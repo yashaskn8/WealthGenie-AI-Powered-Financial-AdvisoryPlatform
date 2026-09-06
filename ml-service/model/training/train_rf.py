@@ -16,12 +16,14 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import balanced_accuracy_score, f1_score
 
 from model.data.preprocessing import (
     prepare_synthetic_training_data,
     compute_dataset_hash_from_arrays,
     get_dataset_generation_params,
 )
+from model.data.feature_engineering import FEATURE_NAMES, FEATURE_SCHEMA_VERSION
 
 logger = logging.getLogger("wealthgenie.rf_trainer")
 
@@ -63,7 +65,9 @@ def train_random_forest_model(
     # Compute training accuracy
     preds = pipeline.predict(X)
     train_acc = float(np.mean(preds == y))
-    logger.info(f"RandomForest baseline training complete. Rule-approximation fidelity: {train_acc:.4f}")
+    balanced_accuracy = float(balanced_accuracy_score(y, preds))
+    macro_f1 = float(f1_score(y, preds, average="macro"))
+    logger.info(f"RandomForest v4 training complete. Suitability-policy fidelity: {train_acc:.4f}")
 
     # Ensure target directories exist
     model_dir = Path(model_dir)
@@ -82,18 +86,22 @@ def train_random_forest_model(
     metadata = {
         "model_name": "RandomForest",
         "git_commit_hash": "auto-trained-baseline",
-        "model_version": "3.0.0",
-        "dataset_version": "3.0.0",
+        "model_version": "4.0.0",
+        "dataset_version": "4.0.0",
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "feature_names": FEATURE_NAMES,
+        "n_features": len(FEATURE_NAMES),
         "training_data_hash": data_hash,
         "dataset_lineage": lineage_params,
-        "policy_config_version": "1.0.0",
+        "policy_config_version": "suitability-freeze-1.0.0",
         "dataset_timestamp": datetime.now(timezone.utc).isoformat(),
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "test_accuracy": round(train_acc, 4),
         "rule_approximation_fidelity": round(train_acc, 4),
-        "balanced_accuracy": 0.858,
-        "macro_f1": 0.8601,
-        "independent_cfp_benchmark_accuracy": 0.2526,
+        "balanced_accuracy": round(balanced_accuracy, 4),
+        "macro_f1": round(macro_f1, 4),
+        "training_methodology": "deterministic synthetic approximation of the frozen suitability policy",
+        "metric_interpretation": "policy-approximation fidelity, not investment outcome accuracy",
     }
 
     with open(meta_path, "w", encoding="utf-8") as f:

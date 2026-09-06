@@ -20,7 +20,7 @@ SAVED_MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 class PyTorchModelConfig(BaseModel):
     """Configuration for PyTorch Multi-Layer Perceptron architecture."""
-    input_dim: int = Field(16, description="Number of input features")
+    input_dim: int = Field(19, description="Number of recommendation-features-4.0.0 inputs")
     hidden_dims: List[int] = Field([64, 32], description="Hidden layer dimensions")
     output_dim: int = Field(6, description="Number of target output classes")
     dropout_rate: float = Field(0.2, ge=0.0, le=0.8, description="Dropout rate")

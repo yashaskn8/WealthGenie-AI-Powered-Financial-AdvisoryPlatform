@@ -3,7 +3,6 @@ Phase 4 Rigor Evaluation & Non-Circularity Verification Test Suite
 """
 
 import pytest
-import numpy as np
 from model.evaluation.rigor_evaluator import (
     audit_feature_overlap,
     audit_formula_logic_overlap,
@@ -15,38 +14,25 @@ from model.evaluation.rigor_evaluator import (
 def test_feature_overlap_audit():
     """Verifies that the circular feature overlap audit runs and detects base feature overlap."""
     audit = audit_feature_overlap()
-    assert audit["classifier_feature_count"] == 16
-    assert audit["base_feature_overlap_percentage"] == 100.0
-    assert "age" in audit["overlapping_features"]
-    assert "annual_income" in audit["overlapping_features"]
+    assert audit["classifier_feature_count"] == 19
+    assert audit["feature_schema_version"] == "recommendation-features-4.0.0"
+    assert audit["forbidden_feature_overlap_percentage"] == 0.0
+    assert audit["forbidden_feature_overlap"] == []
+    assert audit["finding"] == "PASS"
 
 
-def test_independent_cfp_benchmark_zero_overlap():
-    """Verifies programmatically calculated zero formula overlap and multi-model independent benchmark performance."""
+def test_policy_fidelity_is_not_misrepresented_as_outcome_accuracy():
+    """Synthetic labels deliberately approximate policy and must disclose that fact."""
     formula_audit = audit_formula_logic_overlap()
-    assert formula_audit["formula_overlap_percentage"] == 0.0
-    assert len(formula_audit["shared_math_terms"]) == 0
+    assert formula_audit["formula_overlap_percentage"] == 100.0
+    assert formula_audit["shared_math_terms"] == ["frozen_suitability_policy"]
 
     try:
         report = run_full_rigor_audit()
     except FileNotFoundError as e:
         pytest.skip(f"Rigor audit requires pre-trained model/dataset artifacts missing in CI: {e}")
 
-    indep = report["independent_organic_benchmark"]
-    assert "independent_benchmark_accuracy" in indep
-    assert indep["formula_overlap_with_training_labeler"] == 0.0
-
-    # Multi-model evaluation checks (RF, MLP, FT-Transformer)
-    multi_model = report["multi_model_independent_benchmark"]
-    assert "RandomForest" in multi_model
-    assert "PyTorch_FinancialMLP" in multi_model
-    assert "FT_Transformer" in multi_model
-
-    # Verify headline FT-Transformer claim model is evaluated and collapses on independent benchmark
-    ft_res = multi_model["FT_Transformer"]
-    assert ft_res["independent_cfp_benchmark_accuracy"] < 0.30
-    rf_res = multi_model["RandomForest"]
-    assert rf_res["independent_cfp_benchmark_accuracy"] < 0.30
+    assert report["metric_reframe"]["outcome_accuracy_claimed"] is False
 
 
 def test_rigor_evaluation_reproducibility():
@@ -57,12 +43,12 @@ def test_rigor_evaluation_reproducibility():
         pytest.skip(f"Rigor audit requires pre-trained model/dataset artifacts missing in CI: {e}")
 
     assert "metric_reframe" in report
-    assert report["metric_reframe"]["reframed_metric_name"] == "Rule-Approximation Fidelity"
+    assert report["metric_reframe"]["reframed_metric_name"] == "Suitability-Policy Approximation Fidelity"
 
     # Feature ablation
     ablation = report["feature_ablation_impact"]
-    assert len(ablation) == 16
-    assert "stated_tolerance_score" in ablation
+    assert len(ablation) == 19
+    assert "risk_tolerance_encoded" in ablation
 
     # Noise robustness
     noise = report["noise_robustness"]
@@ -73,5 +59,4 @@ def test_rigor_evaluation_reproducibility():
     # Assert noise degrades fidelity monotonically
     assert noise["noise_std_5pct_accuracy"] >= noise["noise_std_10pct_accuracy"]
     assert noise["noise_std_10pct_accuracy"] >= noise["noise_std_20pct_accuracy"]
-
 

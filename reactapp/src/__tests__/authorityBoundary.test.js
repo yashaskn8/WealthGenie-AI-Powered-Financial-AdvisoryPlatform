@@ -26,8 +26,8 @@ describe('frontend financial authority boundary', () => {
     const chat = source('components/GenieChat.jsx');
     expect(taxScreen).toContain('api.compareTax');
     expect(taxScreen).not.toContain('calculateTaxesLocal');
-    expect(chat).toContain('api.compareTax');
     expect(chat).not.toContain('calculateTaxes(');
+    expect(chat).toContain('api.sendChatMessage');
   });
 
   it('uses Express for personalized product suitability and ordering', () => {
@@ -35,6 +35,6 @@ describe('frontend financial authority boundary', () => {
     expect(whereToInvest).toContain('api.rankInvestmentCandidates');
     expect(whereToInvest).not.toContain('rankWhereToInvest(');
     expect(whereToInvest).not.toContain('shouldRecommendETF(');
-    expect(whereToInvest).toContain('No personalized ranking has been generated.');
+    expect(whereToInvest).toContain('No provider ranking is shown.');
   });
 });

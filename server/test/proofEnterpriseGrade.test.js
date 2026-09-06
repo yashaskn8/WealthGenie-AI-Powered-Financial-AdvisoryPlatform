@@ -4,9 +4,13 @@ import express from 'express';
 import { withServer, jsonRequest } from '../test-utils/httpTestUtils.js';
 import { correlationIdMiddleware } from '../middleware/correlation.js';
 import { errorHandler } from '../middleware/errorHandler.js';
-import { validate, validateQuery, taxComputeSchema, chatMessageSchema, monteCarloSchema } from '../validation/schemas.js';
+import { validate, validateQuery, taxComputeSchema, chatMessageSchema } from '../validation/schemas.js';
+import { personalizedMonteCarloSchema, validateStrict } from '../validation/financialSchemas.js';
 import { getRuleBasedFallback } from '../services/mlClient.js';
 import { queryRAG } from '../services/ragClient.js';
+import { buildMlProfileInput } from '../services/recommendationProfile.js';
+import { assessSuitabilityRisk } from '../services/riskProfiler.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 describe('CLAIM 1 — Enterprise-Grade Verification Suite', () => {
   let app;
@@ -24,7 +28,7 @@ describe('CLAIM 1 — Enterprise-Grade Verification Suite', () => {
       res.json({ reply: 'ok' });
     });
 
-    app.post('/api/montecarlo/simulate', validate(monteCarloSchema), (req, res) => {
+    app.post('/api/montecarlo/simulate', validateStrict(personalizedMonteCarloSchema), (req, res) => {
       res.json({ simulated: true });
     });
 
@@ -70,12 +74,8 @@ describe('CLAIM 1 — Enterprise-Grade Verification Suite', () => {
   });
 
   it('4. Provides graceful rule-based fallback when ML microservice is offline or incomplete', async () => {
-    const fallback = getRuleBasedFallback({
-      age: 28,
-      annual_income: 1200000,
-      monthly_savings: 30000,
-      risk_category: 'Moderate',
-    });
+    const profile = canonicalProfile({ age: 28, monthlySavings: 30000 });
+    const fallback = getRuleBasedFallback(buildMlProfileInput(profile, assessSuitabilityRisk(profile)));
 
     assert.ok(fallback.primary);
     assert.ok(fallback.secondary);

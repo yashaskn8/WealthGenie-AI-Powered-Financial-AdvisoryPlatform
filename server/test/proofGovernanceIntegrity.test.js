@@ -1,9 +1,11 @@
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { LayeredMemoryManager, canonicalStringify, computeCanonicalHash } from '../services/layeredMemoryManager.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 describe('PHASE 2 — Governance Integrity Verification Suite', () => {
   const TEST_USER = 'user-governance-test-001';
+  const PROFILE = canonicalProfile();
 
   afterEach(() => {
     LayeredMemoryManager.resetStores();
@@ -55,7 +57,7 @@ describe('PHASE 2 — Governance Integrity Verification Suite', () => {
     // 2. Verify in full context assembly too
     const ctx = LayeredMemoryManager.buildRetrievedContext(
       'Tell me about NPS and SIP',
-      { userId: TEST_USER },
+      PROFILE,
       [], null, [],
       { userId: TEST_USER }
     );
@@ -107,17 +109,16 @@ describe('PHASE 2 — Governance Integrity Verification Suite', () => {
     assert.equal(factsAfter.emergencyFund, 500000,
       'Untampered emergencyFund fact MUST survive read-path hash verification');
 
-    // 3. Verify in context assembly: profileMemory must NOT contain tampered spouseName, but MUST contain emergencyFund
+    // Conversation facts stay non-authoritative and tampered facts are excluded.
     const ctx = LayeredMemoryManager.buildRetrievedContext(
       'What is my family profile?',
-      { userId: TEST_USER },
+      PROFILE,
       [], null, [],
       { userId: TEST_USER }
     );
-    assert.equal(ctx.profileMemory.spouseName, undefined,
-      'Tampered spouseName must not leak into profileMemory in assembled context');
-    assert.equal(ctx.profileMemory.emergencyFund, 500000,
-      'Untampered emergencyFund must appear in profileMemory in assembled context');
+    assert.equal(ctx.profileMemory.spouseName, undefined);
+    assert.equal(ctx.nonAuthoritativeMemory.spouseName, undefined);
+    assert.equal(ctx.nonAuthoritativeMemory.emergencyFund, 500000);
   });
 
 
@@ -161,13 +162,14 @@ describe('PHASE 2 — Governance Integrity Verification Suite', () => {
 
     const ctx = LayeredMemoryManager.buildRetrievedContext(
       'How should I invest for retirement?',
-      { userId: TEST_USER, age: 30 },
+      canonicalProfile({ age: 30 }),
       [], null, [],
       { userId: TEST_USER }
     );
     assert.equal(ctx.midTermMemory.length, 2, 'Both mid-term memories in context');
-    assert.equal(ctx.profileMemory.retirementAge, 55);
-    assert.equal(ctx.profileMemory.riskTolerance, 'aggressive');
+    assert.equal(ctx.nonAuthoritativeMemory.retirementAge, 55);
+    assert.equal(ctx.nonAuthoritativeMemory.riskTolerance, 'aggressive');
+    assert.equal(ctx.profileMemory.riskTolerance, 'Moderate');
     assert.match(ctx.systemMemory.governanceHash, /^[0-9a-f]{64}$/,
       'governanceHash must be a real 64-char hex SHA-256 string');
     assert.equal(ctx.systemMemory.integrityVerified, true);
@@ -202,14 +204,14 @@ describe('PHASE 2 — Governance Integrity Verification Suite', () => {
   it('5. Governance hash changes when governed data changes (hash is load-bearing, not static)', () => {
     const ctx1 = LayeredMemoryManager.buildRetrievedContext(
       'My investments',
-      { userId: TEST_USER, age: 30, annualIncome: 1200000 },
+      canonicalProfile({ age: 30, monthlyTakeHome: 100000 }),
       [], null, [],
       { userId: TEST_USER }
     );
 
     const ctx2 = LayeredMemoryManager.buildRetrievedContext(
       'My investments',
-      { userId: TEST_USER, age: 45, annualIncome: 2500000 },
+      canonicalProfile({ age: 45, monthlyTakeHome: 200000 }),
       [], null, [],
       { userId: TEST_USER }
     );
@@ -219,7 +221,7 @@ describe('PHASE 2 — Governance Integrity Verification Suite', () => {
 
     const ctx3 = LayeredMemoryManager.buildRetrievedContext(
       'My investments',
-      { userId: TEST_USER, age: 30, annualIncome: 1200000 },
+      canonicalProfile({ age: 30, monthlyTakeHome: 100000 }),
       [], null, [],
       { userId: TEST_USER }
     );
@@ -258,7 +260,7 @@ describe('PHASE 2 — Governance Integrity Verification Suite', () => {
     // Chain head must match context's chainHeadHash
     const ctx = LayeredMemoryManager.buildRetrievedContext(
       'Show me my facts',
-      { userId: TEST_USER },
+      PROFILE,
       [], null, [],
       { userId: TEST_USER }
     );

@@ -16,6 +16,8 @@ const CACHE_TTL = {
   FD_RATES: 86400,     // 24 hours
   LIVE_PARAMS: 3600,   // 1 hour
 };
+export const MARKET_PARAMETER_SCHEMA_VERSION = 'market-parameters-2.0.0';
+export const MARKET_PARAMETER_CACHE_KEY = `mc:instrument:params:${MARKET_PARAMETER_SCHEMA_VERSION}`;
 
 // ─── FUNCTION 1: Fetch and parse AMFI NAV data ──────────────────────
 /**
@@ -123,15 +125,15 @@ export async function fetchIndexStatistics(symbol = '^NSEI') {
     return { ...stats, cached: false };
   } catch (err) {
     console.error(`[MarketData] Index ${symbol} fetch failed:`, err.message);
-    // Return fallback hardcoded values so the system degrades gracefully
     return {
       symbol,
-      annualised_return: 0.12,
-      annualised_volatility: 0.17,
+      available: false,
+      annualised_return: null,
+      annualised_volatility: null,
       data_points: 0,
       latest_price: null,
       computed_at: new Date().toISOString(),
-      data_source: 'Fallback (static)',
+      data_source: 'unavailable',
       error: err.message,
       cached: false,
     };
@@ -141,66 +143,53 @@ export async function fetchIndexStatistics(symbol = '^NSEI') {
 // ─── FUNCTION 3: Build live INSTRUMENT_PARAMS for Monte Carlo ───────
 /**
  * Constructs Monte Carlo parameters from live index data.
- * Falls back to static defaults if live data is unavailable.
- *
- * @param {number} [userPostTaxFDRate] - Override FD rate from user profile
+ * Uses the frozen nominal catalog explicitly when verified live index data is unavailable.
  * @returns {Object} instrument → { mean, stdDev }
  */
-export async function getLiveInstrumentParams(userPostTaxFDRate) {
-  const cacheKey = 'mc:instrument:params:live';
-  const cached = await getCache(cacheKey);
-  if (cached) {
-    // Apply cached values dynamically via updateLiveParam
-    for (const [key, val] of Object.entries(cached)) {
+export async function getLiveInstrumentParams() {
+  const cached = await getCache(MARKET_PARAMETER_CACHE_KEY);
+  if (cached?.schema_version === MARKET_PARAMETER_SCHEMA_VERSION && cached.params) {
+    for (const [key, val] of Object.entries(cached.params)) {
       if (INSTRUMENT_PARAMS[key] && val.mean !== undefined) {
         const nominalRate = parseFloat((val.mean * 100).toFixed(2));
         updateLiveParam(key, nominalRate, val.stdDev);
       }
     }
-    return { params: cached, cached: true };
+    return { ...cached, cached: true };
   }
 
-  let niftyStats;
-  try {
-    niftyStats = await fetchIndexStatistics('^NSEI');
-  } catch (_) {
-    niftyStats = { annualised_return: 0.12, annualised_volatility: 0.17 };
+  const niftyStats = await fetchIndexStatistics('^NSEI');
+  const params = Object.fromEntries(Object.entries(INSTRUMENT_PARAMS).map(([key, value]) => [key, {
+    mean: value.nominalRate / 100,
+    stdDev: value.volatility,
+    source: 'frozen-catalog',
+  }]));
+
+  const liveReturn = Number(niftyStats.annualised_return);
+  const liveVolatility = Number(niftyStats.annualised_volatility);
+  const liveUsable = niftyStats.available !== false
+    && Number(niftyStats.data_points) >= 13
+    && Number.isFinite(liveReturn) && liveReturn > -1 && liveReturn <= 1
+    && Number.isFinite(liveVolatility) && liveVolatility >= 0 && liveVolatility <= 0.60;
+
+  if (liveUsable) {
+    const equityMean = liveReturn * 0.8;
+    const candidates = {
+      ELSS:       { mean: equityMean * 0.95, stdDev: liveVolatility },
+      Equity_MF:  { mean: equityMean * 0.95, stdDev: liveVolatility },
+      ETF:        { mean: equityMean * 0.98, stdDev: liveVolatility * 0.95 },
+      NPS:        { mean: equityMean * 0.85, stdDev: liveVolatility * 0.7 },
+      Hybrid_MF:  { mean: equityMean * 0.92, stdDev: liveVolatility * 0.55 },
+      Index_MF:   { mean: equityMean * 0.98, stdDev: liveVolatility * 0.95 },
+      Midcap_MF:  { mean: equityMean * 1.35, stdDev: liveVolatility * 1.22 },
+      Smallcap_MF:{ mean: equityMean * 1.50, stdDev: liveVolatility * 1.55 },
+    };
+    for (const [key, candidate] of Object.entries(candidates)) {
+      if (candidate.mean > -1 && candidate.mean <= 1 && candidate.stdDev >= 0 && candidate.stdDev <= 0.60) {
+        params[key] = { ...candidate, source: 'verified-index-derived' };
+      }
+    }
   }
-
-  // Use live Nifty stats as base for equity instruments
-  // Apply 20% haircut on return for conservatism
-  const rawEquityMean = niftyStats.annualised_return * 0.8;
-  // Floor: equity return should never go below 6% for long-term projections
-  // even during short-term drawdowns, to avoid misleadingly pessimistic projections.
-  // Ceiling: cap at 25% to prevent euphoria-driven over-projection.
-  const equityMean = Math.max(0.06, Math.min(rawEquityMean, 0.25));
-  const equityVol = Math.max(0.05, niftyStats.annualised_volatility); // vol floor for numerical stability
-
-  if (rawEquityMean !== equityMean) {
-    console.warn(`[MarketData] Equity mean clamped: raw=${(rawEquityMean*100).toFixed(1)}%, used=${(equityMean*100).toFixed(1)}%`);
-  }
-
-  const params = {
-    ELSS:       { mean: equityMean * 0.95,   stdDev: equityVol,         source: 'live' },
-    Equity_MF:  { mean: equityMean * 0.95,   stdDev: equityVol,         source: 'live' },
-    ETF:        { mean: equityMean * 0.98,   stdDev: equityVol * 0.95,  source: 'live' },
-    Debt_MF:    { mean: 0.07,                stdDev: 0.03,              source: 'static' },
-    FD:         { mean: userPostTaxFDRate || 0.065, stdDev: 0.005,      source: userPostTaxFDRate ? 'user' : 'static' },
-    RBI_Bond:   { mean: 0.075,               stdDev: 0.002,             source: 'static' },
-    'G-Sec':    { mean: 0.072,               stdDev: 0.01,              source: 'static' },
-    PPF:        { mean: 0.071,               stdDev: 0.003,             source: 'static' },
-    NPS:        { mean: equityMean * 0.85,   stdDev: equityVol * 0.7,   source: 'live' },
-    Gold:       { mean: 0.09,                stdDev: 0.15,              source: 'static' },
-    SGB:        { mean: 0.105,               stdDev: 0.14,              source: 'static' },
-    Liquid_MF:  { mean: 0.065,               stdDev: 0.005,             source: 'static' },
-    Arbitrage_MF: { mean: 0.07,              stdDev: 0.02,              source: 'static' },
-    Hybrid_MF:  { mean: equityMean * 0.92,   stdDev: equityVol * 0.55,  source: 'live' },
-    Index_MF:   { mean: equityMean * 0.98,   stdDev: equityVol * 0.95,  source: 'live' },
-    Midcap_MF:  { mean: equityMean * 1.35,   stdDev: equityVol * 1.22,  source: 'live' },
-    Smallcap_MF: { mean: equityMean * 1.50,  stdDev: equityVol * 1.55,  source: 'live' },
-    SCSS:       { mean: 0.082,               stdDev: 0.002,             source: 'static' },
-    SSY:        { mean: 0.082,               stdDev: 0.002,             source: 'static' },
-  };
 
   // Apply the live rates dynamically via updateLiveParam
   for (const [key, val] of Object.entries(params)) {
@@ -210,8 +199,16 @@ export async function getLiveInstrumentParams(userPostTaxFDRate) {
     }
   }
 
-  await setCache(cacheKey, params, CACHE_TTL.LIVE_PARAMS);
-  return { params, cached: false, nifty_stats: niftyStats };
+  const result = {
+    schema_version: MARKET_PARAMETER_SCHEMA_VERSION,
+    params,
+    computed_at: new Date().toISOString(),
+    live_index_used: liveUsable,
+    live_index_reason: liveUsable ? 'verified_3_year_monthly_series' : 'unavailable_or_outside_supported_bounds',
+    nifty_stats: niftyStats,
+  };
+  await setCache(MARKET_PARAMETER_CACHE_KEY, result, CACHE_TTL.LIVE_PARAMS);
+  return { ...result, cached: false };
 }
 
 // ─── FUNCTION 4: Check FD rate staleness in MongoDB ─────────────────

@@ -19,6 +19,7 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
           annualIncome: 1000000,
           holdingYears: 3,
           regime: 'new',
+          incomeSource: 'salary',
           monthlySIP: 10000,
           userAge: 30,
         }),
@@ -42,6 +43,7 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
           ],
           annualIncome: 1000000,
           regime: 'new',
+          incomeSource: 'salary',
           userAge: 30,
         }),
       });

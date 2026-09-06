@@ -5,6 +5,7 @@ drift detection, promotion gates, shadow evaluation, and rollback.
 """
 
 import logging
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -12,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Security, status
 from pydantic import BaseModel, Field
 
 from model.serving.registry import registry
+from model.data.feature_engineering import FEATURE_NAMES, FEATURE_SCHEMA_VERSION
 from store_factory import get_model_registry
 from security import operator_key_header, verify_api_key, verify_operator_key
 
@@ -124,10 +126,10 @@ def check_promotion_gate(
 
 
 class RegisterModelRequest(BaseModel):
-    model_config = {"protected_namespaces": ()}
+    model_config = {"protected_namespaces": (), "extra": "forbid"}
     model_architecture: str = Field(..., description="Model architecture identifier (e.g. RandomForest, PyTorch_MLP, FT_Transformer)")
     artifact_path: str = Field(..., description="Path to serialized model artifact on disk")
-    training_data_hash: Optional[str] = Field("live_api_seeded", description="SHA-256 hash of training data")
+    training_data_hash: str = Field(..., min_length=64, max_length=64, pattern=r"^[0-9a-fA-F]{64}$", description="SHA-256 hash of training data")
     training_timestamp: Optional[str] = Field(None, description="ISO timestamp of training completion")
     hyperparameters: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Model hyperparameters")
     metrics: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Evaluation metrics (accuracy, fidelity, F1)")
@@ -138,7 +140,7 @@ class RegisterModelRequest(BaseModel):
 
 
 class DriftCheckRequest(BaseModel):
-    model_config = {"protected_namespaces": ()}
+    model_config = {"protected_namespaces": (), "extra": "forbid"}
     architecture: str = Field("RandomForest", description="Model architecture to check drift for")
     force_retrain: bool = Field(True, description="Whether to trigger retrain if drift is detected")
     use_buffer: bool = Field(True, description="Whether to evaluate real accumulated observations from InferenceBuffer")
@@ -154,7 +156,7 @@ class PromoteRequest(BaseModel):
 
 
 class ValidateRequest(BaseModel):
-    model_config = {"protected_namespaces": ()}
+    model_config = {"protected_namespaces": (), "extra": "forbid"}
     metrics: Dict[str, float] = Field(..., description="Complete tracked validation evidence")
 
 
@@ -240,6 +242,23 @@ def register_model_version(
     if payload.dataset_lineage:
         hparams["dataset_lineage"] = payload.dataset_lineage
 
+    if payload.model_architecture in {"RandomForest", "PyTorch_MLP", "FT_Transformer"}:
+        if hparams.get("feature_schema_version") != FEATURE_SCHEMA_VERSION:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"feature_schema_version must equal {FEATURE_SCHEMA_VERSION}",
+            )
+        if hparams.get("feature_names") != FEATURE_NAMES:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="feature_names must exactly match the ordered v4 feature allowlist",
+            )
+        if set(payload.reference_distributions or {}) != set(FEATURE_NAMES):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="reference_distributions must cover exactly the v4 feature allowlist",
+            )
+
     try:
         version_id = store.register_model(
             model_architecture=payload.model_architecture,
@@ -275,6 +294,12 @@ def validate_version(version_id: str, payload: ValidateRequest, store=Depends(ge
     missing = [name for name in PROMOTION_TRACKED_METRICS if name not in payload.metrics]
     if missing:
         raise HTTPException(status_code=409, detail=f"Missing validation metrics: {', '.join(missing)}")
+    invalid = [
+        name for name in PROMOTION_TRACKED_METRICS
+        if not math.isfinite(payload.metrics[name]) or not 0.0 <= payload.metrics[name] <= 1.0
+    ]
+    if invalid:
+        raise HTTPException(status_code=422, detail=f"Validation metrics must be finite values in [0, 1]: {', '.join(invalid)}")
     return store.update_lifecycle_state(version_id, "VALIDATED", metrics=payload.metrics)
 
 
@@ -502,7 +527,7 @@ def configure_shadow_model(
 
     if not pred.is_loaded:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=status.HTTP_409_CONFLICT,
             detail="Failed to load predictor for shadow evaluation."
         )
 

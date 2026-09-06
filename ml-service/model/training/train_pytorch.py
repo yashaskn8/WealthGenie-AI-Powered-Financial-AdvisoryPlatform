@@ -30,6 +30,7 @@ from model.architecture.ft_transformer import FTTransformer, FTTransformerConfig
 from model.architecture.model import FinancialMLP
 from model.data.preprocessing import FeaturePreprocessor, prepare_synthetic_training_data
 from model.evaluation.visualizer import plot_training_curves, plot_confusion_matrix
+from model.data.feature_engineering import FEATURE_NAMES, FEATURE_SCHEMA_VERSION
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("wealthgenie.pytorch_trainer")
@@ -220,7 +221,9 @@ def train_pytorch_model(
 
     metadata = {
         "model_type": "PyTorch_FinancialMLP",
-        "version": "1.0.0",
+        "version": "4.0.0",
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "feature_names": FEATURE_NAMES,
         "training_time_seconds": round(elapsed_time, 4),
         "epochs_completed": len(history["train_loss"]),
         "best_val_loss": round(best_val_loss, 4),
@@ -312,6 +315,15 @@ def train_ft_transformer_model(
 
     torch.save(model.state_dict(), save_path)
     preprocessor.save(scaler_path)
+
+    ft_metadata_path = save_path.parent / "ft_transformer_metadata.json"
+    with open(ft_metadata_path, "w", encoding="utf-8") as metadata_file:
+        json.dump({
+            "version": "4.0.0",
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "feature_names": FEATURE_NAMES,
+            "model_config": config.model_dump(),
+        }, metadata_file, indent=2)
 
     eval_metrics = evaluate_pytorch_model(model, test_loader, device)
     logger.info(f"FT-Transformer trained successfully and saved to {save_path}")

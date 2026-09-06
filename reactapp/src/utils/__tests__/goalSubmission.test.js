@@ -10,6 +10,7 @@ describe('goalSubmission Utility (WG-033)', () => {
       targetDate: '2045-06-30',
       currentSavings: 100000,
       priority: 'High',
+      profileId: 'profile_123',
     });
 
     expect(payloadFromString).toEqual({
@@ -18,6 +19,7 @@ describe('goalSubmission Utility (WG-033)', () => {
       target_date: '2045-06-30',
       current_savings: 100000,
       priority: 'High',
+      profileId: 'profile_123',
     });
 
     // Test Date instance targetDate (from GoalTracker computed Date)
@@ -28,22 +30,20 @@ describe('goalSubmission Utility (WG-033)', () => {
       targetDate: dateObj,
       currentSavings: 50000,
       priority: 'Critical',
+      profileId: 'profile_123',
     });
 
     expect(payloadFromDate.target_date).toBe('2040-01-15');
   });
 
-  it('b. buildGoalPayload correctly omits profileId when not provided', () => {
-    const payloadWithoutProfile = buildGoalPayload({
+  it('b. buildGoalPayload fails closed when the canonical profile ID is absent', () => {
+    expect(() => buildGoalPayload({
       goalName: 'Vehicle',
       targetAmount: 500000,
       targetDate: '2027-12-31',
       currentSavings: 0,
       priority: 'Medium',
-    });
-
-    expect('profileId' in payloadWithoutProfile).toBe(false);
-    expect(Object.keys(payloadWithoutProfile)).not.toContain('profileId');
+    })).toThrow('canonical Financial Profile ID');
 
     const payloadWithProfile = buildGoalPayload({
       goalName: 'Vehicle',
@@ -69,6 +69,7 @@ describe('goalSubmission Utility (WG-033)', () => {
       targetDate: '2027-03-31',
       currentSavings: 0,
       priority: 'Low',
+      profileId: 'profile_123',
     });
 
     expect(mockApi.createGoal).toHaveBeenCalledWith({
@@ -77,6 +78,7 @@ describe('goalSubmission Utility (WG-033)', () => {
       target_date: '2027-03-31',
       current_savings: 0,
       priority: 'Low',
+      profileId: 'profile_123',
     });
     expect(res).toEqual({
       success: true,
@@ -97,6 +99,7 @@ describe('goalSubmission Utility (WG-033)', () => {
       targetAmount: 10000000,
       targetDate: '2050-01-01',
       currentSavings: 0,
+      profileId: 'profile_123',
     });
 
     await expect(resPromise).resolves.toEqual({

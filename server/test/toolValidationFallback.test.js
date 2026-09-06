@@ -10,6 +10,7 @@ import Recommendation from '../models/Recommendation.js';
 import Goal from '../models/Goal.js';
 import User from '../models/User.js';
 import ConversationHistory from '../models/ConversationHistory.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 const mockUserId = '60d5ecb8b3b3a72d9c8e4a11';
 const mockSessionId = 'test-validation-session';
@@ -23,13 +24,12 @@ const mockUser = {
 const mockProfile = {
   _id: '60d5ecb8b3b3a72d9c8e4a22',
   userId: mockUserId,
-  age: 28,
-  annualIncome: 800000,
-  monthlySavings: 15000,
-  riskCategory: 'Conservative',
-  taxRegime: 'new',
-  investmentHorizon: 10,
-  recommendedEquityAllocation: 40,
+  ...canonicalProfile({
+    age: 28,
+    monthlyTakeHome: 80000,
+    monthlySavings: 15000,
+    riskTolerance: 'Conservative',
+  }),
 };
 
 describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
@@ -105,7 +105,15 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
   it('tax_calculator accepts valid params and returns success', async () => {
     const result = await FinancialToolRegistry.executeTool('tax_calculator', {
       income: 1500000,
+      incomeSource: 'salary',
+      age: 35,
       regime: 'new',
+      section80C: 0,
+      nps80CCD1B: 0,
+      section80D_self: 0,
+      section80D_parents: 0,
+      parentsSenior: false,
+      hra: 0,
     });
     assert.equal(result.success, true);
     assert.ok(result.result, 'Must return a result object');
@@ -186,9 +194,9 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
     assert.deepEqual(mcpResult.result, directResult.result);
   });
 
-  // ── Strips Unknown Keys via Joi (stripUnknown: true) ──
+  // ── Rejects Unknown Keys at the strict calculation boundary ──
 
-  it('sip_projection strips unknown keys and executes successfully', async () => {
+  it('sip_projection rejects unknown keys', async () => {
     const result = await FinancialToolRegistry.executeTool('sip_projection', {
       monthlyInvestment: 10000,
       annualRate: 0.12,
@@ -196,8 +204,8 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
       unknownJunkField: 'should be stripped',
       anotherUnknown: 42,
     });
-    assert.equal(result.success, true);
-    assert.equal(result.result.futureValue, 2323391);
+    assert.equal(result.success, false);
+    assert.match(result.error, /Invalid tool arguments/);
   });
 
   // ── processChat Tool Error Isolation via Two-Pass ──

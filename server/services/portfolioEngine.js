@@ -134,11 +134,7 @@ export function buildCovarianceMatrix(assetKeys) {
         let lookupKey = COVARIANCE_ALIAS[key] || key;
         const idx = ASSET_KEYS.indexOf(lookupKey);
         if (idx === -1) {
-            // Graceful fallback: use Equity_MF (index 0) as a safe default
-            // and warn instead of crashing the request
-            console.warn(`[portfolioEngine] Unknown asset key "${key}" in buildCovarianceMatrix. ` +
-                `Falling back to Equity_MF correlation profile. Valid keys: ${ASSET_KEYS.join(', ')}`);
-            return 0;
+            throw new Error(`Unknown asset key "${key}". Valid keys: ${ASSET_KEYS.join(', ')}`);
         }
         return idx;
     });
@@ -146,8 +142,7 @@ export function buildCovarianceMatrix(assetKeys) {
         const resolvedKey = COVARIANCE_ALIAS[key] || key;
         const params = INSTRUMENT_PARAMS[resolvedKey] || INSTRUMENT_PARAMS[key];
         if (!params) {
-            console.warn(`[portfolioEngine] No INSTRUMENT_PARAMS entry for "${key}". Using default volatility 0.10.`);
-            return 0.10;
+            throw new Error(`No volatility parameters established for "${key}"`);
         }
         return params.volatility;
     });
@@ -336,7 +331,11 @@ export function solveRiskParity(assetKeys) {
         volatility: _round6(finalVol),
     };
 }
-export function optimisePortfolio(assetKeys, postTaxReturns, strategy = 'max_sharpe') {
+export function optimisePortfolio(assetKeys, postTaxReturns, strategy) {
+    if (!Array.isArray(postTaxReturns) || postTaxReturns.length !== assetKeys.length
+        || postTaxReturns.some(value => !Number.isFinite(value))) {
+        throw new TypeError('An explicit finite nominal return is required for every asset');
+    }
     switch (strategy) {
         case 'min_variance':
             return { strategy, ...solveMinVariance(assetKeys, postTaxReturns) };
@@ -345,8 +344,8 @@ export function optimisePortfolio(assetKeys, postTaxReturns, strategy = 'max_sha
         case 'risk_parity': {
             const result = solveRiskParity(assetKeys);
             const expectedReturn = assetKeys.reduce((sum, key, index) => {
-                const weight = result.weights[key] || 0;
-                const assetReturn = Number(postTaxReturns?.[index]) || 0;
+                const weight = result.weights[key];
+                const assetReturn = postTaxReturns[index];
                 return sum + weight * assetReturn;
             }, 0);
             const sharpe = result.volatility > 1e-12
@@ -498,42 +497,40 @@ function getTransactionCostRate(key, isSell, holdingMonths = 24) {
     }
     return 0.0;
 }
-export function computeRebalance(currentAllocation, targetAllocation, threshold = 2.0, partialRatio = 1.0, holdingMonths = 24) {
+export function computeRebalance(currentAllocation, targetAllocation, threshold, partialRatio, holdingMonths) {
+    if (!currentAllocation || typeof currentAllocation !== 'object' || Array.isArray(currentAllocation)
+        || !targetAllocation || typeof targetAllocation !== 'object' || Array.isArray(targetAllocation)) {
+        throw new TypeError('currentAllocation and targetAllocation must be explicit objects');
+    }
+    if (!Number.isFinite(threshold) || threshold < 0 || threshold > 50
+        || !Number.isFinite(partialRatio) || partialRatio < 0.1 || partialRatio > 1
+        || !Number.isFinite(holdingMonths) || holdingMonths < 0 || holdingMonths > 600) {
+        throw new RangeError('threshold, partialRatio, and holdingMonths must be explicit and within supported ranges');
+    }
     const resolvedCurrent = {};
     let totalValue = 0;
     for (const [k, v] of Object.entries(currentAllocation || {})) {
-        const val = Number(v) || 0;
-        if (val < 0)
-            continue;
+        if (!Number.isFinite(v) || v < 0) throw new TypeError(`Invalid current allocation for ${k}`);
+        const val = v;
         const resolved = resolveAssetKey(k);
+        if (!INSTRUMENT_PARAMS[resolved]) throw new Error(`Unknown current allocation instrument "${k}"`);
         resolvedCurrent[resolved] = (resolvedCurrent[resolved] || 0) + val;
         totalValue += val;
     }
     if (totalValue <= 0) {
-        return {
-            total_portfolio_value: 0,
-            drift_index: 0,
-            drift_severity: 'Low',
-            rebalance_recommended: false,
-            total_estimated_transaction_cost: 0,
-            before_stats: { cagr: 0, risk_score: 0 },
-            after_stats: { cagr: 0, risk_score: 0 },
-            assets: [],
-        };
+        throw new RangeError('currentAllocation total must be greater than zero');
     }
-    const targetVals = Object.values(targetAllocation || {}).map(v => Number(v) || 0);
-    const maxVal = Math.max(...targetVals, 0);
+    const targetVals = Object.values(targetAllocation);
+    if (!targetVals.length || targetVals.some(value => !Number.isFinite(value) || value < 0 || value > 100)) {
+        throw new TypeError('Every target allocation must be an explicit percentage from 0 to 100');
+    }
     const targetSum = targetVals.reduce((s, v) => s + v, 0);
-    const isDecimal = maxVal <= 1.0 && targetSum <= 1.05;
-    const scale = isDecimal ? 100 : 1.0;
-    const normalizedSum = targetSum * scale;
+    if (Math.abs(targetSum - 100) > 0.01) throw new RangeError('targetAllocation must sum to exactly 100');
     const resolvedTarget = {};
-    for (const [k, v] of Object.entries(targetAllocation || {})) {
-        const val = Number(v) || 0;
-        if (val < 0)
-            continue;
+    for (const [k, val] of Object.entries(targetAllocation)) {
         const resolved = resolveAssetKey(k);
-        resolvedTarget[resolved] = (resolvedTarget[resolved] || 0) + (normalizedSum > 0 ? (val * scale / normalizedSum) * 100 : 0);
+        if (!INSTRUMENT_PARAMS[resolved]) throw new Error(`Unknown target allocation instrument "${k}"`);
+        resolvedTarget[resolved] = (resolvedTarget[resolved] || 0) + val;
     }
     const allKeys = Array.from(new Set([
         ...Object.keys(resolvedCurrent),
@@ -556,10 +553,12 @@ export function computeRebalance(currentAllocation, targetAllocation, threshold 
         const suggestedCorrection = rawCorrection * partialRatio;
         const driftExceedsThreshold = Math.abs(driftPct) >= threshold;
         sumDiff += Math.abs(driftPct);
-        const params = INSTRUMENT_PARAMS[key] || { nominalRate: 7.0, riskLevel: 'Medium', name: key };
+        const params = INSTRUMENT_PARAMS[key];
+        if (!params) throw new Error(`No instrument parameters established for "${key}"`);
         const nominalRate = params.nominalRate;
         const riskLevel = params.riskLevel;
-        const riskWeight = RISK_SCORE_MAP[riskLevel] || 50;
+        const riskWeight = RISK_SCORE_MAP[riskLevel];
+        if (!Number.isFinite(riskWeight)) throw new Error(`No risk score established for "${key}"`);
         beforeWeightedCAGR += (currentPct / 100) * nominalRate;
         afterWeightedCAGR += (targetPct / 100) * nominalRate;
         beforeWeightedRisk += (currentPct / 100) * riskWeight;

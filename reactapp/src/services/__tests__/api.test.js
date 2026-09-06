@@ -10,6 +10,22 @@ function jsonResponse(body, status = 200, headers = {}) {
   };
 }
 
+const CANONICAL_PROFILE = Object.freeze({
+  monthly_take_home: 100000,
+  monthly_savings: 20000,
+  age: 35,
+  risk_tolerance: 'Moderate',
+  sold_property_proceeds: 0,
+  has_lump_sum: false,
+  lump_sum_amount: 0,
+  liquid_savings: 200000,
+  emi_burden_pct: 10,
+  financial_dependents: 1,
+  emergency_fund_months: 6,
+  investment_goals: ['Wealth Growth'],
+  investment_horizon_years: 10,
+});
+
 describe('frontend API contracts', () => {
   beforeEach(() => {
     api.clearAuthToken();
@@ -36,18 +52,18 @@ describe('frontend API contracts', () => {
     expect(sessionStorage.length).toBe(0);
   });
 
-  it('omits absent optional Monte Carlo values instead of sending invalid nulls', async () => {
+  it('sends explicit Monte Carlo inputs and the authoritative profile ID', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ success: true }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await api.runMonteCarlo('FD', 5000, 10, null, null, 0);
+    await api.runMonteCarlo('FD', 5000, 10, null, '64b000000000000000000001');
 
     const [, config] = fetchMock.mock.calls[0];
     expect(JSON.parse(config.body)).toEqual({
+      profileId: '64b000000000000000000001',
       instrument: 'FD',
       monthly_investment: 5000,
       years: 10,
-      current_savings: 0,
     });
   });
 
@@ -57,18 +73,18 @@ describe('frontend API contracts', () => {
       details: ['target_amount must be at least 1000'],
     }, 400)));
 
-    await expect(api.runMonteCarlo('FD', 5000, 10, 500)).rejects.toThrow(
+    await expect(api.runMonteCarlo('FD', 5000, 10, 500, '64b000000000000000000001')).rejects.toThrow(
       'target_amount must be at least 1000'
     );
   });
 
-  it('normalizes rupee allocations to the fractional weights required by Express', async () => {
+  it('requires explicit fractional weights and preserves them exactly', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ instruments: [] }));
     vi.stubGlobal('fetch', fetchMock);
 
     await api.updateRecommendationWeights('64b000000000000000000001', {
-      Equity_MF: 7500,
-      Debt_MF: 2500,
+      Equity_MF: 0.75,
+      Debt_MF: 0.25,
     });
 
     const [, config] = fetchMock.mock.calls[0];
@@ -103,16 +119,16 @@ describe('frontend API contracts', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     await api.rankInvestmentCandidates(
-      [{ id: 'index', name: 'Index Fund', expectedReturn: 12 }],
-      { age: 35, risk_tolerance: 'Moderate' },
-      { regimeApplied: false, regimeKey: 'normal', sortBy: 'expense' }
+      '64b000000000000000000001',
+      'Index_MF',
+      [{ id: 'index', name: 'Index Fund', highlight: 'Low-cost option' }],
     );
 
     expect(fetchMock.mock.calls[0][0]).toMatch(/\/api\/instruments\/rank-wti$/);
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
-      candidates: [{ id: 'index', name: 'Index Fund', expectedReturn: 12 }],
-      userProfile: { age: 35, risk_tolerance: 'Moderate' },
-      options: { regimeApplied: false, regimeKey: 'normal', sortBy: 'expense' },
+      profileId: '64b000000000000000000001',
+      parentInstrumentId: 'Index_MF',
+      candidates: [{ id: 'index', name: 'Index Fund', highlight: 'Low-cost option' }],
     });
   });
 
@@ -138,7 +154,7 @@ describe('frontend API contracts', () => {
       details: { currentVersion: 4, expectedVersion: 3 },
     }, 409)));
 
-    await expect(api.updateProfile('profile-1', { version: 3 })).rejects.toMatchObject({
+    await expect(api.updateProfile('profile-1', { ...CANONICAL_PROFILE, version: 3 })).rejects.toMatchObject({
       name: 'ApiError',
       status: 409,
       code: 'PROFILE_VERSION_CONFLICT',
@@ -209,7 +225,7 @@ describe('frontend API contracts', () => {
   it('never persists financial lifecycle payloads in browser storage', async () => {
     const responses = [
       { csrfToken: 'csrf', user: { id: 'privacy-user', email: 'privacy@example.com' } },
-      { profileId: '64b000000000000000000001', monthly_income: 987654, monthly_savings: 123456 },
+      { profileId: '64b000000000000000000001', ...CANONICAL_PROFILE },
       { recommendationId: 'rec-1', auditId: 'audit-1', instruments: [{ type: 'ETF' }] },
       { id: 'goal-1', goal_name: 'Private home goal', target_amount: 7654321 },
       { message: 'Logout successful.' },
@@ -218,20 +234,16 @@ describe('frontend API contracts', () => {
     const localSet = vi.spyOn(Storage.prototype, 'setItem');
 
     await api.login('privacy@example.com', 'StrongPass1!');
-    await api.buildProfile({
-      age: 35, monthly_income: 987654, monthly_savings: 123456,
-      liquid_savings: 222222, existing_debt: 7, dependents: 1,
-      emergency_fund_months: 6, risk_tolerance: 'Moderate', goal_type: 'wealth-building',
-    });
+    await api.buildProfile(CANONICAL_PROFILE);
     await api.getRecommendations('64b000000000000000000001');
     await api.createGoal({ goal_name: 'Private home goal', target_amount: 7654321, target_date: '2035-01-01' });
     await api.logout();
 
     const persisted = [...Array(localStorage.length)].map((_, index) => localStorage.getItem(localStorage.key(index))).join(' ')
       + [...Array(sessionStorage.length)].map((_, index) => sessionStorage.getItem(sessionStorage.key(index))).join(' ');
-    expect(persisted).not.toContain('987654');
-    expect(persisted).not.toContain('123456');
-    expect(persisted).not.toContain('222222');
+    expect(persisted).not.toContain('100000');
+    expect(persisted).not.toContain('20000');
+    expect(persisted).not.toContain('200000');
     expect(persisted).not.toContain('7654321');
     expect(persisted).not.toContain('rec-1');
     expect(persisted).not.toContain('privacy@example.com');

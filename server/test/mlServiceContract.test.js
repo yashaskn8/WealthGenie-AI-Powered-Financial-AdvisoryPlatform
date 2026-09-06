@@ -16,19 +16,13 @@ const fixtures = JSON.parse(fs.readFileSync(path.join(serverRoot, 'contracts', '
 
 test('Node prediction payload is exactly accepted by the Pydantic consumer fixture', () => {
   const request = buildPredictionRequest({
-    age: 34,
+    ...fixtures.prediction_request,
     annual_income: 1800000,
-    monthly_savings: 45000,
-    risk_category: 'Moderate',
-    liquid_savings: 500000,
     existing_debt_emi_ratio_pct: 12,
-    dependents: 1,
-    emergency_fund_months: 6,
-    risk_tolerance: 'Moderate',
     goal_type: 'wealth-building',
-    investment_horizon: 15,
   });
   assert.deepEqual(request, fixtures.prediction_request);
+  assert.equal('annual_income' in request, false);
   assert.equal('existing_debt_emi_ratio_pct' in request, false, 'do not send fields FastAPI silently ignores');
 });
 
@@ -37,7 +31,7 @@ test('Node normalizes complete prediction responses and marks service results no
   assert.equal(result.primary, 'ETF');
   assert.equal(result.secondary, 'Debt_MF');
   assert.equal(result.tertiary, 'SGB');
-  assert.equal(result.model_version, 'rf-3.1.0');
+  assert.equal(result.model_version, '4.0.0');
   assert.equal(result.fallback, false);
   assert.equal(result.explanation.predicted_class, 'ETF');
 });

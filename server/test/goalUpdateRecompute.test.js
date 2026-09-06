@@ -17,6 +17,8 @@ import { errorHandler } from '../middleware/errorHandler.js';
 import { withServer, jsonRequest } from '../test-utils/httpTestUtils.js';
 import Goal from '../models/Goal.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import Recommendation from '../models/Recommendation.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 const testSecret = ['wg037', 'test', 'jwt', 'secret', 'key'].join('-');
 process.env.JWT_SECRET = process.env.JWT_SECRET || testSecret;
@@ -44,29 +46,40 @@ function buildTestApp() {
 
 async function ensureDb() {
   await setupTestDatabase();
-  const existingProfile = await FinancialProfile.findOne({ userId: TEST_USER_ID });
-  if (!existingProfile) {
-    await FinancialProfile.create({
+  let profile = await FinancialProfile.findOne({ userId: TEST_USER_ID });
+  if (!profile) {
+    profile = await FinancialProfile.create({
       userId: TEST_USER_ID,
-      monthlyIncome: 100000,
-      annualIncome: 1200000,
-      age: 35,
-      savings: 30000,
-      goals: [],
+      ...canonicalProfile({ monthlyTakeHome: 100000, monthlySavings: 30000 }),
+      recommendationProfileVersion: 'financial-profile-1.0.0',
     });
   }
+  await Recommendation.findOneAndUpdate(
+    { userId: TEST_USER_ID, profileId: profile._id },
+    {
+      userId: TEST_USER_ID, profileId: profile._id,
+      instruments: [{
+        type: 'FD', name: 'Bank Fixed Deposit', allocationWeight: 1,
+        nominalReturn: 7.5, effectiveYield: 7.5,
+      }],
+      advisoryText: 'Fixture recommendation', generatedAt: new Date(),
+    },
+    { upsert: true, new: true },
+  );
+  return profile;
 }
 
 test.after(async () => {
   try {
     await Goal.deleteMany({ userId: TEST_USER_ID });
+    await Recommendation.deleteMany({ userId: TEST_USER_ID });
     await FinancialProfile.deleteMany({ userId: TEST_USER_ID });
   } catch (_) {}
   await teardownTestDatabase();
 });
 
 test('WG-037 Scenario (a): POST /create goal with known target_amount and target_date', async () => {
-  await ensureDb();
+  const profile = await ensureDb();
   const token = signToken();
   const app = buildTestApp();
 
@@ -80,6 +93,7 @@ test('WG-037 Scenario (a): POST /create goal with known target_amount and target
     target_amount: 1000000, // ₹10 Lakhs
     target_date: targetDateStr,
     current_savings: 100000, // ₹1 Lakh
+    profileId: profile._id.toString(),
     priority: 'High',
   };
 
@@ -102,7 +116,7 @@ test('WG-037 Scenario (a): POST /create goal with known target_amount and target
 });
 
 test('WG-037 Scenario (b): PATCH target_amount recomputes inflation_adjusted_target using exact route formula', async () => {
-  await ensureDb();
+  const profile = await ensureDb();
   const token = signToken();
   const app = buildTestApp();
 
@@ -120,6 +134,7 @@ test('WG-037 Scenario (b): PATCH target_amount recomputes inflation_adjusted_tar
         target_amount: 1000000,
         target_date: targetDateStr,
         current_savings: 100000,
+        profileId: profile._id.toString(),
         priority: 'High',
       }),
     });
@@ -159,7 +174,7 @@ test('WG-037 Scenario (b): PATCH target_amount recomputes inflation_adjusted_tar
 });
 
 test('WG-037 Scenario (c): PATCH current_savings reduces/maintains SIP and leaves inflation_adjusted_target unchanged', async () => {
-  await ensureDb();
+  const profile = await ensureDb();
   const token = signToken();
   const app = buildTestApp();
 
@@ -177,6 +192,7 @@ test('WG-037 Scenario (c): PATCH current_savings reduces/maintains SIP and leave
         target_amount: 1500000,
         target_date: targetDateStr,
         current_savings: 50000,
+        profileId: profile._id.toString(),
         priority: 'High',
       }),
     });
@@ -210,7 +226,7 @@ test('WG-037 Scenario (c): PATCH current_savings reduces/maintains SIP and leave
 });
 
 test('WG-037 Scenario (d): PATCH priority-only leaves inflation_adjusted_target, recommended_sip, and monte_carlo_summary unchanged', async () => {
-  await ensureDb();
+  const profile = await ensureDb();
   const token = signToken();
   const app = buildTestApp();
 
@@ -228,6 +244,7 @@ test('WG-037 Scenario (d): PATCH priority-only leaves inflation_adjusted_target,
         target_amount: 500000,
         target_date: targetDateStr,
         current_savings: 100000,
+        profileId: profile._id.toString(),
         priority: 'Medium',
       }),
     });

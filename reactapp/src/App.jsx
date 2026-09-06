@@ -7,8 +7,9 @@ import GenieChat from './components/GenieChat';
 import ErrorBoundary from './components/ErrorBoundary';
 import * as api from './services/api';
 import { useAuth } from './context/AuthContext';
-import { assertKnownBackendInstrumentTypes, backendToLocalInstrument, localToBackendInstrument } from './utils/instrumentTypeMap';
+import { assertKnownBackendInstrumentTypes, backendToLocalInstrument } from './utils/instrumentTypeMap';
 import { investmentDatabase } from './investmentDatabase';
+import { financialProfileKey } from './utils/financialProfile';
 
 // ── Lazy-loaded page components (code-split for faster initial load) ──
 const GoalTracker = lazy(() => import('./components/GoalTracker'));
@@ -40,13 +41,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
   const [isLoading, setIsLoading] = useState(true);
 
   // Stable serialized key - changes ONLY when profile data changes, not on every render
-  const profileKey = useMemo(() => JSON.stringify({
-    a: userProfile.age, i: userProfile.monthly_income, s: userProfile.monthly_savings,
-    r: userProfile.riskCategory || userProfile.risk_tolerance, g: userProfile.investment_goals,
-    h: userProfile.investment_horizon, t: userProfile.taxRegime, p: userProfile.profileId,
-  }), [userProfile.age, userProfile.monthly_income, userProfile.monthly_savings,
-       userProfile.riskCategory, userProfile.risk_tolerance, userProfile.investment_goals,
-       userProfile.investment_horizon, userProfile.taxRegime, userProfile.profileId]);
+  const profileKey = useMemo(() => financialProfileKey(userProfile), [userProfile]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -56,14 +51,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
         setIsLoading(true);
         setBackendRecs(null); // Clear stale data immediately
         setBackendFallback(null);
-        let activeProfileId = userProfile.profileId;
-        if (!activeProfileId) {
-          const profileResponse = await api.buildProfile(userProfile, { signal: controller.signal });
-          activeProfileId = profileResponse.profileId;
-          if (activeProfileId) {
-            if (!cancelled) onProfileUpdate?.({ ...userProfile, profileId: activeProfileId });
-          }
-        }
+        const activeProfileId = userProfile.profileId;
         if (!activeProfileId) {
           throw new Error('Backend profile creation did not return a profileId.');
         }
@@ -108,28 +96,27 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
 
     assertKnownBackendInstrumentTypes(backendRecs.instruments?.map(bi => bi.type), 'recommendation merge');
 
-    const totalSavings = Number(userProfile?.monthly_savings || userProfile?.savings) || 0;
+    const totalSavings = Number(userProfile.monthly_savings);
 
     // Treat backend response as the single source of truth for order, ranking, and allocations.
     // Map over backend instruments directly to preserve their exact order and allocations.
-    let merged = (backendRecs.instruments || []).map((bi, idx) => {
+    let merged = (backendRecs.instruments || []).map((bi) => {
       const localId = backendToLocalInstrument(bi.type);
       
       // Look up full display attributes from the investment database catalog
       const dbMatch = investmentDatabase.find(inv => 
-        inv.id === (bi.instrumentId || localId)
+        inv.id === (bi.id || localId)
       );
 
-      const backendWeight = bi.allocationWeight !== undefined 
-        ? bi.allocationWeight 
-        : (idx === 0 ? 0.40 : idx === 1 ? 0.30 : idx === 2 ? 0.15 : idx === 3 ? 0.10 : 0.05);
+      const backendWeight = Number(bi.allocationWeight);
+      if (!Number.isFinite(backendWeight)) throw new Error(`Backend omitted allocation weight for ${bi.id || bi.type}`);
 
       const allocation = Math.round((backendWeight * totalSavings) / 100) * 100;
 
       return {
         ...dbMatch,
         // Enriched presentation metadata from the catalog
-        id: bi.instrumentId || dbMatch?.id || localId,
+        id: bi.id || dbMatch?.id || localId,
         name: bi.name || dbMatch?.name || bi.type,
         abbr: dbMatch?.abbr || bi.type,
         color: dbMatch?.color || '#38bdf8',
@@ -137,18 +124,20 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
         category: dbMatch?.category || dbMatch?.cat || 'Other',
         cat: dbMatch?.cat || dbMatch?.category || 'Other',
         assetClass: dbMatch?.assetClass || 'Other',
-        riskLabel: bi.riskLevel || dbMatch?.riskLabel || 'Medium',
-        risk: dbMatch?.risk || 3,
-        lockIn: bi.lockIn !== undefined ? bi.lockIn : (dbMatch?.lockIn || 0),
-        lock_in_years: bi.lockIn !== undefined ? bi.lockIn : (dbMatch?.lockIn || 0),
+        riskLabel: bi.riskLevel || dbMatch?.riskLabel,
+        risk: bi.riskScore ?? dbMatch?.risk,
+        lockIn: bi.lockIn ?? dbMatch?.lockIn,
+        lock_in_years: bi.lockIn ?? dbMatch?.lockIn,
         goalTags: dbMatch?.goalTags || [],
         
         // Dynamic values from backend response
         monthly_allocation: allocation,
-        postTaxReturn: bi.postTaxReturn !== undefined ? bi.postTaxReturn : (bi.effectiveYield !== undefined ? bi.effectiveYield : (dbMatch?.postTaxReturn || dbMatch?.rate || 7.0)),
-        nominalReturn: bi.nominalReturn !== undefined ? bi.nominalReturn : (dbMatch?.expectedReturn || dbMatch?.rate || 7.0),
-        rate: bi.nominalReturn !== undefined ? bi.nominalReturn : (dbMatch?.rate || dbMatch?.expectedReturn || 7.0),
-        expectedReturn: bi.nominalReturn !== undefined ? bi.nominalReturn : (dbMatch?.expectedReturn || dbMatch?.rate || 7.0),
+        postTaxReturn: null,
+        effectiveYield: bi.effectiveYield,
+        returnBasis: bi.returnBasis,
+        nominalReturn: bi.nominalReturn,
+        rate: bi.nominalReturn,
+        expectedReturn: bi.nominalReturn,
         ml_confidence: backendRecs?.confidence_scores?.[bi.type] ?? 0,
         advisory_text: backendRecs.advisory_text,
         _source: 'backend',
@@ -166,20 +155,18 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
     }
     return merged;
   }, [backendRecs, userProfile]);
-  const eligibleInvestments = recommendations;
-
   const handleLearnMore = (investment) => {
     const normalized = {
       ...investment,
-      expected_return_min: investment.expected_return_min ?? investment.returnRange?.min ?? (investment.expectedReturn ? investment.expectedReturn * 0.85 : (investment.rate ? investment.rate * 0.85 : 0)),
-      expected_return_max: investment.expected_return_max ?? investment.returnRange?.max ?? (investment.expectedReturn || investment.rate || 0),
-      category: investment.category || investment.cat || 'Other',
-      risk_level: investment.risk_level || investment.riskLabel || 'Medium',
-      lock_in_years: investment.lock_in_years ?? investment.lockIn ?? 0,
+      expected_return_min: investment.expected_return_min ?? investment.returnRange?.min ?? null,
+      expected_return_max: investment.expected_return_max ?? investment.returnRange?.max ?? investment.nominalReturn ?? null,
+      category: investment.category || investment.cat || 'Unclassified',
+      risk_level: investment.risk_level || investment.riskLabel || 'Unknown',
+      lock_in_years: investment.lock_in_years ?? investment.lockIn ?? null,
       tax_benefit: investment.tax_benefit ?? (investment.taxType === 'eee' || investment.taxType === 'elss' || investment.taxType === 'nps'),
       tax_section: investment.tax_section || (investment.taxType === 'eee' ? '80C' : investment.taxType === 'elss' ? '80C' : investment.taxType === 'nps' ? '80CCD(1B)' : null),
       tax_free_interest: investment.tax_free_interest ?? (investment.taxType === 'eee'),
-      liquidity: investment.liquidity || (investment.lockIn > 3 ? 'Low' : investment.lockIn > 0 ? 'Medium' : 'High'),
+      liquidity: investment.liquidity || null,
       description: investment.description || investment.desc || '',
     };
     setDeepDiveInvestment(normalized);
@@ -187,19 +174,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
 
   const handleRebalanceSave = async (updated) => {
     try {
-      let profileId = backendRecs?.profileId || userProfile.profileId;
-      if (!profileId) {
-        const profileResponse = await api.buildProfile(userProfile);
-        profileId = profileResponse.profileId;
-        if (profileId) {
-          const recResponse = await api.getRecommendations(profileId);
-          onProfileUpdate?.({ ...userProfile, profileId });
-          setBackendRecs({
-            ...recResponse,
-            profileId,
-          });
-        }
-      }
+      const profileId = backendRecs?.profileId || userProfile.profileId;
 
       if (!profileId) {
         throw new Error("Could not build user profile for database update.");
@@ -207,8 +182,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
 
       const weights = {};
       updated.forEach(item => {
-        const backendKey = localToBackendInstrument(item.id);
-        weights[backendKey] = item.monthly_allocation;
+        weights[item.id] = Number(item.allocationWeight);
       });
 
       const response = await api.updateRecommendationWeights(profileId, weights);
@@ -259,6 +233,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
         return (
           <ErrorBoundary>
           <RebalancerScreen
+            key={recommendations.map(item => `${item.id}:${item.allocationWeight}`).join('|')}
             profile={userProfile}
             recommendations={recommendations}
             onSave={handleRebalanceSave}
@@ -266,7 +241,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
           </ErrorBoundary>
         );
       case 'sip-planner':
-        return <ErrorBoundary><StepUpPlanner profile={userProfile} /></ErrorBoundary>;
+        return <ErrorBoundary><StepUpPlanner key={`${userProfile.profileId}:${userProfile.version}`} profile={userProfile} /></ErrorBoundary>;
       case 'tax-optimizer':
         return <ErrorBoundary><TaxScreen profile={userProfile} onLearnMore={handleLearnMore} /></ErrorBoundary>;
       case 'compare':
@@ -374,7 +349,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
           investment={deepDiveInvestment}
           onSelectInvestment={setDeepDiveInvestment}
           allRecommendations={recommendations}
-          horizon={userProfile.investment_horizon}
+          horizon={userProfile.investment_horizon_years}
           userProfile={userProfile}
         />
       </Suspense>

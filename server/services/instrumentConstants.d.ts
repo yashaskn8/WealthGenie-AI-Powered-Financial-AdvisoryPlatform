@@ -8,14 +8,14 @@
 export function updateLiveParam(key: string, nominalRate?: number, volatility?: number): void;
 /**
  * Get nominal rate for an instrument key (as percentage, e.g. 12.5).
- * Returns 7.0 as safe default for unknown instruments.
+ * Returns null when the instrument is unknown.
  */
-export function getNominalRate(key: any): any;
+export function getNominalRate(key: unknown): number | null;
 /**
  * Get volatility for an instrument key (as decimal, e.g. 0.18).
- * Returns 0.10 as safe default for unknown instruments.
+ * Returns null when the instrument is unknown.
  */
-export function getVolatility(key: any): any;
+export function getVolatility(key: unknown): number | null;
 /**
  * Build a RATE_LOOKUP map {key: rate} for projection engine compatibility.
  */
@@ -233,7 +233,7 @@ export const INSTRUMENT_PARAMS: {
         tags: string[];
     };
 };
-/** Risk-free rate benchmark (FD post-tax approximation) */
+/** Explicit policy benchmark used for pre-tax nominal portfolio comparisons. */
 export const RISK_FREE_RATE: 0.05;
 /** SEBI disclaimer */
 export const DISCLAIMER: "WealthGenie provides AI-generated investment analysis for educational and informational purposes only. It does not constitute registered investment advice under SEBI (Investment Advisers) Regulations, 2013. Past returns are not indicative of future performance. Please consult a SEBI-registered investment adviser before making investment decisions. Mutual fund investments are subject to market risks.";

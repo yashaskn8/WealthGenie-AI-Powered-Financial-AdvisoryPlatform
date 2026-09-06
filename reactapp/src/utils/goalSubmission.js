@@ -23,12 +23,11 @@ export function buildGoalPayload({
     target_amount: targetAmount,
     target_date: formattedDate,
     current_savings: currentSavings,
-    priority: priority || 'Medium',
+    priority,
   };
 
-  if (profileId) {
-    payload.profileId = profileId;
-  }
+  if (!profileId) throw new Error('A canonical Financial Profile ID is required for goal planning.');
+  payload.profileId = profileId;
 
   return payload;
 }

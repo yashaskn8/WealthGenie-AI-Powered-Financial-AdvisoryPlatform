@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyHeader
 
 from model.evaluation.explainer import ModelExplainer
-from model.data.feature_engineering import engineer_features, to_model_array
+from model.data.feature_engineering import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, engineer_features, to_model_array
 from model.serving.inference import RandomForestPredictor, MLPPredictor, FTTransformerPredictor
 from model.serving.registry import registry
 from store_factory import get_model_registry
@@ -47,8 +47,8 @@ label_encoder = None
 model_accuracy: float | None = None
 confidence_threshold: float = 0.55
 git_commit_hash: str = "ffa37ba"
-model_version: str = "3.0.0"
-dataset_version: str = "3.0.0"
+model_version: str = "4.0.0"
+dataset_version: str = "4.0.0"
 explainer_instance: ModelExplainer | None = None
 
 
@@ -62,36 +62,23 @@ def _seed_and_resolve_active_models(version_registry) -> None:
     """
     logger.info("[Registry Seeding] Starting _seed_and_resolve_active_models...")
 
-    data_dir = BASE_DIR / "data"
-    profiles_csv = data_dir / "investment_profiles.csv"
-    data_hash = "unavailable"
-    if profiles_csv.exists():
-        try:
-            from model.registry.registry_store import compute_data_hash
-            data_hash = compute_data_hash(profiles_csv)
-            logger.info(f"[Registry Seeding] Computed training data hash: {data_hash[:16]}...")
-        except Exception as e:
-            logger.warning(f"[Registry Seeding] Failed to compute data hash: {e}")
-    else:
-        logger.info(f"[Registry Seeding] Training data not found at {profiles_csv}, using data_hash='unavailable'.")
-
-    ref_dist = None
-    if profiles_csv.exists():
-        try:
-            import pandas as pd
-            from model.registry.drift_detection import compute_reference_distributions
-            df = pd.read_csv(profiles_csv)
-            feature_cols = [
-                "age", "annual_income", "monthly_savings", "investment_horizon",
-                "liquid_savings", "existing_debt", "dependents", "emergency_fund_months",
-                "risk_score", "stated_tolerance_score", "savings_rate",
-                "debt_to_income_ratio", "emergency_fund_adequacy_ratio",
-                "risk_capacity_vs_stated_tolerance_gap", "horizon_adjusted_urgency_score",
-                "dependents_adjusted_burden_score",
-            ]
-            ref_dist = compute_reference_distributions(df, feature_cols)
-        except Exception as e:
-            logger.warning(f"[Registry Seeding] Failed to compute reference distributions: {e}")
+    try:
+        import pandas as pd
+        from model.data.preprocessing import (
+            compute_dataset_hash_from_arrays,
+            prepare_synthetic_training_data,
+        )
+        from model.registry.drift_detection import compute_reference_distributions
+        reference_x, reference_y = prepare_synthetic_training_data(num_samples=2_000, seed=42)
+        data_hash = compute_dataset_hash_from_arrays(reference_x, reference_y)
+        ref_dist = compute_reference_distributions(
+            pd.DataFrame(reference_x, columns=FEATURE_NAMES), FEATURE_NAMES
+        )
+        logger.info(
+            f"[Registry Seeding] Computed {FEATURE_SCHEMA_VERSION} training data hash: {data_hash[:16]}..."
+        )
+    except Exception as e:
+        raise RuntimeError("Unable to build the versioned v4 registry baseline") from e
 
     seeded_count = 0
 
@@ -99,7 +86,11 @@ def _seed_and_resolve_active_models(version_registry) -> None:
     rf_artifact = MODEL_DIR / "model.pkl"
     if rf_artifact.exists():
         active_rf = version_registry.get_active_model("RandomForest")
-        if active_rf is not None and Path(active_rf["artifact_path"]).exists():
+        active_schema = (active_rf or {}).get("hyperparameters", {}).get("feature_schema_version")
+        active_reference_features = set((active_rf or {}).get("reference_distributions") or {})
+        if (active_rf is not None and Path(active_rf["artifact_path"]).exists()
+                and active_schema == FEATURE_SCHEMA_VERSION
+                and active_reference_features == set(FEATURE_NAMES)):
             logger.info(f"[Registry Seeding] RandomForest already registered and active: {active_rf['version_id']}")
         else:
             reason = "no active version" if active_rf is None else f"artifact path invalid ({active_rf.get('artifact_path')})"
@@ -116,7 +107,15 @@ def _seed_and_resolve_active_models(version_registry) -> None:
             from model.data.preprocessing import get_dataset_generation_params
             lineage_params = meta.get("dataset_lineage") or get_dataset_generation_params(num_samples=2000, seed=42)
 
-            fidelity = meta.get("test_accuracy", 0.9553)
+            if meta.get("feature_schema_version") != FEATURE_SCHEMA_VERSION or meta.get("feature_names") != FEATURE_NAMES:
+                raise ValueError("RandomForest metadata does not match the v4 feature contract")
+            missing_metrics = [
+                name for name in ("rule_approximation_fidelity", "balanced_accuracy", "macro_f1")
+                if meta.get(name) is None
+            ]
+            if missing_metrics:
+                raise ValueError(f"RandomForest metadata lacks promotion evidence: {', '.join(missing_metrics)}")
+            fidelity = meta["rule_approximation_fidelity"]
             training_timestamp = meta.get("trained_at", "2026-07-23T19:28:42Z")
             data_hash = meta.get("training_data_hash", data_hash)
             hparams = {
@@ -124,12 +123,14 @@ def _seed_and_resolve_active_models(version_registry) -> None:
                 "max_depth": 12,
                 "model_type": "RandomForestClassifier",
                 "dataset_lineage": lineage_params,
+                "feature_schema_version": FEATURE_SCHEMA_VERSION,
+                "feature_names": FEATURE_NAMES,
             }
             metrics = {
                 "rule_approximation_fidelity": fidelity,
-                "independent_cfp_benchmark_accuracy": 0.2526,
-                "balanced_accuracy": meta.get("balanced_accuracy", 0.858),
-                "macro_f1": meta.get("macro_f1", 0.8601),
+                "balanced_accuracy": meta["balanced_accuracy"],
+                "macro_f1": meta["macro_f1"],
+                "metric_interpretation": "policy-approximation fidelity, not investment outcome accuracy",
             }
             try:
                 vid = version_registry.register_model(
@@ -154,7 +155,11 @@ def _seed_and_resolve_active_models(version_registry) -> None:
     mlp_artifact = MODEL_DIR / "saved_models" / "mlp_model.pt"
     if mlp_artifact.exists():
         active_mlp = version_registry.get_active_model("PyTorch_MLP")
-        if active_mlp is not None and Path(active_mlp["artifact_path"]).exists():
+        active_schema = (active_mlp or {}).get("hyperparameters", {}).get("feature_schema_version")
+        active_reference_features = set((active_mlp or {}).get("reference_distributions") or {})
+        if (active_mlp is not None and Path(active_mlp["artifact_path"]).exists()
+                and active_schema == FEATURE_SCHEMA_VERSION
+                and active_reference_features == set(FEATURE_NAMES)):
             logger.info(f"[Registry Seeding] PyTorch_MLP already registered and active: {active_mlp['version_id']}")
         else:
             reason = "no active version" if active_mlp is None else f"artifact path invalid ({active_mlp.get('artifact_path')})"
@@ -165,8 +170,15 @@ def _seed_and_resolve_active_models(version_registry) -> None:
                     artifact_path=mlp_artifact,
                     training_data_hash=data_hash,
                     training_timestamp="2026-07-30T15:57:00Z",
-                    hyperparameters={"input_dim": 16, "hidden_dims": [64, 32], "output_dim": 6},
-                    metrics={"rule_approximation_fidelity": 0.9560, "independent_cfp_benchmark_accuracy": 0.1750},
+                    hyperparameters={
+                        "input_dim": len(FEATURE_NAMES),
+                        "hidden_dims": [64, 32],
+                        "output_dim": 6,
+                        "feature_schema_version": FEATURE_SCHEMA_VERSION,
+                        "feature_names": FEATURE_NAMES,
+                    },
+                    metrics={"metric_interpretation": "policy-approximation fidelity, not investment outcome accuracy"},
+                    reference_distributions=ref_dist,
                     notes="Baseline PyTorch MLP model seeded at application startup",
                     set_active=True,
                 )
@@ -181,7 +193,11 @@ def _seed_and_resolve_active_models(version_registry) -> None:
     ft_artifact = MODEL_DIR / "saved_models" / "ft_transformer.pt"
     if ft_artifact.exists():
         active_ft = version_registry.get_active_model("FT_Transformer")
-        if active_ft is not None and Path(active_ft["artifact_path"]).exists():
+        active_schema = (active_ft or {}).get("hyperparameters", {}).get("feature_schema_version")
+        active_reference_features = set((active_ft or {}).get("reference_distributions") or {})
+        if (active_ft is not None and Path(active_ft["artifact_path"]).exists()
+                and active_schema == FEATURE_SCHEMA_VERSION
+                and active_reference_features == set(FEATURE_NAMES)):
             logger.info(f"[Registry Seeding] FT_Transformer already registered and active: {active_ft['version_id']}")
         else:
             reason = "no active version" if active_ft is None else f"artifact path invalid ({active_ft.get('artifact_path')})"
@@ -192,8 +208,16 @@ def _seed_and_resolve_active_models(version_registry) -> None:
                     artifact_path=ft_artifact,
                     training_data_hash=data_hash,
                     training_timestamp="2026-07-30T16:05:00Z",
-                    hyperparameters={"d_token": 64, "n_blocks": 3, "n_heads": 4},
-                    metrics={"rule_approximation_fidelity": 0.9705, "independent_cfp_benchmark_accuracy": 0.1583},
+                    hyperparameters={
+                        "input_dim": len(FEATURE_NAMES),
+                        "d_token": 64,
+                        "n_blocks": 3,
+                        "n_heads": 4,
+                        "feature_schema_version": FEATURE_SCHEMA_VERSION,
+                        "feature_names": FEATURE_NAMES,
+                    },
+                    metrics={"metric_interpretation": "policy-approximation fidelity, not investment outcome accuracy"},
+                    reference_distributions=ref_dist,
                     notes="Baseline FT-Transformer model seeded at application startup",
                     set_active=True,
                 )
@@ -265,23 +289,27 @@ async def lifespan(app: FastAPI):
 
     # 3. Resolve active versions from registry and reload predictors from registry-tracked paths
     active_rf = version_registry.get_active_model("RandomForest")
-    if active_rf and Path(active_rf["artifact_path"]).exists():
+    active_rf_schema = (active_rf or {}).get("hyperparameters", {}).get("feature_schema_version")
+    if active_rf and Path(active_rf["artifact_path"]).exists() and active_rf_schema == FEATURE_SCHEMA_VERSION:
         rf_pred.load_artifacts(artifact_path=Path(active_rf["artifact_path"]))
-        model_version = active_rf["version_id"]
-        model_accuracy = active_rf.get("metrics", {}).get("rule_approximation_fidelity", 0.9553)
-        model = rf_pred.model
-        label_encoder = rf_pred.label_encoder
-        logger.info(f"RandomForest loaded from registry version {active_rf['version_id']}")
+        if rf_pred.is_loaded:
+            model_version = active_rf["version_id"]
+            model_accuracy = active_rf.get("metrics", {}).get("rule_approximation_fidelity")
+            model = rf_pred.model
+            label_encoder = rf_pred.label_encoder
+            logger.info(f"RandomForest loaded from registry version {active_rf['version_id']}")
     else:
         logger.info(f"RandomForest loaded from default path (no active registry version).")
 
     active_mlp = version_registry.get_active_model("PyTorch_MLP")
-    if active_mlp and Path(active_mlp["artifact_path"]).exists():
+    active_mlp_schema = (active_mlp or {}).get("hyperparameters", {}).get("feature_schema_version")
+    if active_mlp and Path(active_mlp["artifact_path"]).exists() and active_mlp_schema == FEATURE_SCHEMA_VERSION:
         mlp_pred.load_artifacts(artifact_path=Path(active_mlp["artifact_path"]))
         logger.info(f"PyTorch_MLP loaded from registry version {active_mlp['version_id']}")
 
     active_ft = version_registry.get_active_model("FT_Transformer")
-    if active_ft and Path(active_ft["artifact_path"]).exists():
+    active_ft_schema = (active_ft or {}).get("hyperparameters", {}).get("feature_schema_version")
+    if active_ft and Path(active_ft["artifact_path"]).exists() and active_ft_schema == FEATURE_SCHEMA_VERSION:
         ft_pred.load_artifacts(artifact_path=Path(active_ft["artifact_path"]))
         logger.info(f"FT_Transformer loaded from registry version {active_ft['version_id']}")
 
@@ -365,27 +393,33 @@ app.add_middleware(
 )
 
 
-def get_decision_path_description(age: int, income: float, risk_category: str) -> List[str]:
-    """Generates human-readable decision steps explaining model routing logic."""
-    path = []
-    if age < 30:
-        path.append("age < 30")
-    elif age <= 45:
-        path.append("30 <= age <= 45")
-    else:
-        path.append("age > 45")
+def get_decision_path_description(data: PredictRequest) -> List[str]:
+    """Explain only approved suitability inputs; never infer gross income."""
+    return [
+        f"final_suitability_risk={data.final_suitability_risk}",
+        f"risk_capacity_score={data.risk_capacity_score}",
+        f"investment_horizon_years={data.investment_horizon_years}",
+        f"investment_goals={','.join(data.investment_goals)}",
+    ]
 
-    if income > 1500000:
-        path.append("income > 15L")
-    elif income > 1000000:
-        path.append("income > 10L")
-    elif income > 600000:
-        path.append("income > 6L")
-    else:
-        path.append("income <= 6L")
 
-    path.append(f"risk = {risk_category}")
-    return path
+def build_model_input(data: PredictRequest):
+    features = engineer_features(
+        age=data.age,
+        monthly_take_home=data.monthly_take_home,
+        monthly_savings=data.monthly_savings,
+        investment_horizon_years=data.investment_horizon_years,
+        liquid_savings=data.liquid_savings,
+        emi_burden_pct=data.emi_burden_pct,
+        financial_dependents=data.financial_dependents,
+        emergency_fund_months=data.emergency_fund_months,
+        deployable_lump_sum=data.deployable_lump_sum,
+        risk_capacity_score=data.risk_capacity_score,
+        risk_tolerance=data.risk_tolerance,
+        final_suitability_risk=data.final_suitability_risk,
+        investment_goals=data.investment_goals,
+    )
+    return features, to_model_array(features)
 
 
 @app.get("/healthz")
@@ -417,6 +451,7 @@ def health():
     return HealthResponse(
         status=status_str,
         model_version=live_version,
+        feature_schema_version=FEATURE_SCHEMA_VERSION,
         model_accuracy=live_accuracy,
         explainer_loaded=explainer_instance is not None,
     )
@@ -468,13 +503,7 @@ async def predict_enriched(data: PredictRequest):
     Prediction endpoint serving recommendations using Random Forest + TreeSHAP explainability.
     Buffers inference inputs for continuous drift monitoring and dual-evaluates shadow candidate if configured.
     """
-    features = engineer_features(
-        age=data.age, annual_income=data.annual_income, monthly_savings=data.monthly_savings,
-        investment_horizon=data.investment_horizon, liquid_savings=data.liquid_savings,
-        existing_debt=data.existing_debt, dependents=data.dependents,
-        emergency_fund_months=data.emergency_fund_months, risk_tolerance=data.risk_tolerance
-    )
-    model_input = to_model_array(features)
+    features, model_input = build_model_input(data)
 
     # 1. Buffer for continuous drift monitoring
     record_inference_features(features)
@@ -505,7 +534,8 @@ async def predict_enriched(data: PredictRequest):
         secondary=res["secondary"],
         tertiary=res["tertiary"],
         confidence_scores=res["confidence_scores"],
-        decision_path=get_decision_path_description(data.age, data.annual_income, data.risk_category),
+        decision_path=get_decision_path_description(data),
+        feature_schema_version=FEATURE_SCHEMA_VERSION,
         model_used="RandomForest",
         low_confidence=res["low_confidence"],
         confidence_threshold=confidence_threshold,
@@ -525,13 +555,7 @@ async def predict_pytorch(data: PredictRequest):
     if predictor is None or not predictor.is_loaded:
         raise HTTPException(status_code=503, detail="PyTorch MLP model not loaded.")
 
-    features = engineer_features(
-        age=data.age, annual_income=data.annual_income, monthly_savings=data.monthly_savings,
-        investment_horizon=data.investment_horizon, liquid_savings=data.liquid_savings,
-        existing_debt=data.existing_debt, dependents=data.dependents,
-        emergency_fund_months=data.emergency_fund_months, risk_tolerance=data.risk_tolerance
-    )
-    model_input = to_model_array(features)
+    features, model_input = build_model_input(data)
 
     # Buffer for continuous drift monitoring
     record_inference_features(features)
@@ -543,11 +567,12 @@ async def predict_pytorch(data: PredictRequest):
         secondary=res["secondary"],
         tertiary=res["tertiary"],
         confidence_scores=res["confidence_scores"],
-        decision_path=get_decision_path_description(data.age, data.annual_income, data.risk_category),
+        decision_path=get_decision_path_description(data),
+        feature_schema_version=FEATURE_SCHEMA_VERSION,
         model_used="PyTorch_FinancialMLP",
         low_confidence=res["low_confidence"],
         confidence_threshold=0.45,
-        model_version=get_live_model_version("PyTorch_MLP", "1.0.0-pytorch"),
+        model_version=get_live_model_version("PyTorch_MLP", "4.0.0-pytorch"),
         dataset_version=dataset_version,
         git_commit_hash=git_commit_hash,
         explanation=None,
@@ -563,13 +588,7 @@ async def predict_ft_transformer(data: PredictRequest):
     if predictor is None or not predictor.is_loaded:
         raise HTTPException(status_code=503, detail="FT-Transformer model not loaded.")
 
-    features = engineer_features(
-        age=data.age, annual_income=data.annual_income, monthly_savings=data.monthly_savings,
-        investment_horizon=data.investment_horizon, liquid_savings=data.liquid_savings,
-        existing_debt=data.existing_debt, dependents=data.dependents,
-        emergency_fund_months=data.emergency_fund_months, risk_tolerance=data.risk_tolerance
-    )
-    model_input = to_model_array(features)
+    features, model_input = build_model_input(data)
 
     # Buffer for continuous drift monitoring
     record_inference_features(features)
@@ -581,11 +600,12 @@ async def predict_ft_transformer(data: PredictRequest):
         secondary=res["secondary"],
         tertiary=res["tertiary"],
         confidence_scores=res["confidence_scores"],
-        decision_path=get_decision_path_description(data.age, data.annual_income, data.risk_category),
+        decision_path=get_decision_path_description(data),
+        feature_schema_version=FEATURE_SCHEMA_VERSION,
         model_used="PyTorch_FTTransformer",
         low_confidence=res["low_confidence"],
         confidence_threshold=0.45,
-        model_version=get_live_model_version("FT_Transformer", "1.0.0-ft_transformer"),
+        model_version=get_live_model_version("FT_Transformer", "4.0.0-ft_transformer"),
         dataset_version=dataset_version,
         git_commit_hash=git_commit_hash,
         explanation=None,
@@ -597,13 +617,7 @@ async def predict_compare(data: PredictRequest):
     """
     Multi-model inference comparison endpoint running predictions across all loaded models in ModelRegistry.
     """
-    features = engineer_features(
-        age=data.age, annual_income=data.annual_income, monthly_savings=data.monthly_savings,
-        investment_horizon=data.investment_horizon, liquid_savings=data.liquid_savings,
-        existing_debt=data.existing_debt, dependents=data.dependents,
-        emergency_fund_months=data.emergency_fund_months, risk_tolerance=data.risk_tolerance
-    )
-    model_input = to_model_array(features)
+    features, model_input = build_model_input(data)
 
     # Buffer for continuous drift monitoring
     record_inference_features(features)

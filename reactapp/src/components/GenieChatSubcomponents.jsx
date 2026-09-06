@@ -233,38 +233,15 @@ export const MessageBubble = ({ msg, onAction, isLatest }) => {
   );
 };
 
-// ── Proactive Nudge Banner ────────────────────────────────────────
-export function ProactiveNudge({ profile, onAsk }) {
-  const [dismissed, setDismissed] = useState(false);
-  if (dismissed || !profile) return null;
-  let nudge = null;
-  if ((profile.riskCategory || '').includes('Aggressive') && profile.age > 50) {
-    nudge = { 
-      icon: <AlertTriangle size={15} style={{ verticalAlign: 'middle' }} />, 
-      text: 'Your risk category is set to Aggressive but you are over 50. Review safer allocations.', 
-      question: 'Should I reduce my equity exposure at my age?' 
-    };
-  }
-  if (!nudge) return null;
-  return (
-    <div className="proactive-nudge">
-      <span className="nudge-icon">{nudge.icon}</span>
-      <span className="nudge-text">{nudge.text}</span>
-      <button className="nudge-btn" onClick={() => { onAsk(nudge.question); setDismissed(true); }}>Ask Genie</button>
-      <button className="nudge-dismiss" onClick={() => setDismissed(true)}>✕</button>
-    </div>
-  );
-}
-
 // ── Portfolio Snapshot Widget ─────────────────────────────────────
 export function PortfolioSnapshot({ profile }) {
   if (!profile) return null;
-  const annualIncome = profile.annualIncome || (profile.monthly_income || profile.income || 0) * 12;
-  const riskLabel = profile.riskCategory || profile.risk_tolerance || 'N/A';
+  const takeHome = Number(profile.monthly_take_home);
+  const riskLabel = profile.risk_tolerance || 'N/A';
   const items = [
-    { label: 'Income', value: `₹${(annualIncome / 100000).toFixed(1)}L`, color: '#38bdf8' },
+    { label: 'Take-home', value: Number.isFinite(takeHome) ? `₹${takeHome.toLocaleString('en-IN')}/mo` : 'N/A', color: '#38bdf8' },
     { label: 'Risk', value: riskLabel, color: riskLabel.includes('Aggressive') ? '#ef4444' : riskLabel.includes('Conservative') ? '#22c55e' : '#f59e0b' },
-    { label: 'Regime', value: (profile.taxRegime || 'new').toUpperCase(), color: '#a855f7' },
+    { label: 'Goals', value: Array.isArray(profile.investment_goals) ? profile.investment_goals.length : 'N/A', color: '#a855f7' },
   ];
   return (
     <div className="portfolio-snapshot">

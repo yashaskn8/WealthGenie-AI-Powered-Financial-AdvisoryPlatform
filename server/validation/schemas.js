@@ -2,336 +2,94 @@ import Joi from 'joi';
 import { sendError } from '../middleware/errorHandler.js';
 
 /**
- * WealthGenie Request Validation Schemas
- * Uses Joi for runtime input validation on Express routes.
- * 
- * =========================================================================
- * ðŸ“˜ BEGINNER NOTE: WHAT IS INPUT VALIDATION & JOI?
- * =========================================================================
- * 1. Why input validation matters: 
- *    We must never trust data sent by users or browsers. An attacker could send 
- *    negative numbers for income, strings where dates are expected, or huge payloads
- *    to crash our database or server. Validation acts as a shield, ensuring data is
- *    in the correct format, type, and range before our code processes it.
- * 
- * 2. What is Joi?
- *    Joi is a JavaScript schema description language and validator. It lets us write
- *    declarative schemas to describe what a valid request must look like (e.g. "a string,
- *    between 2 and 100 characters, trimmed, and required"). It automatically rejects
- *    invalid requests with status 400 (Bad Request) and cleanses input (e.g. converting
- *    query strings like "1200000" into actual numbers).
+ * Validation for non-Financial-Profile APIs.
+ * Profile, recommendation, WTI, portfolio, projection, Monte Carlo, and goal
+ * schemas live in financialSchemas.js so legacy fields cannot re-enter those paths.
  */
-
-// â”€â”€ Reusable field definitions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-const objectId = Joi.string().pattern(/^[0-9a-fA-F]{24}$/).message('Invalid ID format');
-
-// â”€â”€ Auth Schemas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export const registerSchema = Joi.object({
-  name: Joi.string().trim().min(2).max(100).required()
-    .messages({ 'string.min': 'Name must be at least 2 characters' }),
-  email: Joi.string().trim().lowercase().email().max(254).required()
-    .messages({ 'string.email': 'Please provide a valid email address' }),
-  mobile: Joi.string().trim().pattern(/^[6-9]\d{9}$/).optional()
-    .messages({ 'string.pattern.base': 'Please provide a valid 10-digit Indian mobile number' }),
+  name: Joi.string().trim().min(2).max(100).required(),
+  email: Joi.string().trim().lowercase().email().max(254).required(),
+  mobile: Joi.string().trim().pattern(/^[6-9]\d{9}$/).optional(),
   password: Joi.string().min(8).max(128).required()
     .pattern(/[A-Z]/, 'uppercase')
     .pattern(/[a-z]/, 'lowercase')
     .pattern(/[0-9]/, 'digit')
-    .pattern(/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/, 'special character')
-    .messages({
-      'string.min': 'Password must be at least 8 characters',
-      'string.pattern.name': 'Password must contain at least one {#name}',
-    }),
-});
+    .pattern(/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/, 'special character'),
+}).unknown(false);
 
 export const loginSchema = Joi.object({
-  email: Joi.string().trim().lowercase().email().required()
-    .messages({ 'string.email': 'Please provide a valid email address' }),
-  password: Joi.string().min(1).required()
-    .messages({ 'any.required': 'Password is required' }),
-});
+  email: Joi.string().trim().lowercase().email().required(),
+  password: Joi.string().min(1).required(),
+}).unknown(false);
 
-// â”€â”€ Profile Schema â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-export const profileSchema = Joi.object({
-  monthly_income: Joi.number().min(1000).max(100000000).required()
-    .messages({
-      'number.min': 'Monthly income must be at least â‚¹1,000',
-      'number.max': 'Monthly income cannot exceed â‚¹10,00,00,000',
-    }),
-  age: Joi.number().integer().min(18).max(80).required()
-    .messages({ 'number.min': 'Age must be at least 18', 'number.max': 'Age must be at most 80' }),
-  monthly_savings: Joi.number().min(500).max(100000000).required()
-    .messages({
-      'number.min': 'Monthly savings must be at least â‚¹500',
-      'number.max': 'Monthly savings cannot exceed â‚¹10,00,00,000',
-    }),
-  regime: Joi.string().valid('new', 'old').default('new'),
-  investment_horizon: Joi.number().integer().min(1).max(40).default(15),
-  liquid_savings: Joi.number().min(0).max(1000000000).required()
-    .messages({ 'number.min': 'Liquid savings must be a positive number' }),
-  existing_debt_emi_ratio_pct: Joi.number().min(0).max(100).optional()
-    .messages({ 'number.min': 'Existing debt EMI burden must be between 0 and 100%' }),
-  existing_debt: Joi.number().min(0).max(100).optional()
-    .messages({ 'number.min': 'Existing debt EMI burden must be between 0 and 100%' }),
-  dependents: Joi.number().integer().min(0).max(15).required()
-    .messages({ 'number.min': 'Dependents must be at least 0' }),
-  emergency_fund_months: Joi.number().min(0).max(120).required()
-    .messages({ 'number.min': 'Emergency fund months must be at least 0' }),
-  risk_tolerance: Joi.string().valid('Conservative', 'Moderate', 'Aggressive').required(),
-  goal_type: Joi.string().valid('retirement', 'house purchase', 'education', 'wealth-building').required(),
-  total_ctc: Joi.number().min(100000).max(1000000000).optional()
-    .messages({ 'number.min': 'Total CTC must be at least â‚¹1,00,000', 'number.max': 'Total CTC cannot exceed â‚¹100 Crores' }),
-  basic_component: Joi.number().min(20000).max(1000000000).optional()
-    .messages({ 'number.min': 'Basic salary component must be at least â‚¹20,000' }),
-  monthly_take_home: Joi.number().min(1000).optional()
-    .messages({ 'number.min': 'Monthly take-home salary must be at least â‚¹1,000' }),
-  sold_property_amount: Joi.number().min(0).max(10000000000).default(0),
-  has_lump_sum: Joi.boolean().default(false).optional(),
-  lump_sum_amount: Joi.when('has_lump_sum', {
-    is: true,
-    then: Joi.number().min(1).required().messages({ 'number.min': 'Lump sum amount must be greater than 0 when has_lump_sum is true' }),
-    otherwise: Joi.number().min(0).optional().default(0)
-  }),
-  goals: Joi.array().items(Joi.string()).optional(),
-  investment_goals: Joi.array().items(Joi.string()).optional(),
-  // Tax deduction fields (WG-DEDUCTIONS-COLLECTION)
-  section_80c: Joi.number().min(0).max(150000).optional()
-    .messages({ 'number.min': 'Section 80C deduction must be at least ₹0', 'number.max': 'Section 80C deduction cannot exceed statutory cap of ₹1,50,000' }),
-  section80C: Joi.number().min(0).max(150000).optional()
-    .messages({ 'number.min': 'Section 80C deduction must be at least ₹0', 'number.max': 'Section 80C deduction cannot exceed statutory cap of ₹1,50,000' }),
-  section_80ccd1b: Joi.number().min(0).max(50000).optional()
-    .messages({ 'number.min': 'Section 80CCD(1B) deduction must be at least ₹0', 'number.max': 'Section 80CCD(1B) deduction cannot exceed statutory cap of ₹50,000' }),
-  section80CCD1B: Joi.number().min(0).max(50000).optional()
-    .messages({ 'number.min': 'Section 80CCD(1B) deduction must be at least ₹0', 'number.max': 'Section 80CCD(1B) deduction cannot exceed statutory cap of ₹50,000' }),
-  nps80CCD1B: Joi.number().min(0).max(50000).optional()
-    .messages({ 'number.min': 'Section 80CCD(1B) deduction must be at least ₹0', 'number.max': 'Section 80CCD(1B) deduction cannot exceed statutory cap of ₹50,000' }),
-  section80CCD: Joi.number().min(0).max(50000).optional()
-    .messages({ 'number.min': 'Section 80CCD(1B) deduction must be at least ₹0', 'number.max': 'Section 80CCD(1B) deduction cannot exceed statutory cap of ₹50,000' }),
-  section_80ccd: Joi.number().min(0).max(50000).optional()
-    .messages({ 'number.min': 'Section 80CCD(1B) deduction must be at least ₹0', 'number.max': 'Section 80CCD(1B) deduction cannot exceed statutory cap of ₹50,000' }),
-  section_80d_self: Joi.number().min(0).max(50000).optional()
-    .messages({ 'number.min': 'Section 80D (Self) deduction must be at least ₹0', 'number.max': 'Section 80D (Self) deduction cannot exceed ₹50,000' }),
-  section80D_self: Joi.number().min(0).max(50000).optional()
-    .messages({ 'number.min': 'Section 80D (Self) deduction must be at least ₹0', 'number.max': 'Section 80D (Self) deduction cannot exceed ₹50,000' }),
-  section_80d_parents: Joi.number().min(0).max(50000).optional()
-    .messages({ 'number.min': 'Section 80D (Parents) deduction must be at least ₹0', 'number.max': 'Section 80D (Parents) deduction cannot exceed ₹50,000' }),
-  section80D_parents: Joi.number().min(0).max(50000).optional()
-    .messages({ 'number.min': 'Section 80D (Parents) deduction must be at least ₹0', 'number.max': 'Section 80D (Parents) deduction cannot exceed ₹50,000' }),
-  parents_senior: Joi.boolean().optional(),
-  parentsSenior: Joi.boolean().optional(),
-  hra: Joi.number().min(0).max(10000000).optional()
-    .messages({ 'number.min': 'HRA exemption must be at least ₹0' }),
-  home_loan_interest: Joi.number().min(0).max(200000).optional()
-    .messages({ 'number.min': 'Home loan interest deduction must be at least ₹0', 'number.max': 'Section 24(b) home loan interest deduction cannot exceed statutory cap of ₹2,00,000' }),
-  homeLoanInterest: Joi.number().min(0).max(200000).optional()
-    .messages({ 'number.min': 'Home loan interest deduction must be at least ₹0', 'number.max': 'Section 24(b) home loan interest deduction cannot exceed statutory cap of ₹2,00,000' }),
-  section_80eea: Joi.number().min(0).max(150000).optional()
-    .messages({ 'number.min': 'Section 80EEA deduction must be at least ₹0', 'number.max': 'Section 80EEA deduction cannot exceed statutory cap of ₹1,50,000' }),
-  section80EEA: Joi.number().min(0).max(150000).optional()
-    .messages({ 'number.min': 'Section 80EEA deduction must be at least ₹0', 'number.max': 'Section 80EEA deduction cannot exceed statutory cap of ₹1,50,000' }),
-  income_source: Joi.string().valid('salary', 'pension', 'family_pension', 'other').optional(),
-  incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'other').optional(),
-  version: Joi.number().integer().min(0).optional(),
-}).custom((value, helpers) => {
-  if (value.monthly_savings >= value.monthly_income) {
-    return helpers.error('any.custom', { message: 'Monthly savings (â‚¹' + value.monthly_savings.toLocaleString('en-IN') + ') must be less than monthly income (â‚¹' + value.monthly_income.toLocaleString('en-IN') + ')' });
-  }
-  if (value.monthly_take_home && value.total_ctc && (value.monthly_take_home * 12 > value.total_ctc)) {
-    return helpers.error('any.custom', { message: 'Annualized monthly take-home salary (â‚¹' + (value.monthly_take_home * 12).toLocaleString('en-IN') + ') cannot exceed Total CTC (â‚¹' + value.total_ctc.toLocaleString('en-IN') + ')' });
-  }
-  if (value.basic_component && value.total_ctc && (value.basic_component > value.total_ctc * 0.6)) {
-    return helpers.error('any.custom', { message: 'Basic salary component (â‚¹' + value.basic_component.toLocaleString('en-IN') + ') cannot exceed 60% of Total CTC (â‚¹' + value.total_ctc.toLocaleString('en-IN') + ')' });
-  }
-  if (value.basic_component && value.total_ctc && (value.basic_component < value.total_ctc * 0.2)) {
-    return helpers.error('any.custom', { message: 'Basic salary component (â‚¹' + value.basic_component.toLocaleString('en-IN') + ') must be at least 20% of Total CTC (â‚¹' + value.total_ctc.toLocaleString('en-IN') + ')' });
-  }
-  return value;
-});
+export const chatMessageSchema = Joi.object({
+  message: Joi.string().trim().min(1).max(1000).required(),
+  session_id: Joi.string().max(100).optional(),
+}).unknown(false);
 
-export const updateProfileSchema = profileSchema.keys({
-  version: Joi.number().integer().min(1).required().messages({
-    'any.required': 'version is required for profile updates',
-    'number.min': 'version must be at least 1',
-  }),
-});
-
-// â”€â”€ Recommendation Schema â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-export const recommendSchema = Joi.object({
-  profileId: objectId.required()
-    .messages({ 'string.pattern.base': 'Invalid profile ID format' }),
-});
-
-// â”€â”€ Projection Schema â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-const VALID_INSTRUMENTS = [
-  'FD', 'ELSS', 'Equity_MF', 'ETF', 'Debt_MF',
-  'RBI_Bond', 'G-Sec', 'PPF', 'NPS', 'Gold',
-  'SGB', 'Liquid_MF', 'Arbitrage_MF', 'Hybrid_MF',
-  'Index_MF', 'Midcap_MF', 'Smallcap_MF', 'SCSS', 'SSY',
-];
-
-export const projectionSchema = Joi.object({
-  profileId: objectId.required(),
-  instruments: Joi.array().items(Joi.string().valid(...VALID_INSTRUMENTS)).min(1).max(10).optional(),
-  monthly_investment: Joi.number().min(500).max(10000000).optional(),
-  years: Joi.array().items(Joi.number().integer().min(1).max(50)).min(1).max(10).optional(),
-});
-
-// â”€â”€ Monte Carlo Schema â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-export const monteCarloSchema = Joi.object({
-  instrument: Joi.string().valid(...VALID_INSTRUMENTS).required(),
-  monthly_investment: Joi.number().min(500).max(10000000).required(),
-  years: Joi.number().integer().min(1).max(40).required(),
-  target_amount: Joi.number().min(1000).max(10000000000).optional(),
-  current_savings: Joi.number().min(0).max(10000000000).optional(),
-  profileId: objectId.optional(),
-});
-
-// â”€â”€ Goal Schema â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-export const goalSchema = Joi.object({
-  goal_name: Joi.string().trim().min(2).max(100).required(),
-  target_amount: Joi.number().min(1000).max(10000000000).required()
-    .messages({
-      'number.min': 'Target amount must be at least â‚¹1,000',
-      'number.max': 'Target amount cannot exceed â‚¹1,000 Crores',
-    }),
-  target_date: Joi.date().iso().required()
-    .custom((value, helpers) => {
-      // Enforce 6-month minimum horizon for meaningful projections
-      const sixMonthsFromNow = new Date();
-      sixMonthsFromNow.setMonth(sixMonthsFromNow.getMonth() + 6);
-      if (value < sixMonthsFromNow) {
-        return helpers.error('date.min', { message: 'Target date must be at least 6 months from today' });
-      }
-      // Enforce 50-year maximum horizon to prevent CPU/OOM Denial of Service
-      const fiftyYearsFromNow = new Date();
-      fiftyYearsFromNow.setFullYear(fiftyYearsFromNow.getFullYear() + 50);
-      if (value > fiftyYearsFromNow) {
-        return helpers.error('date.max', { message: 'Target date cannot be more than 50 years in the future' });
-      }
-      return value;
-    })
-    .messages({
-      'date.min': 'Target date must be at least 6 months from today for meaningful projections',
-    }),
-  current_savings: Joi.number().min(0).max(10000000000).default(0),
-  profileId: objectId.optional(),
-  priority: Joi.string().valid('Critical', 'High', 'Medium', 'Low').default('Medium').optional(),
-});
-
-// â”€â”€ Tax Schema â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-export const goalUpdateSchema = Joi.object({
-  target_amount: Joi.number().min(1000).max(10000000000).optional()
-    .messages({
-      'number.min': 'Target amount must be at least â‚¹1,000',
-      'number.max': 'Target amount cannot exceed â‚¹1,000 Crores',
-    }),
-  current_savings: Joi.number().min(0).max(10000000000).optional(),
-  priority: Joi.string().valid('Critical', 'High', 'Medium', 'Low').optional(),
-});
-
-export const taxCompareSchema = Joi.object({
-  income: Joi.number().min(0).max(1000000000).required()
-    .messages({ 'number.min': 'Income must be a positive number' }),
-  incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').default('salary'),
+const taxFields = {
+  income: Joi.number().min(0).max(1000000000).required(),
+  incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').required(),
   section80C: Joi.number().min(0).max(150000).optional(),
   nps80CCD1B: Joi.number().min(0).max(50000).optional(),
   nps80CCD2: Joi.number().min(0).max(100000000).optional(),
   basicSalary: Joi.number().min(0).max(1000000000).optional(),
-  isGovtEmployee: Joi.boolean().default(false).optional(),
+  isGovtEmployee: Joi.boolean().optional(),
   section80D: Joi.number().min(0).max(100000).optional(),
   section80D_self: Joi.number().min(0).max(50000).optional(),
   section80D_parents: Joi.number().min(0).max(50000).optional(),
-  parents_senior: Joi.boolean().default(false).optional(),
-  self_senior: Joi.boolean().default(false).optional(),
+  parents_senior: Joi.boolean().optional(),
+  self_senior: Joi.boolean().optional(),
   hra: Joi.number().min(0).max(100000000).optional(),
   homeLoanInterest: Joi.number().min(0).max(200000).optional(),
   other: Joi.number().min(0).max(100000000).optional(),
   age: Joi.number().integer().min(18).max(120).optional(),
   fiscalYear: Joi.string().pattern(/^FY\d{4}-\d{2}$/).optional(),
-});
+};
 
-export const taxComputeSchema = taxCompareSchema.keys({
-  regime: Joi.string().valid('new', 'old').default('new'),
-});
+function requireTaxDependencyFacts(value, helpers) {
+  if (Number(value.nps80CCD2) > 0
+      && (!Number.isFinite(value.basicSalary) || typeof value.isGovtEmployee !== 'boolean')) {
+    return helpers.message({ custom: 'basicSalary and isGovtEmployee are required when nps80CCD2 is claimed' });
+  }
+  const healthDeduction = Number(value.section80D || 0)
+    + Number(value.section80D_self || 0) + Number(value.section80D_parents || 0);
+  if (healthDeduction > 0 && !Number.isInteger(value.age)) {
+    return helpers.message({ custom: 'age is required when a Section 80D deduction is claimed' });
+  }
+  if (Number(value.section80D_parents) > 0 && typeof value.parents_senior !== 'boolean') {
+    return helpers.message({ custom: 'parents_senior is required when a parents Section 80D deduction is claimed' });
+  }
+  return value;
+}
 
-// â”€â”€ Rebalance Schema â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-export const rebalanceSchema = Joi.object({
-  current_allocation: Joi.object().pattern(Joi.string(), Joi.number().min(0).max(1000000000)).max(30).required()
-    .messages({ 'any.required': 'Current asset allocation is required' }),
-  target_allocation: Joi.object().pattern(Joi.string(), Joi.number().min(0).max(100)).max(30).required()
-    .messages({ 'any.required': 'Target asset weights are required' }),
-  threshold: Joi.number().min(0).max(50).default(2.0),
-  partial_ratio: Joi.number().min(0.1).max(1.0).default(1.0),
-  holding_months: Joi.number().min(0).max(600).default(24),
-});
+export const taxCompareSchema = Joi.object(taxFields).custom(requireTaxDependencyFacts).unknown(false);
+export const taxComputeSchema = Joi.object({
+  ...taxFields,
+  regime: Joi.string().valid('new', 'old').required(),
+}).custom(requireTaxDependencyFacts).unknown(false);
 
-export const updateWeightsSchema = Joi.object({
-  profileId: objectId.required()
-    .messages({ 'string.pattern.base': 'Invalid profile ID format' }),
-  weights: Joi.object().pattern(Joi.string(), Joi.number().min(0).max(1.0)).max(30).required()
-    .messages({ 'any.required': 'Weights are required' }),
-});
-
-
-// â”€â”€ Chat Schema â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-export const chatMessageSchema = Joi.object({
-  message: Joi.string().trim().min(1).max(1000).required()
-    .messages({
-      'string.empty': 'Message cannot be empty',
-      'string.max': 'Message too long. Maximum 1000 characters.',
-    }),
-  session_id: Joi.string().max(100).optional(),
-});
-
-// â”€â”€ Rank WTI Schema (WG-005) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-export const rankWtiSchema = Joi.object({
-  userProfile: Joi.object({
-    age: Joi.number().integer().min(18).max(80).optional(),
-    monthly_income: Joi.number().min(0).max(10000000).optional(),
-    annualIncome: Joi.number().min(0).max(120000000).optional(),
-    monthly_savings: Joi.number().min(0).max(10000000).optional(),
-    riskCategory: Joi.string().valid('Conservative', 'Conservative-Moderate', 'Moderate', 'Moderate-Aggressive', 'Aggressive').optional(),
-    risk_tolerance: Joi.string().valid('Conservative', 'Moderate', 'Aggressive').optional(),
-    investment_horizon: Joi.number().integer().min(1).max(40).optional(),
-    investmentHorizon: Joi.number().integer().min(1).max(40).optional(),
-    taxRegime: Joi.string().valid('new', 'old').optional(),
-  }).optional().default({}),
-  candidates: Joi.array().items(Joi.object({
-    name: Joi.string().trim().max(100).required(),
-    rate: Joi.alternatives().try(Joi.number().min(0).max(100), Joi.string().max(20)).optional(),
-    expectedReturn: Joi.number().min(0).max(100).optional(),
-    highlight: Joi.string().max(200).optional(),
-    badge: Joi.string().max(100).optional(),
-    type: Joi.string().max(50).optional(),
-    id: Joi.string().max(50).optional(),
-  })).max(50).optional().default([]),
-  options: Joi.object({
-    regimeApplied: Joi.boolean().optional(),
-    regimeKey: Joi.string().max(50).optional(),
-    sortBy: Joi.string().valid('score', 'postTaxYield', 'expense').optional(),
-  }).optional().default({}),
-});
-
-// ── Public calculation schemas ──
 const postTaxInstrumentSchema = Joi.object({
   instrumentType: Joi.string().trim().min(1).max(50).required(),
   nominalRate: Joi.number().min(0).max(1).required(),
-  holdingYears: Joi.number().min(0.01).max(100).default(3),
-  monthlySIP: Joi.number().min(0).max(100000000).default(10000),
-});
+  holdingYears: Joi.number().min(0.01).max(100).required(),
+  monthlySIP: Joi.number().min(0).max(100000000).required(),
+}).unknown(false);
 
 export const postTaxReturnSchema = postTaxInstrumentSchema.keys({
   annualIncome: Joi.number().min(0).max(1000000000).required(),
-  regime: Joi.string().valid('new', 'old').default('new'),
-  userAge: Joi.number().integer().min(0).max(120).default(30),
+  regime: Joi.string().valid('new', 'old').required(),
+  userAge: Joi.number().integer().min(0).max(120).required(),
+  incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').required(),
 });
 
 export const postTaxReturnBatchSchema = Joi.object({
   instruments: Joi.array().items(postTaxInstrumentSchema).min(1).max(50).required(),
   annualIncome: Joi.number().min(0).max(1000000000).required(),
-  regime: Joi.string().valid('new', 'old').default('new'),
-  userAge: Joi.number().integer().min(0).max(120).default(30),
-});
+  regime: Joi.string().valid('new', 'old').required(),
+  userAge: Joi.number().integer().min(0).max(120).required(),
+  incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').required(),
+}).unknown(false);
 
 export const macroRegimeKeys = [
   'normal', 'geopolitical_conflict', 'pandemic_health_crisis',
@@ -340,25 +98,31 @@ export const macroRegimeKeys = [
 
 export const regimeQuerySchema = Joi.object({
   regime: Joi.string().valid(...macroRegimeKeys).optional(),
-});
+}).unknown(false);
+
+export const regimeTiltsQuerySchema = Joi.object({
+  regime: Joi.string().valid(...macroRegimeKeys).required(),
+}).unknown(false);
 
 export const regimeAdjustSchema = Joi.object({
   baseWeights: Joi.object()
     .pattern(Joi.string().pattern(/^[A-Za-z0-9_-]{1,50}$/), Joi.number().min(0).max(1))
-    .min(1)
-    .max(30)
-    .required(),
-  regimeKey: Joi.string().valid(...macroRegimeKeys).default('normal'),
+    .min(1).max(30).required(),
+  regimeKey: Joi.string().valid(...macroRegimeKeys).required(),
 }).custom((value, helpers) => {
   const total = Object.values(value.baseWeights).reduce((sum, weight) => sum + weight, 0);
-  return total > 0 ? value : helpers.error('any.custom', { message: 'At least one base weight must be greater than zero' });
-});
+  return Math.abs(total - 1) <= 0.0001
+    ? value
+    : helpers.message({ custom: 'baseWeights must sum to exactly 1' });
+}).unknown(false);
 
-function _createValidator(schema, property) {
+function createValidator(schema, property) {
   return (req, res, next) => {
     const { error, value } = schema.validate(req[property], {
       abortEarly: false,
-      stripUnknown: true,
+      allowUnknown: false,
+      stripUnknown: false,
+      convert: true,
     });
     if (error) {
       return sendError(
@@ -367,7 +131,7 @@ function _createValidator(schema, property) {
         400,
         'Validation failed',
         'VALIDATION_ERROR',
-        error.details.map(d => d.message),
+        error.details.map(detail => detail.message),
       );
     }
     req[property] = value;
@@ -375,16 +139,10 @@ function _createValidator(schema, property) {
   };
 }
 
-/**
- * Express middleware factory for Joi body validation.
- */
 export function validate(schema) {
-  return _createValidator(schema, 'body');
+  return createValidator(schema, 'body');
 }
 
-/**
- * Express middleware factory for Joi query validation.
- */
 export function validateQuery(schema) {
-  return _createValidator(schema, 'query');
+  return createValidator(schema, 'query');
 }

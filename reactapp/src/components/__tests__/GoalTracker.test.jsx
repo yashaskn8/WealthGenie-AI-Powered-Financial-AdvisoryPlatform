@@ -1,147 +1,52 @@
-/**
- * @vitest-environment jsdom
- */
+/** @vitest-environment jsdom */
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import GoalTracker from '../GoalTracker';
-import api from '../../services/api';
+import * as api from '../../services/api';
 
 vi.mock('../../services/api', () => ({
-  default: {
-    getGoals: vi.fn(),
-    createGoal: vi.fn(),
-    updateGoal: vi.fn(),
-    deleteGoal: vi.fn(),
-  },
+  getGoals: vi.fn(),
+  createGoal: vi.fn(),
+  deleteGoal: vi.fn(),
 }));
 
-describe('GoalTracker Component — Batch Error Isolation (WG-032)', () => {
-  const mockProfile = {
-    _id: 'prof_123',
-    monthly_income: 50000,
-    monthly_savings: 10000,
-    age: 30,
-    investment_horizon: 15,
-  };
+const profile = { profileId: '64b000000000000000000001' };
 
+describe('GoalTracker custom-goal boundary', () => {
+  afterEach(cleanup);
   beforeEach(() => {
     vi.clearAllMocks();
+    api.getGoals.mockResolvedValue({ goals: [] });
   });
 
-  it('a. All 4 default goals succeed: attempts all 4, no failure banner, refreshes dbGoals, resets isInitializing to false', async () => {
-    api.getGoals.mockResolvedValueOnce({ goals: [] }); // initial fetch (preview mode)
-    api.createGoal.mockResolvedValue({ success: true });
-    api.getGoals.mockResolvedValueOnce({
-      goals: [
-        { _id: 'g1', goal_name: 'Retirement', target_amount: 15000000 },
-        { _id: 'g2', goal_name: 'Wealth Growth', target_amount: 3000000 },
-        { _id: 'g3', goal_name: 'Tax Saving', target_amount: 150000 },
-        { _id: 'g4', goal_name: 'Emergency Fund', target_amount: 240000 },
-      ],
-    }); // after bootstrap
-
-    render(<GoalTracker profile={mockProfile} recommendations={[]} />);
-
-    await waitFor(() => {
-      expect(screen.getByText('Save My Goals')).toBeTruthy();
-    });
-
-    const saveButton = screen.getByText('Save My Goals');
-    fireEvent.click(saveButton);
-
-    await waitFor(() => {
-      expect(api.createGoal).toHaveBeenCalledTimes(4);
-    });
-
-    await waitFor(() => {
-      expect(api.getGoals).toHaveBeenCalledTimes(2);
-      expect(screen.getByText('Your Saved Goals')).toBeTruthy();
-    });
-
-    // Confirm no failure banner is present
-    expect(screen.queryByText(/Skipped:/i)).toBeNull();
-    expect(screen.queryByText(/Couldn't create any goals/i)).toBeNull();
-
-    // Confirm isInitializing is false (Save button / Saving Goals text no longer initializing)
-    expect(screen.queryByText('Saving Goals...')).toBeNull();
+  it('never bootstraps profile goals and only opens an explicit custom-goal form', async () => {
+    render(<GoalTracker profile={profile} />);
+    expect(await screen.findByText('No custom goals yet.')).toBeTruthy();
+    expect(api.createGoal).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: /add custom goal/i }));
+    expect(screen.getByTestId('goal-form')).toBeTruthy();
   });
 
-  it('b. 1 of 4 fails (duplicate conflict on 2nd goal): attempts ALL 4 goals, displays partial success banner with server message, refreshes dbGoals, resets isInitializing to false', async () => {
-    api.getGoals.mockResolvedValueOnce({ goals: [] }); // initial fetch
-
-    const conflictMsg = 'A goal named "Wealth Growth" already exists. Use a different name.';
-    api.createGoal
-      .mockResolvedValueOnce({ success: true }) // 1. Retirement succeeds
-      .mockRejectedValueOnce(new Error(conflictMsg)) // 2. Wealth Growth fails with 409 conflict
-      .mockResolvedValueOnce({ success: true }) // 3. Tax Saving succeeds
-      .mockResolvedValueOnce({ success: true }); // 4. Emergency Fund succeeds
-
-    api.getGoals.mockResolvedValueOnce({
-      goals: [
-        { _id: 'g1', goal_name: 'Retirement', target_amount: 15000000 },
-        { _id: 'g3', goal_name: 'Tax Saving', target_amount: 150000 },
-        { _id: 'g4', goal_name: 'Emergency Fund', target_amount: 240000 },
-      ],
-    }); // refresh returns the 3 goals that succeeded
-
-    render(<GoalTracker profile={mockProfile} recommendations={[]} />);
-
-    await waitFor(() => {
-      expect(screen.getByText('Save My Goals')).toBeTruthy();
-    });
-
-    fireEvent.click(screen.getByText('Save My Goals'));
-
-    // CRITICAL: Must attempt ALL 4 goals without stopping early on failure #2
-    await waitFor(() => {
-      expect(api.createGoal).toHaveBeenCalledTimes(4);
-    });
-
-    // Confirm dbGoals was still refreshed despite partial failure
-    await waitFor(() => {
-      expect(api.getGoals).toHaveBeenCalledTimes(2);
-    });
-
-    // Confirm inline partial failure banner is displayed with actual server error message
-    await waitFor(() => {
-      expect(screen.getByText(/Created 3 of 4 goals/i)).toBeTruthy();
-      expect(screen.getByText(new RegExp(conflictMsg, 'i'))).toBeTruthy();
-    });
-
-    // Confirm isInitializing is false (not stuck in loading/initializing state)
-    expect(screen.queryByText('Saving Goals...')).toBeNull();
+  it('fails closed when no authoritative profile ID exists', async () => {
+    render(<GoalTracker profile={null} />);
+    expect(await screen.findByText('No custom goals yet.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /add custom goal/i })).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent('Save a complete Financial Profile');
+    expect(api.createGoal).not.toHaveBeenCalled();
   });
 
-  it('c. All 4 fail: attempts all 4, displays total-failure banner with server message, refreshes dbGoals, resets isInitializing to false', async () => {
-    api.getGoals.mockResolvedValueOnce({ goals: [] });
-
-    const serverMsg = 'Database connection timeout';
-    api.createGoal.mockRejectedValue(new Error(serverMsg));
-    api.getGoals.mockResolvedValueOnce({ goals: [] });
-
-    render(<GoalTracker profile={mockProfile} recommendations={[]} />);
-
-    await waitFor(() => {
-      expect(screen.getByText('Save My Goals')).toBeTruthy();
-    });
-
-    fireEvent.click(screen.getByText('Save My Goals'));
-
-    await waitFor(() => {
-      expect(api.createGoal).toHaveBeenCalledTimes(4);
-    });
-
-    await waitFor(() => {
-      expect(api.getGoals).toHaveBeenCalledTimes(2);
-    });
-
-    // Confirm total failure banner is displayed
-    await waitFor(() => {
-      expect(screen.getByText(new RegExp(`Couldn't create any goals: ${serverMsg}`, 'i'))).toBeTruthy();
-    });
-
-    // Confirm isInitializing resets to false
-    expect(screen.queryByText('Saving Goals...')).toBeNull();
+  it('deletes only the selected custom goal', async () => {
+    api.getGoals.mockResolvedValue({ goals: [{
+      _id: 'goal-1', goal_name: 'Dream Studio', target_amount: 500000,
+      target_date: '2030-01-01', priority: 'High', inflation_adjusted_target: 600000,
+      recommended_sip: 5000, simulation_classification: 'PROFILE_CONSTRAINED_GOAL_FEASIBILITY',
+      return_basis: 'pre-tax nominal', inflation_assumption: 0.06,
+    }] });
+    api.deleteGoal.mockResolvedValue({ success: true });
+    render(<GoalTracker profile={profile} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete Dream Studio' }));
+    await waitFor(() => expect(api.deleteGoal).toHaveBeenCalledWith('goal-1'));
+    expect(screen.queryByText('Dream Studio')).toBeNull();
   });
 });

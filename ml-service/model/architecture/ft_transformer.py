@@ -23,7 +23,7 @@ class ReGLU(nn.Module):
 
 class FTTransformerConfig(BaseModel):
     """Configuration hyperparameters for FT-Transformer architecture."""
-    input_dim: int = Field(16, description="Number of numerical features")
+    input_dim: int = Field(19, description="Number of recommendation-features-4.0.0 inputs")
     d_token: int = Field(32, description="Token embedding dimension")
     n_blocks: int = Field(3, description="Number of Transformer Encoder blocks")
     n_heads: int = Field(4, description="Number of attention heads per block")

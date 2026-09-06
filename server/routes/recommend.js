@@ -1,77 +1,85 @@
+import crypto from 'crypto';
+import mongoose from 'mongoose';
 import { Router } from 'express';
-import { verifyJWT, isOwner, isValidObjectId } from '../middleware/authMiddleware.js';
+import { verifyJWT, isValidObjectId } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
-import { validate, recommendSchema, updateWeightsSchema } from '../validation/schemas.js';
+import {
+  recommendationRequestSchema,
+  recommendationWeightsSchema,
+  validateStrict,
+} from '../validation/financialSchemas.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import AuditRecord from '../models/AuditRecord.js';
 import logger from '../utils/logger.js';
 import { getMLPrediction } from '../services/mlClient.js';
-import { getTaxSlab, REGULATORY_RULE_VERSION } from '../services/taxEngine.js';
 import { generateAdvisory } from '../services/geminiService.js';
-import { runPipeline } from '../services/RecommendationPipeline.js';
-import { getLiveInstrumentParams } from '../services/marketDataService.js';
+import {
+  runPipeline,
+  assertPortfolioSuitable,
+  resolveConcentrationCap,
+} from '../services/RecommendationPipeline.js';
+import {
+  buildRecommendationProfile,
+  buildRecommendationProfileHash,
+  buildMlProfileInput,
+  buildLlmFinancialContext,
+  deriveRecommendationMetrics,
+  RECOMMENDATION_POLICY_VERSION,
+  FINANCIAL_PROFILE_SCHEMA_VERSION,
+} from '../services/recommendationProfile.js';
+import { assessSuitabilityRisk, RISK_CAPACITY_POLICY } from '../services/riskProfiler.js';
 import { claimAdvisoryIdempotency, releaseAdvisoryIdempotency } from '../middleware/idempotency.js';
 import { persistAdvisoryAtomically } from '../services/advisoryPersistence.js';
-import crypto from 'crypto';
-import mongoose from 'mongoose';
 import { setCache, delCache } from '../config/redis.js';
 import { RISK_FREE_RATE, DISCLAIMER } from '../services/instrumentConstants.js';
-import { canonicalSha256 } from '../utils/canonicalJson.js';
 import { verifyAuditChain } from '../services/auditChain.js';
 
 const router = Router();
 
-function buildProfileHash(profile) {
-  return crypto.createHash('sha256').update(JSON.stringify({
+export function buildRecommendationCacheKey(userId, profileId, profile, modelVersion = 'unversioned-model') {
+  return `recommendation:${userId}:${profileId}:${buildRecommendationProfileHash(profile, { modelVersion })}`;
+}
+
+function canonicalAuditInputs(profile, suitability, modelVersion) {
+  const metrics = deriveRecommendationMetrics(profile);
+  return {
+    financial_profile_schema_version: FINANCIAL_PROFILE_SCHEMA_VERSION,
+    recommendation_policy_version: RECOMMENDATION_POLICY_VERSION,
+    risk_capacity_policy_version: RISK_CAPACITY_POLICY.version,
+    model_version: modelVersion,
+    monthly_take_home: profile.monthlyTakeHome,
+    monthly_savings: profile.monthlySavings,
     age: profile.age,
-    income: profile.annualIncome,
-    savings: profile.savings,
-    riskCategory: profile.riskCategory,
-    risk_tolerance: profile.risk_tolerance,
-    regime: profile.taxRegime,
-    horizon: profile.investmentHorizon,
-    emergency_fund_months: profile.emergency_fund_months,
-    hasLumpSum: profile.hasLumpSum,
-    lumpSumAmount: profile.lumpSumAmount,
-    soldPropertyAmount: profile.soldPropertyAmount,
-    liquid_savings: profile.liquid_savings,
-    existing_debt: profile.existing_debt,
-    dependents: profile.dependents,
-    goal_type: profile.goal_type,
-  })).digest('hex').substring(0, 16);
+    risk_tolerance: profile.riskTolerance,
+    sold_property_proceeds: profile.soldPropertyProceeds,
+    has_lump_sum: profile.hasLumpSum,
+    lump_sum_amount: profile.lumpSumAmount,
+    liquid_savings: profile.liquidSavings,
+    emi_burden_pct: profile.emiBurdenPct,
+    financial_dependents: profile.financialDependents,
+    emergency_fund_months: profile.emergencyFundMonths,
+    investment_goals: [...profile.investmentGoals],
+    investment_horizon_years: profile.investmentHorizonYears,
+    deployable_lump_sum: metrics.deployableLumpSum,
+    risk_capacity_score: suitability.capacityScore,
+    final_suitability_risk: suitability.finalRisk,
+    suitability_reason_codes: [...suitability.reasonCodes],
+  };
 }
 
-export function buildRecommendationCacheKey(userId, profileId, profile) {
-  return `recommendation:${userId}:${profileId}:${buildProfileHash(profile)}`;
-}
-
-/**
- * POST /api/recommend [Protected]
- * Generate investment recommendations for a financial profile.
- */
-router.post('/', verifyJWT, validate(recommendSchema), asyncHandler(async (req, res) => {
+router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHandler(async (req, res) => {
   const { profileId } = req.body;
+  const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
+  if (!stored) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
 
-  if (!isValidObjectId(profileId)) {
-    throw createError(400, 'Invalid profileId format', 'Invalid profile ID.');
-  }
-
-  const profile = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
-  if (!profile) {
-    throw createError(404, `Profile not found: ${profileId}`, 'Profile not found.');
-  }
-
-  // Authorization: verify the profile belongs to the requesting user
-  if (!isOwner(profile, req.user.userId)) {
-    throw createError(403, `User ${req.user.userId} tried to access profile ${profileId}`, 'Access denied.');
-  }
-
+  const profile = buildRecommendationProfile(stored);
+  const suitability = assessSuitabilityRisk(profile);
   const idempotencyClaim = await claimAdvisoryIdempotency({
     key: req.headers['idempotency-key'],
     userId: req.user.userId,
-    profileId: profile._id,
-    payload: req.body,
+    profileId: stored._id,
+    payload: { profileId },
   });
   if (idempotencyClaim.state === 'REPLAY') {
     res.setHeader('X-Cache-Lookup', 'HIT - Idempotent');
@@ -79,298 +87,178 @@ router.post('/', verifyJWT, validate(recommendSchema), asyncHandler(async (req, 
   }
 
   try {
-    // Call ML microservice
-    const mlResult = await getMLPrediction({
-    age: profile.age,
-    annual_income: profile.annualIncome,
-    monthly_savings: profile.savings,
-    risk_category: profile.riskCategory,
-    liquid_savings: profile.liquid_savings !== undefined ? profile.liquid_savings : 0,
-    existing_debt: profile.existing_debt !== undefined ? profile.existing_debt : (profile.existing_debt_emi_ratio_pct !== undefined ? profile.existing_debt_emi_ratio_pct : 0),
-    existing_debt_emi_ratio_pct: profile.existing_debt_emi_ratio_pct !== undefined ? profile.existing_debt_emi_ratio_pct : (profile.existing_debt !== undefined ? profile.existing_debt : 0),
-    dependents: profile.dependents !== undefined ? profile.dependents : 0,
-    emergency_fund_months: profile.emergency_fund_months !== undefined ? profile.emergency_fund_months : 0,
-    risk_tolerance: profile.risk_tolerance || 'Moderate',
-    goal_type: profile.goal_type || 'wealth-building',
-    investment_horizon: profile.investmentHorizon || 15
-  }, req.correlationId, req.user.userId);
+    const mlInput = buildMlProfileInput(profile, suitability);
+    const mlResult = await getMLPrediction(mlInput, req.correlationId, req.user.userId, req.user.role);
+    const { instruments, confidenceScores, riskReconciliation, computedWeights } = runPipeline(profile, mlResult);
+    if (!instruments.length) {
+      throw createError(422, 'No instruments passed the suitability boundary', 'No suitable instruments were found for this profile.');
+    }
 
-  // ── Run the metadata-driven RecommendationPipeline ──────────────
-  await getLiveInstrumentParams().catch(() => {});
-
-  const { instruments, confidenceScores, riskReconciliation, computedWeights } = runPipeline(profile, mlResult);
-
-  if (instruments.length === 0) {
-    throw createError(502, 'RecommendationPipeline returned no instruments', 'Recommendation engine returned empty results.');
-  }
-
-  // Portfolio-level expected yield (weighted average of post-tax returns)
-  const portfolioYield = parseFloat(
-    instruments.reduce((s, i) => s + (i.effectiveYield * i.allocationWeight), 0).toFixed(2)
-  );
-
-  // Call Groq/Gemini for advisory text
-  const marginalRate = getTaxSlab(profile.annualIncome, profile.taxRegime);
-  const advisory = await generateAdvisory({
-    age: profile.age,
-    annualIncome: profile.annualIncome,
-    monthlySavings: profile.savings,
-    taxSlab: marginalRate,
-    riskCategory: profile.riskCategory,
-    instruments: instruments.map(i => ({ name: i.name, type: i.type, postTaxReturn: i.postTaxReturn })),
-    horizon: profile.investmentHorizon || 15,
-    shapExplanation: mlResult.explanation || null,
-  });
+    const portfolioExpectedReturn = Number(instruments.reduce(
+      (sum, instrument) => sum + instrument.nominalReturn * instrument.allocationWeight,
+      0,
+    ).toFixed(2));
+    const advisory = await generateAdvisory({
+      profile: buildLlmFinancialContext(profile, suitability),
+      instruments: instruments.map(instrument => ({
+        id: instrument.id,
+        name: instrument.name,
+        type: instrument.type,
+        nominalReturn: instrument.nominalReturn,
+        allocationWeight: instrument.allocationWeight,
+      })),
+      shapExplanation: mlResult.explanation || null,
+    });
 
     const recommendationId = new mongoose.Types.ObjectId();
     const auditId = new mongoose.Types.ObjectId();
-    const modelVersion = mlResult.model_version || (mlResult.fallback ? 'rule_fallback' : '2.0');
-    const auditTimestamp = new Date();
-
-    // ── Synchronous Audit Log Write (Regulatory Compliance - Fail Loudly) ──
-    const sanitizedInputs = {
-    age: profile.age,
-    annual_income: profile.annualIncome,
-    monthly_savings: profile.savings,
-    risk_category: profile.riskCategory,
-    liquid_savings: profile.liquid_savings,
-    existing_debt: profile.existing_debt,
-    dependents: profile.dependents,
-    emergency_fund_months: profile.emergency_fund_months,
-    risk_tolerance: profile.risk_tolerance,
-    goal_type: profile.goal_type,
-    tax_regime: profile.taxRegime,
-    investment_horizon: profile.investmentHorizon || 15,
-  };
-    const inputHash = canonicalSha256(sanitizedInputs);
+    const modelVersion = mlResult.model_version || (mlResult.fallback ? 'rule-fallback-4.0.0' : 'unknown-model');
+    const inputs = canonicalAuditInputs(profile, suitability, modelVersion);
+    const inputHash = buildRecommendationProfileHash(profile, { modelVersion });
     const correlationId = req.correlationId || req.traceId || crypto.randomUUID();
-    const citedRagChunkIds = advisory.cited_chunks || mlResult.cited_chunk_ids || [];
+    const timestamp = new Date();
     const recommendationData = {
       _id: recommendationId,
       userId: req.user.userId,
-      profileId: profile._id,
+      profileId: stored._id,
       instruments,
       advisoryText: advisory.text,
       confidenceScores,
-      mlFallback: mlResult.fallback || false,
+      mlFallback: Boolean(mlResult.fallback),
       modelVersion,
     };
     const auditRecordData = {
       _id: auditId,
       userId: req.user.userId,
-      profileId: profile._id,
+      profileId: stored._id,
       recommendationId,
       correlationId,
       traceId: req.traceId || req.correlationId || '',
-      version_id: modelVersion || '1.0.0',
-      regulatory_rule_version: REGULATORY_RULE_VERSION,
+      version_id: modelVersion,
+      regulatory_rule_version: RECOMMENDATION_POLICY_VERSION,
       input_hash: inputHash,
-      inputs: sanitizedInputs,
+      inputs,
       recommendations: {
         instruments,
         confidenceScores,
-        portfolioYield,
+        portfolioExpectedReturn,
         modelVersion,
-        regulatoryRuleVersion: REGULATORY_RULE_VERSION,
+        recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
         advisorySummary: advisory.text ? advisory.text.slice(0, 500) : '',
       },
-      cited_rag_chunk_ids: citedRagChunkIds,
+      cited_rag_chunk_ids: advisory.cited_chunks || mlResult.cited_chunk_ids || [],
       engine: mlResult.fallback ? 'rule_fallback' : 'ml_service',
-      timestamp: auditTimestamp,
+      timestamp,
+    };
+    const response = {
+      recommendationId,
+      audit_id: auditId,
+      audit_hash: inputHash,
+      instruments,
+      ranked: true,
+      advisory_text: advisory.text,
+      confidence_scores: confidenceScores,
+      decision_path: mlResult.decision_path,
+      explanation: mlResult.explanation || null,
+      ml_fallback: Boolean(mlResult.fallback),
+      model_version: modelVersion,
+      recommendation_policy_version: RECOMMENDATION_POLICY_VERSION,
+      financial_profile_schema_version: FINANCIAL_PROFILE_SCHEMA_VERSION,
+      portfolio_expected_return: portfolioExpectedReturn,
+      return_basis: 'PRE_TAX_NOMINAL',
+      risk_free_rate: Number((RISK_FREE_RATE * 100).toFixed(2)),
+      disclaimer: DISCLAIMER,
+      final_risk_tier: riskReconciliation.final_risk_tier,
+      capacity_score: riskReconciliation.capacity_score,
+      preference_score: riskReconciliation.preference_score,
+      reconciliation_note: riskReconciliation.reconciliation_note,
+      advisory_note: riskReconciliation.advisory_note,
+      suitability_reason_codes: riskReconciliation.reason_codes,
+      excluded_due_to_eligibility: riskReconciliation.excluded_due_to_eligibility,
+      computed_weights: computedWeights,
     };
 
-    const result = {
-    recommendationId,
-    audit_id: auditId,
-    audit_hash: inputHash,
-    instruments,
-    ranked: true,
-    advisory_text: advisory.text,
-    confidence_scores: confidenceScores,
-    decision_path: mlResult.decision_path,
-    explanation: mlResult.explanation || null,
-    ml_fallback: mlResult.fallback || false,
-    model_version: modelVersion,
-    regulatory_rule_version: REGULATORY_RULE_VERSION,
-    portfolio_yield: portfolioYield,
-    risk_free_rate: parseFloat((RISK_FREE_RATE * 100).toFixed(2)),
-    disclaimer: DISCLAIMER,
-    // Section 7: Risk reconciliation metadata
-    final_risk_tier: riskReconciliation.final_risk_tier,
-    capacity_score: riskReconciliation.capacity_score,
-    preference_score: riskReconciliation.preference_score,
-    reconciliation_note: riskReconciliation.reconciliation_note,
-    advisory_note: riskReconciliation.advisory_note,
-    excluded_due_to_eligibility: riskReconciliation.excluded_due_to_eligibility,
-    // WG-004: Attach backend-computed scoring weights in both snake_case and camelCase
-    computed_weights: computedWeights,
-    computedWeights: computedWeights,
-    };
-
-    const persistedResult = await persistAdvisoryAtomically({
+    const persisted = await persistAdvisoryAtomically({
       recommendation: recommendationData,
       auditRecord: auditRecordData,
-      response: result,
+      response,
       idempotencyClaim,
     });
-
-    // This cache is an optimization only. Idempotent replay is sourced from
-    // the transactionally persisted operation, never from Redis.
-    const cacheKey = buildRecommendationCacheKey(req.user.userId, profile._id, profile);
-    await setCache(cacheKey, persistedResult, 86400).catch(error => {
+    const cacheKey = buildRecommendationCacheKey(req.user.userId, stored._id, profile, modelVersion);
+    await setCache(cacheKey, persisted, 86400).catch(error => {
       logger.warn('Recommendation cache write failed after committed advisory', { error: error.message });
     });
-
-    res.json(persistedResult);
+    return res.json(persisted);
   } catch (error) {
     await releaseAdvisoryIdempotency(idempotencyClaim).catch(releaseError => {
-      logger.error('Failed to release advisory idempotency claim', {
-        operationId: idempotencyClaim.operationId,
-        error: releaseError.message,
-      });
+      logger.error('Failed to release advisory idempotency claim', { error: releaseError.message });
     });
     throw error;
   }
 }));
 
-/**
- * GET /api/recommend/audit [Protected]
- * Retrieve tamper-evident audit-chain records for regulatory review.
- */
 router.get('/audit', verifyJWT, asyncHandler(async (req, res) => {
-  const limit = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 100);
-  const skip = Math.max(parseInt(req.query.skip) || 0, 0);
-
+  const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 20, 1), 100);
+  const skip = Math.max(Number.parseInt(req.query.skip, 10) || 0, 0);
   const query = { userId: req.user.userId };
-  if (req.query.correlationId) {
-    query.correlationId = req.query.correlationId;
-  }
-  if (req.query.profileId && isValidObjectId(req.query.profileId)) {
-    query.profileId = req.query.profileId;
-  }
-
+  if (req.query.correlationId) query.correlationId = req.query.correlationId;
+  if (req.query.profileId && isValidObjectId(req.query.profileId)) query.profileId = req.query.profileId;
   const [records, total] = await Promise.all([
-    AuditRecord.find(query)
-      .sort({ timestamp: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
+    AuditRecord.find(query).sort({ timestamp: -1 }).skip(skip).limit(limit).lean(),
     AuditRecord.countDocuments(query),
   ]);
-
-  res.json({
-    status: 'success',
-    total,
-    count: records.length,
-    skip,
-    limit,
-    records,
-  });
+  res.json({ status: 'success', total, count: records.length, skip, limit, records });
 }));
 
-/**
- * GET /api/recommend/audit/verify [Protected]
- * Verify the authenticated user's complete tamper-evident audit chain.
- */
 router.get('/audit/verify', verifyJWT, asyncHandler(async (req, res) => {
   const verification = await verifyAuditChain(req.user.userId);
-  res.status(verification.valid ? 200 : 409).json({
-    status: verification.valid ? 'valid' : 'invalid',
-    ...verification,
-  });
+  res.status(verification.valid ? 200 : 409).json({ status: verification.valid ? 'valid' : 'invalid', ...verification });
 }));
 
-/**
- * GET /api/recommend/audit/:id [Protected]
- * Retrieve specific audit trail record by ID.
- */
 router.get('/audit/:id', verifyJWT, asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  if (!isValidObjectId(id)) {
-    throw createError(400, 'Invalid audit ID format', 'Invalid audit ID.');
-  }
-
-  const record = await AuditRecord.findById(id).lean();
-  if (!record) {
-    throw createError(404, 'Audit record not found', 'Audit record not found.');
-  }
-
+  if (!isValidObjectId(req.params.id)) throw createError(400, 'Invalid audit ID format', 'Invalid audit ID.');
+  const record = await AuditRecord.findById(req.params.id).lean();
+  if (!record) throw createError(404, 'Audit record not found', 'Audit record not found.');
   if (record.userId.toString() !== req.user.userId.toString() && req.user.role !== 'admin') {
     throw createError(403, 'Access denied to audit record', 'Access denied.');
   }
-
-  res.json({
-    status: 'success',
-    record,
-  });
+  res.json({ status: 'success', record });
 }));
 
-/**
- * POST /api/recommend/weights [Protected]
- * Updates allocation weights of a recommendation.
- */
-router.post('/weights', verifyJWT, validate(updateWeightsSchema), asyncHandler(async (req, res) => {
+router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), asyncHandler(async (req, res) => {
   const { profileId, weights } = req.body;
-
-  const profile = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
-  if (!profile) {
-    throw createError(404, `Profile not found: ${profileId}`, 'Profile not found.');
-  }
-
-  if (!isOwner(profile, req.user.userId)) {
-    throw createError(403, `Access denied`, 'Access denied.');
-  }
-
-  // Find the latest recommendation for this profile & user
+  const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
+  if (!stored) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
+  const profile = buildRecommendationProfile(stored);
   const recommendation = await Recommendation.findOne({ profileId, userId: req.user.userId }).sort({ generatedAt: -1 });
-  if (!recommendation) {
-    throw createError(404, 'No recommendation found to update', 'No recommendation found.');
-  }
+  if (!recommendation) throw createError(404, 'No recommendation found to update', 'No recommendation found.');
 
-  // Update weights on instruments
-  const parsedWeights = {};
-  let totalWeight = 0;
-  for (const [k, v] of Object.entries(weights || {})) {
-    const val = Number(v) || 0;
-    if (val < 0) continue;
-    parsedWeights[k] = val;
-    totalWeight += val;
+  const instrumentIds = recommendation.instruments.map(instrument => String(instrument.id));
+  const suppliedIds = Object.keys(weights);
+  if (instrumentIds.length !== suppliedIds.length || instrumentIds.some(id => !suppliedIds.includes(id))) {
+    throw createError(400, 'Weights must identify every recommended instrument by id and may not add instruments.', 'Invalid instrument weights.');
   }
+  assertPortfolioSuitable(profile, instrumentIds);
 
-  if (totalWeight <= 0) {
-    throw createError(400, 'Invalid weights', 'Total weights must be greater than zero.');
-  }
-
-  // Map of weights normalized to sum to exactly 1.0
-  const normWeights = {};
-  for (const [k, v] of Object.entries(parsedWeights)) {
-    normWeights[k.toUpperCase()] = v / totalWeight;
-  }
-
-  // Update the recommendation instruments
-  recommendation.instruments.forEach(inst => {
-    const weight = normWeights[inst.type.toUpperCase()] ?? 0;
-    inst.allocationWeight = parseFloat(weight.toFixed(4));
+  const groupTotals = new Map();
+  recommendation.instruments.forEach(instrument => {
+    const cap = resolveConcentrationCap(instrument.toObject ? instrument.toObject() : instrument);
+    if (cap) groupTotals.set(cap.key, (groupTotals.get(cap.key) || 0) + weights[instrument.id] * 100);
   });
-
-  // Re-normalize instruments weights to sum to EXACTLY 1.0 (to avoid rounding issues)
-  const instWeightSum = recommendation.instruments.reduce((s, i) => s + i.allocationWeight, 0);
-  if (instWeightSum > 0 && Math.abs(instWeightSum - 1.0) > 0.0001) {
-    const maxIdx = recommendation.instruments.reduce((mi, w, i, arr) => w.allocationWeight > arr[mi].allocationWeight ? i : mi, 0);
-    recommendation.instruments[maxIdx].allocationWeight = parseFloat((recommendation.instruments[maxIdx].allocationWeight + (1.0 - instWeightSum)).toFixed(4));
+  for (const [key, total] of groupTotals.entries()) {
+    const cap = resolveConcentrationCap(recommendation.instruments.find(instrument => resolveConcentrationCap(instrument)?.key === key));
+    if (cap && total > cap.maxPct + 0.0001) {
+      throw createError(400, `Allocation exceeds ${key} concentration cap of ${cap.maxPct}%`, 'Allocation exceeds suitability limits.');
+    }
   }
 
+  recommendation.instruments.forEach(instrument => {
+    instrument.allocationWeight = Number(weights[instrument.id].toFixed(4));
+    instrument.allocation_pct = Number((weights[instrument.id] * 100).toFixed(2));
+  });
   await recommendation.save();
-
-  // Invalidate Redis cache for this recommendation
-  const cacheKey = buildRecommendationCacheKey(req.user.userId, profile._id, profile);
-  await delCache(cacheKey);
-
-  res.json({
-    status: 'success',
-    message: 'Recommendation weights updated successfully.',
-    instruments: recommendation.instruments,
-  });
+  await delCache(buildRecommendationCacheKey(req.user.userId, stored._id, profile, recommendation.modelVersion));
+  res.json({ status: 'success', message: 'Recommendation weights updated.', instruments: recommendation.instruments });
 }));
 
 export default router;

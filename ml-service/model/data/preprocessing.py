@@ -65,61 +65,89 @@ def prepare_synthetic_training_data(
     num_samples: int = 1500, seed: int = 42
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Generates synthetic training dataset covering all 16 features and 6 target investment categories:
-    [Equity_MF, ELSS, ETF, Debt_MF, FD, RBI_Bond].
+    Generate deterministic v4 boundary-conformant training examples.
+
+    Labels approximate a transparent suitability policy; they are not claimed
+    to be observed investor outcomes. The final server-side suitability guard
+    remains authoritative after ML ranking.
     """
-    np.random.seed(seed)
+    from model.data.feature_engineering import engineer_features, to_model_array
 
-    # 1. Generate 16 raw/engineered features
-    age = np.random.uniform(20, 75, num_samples)
-    annual_income = np.random.uniform(300000, 5000000, num_samples)
-    monthly_savings = np.random.uniform(5000, 150000, num_samples)
-    investment_horizon = np.random.uniform(1, 30, num_samples)
-    liquid_savings = np.random.uniform(20000, 2000000, num_samples)
-    existing_debt = np.random.uniform(0, 50, num_samples)
-    dependents = np.random.randint(0, 5, num_samples)
-    emergency_fund_months = np.random.uniform(0, 12, num_samples)
-    
-    # Derived features
-    risk_score = np.random.uniform(10, 95, num_samples)
-    stated_tolerance_score = np.random.choice([20.0, 60.0, 100.0], num_samples)
-    savings_rate = np.clip(monthly_savings / (annual_income / 12.0), 0.0, 1.0)
-    debt_to_income = existing_debt / 100.0
-    ef_adequacy = emergency_fund_months / 6.0
-    gap = risk_score - stated_tolerance_score
-    urgency = 100.0 * (1.0 - np.minimum(investment_horizon, 30.0) / 30.0)
-    burden = dependents * 10.0 + existing_debt
+    rng = np.random.default_rng(seed)
+    rows = []
+    labels = []
+    risk_names = np.asarray(["Conservative", "Moderate", "Aggressive"])
+    preference_levels = {"Conservative": 1, "Moderate": 3, "Aggressive": 5}
+    final_labels = {1: "Conservative", 2: "Conservative-Moderate", 3: "Moderate", 4: "Moderate-Aggressive", 5: "Aggressive"}
+    goal_names = np.asarray(["Retirement", "Wealth Growth", "Tax Saving", "Emergency Fund"])
 
-    X = np.column_stack([
-        age, annual_income, monthly_savings, investment_horizon,
-        liquid_savings, existing_debt, dependents, emergency_fund_months,
-        risk_score, stated_tolerance_score, savings_rate, debt_to_income,
-        ef_adequacy, gap, urgency, burden
-    ])
+    for _ in range(num_samples):
+        age = int(rng.integers(18, 81))
+        take_home = float(rng.uniform(20_000, 500_000))
+        savings_rate = float(rng.uniform(0.03, 0.70))
+        monthly_savings = take_home * savings_rate
+        horizon = int(rng.integers(1, 31))
+        liquid_savings = float(take_home * rng.uniform(0, 18))
+        emi_burden = float(rng.uniform(0, 80))
+        dependents = int(rng.integers(0, 7))
+        emergency_months = float(rng.uniform(0, 12))
+        deployable_lump = float(rng.choice([0.0, take_home * rng.uniform(1, 24)]))
+        risk_tolerance = str(rng.choice(risk_names))
+        goals = [str(rng.choice(goal_names))]
+        if rng.random() < 0.25:
+            second = str(rng.choice(goal_names))
+            if second not in goals:
+                goals.append(second)
 
-    # 2. Rule-based synthetic target labels (0 to 5)
-    # 0: Equity_MF, 1: ELSS, 2: ETF, 3: Debt_MF, 4: FD, 5: RBI_Bond
-    y = np.zeros(num_samples, dtype=int)
-    for i in range(num_samples):
-        if age[i] > 60 or emergency_fund_months[i] < 2:
-            if risk_score[i] < 30:
-                y[i] = 5  # RBI_Bond
-            else:
-                y[i] = 4  # FD
-        elif investment_horizon[i] >= 3 and annual_income[i] >= 800000 and age[i] <= 50 and np.random.rand() > 0.4:
-            y[i] = 1  # ELSS
-        elif risk_score[i] >= 65 and investment_horizon[i] >= 5:
-            y[i] = 0  # Equity_MF
-        elif risk_score[i] >= 45 and investment_horizon[i] >= 3:
-            y[i] = 2  # ETF
-        elif risk_score[i] >= 30:
-            y[i] = 3  # Debt_MF
-        elif risk_score[i] >= 20:
-            y[i] = 4  # FD
+        age_component = np.clip((70 - age) / 52, 0, 1) * 25
+        horizon_component = np.clip(horizon / 30, 0, 1) * 25
+        savings_component = np.clip(savings_rate / 0.30, 0, 1) * 20
+        emergency_component = np.clip(emergency_months / 6, 0, 1) * 15
+        liquidity_component = np.clip((liquid_savings / take_home) / 6, 0, 1) * 10
+        emi_penalty = np.clip((emi_burden - 20) / 80, 0, 1) * 15
+        dependents_penalty = min(10, dependents * 2.5)
+        capacity_score = int(round(np.clip(
+            age_component + horizon_component + savings_component + emergency_component
+            + liquidity_component - emi_penalty - dependents_penalty,
+            0,
+            100,
+        )))
+        capacity_level = min(5, capacity_score // 20 + 1)
+        final_level = min(capacity_level, preference_levels[risk_tolerance])
+        final_risk = final_labels[final_level]
+
+        feature_row = engineer_features(
+            age=age,
+            monthly_take_home=take_home,
+            monthly_savings=monthly_savings,
+            investment_horizon_years=horizon,
+            liquid_savings=liquid_savings,
+            emi_burden_pct=emi_burden,
+            financial_dependents=dependents,
+            emergency_fund_months=emergency_months,
+            deployable_lump_sum=deployable_lump,
+            risk_capacity_score=capacity_score,
+            risk_tolerance=risk_tolerance,
+            final_suitability_risk=final_risk,
+            investment_goals=goals,
+        )
+        rows.append(to_model_array(feature_row)[0])
+
+        if "Emergency Fund" in goals or emergency_months < 2:
+            label = 4 if horizon <= 3 else 3  # FD / Debt_MF
+        elif "Tax Saving" in goals and horizon >= 3:
+            label = 1  # ELSS characteristics, not personalized tax savings
+        elif final_level >= 4 and horizon >= 5:
+            label = 0  # Equity_MF
+        elif final_level >= 3 and horizon >= 3:
+            label = 2  # ETF
+        elif final_level >= 2:
+            label = 3  # Debt_MF
         else:
-            y[i] = 5  # RBI_Bond
+            label = 5 if horizon >= 5 else 4  # RBI_Bond / FD
+        labels.append(label)
 
-    return X, y
+    return np.asarray(rows, dtype=np.float64), np.asarray(labels, dtype=int)
 
 
 import hashlib
@@ -137,12 +165,13 @@ def get_dataset_generation_params(num_samples: int = 1500, seed: int = 42) -> Di
         "generator_name": "prepare_synthetic_training_data",
         "seed": seed,
         "num_samples": num_samples,
-        "feature_count": 16,
+        "feature_count": 19,
         "class_count": 6,
-        "age_range": [20.0, 75.0],
-        "income_range": [300000.0, 5000000.0],
-        "monthly_savings_range": [5000.0, 150000.0],
-        "investment_horizon_range": [1.0, 30.0],
+        "age_range": [18.0, 80.0],
+        "monthly_take_home_range": [20000.0, 500000.0],
+        "savings_rate_range": [0.03, 0.70],
+        "investment_horizon_years_range": [1.0, 30.0],
+        "feature_schema_version": "recommendation-features-4.0.0",
         "target_classes": ["Equity_MF", "ELSS", "ETF", "Debt_MF", "FD", "RBI_Bond"],
     }
 
@@ -157,4 +186,3 @@ def regenerate_synthetic_dataset_and_hash(params: Dict[str, Any]) -> Tuple[np.nd
     X, y = prepare_synthetic_training_data(num_samples=num_samples, seed=seed)
     data_hash = compute_dataset_hash_from_arrays(X, y)
     return X, y, data_hash
-

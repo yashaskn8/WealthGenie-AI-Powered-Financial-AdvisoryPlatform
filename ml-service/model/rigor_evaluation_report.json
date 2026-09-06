@@ -1,167 +1,68 @@
 {
+  "feature_contract_audit": {
+    "feature_schema_version": "recommendation-features-4.0.0",
+    "classifier_feature_count": 19,
+    "feature_names": [
+      "age",
+      "monthly_take_home",
+      "monthly_savings",
+      "investment_horizon_years",
+      "liquid_savings",
+      "emi_burden_pct",
+      "financial_dependents",
+      "emergency_fund_months",
+      "deployable_lump_sum",
+      "risk_capacity_score",
+      "risk_tolerance_encoded",
+      "final_suitability_risk_encoded",
+      "savings_rate",
+      "liquidity_months",
+      "goal_retirement",
+      "goal_wealth_growth",
+      "goal_tax_saving",
+      "goal_emergency_fund",
+      "emergency_fund_gap_months"
+    ],
+    "forbidden_feature_overlap": [],
+    "forbidden_feature_overlap_percentage": 0.0,
+    "finding": "PASS"
+  },
   "formula_logic_overlap_audit": {
-    "labeler_math_terms": [
-      "age_factor",
-      "debt_burden",
-      "horizon_factor",
-      "risk_capacity",
-      "savings_factor",
-      "utility_score"
+    "formula_overlap_percentage": 100.0,
+    "shared_math_terms": [
+      "frozen_suitability_policy"
     ],
-    "cfp_benchmark_math_terms": [
-      "100_minus_age",
-      "max_equity_pct",
-      "target_equity_score",
-      "willingness_weight"
-    ],
-    "shared_math_terms": [],
-    "labeler_decision_thresholds": [
-      0.25,
-      0.4,
-      0.55,
-      0.7,
-      0.85
-    ],
-    "cfp_decision_thresholds": [
-      0.1,
-      0.35,
-      0.4,
-      0.5,
-      0.65,
-      3.0,
-      4.0,
-      5.0,
-      55.0,
-      60.0
-    ],
-    "shared_decision_thresholds": [
-      0.4
-    ],
-    "formula_overlap_percentage": 0.0,
-    "decision_threshold_overlap_percentage": 7.14,
-    "audit_finding": "0.00% math formula overlap. The independent CFP benchmark uses 100-minus-age allocation logic and stated tolerance, completely decoupled from label_construction.py utility equations.",
-    "disclosure_note": "Formula term sets and decision boundary constants are manually extracted from function source code, not dynamically auto-parsed via AST."
+    "audit_finding": "The synthetic labels intentionally approximate the disclosed frozen suitability policy. Reported fidelity is not investment-outcome accuracy."
   },
   "metric_reframe": {
-    "original_claimed_metric": "97.05% Prediction Accuracy (FT-Transformer)",
-    "reframed_metric_name": "Rule-Approximation Fidelity",
-    "rule_approximation_fidelity_random_forest": 0.9837,
-    "rule_approximation_fidelity_pytorch_mlp": 0.1932,
-    "rule_approximation_fidelity_ft_transformer": 0.1378,
-    "explanation": "Original accuracy metrics (97.05% FT-Transformer, 95.63% RF, 95.60% MLP) represent the models' mathematical fidelity in approximating the label_construction.py formula. All three models collapse when evaluated against the independent CFP benchmark."
-  },
-  "multi_model_independent_benchmark": {
-    "RandomForest": {
-      "rule_approximation_fidelity": 0.9837,
-      "independent_cfp_benchmark_accuracy": 0.2526
-    },
-    "PyTorch_FinancialMLP": {
-      "rule_approximation_fidelity": 0.1932,
-      "independent_cfp_benchmark_accuracy": 0.175
-    },
-    "FT_Transformer": {
-      "rule_approximation_fidelity": 0.1378,
-      "independent_cfp_benchmark_accuracy": 0.1583
-    }
-  },
-  "feature_overlap_audit": {
-    "classifier_feature_count": 16,
-    "label_rule_feature_count": 9,
-    "overlapping_features": [
-      "age",
-      "annual_income",
-      "dependents",
-      "emergency_fund_months",
-      "existing_debt",
-      "investment_horizon",
-      "monthly_savings"
-    ],
-    "base_feature_overlap_percentage": 100.0,
-    "finding": "100% of the base demographic/financial features used by the classifier were also used as inputs to the label_construction.py formula. Therefore, original accuracy measured rule-approximation fidelity, not independent behavioral prediction."
-  },
-  "organic_data_search_audit": {
-    "public_survey_dataset_searched": false,
-    "fallback_method_applied": "Constructed independent Certified Financial Planner (CFP) suitability benchmark (100-minus-age equity allocation rule + stated willingness score + 3-month emergency fund liquidity floor).",
-    "justification_and_limitations": "Organic investor outcome dataset search (e.g., SCF / broker trade logs) was bypassed in favor of an independent domain-expert rule set. While this guarantees 0.0% formula overlap with label_construction.py, it represents a synthetic expert benchmark rather than observed real-world investor behavioral outcomes."
-  },
-  "independent_organic_benchmark": {
-    "independent_benchmark_accuracy": 0.2526,
-    "independent_benchmark_weighted_f1": 0.1665,
-    "independent_benchmark_macro_f1": 0.2123,
-    "independent_benchmark_precision": 0.5597,
-    "independent_benchmark_recall": 0.2526,
-    "target_source": "Certified Financial Planner (CFP) independent benchmark (stated willingness + 100-age rule)",
-    "formula_overlap_with_training_labeler": 0.0,
-    "formula_logic_audit": {
-      "labeler_math_terms": [
-        "age_factor",
-        "debt_burden",
-        "horizon_factor",
-        "risk_capacity",
-        "savings_factor",
-        "utility_score"
-      ],
-      "cfp_benchmark_math_terms": [
-        "100_minus_age",
-        "max_equity_pct",
-        "target_equity_score",
-        "willingness_weight"
-      ],
-      "shared_math_terms": [],
-      "labeler_decision_thresholds": [
-        0.25,
-        0.4,
-        0.55,
-        0.7,
-        0.85
-      ],
-      "cfp_decision_thresholds": [
-        0.1,
-        0.35,
-        0.4,
-        0.5,
-        0.65,
-        3.0,
-        4.0,
-        5.0,
-        55.0,
-        60.0
-      ],
-      "shared_decision_thresholds": [
-        0.4
-      ],
-      "formula_overlap_percentage": 0.0,
-      "decision_threshold_overlap_percentage": 7.14,
-      "audit_finding": "0.00% math formula overlap. The independent CFP benchmark uses 100-minus-age allocation logic and stated tolerance, completely decoupled from label_construction.py utility equations.",
-      "disclosure_note": "Formula term sets and decision boundary constants are manually extracted from function source code, not dynamically auto-parsed via AST."
-    }
+    "reframed_metric_name": "Suitability-Policy Approximation Fidelity",
+    "policy_approximation_fidelity_random_forest": 0.528,
+    "outcome_accuracy_claimed": false
   },
   "feature_ablation_impact": {
-    "stated_tolerance_score": 0.0773,
-    "annual_income": 0.0576,
-    "risk_capacity_vs_stated_tolerance_gap": 0.0504,
-    "age": 0.0374,
-    "risk_score": 0.0358,
-    "dependents_adjusted_burden_score": 0.0266,
-    "existing_debt": 0.0133,
-    "emergency_fund_months": 0.0131,
-    "emergency_fund_adequacy_ratio": 0.0122,
-    "debt_to_income_ratio": 0.0106,
-    "monthly_savings": 0.004,
-    "horizon_adjusted_urgency_score": 0.0035,
-    "investment_horizon": 0.0029,
-    "savings_rate": 0.0029,
-    "liquid_savings": 0.0028,
-    "dependents": 0.0022
+    "goal_tax_saving": 0.2115,
+    "risk_tolerance_encoded": 0.1135,
+    "investment_horizon_years": 0.0575,
+    "final_suitability_risk_encoded": 0.0125,
+    "emergency_fund_months": 0.003,
+    "risk_capacity_score": 0.0015,
+    "age": 0.001,
+    "financial_dependents": 0.001,
+    "emergency_fund_gap_months": 0.001,
+    "goal_wealth_growth": 0.0005,
+    "monthly_take_home": 0.0,
+    "monthly_savings": 0.0,
+    "savings_rate": 0.0,
+    "emi_burden_pct": -0.0005,
+    "deployable_lump_sum": -0.0005,
+    "liquidity_months": -0.0005,
+    "liquid_savings": -0.001,
+    "goal_retirement": -0.0015,
+    "goal_emergency_fund": -0.0025
   },
   "noise_robustness": {
-    "noise_std_5pct_accuracy": 0.9722,
-    "noise_std_10pct_accuracy": 0.9622,
-    "noise_std_20pct_accuracy": 0.9437
-  },
-  "reproducibility": {
-    "dataset_samples": 20000,
-    "feature_count": 16,
-    "seed": 42
+    "noise_std_5pct_accuracy": 0.521,
+    "noise_std_10pct_accuracy": 0.51,
+    "noise_std_20pct_accuracy": 0.4965
   }
 }

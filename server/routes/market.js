@@ -1,7 +1,12 @@
 import { Router } from 'express';
 import { verifyJWT } from '../middleware/authMiddleware.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
-import { getMarketDataSummary, getLiveInstrumentParams, fetchIndexStatistics } from '../services/marketDataService.js';
+import {
+  getMarketDataSummary,
+  getLiveInstrumentParams,
+  fetchIndexStatistics,
+  MARKET_PARAMETER_CACHE_KEY,
+} from '../services/marketDataService.js';
 import { delCache } from '../config/redis.js';
 
 const router = Router();
@@ -19,11 +24,11 @@ router.get('/rates', asyncHandler(async (req, res) => {
   if (liveParams?.params) {
     for (const [key, val] of Object.entries(liveParams.params)) {
       instrument_data_sources[key] = {
-        source: val.source || 'static',
+        source: val.source,
         rate: val.mean,
-        ...(val.source === 'live'
-          ? { based_on: 'Nifty 3yr trailing' }
-          : { last_reviewed: '2026-04-01', note: `Rate: ${(val.mean * 100).toFixed(1)}%` }
+        ...(val.source === 'verified-index-derived'
+          ? { based_on: 'Nifty 3-year monthly series with disclosed 0.8 policy factor' }
+          : { note: `Frozen catalog assumption: ${(val.mean * 100).toFixed(1)}%` }
         ),
       };
     }
@@ -55,7 +60,7 @@ router.post('/refresh', verifyJWT, asyncHandler(async (req, res) => {
   await Promise.allSettled([
     delCache('index:stats:^NSEI'),
     delCache('index:stats:^BSESN'),
-    delCache('mc:instrument:params:live'),
+    delCache(MARKET_PARAMETER_CACHE_KEY),
   ]);
 
   // Trigger background refresh (non-blocking)

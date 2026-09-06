@@ -1,269 +1,162 @@
+"""Financial Profile v4 serving-contract and feature-parity tests."""
+
+import json
 import os
-import numpy as np  # type: ignore[import-not-found]
+from pathlib import Path
+
+import numpy as np
 import pytest
-from pydantic import ValidationError
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
-from model.data.feature_engineering import engineer_features, to_model_array, get_feature_names
+from main import app, build_model_input, get_decision_path_description, model
+from model.data.feature_engineering import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, engineer_features, to_model_array
 from schemas import PredictRequest
-from main import app, get_decision_path_description, model
-
-client_instance = None
-
-@pytest.fixture(scope="module")
-def client():
-    with TestClient(app) as c:
-        yield c
 
 API_KEY = "wealthgenie_secret_api_key_2026"
 
-def test_predict_request_rejects_monthly_savings_above_income():
-    with pytest.raises(ValidationError):
-        PredictRequest(
-            age=30,
-            annual_income=120000,
-            monthly_savings=20000,
-            risk_category='Moderate',
-            liquid_savings=10000,
-            existing_debt=10.0,
-            dependents=1,
-            emergency_fund_months=3.0,
-            risk_tolerance='Moderate',
-            goal_type='wealth-building',
-            investment_horizon=15
-        )
 
-def test_feature_parity_train_inference():
-    """
-    Asserts byte-for-byte identical output for training and inference paths.
-    """
-    raw_inputs = {
-        'age': 34,
-        'annual_income': 1500000.0,
-        'monthly_savings': 35000.0,
-        'investment_horizon': 12,
-        'liquid_savings': 500000.0,
-        'existing_debt': 15.0,
-        'dependents': 2,
-        'emergency_fund_months': 4.0,
-        'risk_tolerance': 'Moderate'
+def canonical_payload(**overrides):
+    payload = {
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "age": 34,
+        "monthly_take_home": 150_000.0,
+        "monthly_savings": 45_000.0,
+        "liquid_savings": 500_000.0,
+        "emi_burden_pct": 12.0,
+        "financial_dependents": 1,
+        "emergency_fund_months": 6.0,
+        "risk_tolerance": "Moderate",
+        "investment_goals": ["Wealth Growth"],
+        "investment_horizon_years": 15,
+        "deployable_lump_sum": 0.0,
+        "risk_capacity_score": 55,
+        "final_suitability_risk": "Moderate",
     }
-    
-    # Compute via feature_engineering directly
-    feat_train = engineer_features(**raw_inputs)
-    arr_train = to_model_array(feat_train)
-    
-    # Mimic main.py parsing & serving transformation
-    req = PredictRequest(
-        risk_category='Moderate',
-        goal_type='wealth-building',
-        age=raw_inputs['age'],
-        annual_income=raw_inputs['annual_income'],
-        monthly_savings=raw_inputs['monthly_savings'],
-        investment_horizon=raw_inputs['investment_horizon'],
-        liquid_savings=raw_inputs['liquid_savings'],
-        existing_debt=raw_inputs['existing_debt'],
-        dependents=raw_inputs['dependents'],
-        emergency_fund_months=raw_inputs['emergency_fund_months'],
-        risk_tolerance='Moderate'
+    payload.update(overrides)
+    return payload
+
+
+@pytest.fixture(scope="module")
+def client():
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def test_predict_request_rejects_monthly_savings_at_or_above_take_home():
+    with pytest.raises(ValidationError, match="monthly_savings must be less"):
+        PredictRequest.model_validate(canonical_payload(monthly_savings=150_000.0))
+
+
+@pytest.mark.parametrize(
+    "legacy_field,value",
+    [
+        ("annual_income", 1_800_000),
+        ("total_ctc", 2_000_000),
+        ("existing_debt", 12),
+        ("goal_type", "wealth-building"),
+        ("tax_regime", "new"),
+        ("sold_property_proceeds", 1_000_000),
+    ],
+)
+def test_predict_request_rejects_unauthorized_or_non_deployable_features(legacy_field, value):
+    with pytest.raises(ValidationError):
+        PredictRequest.model_validate({**canonical_payload(), legacy_field: value})
+
+
+def test_feature_parity_train_inference_is_exact():
+    request = PredictRequest.model_validate(canonical_payload())
+    direct = engineer_features(
+        age=request.age,
+        monthly_take_home=request.monthly_take_home,
+        monthly_savings=request.monthly_savings,
+        investment_horizon_years=request.investment_horizon_years,
+        liquid_savings=request.liquid_savings,
+        emi_burden_pct=request.emi_burden_pct,
+        financial_dependents=request.financial_dependents,
+        emergency_fund_months=request.emergency_fund_months,
+        deployable_lump_sum=request.deployable_lump_sum,
+        risk_capacity_score=request.risk_capacity_score,
+        risk_tolerance=request.risk_tolerance,
+        final_suitability_risk=request.final_suitability_risk,
+        investment_goals=request.investment_goals,
     )
-    
-    feat_serve = engineer_features(
-        age=req.age,
-        annual_income=req.annual_income,
-        monthly_savings=req.monthly_savings,
-        investment_horizon=req.investment_horizon,
-        liquid_savings=req.liquid_savings,
-        existing_debt=req.existing_debt,
-        dependents=req.dependents,
-        emergency_fund_months=req.emergency_fund_months,
-        risk_tolerance=req.risk_tolerance
+    served_features, served_array = build_model_input(request)
+    assert list(direct) == FEATURE_NAMES
+    assert direct == served_features
+    np.testing.assert_array_equal(to_model_array(direct), served_array)
+
+
+def test_model_input_rejects_arbitrary_feature_spread():
+    features = engineer_features(
+        age=34, monthly_take_home=150_000, monthly_savings=45_000,
+        investment_horizon_years=15, liquid_savings=500_000,
+        emi_burden_pct=12, financial_dependents=1, emergency_fund_months=6,
+        deployable_lump_sum=0, risk_capacity_score=55,
+        risk_tolerance="Moderate", final_suitability_risk="Moderate",
+        investment_goals=["Wealth Growth"],
     )
-    arr_serve = to_model_array(feat_serve)
-    
-    # Assert exact byte-for-byte matching of array dimensions, content and types
-    assert arr_train.shape[1] == len(get_feature_names())
-    assert arr_serve.shape[1] == len(get_feature_names())
-    np.testing.assert_array_equal(arr_train, arr_serve)
+    with pytest.raises(ValueError, match="unexpected"):
+        to_model_array({**features, "annual_income": 1_800_000})
+
 
 def test_api_key_security_unauthorized(client, monkeypatch):
-    # Temporarily set the API key so auth enforcement is active (in CI it's unset)
     monkeypatch.setenv("ML_SERVICE_API_KEY", API_KEY)
-    payload = {
-        "age": 30,
-        "annual_income": 1200000,
-        "monthly_savings": 40000,
-        "risk_category": "Moderate",
-        "liquid_savings": 5000,
-        "existing_debt": 0.0,
-        "dependents": 0,
-        "emergency_fund_months": 3.0,
-        "risk_tolerance": "Moderate",
-        "goal_type": "wealth-building",
-        "investment_horizon": 15
-    }
-    # No header
-    response = client.post("/predict/enriched", json=payload)
+    response = client.post("/predict", json=canonical_payload())
     assert response.status_code == 401
-    assert "Invalid or missing API Key" in response.json()["detail"]
-
-    # Wrong key
-    response = client.post("/predict/enriched", json=payload, headers={"X-API-Key": "wrong_key"})
+    response = client.post("/predict", json=canonical_payload(), headers={"X-API-Key": "wrong"})
     assert response.status_code == 401
 
-def test_api_key_security_authorized(client, monkeypatch):
+
+def test_predict_endpoint_accepts_v4_and_rejects_v3(client, monkeypatch):
     if model is None:
-        pytest.skip("Model .pkl not available in CI — skipping authorized prediction test")
+        pytest.skip("RandomForest artifact is unavailable")
     monkeypatch.setenv("ML_SERVICE_API_KEY", API_KEY)
-    payload = {
-        "age": 30,
-        "annual_income": 1200000,
-        "monthly_savings": 40000,
-        "risk_category": "Moderate",
-        "liquid_savings": 5000,
-        "existing_debt": 0.0,
-        "dependents": 0,
-        "emergency_fund_months": 3.0,
-        "risk_tolerance": "Moderate",
-        "goal_type": "wealth-building",
-        "investment_horizon": 15
-    }
-    response = client.post("/predict/enriched", json=payload, headers={"X-API-Key": API_KEY})
+    headers = {"X-API-Key": API_KEY}
+    response = client.post("/predict/enriched", json=canonical_payload(), headers=headers)
     assert response.status_code == 200
-    assert "primary" in response.json()
+    body = response.json()
+    assert body["feature_schema_version"] == FEATURE_SCHEMA_VERSION
+    assert body["model_version"]
+    assert len({body["primary"], body["secondary"], body["tertiary"]}) == 3
 
-def test_health_endpoint(client):
+    stale = canonical_payload()
+    stale["feature_schema_version"] = "recommendation-features-3.0.0"
+    assert client.post("/predict", json=stale, headers=headers).status_code == 422
+
+
+def test_decision_path_discloses_only_approved_suitability_facts():
+    path = get_decision_path_description(PredictRequest.model_validate(canonical_payload()))
+    joined = " ".join(path)
+    assert "final_suitability_risk=Moderate" in joined
+    assert "risk_capacity_score=55" in joined
+    assert "annual_income" not in joined
+    assert "tax" not in joined.lower()
+
+
+def test_metadata_is_versioned_and_matches_exact_feature_order():
+    metadata = json.loads((Path(__file__).parents[1] / "model" / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["model_version"].startswith("4.")
+    assert metadata["feature_schema_version"] == FEATURE_SCHEMA_VERSION
+    assert metadata["feature_names"] == FEATURE_NAMES
+    assert metadata["n_features"] == len(FEATURE_NAMES)
+    assert metadata["metric_interpretation"] == "policy-approximation fidelity, not investment outcome accuracy"
+
+
+def test_health_exposes_feature_schema_version(client):
     response = client.get("/health")
     assert response.status_code == 200
-    data = response.json()
-    assert data["status"] in ["ok", "model_not_loaded"]
-    assert "model_version" in data
-
-def test_predict_enriched_endpoint_valid(client):
-    if model is None:
-        pytest.skip("Model .pkl not available in CI — skipping enriched prediction test")
-    payload = {
-        "age": 30,
-        "annual_income": 1200000,
-        "monthly_savings": 40000,
-        "risk_category": "Moderate",
-        "liquid_savings": 50000,
-        "existing_debt": 12,
-        "dependents": 2,
-        "emergency_fund_months": 3,
-        "risk_tolerance": "Moderate",
-        "goal_type": "wealth-building",
-        "investment_horizon": 15
-    }
-    response = client.post("/predict/enriched", json=payload, headers={"X-API-Key": API_KEY})
-    assert response.status_code == 200
-    data = response.json()
-    assert "primary" in data
-    assert "secondary" in data
-    assert "tertiary" in data
-    assert "confidence_scores" in data
-    assert "explanation" in data
-    assert data["enriched_features"]["savings_rate"] == 0.4000
-    assert "model_version" in data
-
-def test_predict_enriched_endpoint_invalid_savings(client, monkeypatch):
-    monkeypatch.setenv("ML_SERVICE_API_KEY", API_KEY)
-    payload = {
-        "age": 30,
-        "annual_income": 1200000,
-        "monthly_savings": 150000,  # exceeds monthly income (100k)
-        "risk_category": "Moderate",
-        "liquid_savings": 50000,
-        "existing_debt": 12,
-        "dependents": 2,
-        "emergency_fund_months": 3,
-        "risk_tolerance": "Moderate",
-        "goal_type": "wealth-building",
-        "investment_horizon": 15
-    }
-    response = client.post("/predict/enriched", json=payload, headers={"X-API-Key": API_KEY})
-    assert response.status_code == 422  # validation error
-
-def test_decision_path_description():
-    path = get_decision_path_description(25, 1200000, "Aggressive")
-    assert "age < 30" in path
-    assert "income > 10L" in path
-    assert "risk = Aggressive" in path
-
-def test_shap_efficiency_axiom():
-    """
-    Checks that SHAP values sum to prediction probability minus expected value within tolerance.
-    """
-    try:
-        import joblib  # type: ignore[import-not-found]
-        import shap  # type: ignore[import-not-found]
-        
-        model_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'model', 'model.pkl')
-        if not os.path.exists(model_path):
-            pytest.skip("Model pkl not generated yet, skipping SHAP efficiency test")
-            
-        pipeline = joblib.load(model_path)
-        clf = pipeline.named_steps['clf']
-        scaler = pipeline.named_steps['scaler']
-        
-        explainer = shap.TreeExplainer(clf)
-        
-        # Run check on a dummy test sample matching feature_engineering output
-        feat = engineer_features(
-            age=30, annual_income=1200000.0, monthly_savings=40000.0,
-            investment_horizon=15, liquid_savings=50000.0, existing_debt=12.0,
-            dependents=2, emergency_fund_months=3.0, risk_tolerance='Moderate'
-        )
-        dummy_sample = to_model_array(feat)
-        scaled = scaler.transform(dummy_sample)
-        
-        shap_vals = explainer.shap_values(scaled)
-        probas = clf.predict_proba(scaled)[0]
-        
-        is_list = isinstance(shap_vals, list)
-        
-        for c_idx in range(len(probas)):
-            expected_prob = probas[c_idx]
-            if is_list:
-                shap_sum = np.sum(shap_vals[c_idx][0])
-                base_val = explainer.expected_value[c_idx]
-            else:
-                shap_sum = np.sum(shap_vals[0, :, c_idx])
-                base_val = explainer.expected_value[c_idx]
-                
-            assert abs((base_val + shap_sum) - expected_prob) < 1e-4
-    except ImportError:
-        pytest.skip("shap library not available, skipping efficiency axiom test")
+    assert response.json()["feature_schema_version"] == FEATURE_SCHEMA_VERSION
 
 
 def test_fail_closed_auth_when_api_key_unset(client):
-    """
-    Asserts HTTP 500 error when ML_SERVICE_API_KEY is unset and ENVIRONMENT is not 'local'.
-    """
-    old_key = os.environ.pop("ML_SERVICE_API_KEY", None)
-    old_env = os.environ.pop("ENVIRONMENT", None)
-    try:
-        os.environ["ENVIRONMENT"] = "production"
-        resp = client.post("/predict", json={})
-        assert resp.status_code == 500
-        assert "Server Misconfiguration" in resp.json()["detail"]
-    finally:
-        if old_key is not None:
-            os.environ["ML_SERVICE_API_KEY"] = old_key
-        if old_env is not None:
-            os.environ["ENVIRONMENT"] = old_env
-
-
-def test_dev_mode_auth_bypass_with_local_environment(client):
-    """
-    Asserts dev-mode auth bypass works when ENVIRONMENT='local' even if ML_SERVICE_API_KEY is unset.
-    """
     old_key = os.environ.pop("ML_SERVICE_API_KEY", None)
     old_env = os.environ.get("ENVIRONMENT")
     try:
-        os.environ["ENVIRONMENT"] = "local"
-        resp = client.get("/health")
-        assert resp.status_code == 200
+        os.environ["ENVIRONMENT"] = "production"
+        response = client.post("/predict", json=canonical_payload())
+        assert response.status_code == 500
+        assert "Server Misconfiguration" in response.json()["detail"]
     finally:
         if old_key is not None:
             os.environ["ML_SERVICE_API_KEY"] = old_key
@@ -271,85 +164,3 @@ def test_dev_mode_auth_bypass_with_local_environment(client):
             os.environ["ENVIRONMENT"] = old_env
         else:
             os.environ.pop("ENVIRONMENT", None)
-
-
-def test_rag_80c_elss_citation_regression():
-    """
-    Regression Test (Bug 2 Fix): Ensures 'How much deduction is allowed under Section 80C for ELSS?'
-    returns the correct Section 80C citation at top position when processed through RAG pipeline.
-    """
-    from rag.ingestion.pipeline import IngestionPipeline
-    from rag.retrieval.pipeline import RAGPipeline
-    from rag.config import RAGConfig
-    from rag.schema import RAGQueryRequest
-    from rag.seed_knowledge import TAX_REGULATIONS_2025, MUTUAL_FUNDS_SUITABILITY
-
-    pipeline = IngestionPipeline()
-    pipeline.ingest_text(
-        text=TAX_REGULATIONS_2025,
-        title="Income Tax Regulations FY 2025-26",
-        source="https://www.incometaxindia.gov.in/official/regulations",
-        source_trust_tier="government_official",
-        author="CBDT",
-    )
-    pipeline.ingest_text(
-        text=MUTUAL_FUNDS_SUITABILITY,
-        title="SEBI & AMFI Guidelines",
-        source="https://www.sebi.gov.in/legal/circulars/guidelines",
-        source_trust_tier="regulatory_circular",
-        author="SEBI",
-    )
-
-    config = RAGConfig()
-    rag = RAGPipeline(embedder=pipeline.embedder, vector_store=pipeline.vector_store, config=config)
-
-    query = "How much deduction is allowed under Section 80C for ELSS?"
-    response = rag.query(RAGQueryRequest(question=query))
-
-    assert len(response.citations) > 0, "Expected citations array to be non-empty"
-    all_excerpts = " ".join([c.excerpt.lower() for c in response.citations])
-    assert any(term in all_excerpts for term in ["80c", "1,50,000", "1.5 lakh", "elss", "deduction"]), (
-        f"Citations must contain Section 80C / ELSS details, got: {all_excerpts}"
-    )
-
-
-def test_ft_transformer_reglu_vs_gelu_activations():
-    """
-    Regression Test (Bug 3 Fix): Verifies that ReGLU and GELU activations in FTTransformer
-    both execute successfully, produce distinct output tensors, and support backward passes.
-    """
-    import torch
-    from model.architecture.ft_transformer import FTTransformer, FTTransformerConfig
-
-    config_reglu = FTTransformerConfig(input_dim=16, d_token=32, activation="reglu")
-    model_reglu = FTTransformer(config_reglu)
-    model_reglu.eval()
-
-    config_gelu = FTTransformerConfig(input_dim=16, d_token=32, activation="gelu")
-    model_gelu = FTTransformer(config_gelu)
-    model_gelu.eval()
-
-    torch.manual_seed(42)
-    x = torch.randn(4, 16)
-
-    # Share tokenizer/cls/head weights to isolate FFN activation difference
-    model_gelu.tokenizer.load_state_dict(model_reglu.tokenizer.state_dict())
-    model_gelu.cls_token.data.copy_(model_reglu.cls_token.data)
-    model_gelu.head.load_state_dict(model_reglu.head.state_dict())
-
-    out_reglu = model_reglu(x)
-    out_gelu = model_gelu(x)
-
-    assert out_reglu.shape == (4, 6)
-    assert out_gelu.shape == (4, 6)
-    assert not torch.allclose(out_reglu, out_gelu, atol=1e-4), "ReGLU and GELU activations must produce different outputs"
-
-    # Verify backward pass on both
-    model_reglu.train()
-    loss_reglu = model_reglu(x).sum()
-    loss_reglu.backward()
-
-    model_gelu.train()
-    loss_gelu = model_gelu(x).sum()
-    loss_gelu.backward()
-

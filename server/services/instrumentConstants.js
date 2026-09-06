@@ -36,7 +36,7 @@ import { getCache, setCache, redisAvailable } from '../config/redis.js';
 // This is a CACHE, not authoritative state. Redis is the single source of truth.
 const _liveCache = {};
 
-const REDIS_LIVE_KEY = 'mc:instrument:params:live';
+const REDIS_LIVE_KEY = 'instrument-params:live-overrides:1';
 
 /**
  * Update live parameters dynamically (used by marketDataService).
@@ -91,19 +91,19 @@ const staticParams = {
   FD:           { nominalRate: 7.5,   volatility: 0.005,  expenseRatio: 0.0,    riskLevel: 'Low',        lockIn: 0,  name: 'Bank Fixed Deposit',       tags: ['Guaranteed', 'DICGC Insured'] },
   ELSS:         { nominalRate: 14.4,  volatility: 0.18,   expenseRatio: 0.015,  riskLevel: 'High',       lockIn: 3,  name: 'ELSS Mutual Fund',         tags: ['Tax Saving', '80C'] },
   Equity_MF:    { nominalRate: 14.9,  volatility: 0.18,   expenseRatio: 0.015,  riskLevel: 'High',       lockIn: 0,  name: 'Equity Mutual Fund',       tags: ['Wealth Growth'] },
-  ETF:          { nominalRate: 13.3,  volatility: 0.16,   expenseRatio: 0.001,  riskLevel: 'Medium',     lockIn: 0,  name: 'Nifty 50 ETF',             tags: ['Passive', 'Low Cost'] },
-  Debt_MF:      { nominalRate: 7.9,   volatility: 0.03,   expenseRatio: 0.008,  riskLevel: 'Low-Medium', lockIn: 0,  name: 'Debt Mutual Fund',         tags: ['Liquid'] },
-  RBI_Bond:     { nominalRate: 7.4,   volatility: 0.002,  expenseRatio: 0.0,    riskLevel: 'Very Low',   lockIn: 7,  name: 'RBI Savings Bond',         tags: ['Sovereign'] },
-  'G-Sec':      { nominalRate: 7.2,   volatility: 0.01,   expenseRatio: 0.0,    riskLevel: 'Very Low',   lockIn: 0,  name: 'Government Security',      tags: ['Sovereign', 'Gilt'] },
+  ETF:          { nominalRate: 13.7,  volatility: 0.16,   expenseRatio: 0.001,  riskLevel: 'Medium',     lockIn: 0,  name: 'Nifty 50 ETF',             tags: ['Passive', 'Low Cost'] },
+  Debt_MF:      { nominalRate: 7.5,   volatility: 0.03,   expenseRatio: 0.008,  riskLevel: 'Low-Medium', lockIn: 0,  name: 'Debt Mutual Fund',         tags: ['Liquid'] },
+  RBI_Bond:     { nominalRate: 7.5,   volatility: 0.002,  expenseRatio: 0.0,    riskLevel: 'Very Low',   lockIn: 7,  name: 'RBI Savings Bond',         tags: ['Sovereign'] },
+  'G-Sec':      { nominalRate: 7.3,   volatility: 0.01,   expenseRatio: 0.0,    riskLevel: 'Very Low',   lockIn: 0,  name: 'Government Security',      tags: ['Sovereign', 'Gilt'] },
   PPF:          { nominalRate: 7.1,   volatility: 0.003,  expenseRatio: 0.0,    riskLevel: 'Very Low',   lockIn: 15, name: 'Public Provident Fund',    tags: ['EEE', 'Tax Free', '80C'] },
-  NPS:          { nominalRate: 8.9,   volatility: 0.12,   expenseRatio: 0.0001, riskLevel: 'Medium',     lockIn: 60, name: 'National Pension System',  tags: ['Retirement', '80CCD'] },
+  NPS:          { nominalRate: 10.5,  volatility: 0.12,   expenseRatio: 0.0001, riskLevel: 'Medium',     lockIn: 60, name: 'National Pension System',  tags: ['Retirement', '80CCD'] },
   Gold:         { nominalRate: 10.8,  volatility: 0.15,   expenseRatio: 0.005,  riskLevel: 'Medium',     lockIn: 0,  name: 'Gold (Commodity)',          assetClass: 'Commodity', tags: ['Hedge', 'Inflation'] },
   SGB:          { nominalRate: 13.0,  volatility: 0.14,   expenseRatio: 0.0,    riskLevel: 'Low-Medium', lockIn: 8,  name: 'Sovereign Gold Bond',      tags: ['Gold', 'Tax Exempt'] },
-  Liquid_MF:    { nominalRate: 6.9,   volatility: 0.005,  expenseRatio: 0.0025, riskLevel: 'Low',        lockIn: 0,  name: 'Liquid Mutual Fund',       tags: ['Emergency Fund', 'T+1'] },
+  Liquid_MF:    { nominalRate: 7.0,   volatility: 0.005,  expenseRatio: 0.0025, riskLevel: 'Low',        lockIn: 0,  name: 'Liquid Mutual Fund',       tags: ['Emergency Fund', 'T+1'] },
   Arbitrage_MF: { nominalRate: 7.5,   volatility: 0.02,   expenseRatio: 0.0035, riskLevel: 'Low',        lockIn: 0,  name: 'Arbitrage Mutual Fund',    tags: ['Low Volatility', 'Equity Taxed'] },
-  Hybrid_MF:    { nominalRate: 11.3,  volatility: 0.10,   expenseRatio: 0.012,  riskLevel: 'Medium',     lockIn: 0,  name: 'Balanced Advantage Fund',  tags: ['Hybrid', 'Dynamic'] },
-  Index_MF:     { nominalRate: 13.8,  volatility: 0.16,   expenseRatio: 0.002,  riskLevel: 'Medium',     lockIn: 0,  name: 'Nifty 50 Index Fund',      tags: ['Passive', 'Low Cost'] },
-  Midcap_MF:    { nominalRate: 17.4,  volatility: 0.22,   expenseRatio: 0.015,  riskLevel: 'High',       lockIn: 0,  name: 'Mid-Cap Mutual Fund',      tags: ['High Growth'] },
+  Hybrid_MF:    { nominalRate: 10.8,  volatility: 0.10,   expenseRatio: 0.012,  riskLevel: 'Medium',     lockIn: 0,  name: 'Balanced Advantage Fund',  tags: ['Hybrid', 'Dynamic'] },
+  Index_MF:     { nominalRate: 14.2,  volatility: 0.16,   expenseRatio: 0.002,  riskLevel: 'Medium',     lockIn: 0,  name: 'Nifty 50 Index Fund',      tags: ['Passive', 'Low Cost'] },
+  Midcap_MF:    { nominalRate: 16.7,  volatility: 0.22,   expenseRatio: 0.015,  riskLevel: 'High',       lockIn: 0,  name: 'Mid-Cap Mutual Fund',      tags: ['High Growth'] },
   Smallcap_MF:  { nominalRate: 21.0,  volatility: 0.28,   expenseRatio: 0.015,  riskLevel: 'Very High',  lockIn: 0,  name: 'Small-Cap Mutual Fund',    tags: ['Highest Risk'] },
   SCSS:         { nominalRate: 8.2,   volatility: 0.002,  expenseRatio: 0.0,    riskLevel: 'Very Low',   lockIn: 5,  name: 'Senior Citizens Savings',  tags: ['Sovereign', 'Senior'] },
   SSY:          { nominalRate: 8.2,   volatility: 0.002,  expenseRatio: 0.0,    riskLevel: 'Very Low',   lockIn: 21, name: 'Sukanya Samriddhi',        tags: ['EEE', 'Girl Child'] },
@@ -140,18 +140,18 @@ export const INSTRUMENT_PARAMS = new Proxy(staticParams, {
 
 /**
  * Get nominal rate for an instrument key (as percentage, e.g. 12.5).
- * Returns 7.0 as safe default for unknown instruments.
+ * Unknown instruments fail closed; callers must establish a catalog mapping.
  */
 export function getNominalRate(key) {
-  return INSTRUMENT_PARAMS[key]?.nominalRate ?? 7.0;
+  return INSTRUMENT_PARAMS[key]?.nominalRate ?? null;
 }
 
 /**
  * Get volatility for an instrument key (as decimal, e.g. 0.18).
- * Returns 0.10 as safe default for unknown instruments.
+ * Unknown instruments fail closed; callers must establish a catalog mapping.
  */
 export function getVolatility(key) {
-  return INSTRUMENT_PARAMS[key]?.volatility ?? 0.10;
+  return INSTRUMENT_PARAMS[key]?.volatility ?? null;
 }
 
 /**
@@ -186,6 +186,6 @@ export const DISCLAIMER = 'WealthGenie provides AI-generated investment analysis
  * @returns {number} Monthly rate
  */
 export function toMonthlyRate(annualRate, continuous = false) {
-  if (!Number.isFinite(annualRate)) return 0;
+  if (!Number.isFinite(annualRate)) throw new TypeError('annualRate must be finite');
   return continuous ? Math.exp(annualRate / 12) - 1 : annualRate / 12;
 }

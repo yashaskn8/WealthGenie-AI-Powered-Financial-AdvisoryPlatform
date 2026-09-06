@@ -8,7 +8,7 @@ The model is loaded once at initialization and reused across calls.
 """
 
 import logging
-from typing import List
+from typing import Any, List, Optional
 
 from sentence_transformers import CrossEncoder
 
@@ -30,7 +30,7 @@ class CrossEncoderReranker(BaseReranker):
     and contextual similarity that keyword overlap cannot.
     """
 
-    def __init__(self, model_name: str = _DEFAULT_MODEL_NAME):
+    def __init__(self, model_name: str = _DEFAULT_MODEL_NAME, model: Optional[Any] = None):
         """
         Loads the cross-encoder model once at initialization.
 
@@ -39,9 +39,12 @@ class CrossEncoderReranker(BaseReranker):
                         Defaults to cross-encoder/ms-marco-MiniLM-L-6-v2.
         """
         self._model_name = model_name
-        logger.info(f"Loading cross-encoder model: {model_name}")
-        self._model = CrossEncoder(model_name)
-        logger.info(f"Cross-encoder model loaded successfully: {model_name}")
+        if model is None:
+            logger.info(f"Loading cross-encoder model: {model_name}")
+            self._model = CrossEncoder(model_name)
+            logger.info(f"Cross-encoder model loaded successfully: {model_name}")
+        else:
+            self._model = model
 
     def rerank(self, query: str, chunks: List[RetrievedChunk]) -> List[RetrievedChunk]:
         """

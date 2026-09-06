@@ -11,6 +11,7 @@ import Goal from '../models/Goal.js';
 import ConversationHistory from '../models/ConversationHistory.js';
 import User from '../models/User.js';
 import { ProviderManager } from '../services/providerAbstraction.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret-wealthgenie-2026';
 process.env.JWT_SECRET = JWT_SECRET;
@@ -21,12 +22,7 @@ const validToken = jwt.sign({ userId: mockUserId, email: 'test@example.com' }, J
 const mockProfile = {
   _id: '60d5ecb8b3b3a72d9c8e4a22',
   userId: mockUserId,
-  age: 30,
-  annualIncome: 1000000,
-  monthlySavings: 25000,
-  riskCategory: 'Moderate',
-  taxRegime: 'new',
-  investmentHorizon: 15,
+  ...canonicalProfile({ age: 30, monthlySavings: 25000, investmentHorizonYears: 15 }),
 };
 
 function buildApp() {

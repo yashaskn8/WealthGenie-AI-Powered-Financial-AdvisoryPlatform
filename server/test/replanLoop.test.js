@@ -7,6 +7,7 @@ import User from '../models/User.js';
 import ConversationHistory from '../models/ConversationHistory.js';
 import Goal from '../models/Goal.js';
 import Recommendation from '../models/Recommendation.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 describe('Phase 1: Agentic AI Self-Correction & Replanning Loop Tests', () => {
   const testUserId = '64b0f0000000000000000001';
@@ -19,15 +20,13 @@ describe('Phase 1: Agentic AI Self-Correction & Replanning Loop Tests', () => {
         lean: async () => ({
           _id: '64b0f0000000000000000002',
           userId: testUserId,
-          age: 32,
-          income: 150000,
-          annualIncome: 1800000,
-          savings: 45000,
-          monthlySavings: 45000,
-          riskCategory: 'Moderate',
-          taxRegime: 'new',
-          investmentHorizon: 15,
-          recommendedEquityAllocation: 60,
+          ...canonicalProfile({
+            age: 32,
+            monthlyTakeHome: 150000,
+            monthlySavings: 45000,
+            liquidSavings: 450000,
+            investmentHorizonYears: 15,
+          }),
         }),
       }),
     });
@@ -147,13 +146,14 @@ describe('Phase 1: Agentic AI Self-Correction & Replanning Loop Tests', () => {
 
       if (passCount === 1) {
         // User asks "I need 1 Crore in 15 years, what SIP is needed?".
-        // Pass 1: LLM ambiguously calls sip_projection with 1Cr as monthlyInvestment
+        // Pass 1: LLM uses a valid forward projection, then recognizes that
+        // reverse_sip is the correct operation for a target-corpus question.
         return {
           text: '',
           tool_calls: [
             {
               tool: 'sip_projection',
-              arguments: { monthlyInvestment: 100000, annualRate: 0.12, years: 15 },
+              arguments: { monthlyInvestment: 40000, annualRate: 0.12, years: 15 },
             },
           ],
           tokensUsed: 140,

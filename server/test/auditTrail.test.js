@@ -4,6 +4,7 @@ import mongoose from 'mongoose';
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 import AuditRecord from '../models/AuditRecord.js';
 import FinancialProfile from '../models/FinancialProfile.js';
@@ -40,19 +41,11 @@ describe('AuditRecord - Complete Advisory Audit Trail Verification', () => {
     // Create a real test financial profile in DB
     profile = await FinancialProfile.create({
       userId: testUserId,
-      monthlyIncome: 150000,
-      annualIncome: 1800000,
-      age: 32,
-      savings: 50000,
-      riskCategory: 'Moderate',
-      taxRegime: 'new',
-      investmentHorizon: 15,
-      liquid_savings: 500000,
-      existing_debt_emi_ratio_pct: 10,
-      dependents: 1,
-      emergency_fund_months: 6,
-      risk_tolerance: 'Moderate',
-      goal_type: 'wealth-building',
+      ...canonicalProfile({
+        monthlyTakeHome: 150000, monthlySavings: 50000, age: 32,
+        liquidSavings: 500000, investmentHorizonYears: 15,
+      }),
+      recommendationProfileVersion: 'financial-profile-1.0.0',
     });
   });
 
@@ -94,7 +87,11 @@ describe('AuditRecord - Complete Advisory Audit Trail Verification', () => {
       assert.ok(auditDoc.version_id, 'Must have model/engine version_id');
       assert.ok(auditDoc.inputs, 'Must store sanitized inputs');
       assert.equal(auditDoc.inputs.age, 32);
-      assert.equal(auditDoc.inputs.annual_income, 1800000);
+      assert.equal(auditDoc.inputs.monthly_take_home, 150000);
+      assert.equal(auditDoc.inputs.monthly_savings, 50000);
+      assert.equal(auditDoc.inputs.final_suitability_risk, 'Moderate');
+      assert.equal(auditDoc.inputs.annual_income, undefined);
+      assert.equal(auditDoc.inputs.tax_regime, undefined);
       assert.ok(auditDoc.recommendations, 'Must store recommendations output');
       assert.ok(Array.isArray(auditDoc.recommendations.instruments), 'Must store instruments');
       assert.ok(['ml_service', 'rule_fallback', 'rule_based'].includes(auditDoc.engine), `Valid engine: ${auditDoc.engine}`);

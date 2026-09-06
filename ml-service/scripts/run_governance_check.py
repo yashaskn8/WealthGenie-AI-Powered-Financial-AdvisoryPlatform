@@ -34,15 +34,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import pandas as pd
 from model.registry.registry_store import ModelRegistry
 from model.registry.drift_detection import run_drift_check
+from model.data.feature_engineering import FEATURE_NAMES
 
-MODEL_FEATURES = [
-    "age", "annual_income", "monthly_savings", "investment_horizon",
-    "liquid_savings", "existing_debt", "dependents", "emergency_fund_months",
-    "risk_score", "stated_tolerance_score", "savings_rate",
-    "debt_to_income_ratio", "emergency_fund_adequacy_ratio",
-    "risk_capacity_vs_stated_tolerance_gap", "horizon_adjusted_urgency_score",
-    "dependents_adjusted_burden_score",
-]
+MODEL_FEATURES = FEATURE_NAMES
 
 
 def main():
@@ -93,6 +87,14 @@ def main():
 
         # 4. Load new data and run drift check
         new_data = pd.read_csv(new_data_path)
+        missing = set(MODEL_FEATURES) - set(new_data.columns)
+        unexpected = set(new_data.columns) - set(MODEL_FEATURES)
+        if missing or unexpected:
+            print(
+                f"ERROR: New-data feature contract mismatch: missing={sorted(missing)}, "
+                f"unexpected={sorted(unexpected)}"
+            )
+            sys.exit(1)
         drift_report = run_drift_check(ref_dists, new_data, MODEL_FEATURES)
 
         # 5. Build governance report

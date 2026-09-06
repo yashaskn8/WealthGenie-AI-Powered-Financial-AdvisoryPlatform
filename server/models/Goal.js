@@ -36,6 +36,12 @@ const GoalSchema = new mongoose.Schema({
   }],
   mc_computed_at: { type: Date },
   years_remaining: { type: Number },
+  simulation_classification: {
+    type: String,
+    enum: ['PROFILE_GROUNDED_GOAL_PLAN', 'NON_RECOMMENDATION_GOAL_WHAT_IF'],
+  },
+  return_basis: { type: String, enum: ['PRE_TAX_NOMINAL'] },
+  inflation_assumption: { type: Number, min: 0, max: 1 },
   gemini_advice: { type: String, maxlength: 2000 },
 }, { timestamps: true });
 

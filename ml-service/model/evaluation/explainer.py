@@ -35,7 +35,7 @@ class ModelExplainer:
     def explain(self, raw_features):
         """
         Generate human-readable explanation for a prediction.
-        raw_features: numpy array of shape (1, 16)
+        raw_features: numpy array of shape (1, 19)
         """
         scaled = self.scaler.transform(raw_features)
 
@@ -109,22 +109,25 @@ class ModelExplainer:
         importances = self.rf_model.feature_importances_
 
         FEATURE_MEANS = {
-            'age': 35.0,
-            'annual_income': 800000.0,
-            'monthly_savings': 15000.0,
-            'investment_horizon': 15.0,
-            'liquid_savings': 200000.0,
-            'existing_debt': 15.0,
-            'dependents': 2.0,
-            'emergency_fund_months': 3.0,
-            'risk_score': 50.0,
-            'stated_tolerance_score': 60.0,
-            'savings_rate': 0.20,
-            'debt_to_income_ratio': 0.15,
-            'emergency_fund_adequacy_ratio': 0.5,
-            'risk_capacity_vs_stated_tolerance_gap': 0.0,
-            'horizon_adjusted_urgency_score': 50.0,
-            'dependents_adjusted_burden_score': 30.0,
+            'age': 40.0,
+            'monthly_take_home': 100000.0,
+            'monthly_savings': 25000.0,
+            'investment_horizon_years': 15.0,
+            'liquid_savings': 500000.0,
+            'emi_burden_pct': 20.0,
+            'financial_dependents': 2.0,
+            'emergency_fund_months': 6.0,
+            'deployable_lump_sum': 0.0,
+            'risk_capacity_score': 50.0,
+            'risk_tolerance_encoded': 3.0,
+            'final_suitability_risk_encoded': 3.0,
+            'savings_rate': 0.25,
+            'liquidity_months': 5.0,
+            'goal_retirement': 0.0,
+            'goal_wealth_growth': 1.0,
+            'goal_tax_saving': 0.0,
+            'goal_emergency_fund': 0.0,
+            'emergency_fund_gap_months': 0.0,
         }
 
         contributions = []
@@ -134,7 +137,7 @@ class ModelExplainer:
             mean_val = FEATURE_MEANS.get(feat_name, 0.0)
             
             # For penalty/risk factors, direction is inverted
-            if feat_name in ['existing_debt', 'dependents', 'debt_to_income_ratio', 'dependents_adjusted_burden_score']:
+            if feat_name in ['emi_burden_pct', 'financial_dependents', 'emergency_fund_gap_months']:
                 direction = 'decreased' if raw_val > mean_val else 'increased'
             else:
                 direction = 'increased' if raw_val > mean_val else 'decreased'

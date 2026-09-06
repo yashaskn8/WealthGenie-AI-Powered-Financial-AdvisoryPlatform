@@ -21,6 +21,7 @@ import { errorHandler } from '../middleware/errorHandler.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Goal from '../models/Goal.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
+import { canonicalProfile, canonicalProfilePayload } from './helpers/canonicalProfile.js';
 
 process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
 process.env.NODE_ENV = 'test';
@@ -67,19 +68,10 @@ async function jsonFetch(url, options = {}) {
   return { response, body: text ? JSON.parse(text) : null };
 }
 
-const VALID_PROFILE_BODY = {
-  monthly_income: 80000,
-  age: 30,
-  monthly_savings: 20000,
-  regime: 'new',
-  investment_horizon: 15,
-  liquid_savings: 100000,
-  existing_debt: 0,
-  dependents: 0,
-  emergency_fund_months: 6,
-  risk_tolerance: 'Moderate',
-  goal_type: 'wealth-building',
-};
+const VALID_PROFILE_BODY = canonicalProfilePayload({
+  monthlyTakeHome: 80000, monthlySavings: 20000, age: 30,
+  liquidSavings: 100000, investmentHorizonYears: 15,
+});
 
 // ── Setup ─────────────────────────────────────────────────────────────
 async function ensureDb() {
@@ -120,7 +112,7 @@ test('OCC: PUT /api/profile/:id with stale version returns 409 Conflict', async 
       `${baseUrl}/api/profile/${profileId}`,
       {
         method: 'PUT',
-        body: JSON.stringify({ ...VALID_PROFILE_BODY, monthly_income: 90000, monthly_savings: 25000, version: createBody.version }),
+        body: JSON.stringify({ ...VALID_PROFILE_BODY, monthly_take_home: 90000, monthly_savings: 25000, version: createBody.version }),
         headers: { authorization: `Bearer ${token}` },
       }
     );
@@ -132,7 +124,7 @@ test('OCC: PUT /api/profile/:id with stale version returns 409 Conflict', async 
       `${baseUrl}/api/profile/${profileId}`,
       {
         method: 'PUT',
-        body: JSON.stringify({ ...VALID_PROFILE_BODY, monthly_income: 100000, monthly_savings: 30000, version: createBody.version }),
+        body: JSON.stringify({ ...VALID_PROFILE_BODY, monthly_take_home: 100000, monthly_savings: 30000, version: createBody.version }),
         headers: { authorization: `Bearer ${token}` },
       }
     );
@@ -142,7 +134,7 @@ test('OCC: PUT /api/profile/:id with stale version returns 409 Conflict', async 
 
     // 4. Verify the DB still has the value from update 1 (90000), not update 2 (100000)
     const profile = await FinancialProfile.findById(profileId).lean();
-    assert.equal(profile.monthlyIncome, 90000, 'DB should reflect first update, not stale second update');
+    assert.equal(profile.monthlyTakeHome, 90000, 'DB should reflect first update, not stale second update');
   });
 });
 
@@ -153,19 +145,8 @@ test('OCC: concurrent .save() on same profile triggers VersionError', async (t) 
   // Create a profile directly in DB
   const profile = await FinancialProfile.create({
     userId: TEST_USER_ID,
-    income: 60000,
-    age: 28,
-    savings: 15000,
-    annualIncome: 720000,
-    taxSlab: 0.05,
-    effectiveTaxRate: 3.1,
-    taxRegime: 'new',
-    riskCategory: 'Moderate',
-    riskScore: 45,
-    riskDescription: 'Moderate risk',
-    recommendedEquityAllocation: 50,
-    investableAmount: 15000,
-    investmentHorizon: 10,
+    ...canonicalProfile({ monthlyTakeHome: 60000, monthlySavings: 15000, age: 28 }),
+    recommendationProfileVersion: 'financial-profile-1.0.0',
   });
 
   t.after(async () => {
@@ -177,11 +158,11 @@ test('OCC: concurrent .save() on same profile triggers VersionError', async (t) 
   const copy2 = await FinancialProfile.findById(profile._id);
 
   // Modify and save copy1 — should succeed, bumps __v to 1
-  copy1.income = 70000;
+  copy1.monthlyTakeHome = 70000;
   await copy1.save();
 
   // Modify and save copy2 (stale __v=0) — should throw VersionError
-  copy2.income = 80000;
+  copy2.monthlyTakeHome = 80000;
   await assert.rejects(
     async () => { await copy2.save(); },
     (err) => {
@@ -192,7 +173,7 @@ test('OCC: concurrent .save() on same profile triggers VersionError', async (t) 
 
   // Verify DB has copy1's value (70000), not copy2's (80000)
   const saved1 = await FinancialProfile.findById(profile._id).lean();
-  assert.equal(saved1.monthlyIncome, 70000, 'DB should reflect copy1 save, not copy2');
+  assert.equal(saved1.monthlyTakeHome, 70000, 'DB should reflect copy1 save, not copy2');
 });
 
 // ── Test 3: Idempotency-Key prevents duplicate profile creation ───────
@@ -239,19 +220,8 @@ test('Transaction: Goal creation rolls back if FinancialProfile.updateOne throws
   // Create a profile to link the goal to
   const profile = await FinancialProfile.create({
     userId: TEST_USER_ID,
-    income: 80000,
-    age: 30,
-    savings: 20000,
-    annualIncome: 960000,
-    taxSlab: 0.1,
-    effectiveTaxRate: 5.2,
-    taxRegime: 'new',
-    riskCategory: 'Moderate',
-    riskScore: 50,
-    riskDescription: 'Moderate risk',
-    recommendedEquityAllocation: 50,
-    investableAmount: 20000,
-    investmentHorizon: 15,
+    ...canonicalProfile({ monthlyTakeHome: 80000, monthlySavings: 20000, age: 30 }),
+    recommendationProfileVersion: 'financial-profile-1.0.0',
   });
 
   const goalName = `Rollback Test Goal ${Date.now()}`;

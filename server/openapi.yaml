@@ -194,21 +194,21 @@ paths:
       tags: [Market]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       x-csrf-protection: cookie-session
-      responses: { '200': { $ref: '#/components/responses/Object' }, '401': { $ref: '#/components/responses/Unauthorized' } }
+      responses: { '202': { $ref: '#/components/responses/Object' }, '401': { $ref: '#/components/responses/Unauthorized' } }
 
   /api/tax/compute:
     get:
       operationId: computeTax
       tags: [Tax]
       security: []
-      parameters: [{ $ref: '#/components/parameters/Income' }, { name: regime, in: query, schema: { type: string, enum: [new, old], default: new } }]
+      parameters: [{ $ref: '#/components/parameters/Income' }, { $ref: '#/components/parameters/IncomeSource' }, { name: regime, in: query, required: true, schema: { type: string, enum: [new, old] } }]
       responses: { '200': { $ref: '#/components/responses/TaxCalculation' }, '400': { $ref: '#/components/responses/BadRequest' } }
   /api/tax/compare:
     get:
       operationId: compareTaxRegimes
       tags: [Tax]
       security: []
-      parameters: [{ $ref: '#/components/parameters/Income' }]
+      parameters: [{ $ref: '#/components/parameters/Income' }, { $ref: '#/components/parameters/IncomeSource' }]
       responses: { '200': { $ref: '#/components/responses/TaxComparison' }, '400': { $ref: '#/components/responses/BadRequest' } }
   /api/tax/post-tax-return:
     post:
@@ -270,7 +270,7 @@ paths:
   /api/regime/current:
     get: { operationId: getCurrentRegime, tags: [Regime], security: [], parameters: [{ $ref: '#/components/parameters/MacroRegime' }], responses: { '200': { $ref: '#/components/responses/Object' } } }
   /api/regime/tilts:
-    get: { operationId: getRegimeTilts, tags: [Regime], security: [], parameters: [{ $ref: '#/components/parameters/MacroRegime' }], responses: { '200': { $ref: '#/components/responses/Object' } } }
+    get: { operationId: getRegimeTilts, tags: [Regime], security: [], parameters: [{ name: regime, in: query, required: true, schema: { type: string, enum: [normal, geopolitical_conflict, pandemic_health_crisis, broad_market_crash, inflation_spike, rate_cut_cycle] } }], responses: { '200': { $ref: '#/components/responses/Object' } } }
   /api/regime/adjust:
     post:
       operationId: adjustAllocationForRegime
@@ -308,6 +308,7 @@ components:
     ProfileId: { name: profileId, in: path, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{24}$' } }
     GoalId: { name: goalId, in: path, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{24}$' } }
     Income: { name: income, in: query, required: true, schema: { type: number, minimum: 0, maximum: 1000000000 } }
+    IncomeSource: { name: incomeSource, in: query, required: true, schema: { type: string, enum: [salary, pension, family_pension, business, other] } }
     MacroRegime: { name: regime, in: query, schema: { type: string, enum: [normal, geopolitical_conflict, pandemic_health_crisis, broad_market_crash, inflation_spike, rate_cut_cycle] } }
   requestBodies:
     Register: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RegisterRequest' } } } }
@@ -378,64 +379,75 @@ components:
       properties: { email: { type: string, format: email }, password: { type: string, minLength: 8, maxLength: 128, writeOnly: true } }
     FinancialProfileInput:
       type: object
-      required: [monthly_income, age, monthly_savings, liquid_savings, dependents, emergency_fund_months, risk_tolerance, goal_type]
+      unevaluatedProperties: false
+      required: [monthly_take_home, monthly_savings, age, risk_tolerance, sold_property_proceeds, has_lump_sum, lump_sum_amount, liquid_savings, emi_burden_pct, financial_dependents, emergency_fund_months, investment_goals, investment_horizon_years]
       properties:
-        monthly_income: { type: number, minimum: 1000 }
+        monthly_take_home: { type: number, minimum: 1000, maximum: 100000000 }
+        monthly_savings: { type: number, minimum: 500, maximum: 100000000, description: Must be less than monthly_take_home. }
         age: { type: integer, minimum: 18, maximum: 80 }
-        monthly_savings: { type: number, minimum: 500 }
-        regime: { type: string, enum: [new, old] }
-        investment_horizon: { type: integer, minimum: 1, maximum: 40 }
-        liquid_savings: { type: number, minimum: 0 }
-        existing_debt: { type: number, minimum: 0 }
-        dependents: { type: integer, minimum: 0, maximum: 15 }
-        emergency_fund_months: { type: number, minimum: 0, maximum: 120 }
         risk_tolerance: { type: string, enum: [Conservative, Moderate, Aggressive] }
-        goal_type: { type: string, enum: [retirement, house purchase, education, wealth-building] }
-        total_ctc: { type: number, minimum: 100000 }
-        basic_component: { type: number, minimum: 20000 }
-        monthly_take_home: { type: number, minimum: 1000 }
-        sold_property_amount: { type: number, minimum: 0 }
+        sold_property_proceeds: { type: number, minimum: 0, maximum: 10000000000, description: Historical context only; never deployable capital. }
         has_lump_sum: { type: boolean }
-        lump_sum_amount: { type: number, minimum: 0 }
-        goals: { type: array, items: { type: string } }
+        lump_sum_amount: { type: number, minimum: 0, maximum: 10000000000, description: Must be 0 when has_lump_sum is false and positive when true. }
+        liquid_savings: { type: number, minimum: 0, maximum: 1000000000 }
+        emi_burden_pct: { type: number, minimum: 0, maximum: 100 }
+        financial_dependents: { type: integer, minimum: 0, maximum: 15 }
+        emergency_fund_months: { type: number, minimum: 0, maximum: 120 }
+        investment_goals: { type: array, minItems: 1, maxItems: 4, uniqueItems: true, items: { type: string, enum: [Retirement, Wealth Growth, Tax Saving, Emergency Fund] } }
+        investment_horizon_years: { type: integer, minimum: 1, maximum: 30 }
     FinancialProfileUpdate:
       allOf: [{ $ref: '#/components/schemas/FinancialProfileInput' }, { type: object, required: [version], properties: { version: { type: integer, minimum: 1 } } }]
+      unevaluatedProperties: false
     FinancialProfile:
-      allOf: [{ $ref: '#/components/schemas/FinancialProfileInput' }, { type: object, required: [_id, version, riskCategory, riskScore, taxRegime], properties: { _id: { type: string }, version: { type: integer }, riskCategory: { type: string }, riskScore: { type: number }, taxRegime: { type: string, enum: [new, old] }, taxResult: { type: object, additionalProperties: true }, taxComparison: { type: object, additionalProperties: true } } }]
+      allOf:
+        - { $ref: '#/components/schemas/FinancialProfileInput' }
+        - type: object
+          required: [profileId, version, monthly_investment_capacity, one_time_investment_capacity, profile_schema_version, risk_capacity_score, risk_capacity_level, final_suitability_level, suitability_reason_codes]
+          properties:
+            profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+            version: { type: integer, minimum: 1 }
+            monthly_investment_capacity: { type: number, minimum: 0 }
+            one_time_investment_capacity: { type: number, minimum: 0 }
+            profile_schema_version: { type: string }
+            risk_capacity_score: { type: number, minimum: 0, maximum: 100 }
+            risk_capacity_level: { type: integer, minimum: 1, maximum: 5 }
+            final_suitability_level: { type: integer, minimum: 1, maximum: 5 }
+            suitability_reason_codes: { type: array, items: { type: string } }
+      unevaluatedProperties: false
     RecommendationRequest: { type: object, additionalProperties: false, required: [profileId], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' } } }
     RecommendationResponse:
       type: object
-      required: [recommendationId, auditId]
-      properties: { recommendationId: { type: string }, auditId: { type: string }, recommendations: { type: array, items: { type: object, additionalProperties: true } }, confidence: { type: object, additionalProperties: true }, modelVersion: { type: string }, fallback: { type: boolean }, audit: { $ref: '#/components/schemas/AuditMetadata' } }
+      required: [recommendationId, audit_id, audit_hash, instruments, model_version, recommendation_policy_version, financial_profile_schema_version, return_basis, final_risk_tier]
+      properties: { recommendationId: { type: string }, audit_id: { type: string }, audit_hash: { type: string }, instruments: { type: array, items: { type: object, additionalProperties: true } }, confidence_scores: { type: object, additionalProperties: true }, model_version: { type: string }, ml_fallback: { type: boolean }, recommendation_policy_version: { type: string }, financial_profile_schema_version: { type: string }, return_basis: { type: string, const: PRE_TAX_NOMINAL }, final_risk_tier: { type: string }, excluded_due_to_eligibility: { type: array, items: { type: object, additionalProperties: true } } }
       additionalProperties: true
     AuditMetadata:
       type: object
       properties: { _id: { type: string }, recommendationId: { type: string }, modelVersion: { type: string }, ruleVersion: { type: string }, citedRagChunkIds: { type: array, items: { type: string } }, previous_hash: { type: [string, 'null'] }, record_hash: { type: string }, hash_algorithm: { type: string }, schema_version: { type: string }, correlationId: { type: string }, createdAt: { type: string, format: date-time } }
       additionalProperties: true
     AuditVerification: { type: object, required: [valid], properties: { valid: { type: boolean }, checked: { type: integer }, reason: { type: string } } }
-    RecommendationWeightsRequest: { type: object, required: [profileId, weights], properties: { profileId: { type: string }, weights: { type: object, additionalProperties: { type: number, minimum: 0, maximum: 1 } } } }
+    RecommendationWeightsRequest: { type: object, additionalProperties: false, required: [profileId, weights], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, weights: { type: object, minProperties: 1, maxProperties: 30, additionalProperties: { type: number, minimum: 0, maximum: 1 }, description: Every recommended instrument must be present and weights must sum to exactly 1. } } }
     GoalCreateRequest:
       type: object
       additionalProperties: false
-      required: [goal_name, target_amount, target_date]
-      properties: { goal_name: { type: string, minLength: 2, maxLength: 100 }, target_amount: { type: number, minimum: 1000 }, target_date: { type: string, format: date }, current_savings: { type: number, minimum: 0, default: 0 }, profileId: { type: string }, priority: { type: string, enum: [Critical, High, Medium, Low], default: Medium } }
-    GoalUpdateRequest: { type: object, minProperties: 1, properties: { target_amount: { type: number, minimum: 1000 }, current_savings: { type: number, minimum: 0 }, priority: { type: string, enum: [Critical, High, Medium, Low] } } }
+      required: [goal_name, target_amount, target_date, current_savings, profileId, priority]
+      properties: { goal_name: { type: string, minLength: 2, maxLength: 100 }, target_amount: { type: number, minimum: 1000, maximum: 10000000000 }, target_date: { type: string, format: date }, current_savings: { type: number, minimum: 0, maximum: 10000000000 }, profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, priority: { type: string, enum: [Critical, High, Medium, Low] } }
+    GoalUpdateRequest: { type: object, additionalProperties: false, minProperties: 1, properties: { target_amount: { type: number, minimum: 1000, maximum: 10000000000 }, current_savings: { type: number, minimum: 0, maximum: 10000000000 }, priority: { type: string, enum: [Critical, High, Medium, Low] } } }
     Goal:
       allOf: [{ $ref: '#/components/schemas/GoalCreateRequest' }, { type: object, properties: { _id: { type: string }, monthly_sip_required: { type: number }, probability: { type: number }, status: { type: string } } }]
     Instrument: { type: object, required: [id, name], properties: { id: { type: string }, name: { type: string }, type: { type: string }, expectedReturn: { type: number }, risk: { type: string } }, additionalProperties: true }
-    RankInstrumentsRequest: { type: object, properties: { userProfile: { type: object, additionalProperties: true }, candidates: { type: array, maxItems: 50, items: { type: object, required: [name], properties: { name: { type: string }, id: { type: string }, rate: { oneOf: [{ type: number }, { type: string }] } } } }, options: { type: object, properties: { regimeApplied: { type: boolean }, regimeKey: { type: string }, sortBy: { type: string, enum: [score, postTaxYield, expense] } } } } }
-    ProjectionRequest: { type: object, required: [profileId], properties: { profileId: { type: string }, instruments: { type: array, minItems: 1, maxItems: 10, items: { type: string } }, monthly_investment: { type: number, minimum: 500 }, years: { type: array, minItems: 1, maxItems: 10, items: { type: integer, minimum: 1, maximum: 50 } } } }
+    RankInstrumentsRequest: { type: object, additionalProperties: false, required: [profileId, parentInstrumentId, candidates], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, parentInstrumentId: { type: string, maxLength: 50 }, candidates: { type: array, minItems: 1, maxItems: 50, items: { type: object, additionalProperties: false, required: [name], properties: { name: { type: string, maxLength: 100 }, id: { type: string, maxLength: 100 }, highlight: { type: string, maxLength: 200 }, badge: { type: string, maxLength: 100 }, provider: { type: string, maxLength: 100 }, platform: { type: string, maxLength: 100 }, minInvestment: { type: string, maxLength: 50 }, tenure: { type: string, maxLength: 50 } } } } } }
+    ProjectionRequest: { type: object, additionalProperties: false, required: [profileId, instruments, monthly_investment, years], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, instruments: { type: array, minItems: 1, maxItems: 10, items: { type: string, maxLength: 50 } }, monthly_investment: { type: number, minimum: 500, maximum: 10000000 }, years: { type: array, minItems: 1, maxItems: 10, uniqueItems: true, items: { type: integer, minimum: 1, maximum: 30 } } } }
     XirrRequest: { type: object, required: [cashflows, dates], properties: { cashflows: { type: array, minItems: 2, items: { type: number } }, dates: { type: array, minItems: 2, items: { type: string, format: date } }, guess: { type: number } } }
-    MonteCarloRequest: { type: object, required: [instrument, monthly_investment, years], properties: { instrument: { type: string }, monthly_investment: { type: number, minimum: 500 }, years: { type: integer, minimum: 1, maximum: 40 }, target_amount: { type: number, minimum: 1000 }, current_savings: { type: number, minimum: 0 }, profileId: { type: string } } }
+    MonteCarloRequest: { type: object, additionalProperties: false, required: [profileId, instrument, monthly_investment, years], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, instrument: { type: string, maxLength: 50 }, monthly_investment: { type: number, minimum: 500, maximum: 10000000 }, years: { type: integer, minimum: 1, maximum: 30 }, target_amount: { type: number, minimum: 1000, maximum: 10000000000 } } }
     TaxCalculation: { type: object, properties: { regime: { type: string }, tax: { type: number }, effectiveRate: { type: number } }, additionalProperties: true }
     TaxComparison: { type: object, properties: { old: { $ref: '#/components/schemas/TaxCalculation' }, new: { $ref: '#/components/schemas/TaxCalculation' }, recommendedRegime: { type: string, enum: [old, new] } }, additionalProperties: true }
-    PostTaxInstrument: { type: object, required: [instrumentType, nominalRate], properties: { instrumentType: { type: string }, nominalRate: { type: number, minimum: 0, maximum: 1 }, holdingYears: { type: number, minimum: 0.01, maximum: 100, default: 3 }, monthlySIP: { type: number, minimum: 0, default: 10000 } } }
-    PostTaxReturnRequest: { allOf: [{ $ref: '#/components/schemas/PostTaxInstrument' }, { type: object, required: [annualIncome], properties: { annualIncome: { type: number, minimum: 0 }, regime: { type: string, enum: [new, old], default: new }, userAge: { type: integer, minimum: 0, maximum: 120, default: 30 } } }] }
-    PostTaxReturnBatchRequest: { type: object, required: [instruments, annualIncome], properties: { instruments: { type: array, minItems: 1, maxItems: 50, items: { $ref: '#/components/schemas/PostTaxInstrument' } }, annualIncome: { type: number, minimum: 0 }, regime: { type: string, enum: [new, old], default: new }, userAge: { type: integer, minimum: 0, maximum: 120, default: 30 } } }
-    PortfolioOptimiseRequest: { type: object, required: [profileId], properties: { profileId: { type: string }, assets: { type: array, items: { type: string } }, strategy: { type: string } } }
-    RebalanceRequest: { type: object, required: [current_allocation, target_allocation], properties: { current_allocation: { type: object, additionalProperties: { type: number, minimum: 0 } }, target_allocation: { type: object, additionalProperties: { type: number, minimum: 0, maximum: 100 } }, threshold: { type: number, minimum: 0, maximum: 50, default: 2 }, partial_ratio: { type: number, minimum: 0.1, maximum: 1, default: 1 }, holding_months: { type: number, minimum: 0, maximum: 600, default: 24 } } }
+    PostTaxInstrument: { type: object, additionalProperties: false, required: [instrumentType, nominalRate, holdingYears, monthlySIP], properties: { instrumentType: { type: string, maxLength: 50 }, nominalRate: { type: number, minimum: 0, maximum: 1 }, holdingYears: { type: number, minimum: 0.01, maximum: 100 }, monthlySIP: { type: number, minimum: 0, maximum: 100000000 } } }
+    PostTaxReturnRequest: { allOf: [{ $ref: '#/components/schemas/PostTaxInstrument' }, { type: object, required: [annualIncome, regime, userAge, incomeSource], properties: { annualIncome: { type: number, minimum: 0, maximum: 1000000000 }, regime: { type: string, enum: [new, old] }, userAge: { type: integer, minimum: 0, maximum: 120 }, incomeSource: { type: string, enum: [salary, pension, family_pension, business, other] } } }], unevaluatedProperties: false }
+    PostTaxReturnBatchRequest: { type: object, additionalProperties: false, required: [instruments, annualIncome, regime, userAge, incomeSource], properties: { instruments: { type: array, minItems: 1, maxItems: 50, items: { $ref: '#/components/schemas/PostTaxInstrument' } }, annualIncome: { type: number, minimum: 0, maximum: 1000000000 }, regime: { type: string, enum: [new, old] }, userAge: { type: integer, minimum: 0, maximum: 120 }, incomeSource: { type: string, enum: [salary, pension, family_pension, business, other] } } }
+    PortfolioOptimiseRequest: { type: object, additionalProperties: false, required: [profileId, assets, strategy], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, assets: { type: array, minItems: 2, maxItems: 20, uniqueItems: true, items: { type: string, maxLength: 50 } }, strategy: { type: string, enum: [min_variance, max_sharpe, risk_parity] } } }
+    RebalanceRequest: { type: object, additionalProperties: false, required: [profileId, current_allocation, target_allocation, threshold, partial_ratio, holding_months], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, current_allocation: { type: object, minProperties: 1, maxProperties: 30, additionalProperties: { type: number, minimum: 0, maximum: 1000000000 } }, target_allocation: { type: object, minProperties: 1, maxProperties: 30, additionalProperties: { type: number, minimum: 0, maximum: 100 }, description: Weights must sum to exactly 100. }, threshold: { type: number, minimum: 0, maximum: 50 }, partial_ratio: { type: number, minimum: 0.1, maximum: 1 }, holding_months: { type: number, minimum: 0, maximum: 600 } } }
     PortfolioResult: { type: object, properties: { weights: { type: object, additionalProperties: { type: number } }, trades: { type: array, items: { type: object, additionalProperties: true } } }, additionalProperties: true }
     ChatRequest: { type: object, additionalProperties: false, required: [message], properties: { message: { type: string, minLength: 1, maxLength: 1000 }, session_id: { type: string, maxLength: 100 } } }
     ChatResponse: { type: object, properties: { response: { type: string }, session_id: { type: string }, citations: { type: array, items: { type: string } } }, additionalProperties: true }
-    RegimeAdjustRequest: { type: object, required: [baseWeights], properties: { baseWeights: { type: object, minProperties: 1, additionalProperties: { type: number, minimum: 0, maximum: 1 } }, regimeKey: { type: string, default: normal } } }
+    RegimeAdjustRequest: { type: object, additionalProperties: false, required: [baseWeights, regimeKey], properties: { baseWeights: { type: object, minProperties: 1, maxProperties: 30, additionalProperties: { type: number, minimum: 0, maximum: 1 }, description: Weights must sum to exactly 1. }, regimeKey: { type: string, enum: [normal, geopolitical_conflict, pandemic_health_crisis, broad_market_crash, inflation_spike, rate_cut_cycle] } } }
     HealthStatus: { type: object, required: [status], properties: { status: { type: string }, timestamp: { type: string, format: date-time }, service: { type: string } }, additionalProperties: true }

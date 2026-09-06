@@ -5,6 +5,8 @@
  * bearer compatibility is memory-only and never persists authentication material.
  */
 
+import { toFinancialProfilePayload } from '../utils/financialProfile';
+
 const API_BASE = (import.meta.env.VITE_API_URL || '/api').replace(/\/+$/, '');
 const configuredTimeout = Number(import.meta.env.VITE_API_TIMEOUT_MS);
 const DEFAULT_TIMEOUT_MS = Number.isFinite(configuredTimeout) && configuredTimeout >= 1000
@@ -322,89 +324,22 @@ export async function restoreSession(options = {}) {
 }
 
 // ─── PROFILE ─────────────────────────────────────────────
-export async function buildProfile(
-  firstArg, age, monthlySavings, regime = 'new', investmentHorizon = 15,
-  liquidSavings = 0, existingDebt = 0, dependents = 0, emergencyFundMonths = 0,
-  riskTolerance = 'Moderate', goalType = 'wealth-building',
-  totalCTC = 0, basicComponent = 0, monthlyTakeHome = 0,
-  soldPropertyAmount = 0, hasLumpSum = false, lumpSumAmount = 0
-) {
-  if (typeof firstArg === 'object' && firstArg !== null) {
-    const p = firstArg;
-    const requestOptions = age && typeof age === 'object' ? age : {};
-    const monthlyIncome = Number(p.monthly_income !== undefined ? p.monthly_income : (p.monthlyIncome || 0));
-    const annualIncome = monthlyIncome * 12;
-    const totalCtcVal = Number(p.total_ctc !== undefined ? p.total_ctc : (p.totalCTC || annualIncome));
-    const basicCompVal = Number(p.basic_component !== undefined ? p.basic_component : (p.basicComponent || (totalCtcVal * 0.5)));
-    const takeHomeVal = Number(p.monthly_take_home !== undefined ? p.monthly_take_home : (p.monthlyTakeHome || monthlyIncome));
-    const hasLump = Boolean(p.has_lump_sum !== undefined ? p.has_lump_sum : p.hasLumpSum);
-    const lumpAmount = hasLump ? Number(p.lump_sum_amount !== undefined ? p.lump_sum_amount : (p.lumpSumAmount || 0)) : 0;
-
-    const payload = {
-      monthly_income: monthlyIncome,
-      age: Number(p.age || 30),
-      monthly_savings: Number(p.monthly_savings !== undefined ? p.monthly_savings : (p.monthlySavings || 0)),
-      regime: p.regime || p.taxRegime || 'new',
-      investment_horizon: Number(p.investment_horizon !== undefined ? p.investment_horizon : (p.investmentHorizon || 15)),
-      liquid_savings: Number(p.liquid_savings !== undefined ? p.liquid_savings : (p.liquidSavings || 0)),
-      existing_debt: Number(p.existing_debt !== undefined ? p.existing_debt : (p.existingDebt || 0)),
-      dependents: Number(p.dependents !== undefined ? p.dependents : 0),
-      emergency_fund_months: Number(p.emergency_fund_months !== undefined ? p.emergency_fund_months : (p.emergencyFundMonths || 0)),
-      risk_tolerance: p.risk_tolerance || p.riskTolerance || 'Moderate',
-      goal_type: p.goal_type || p.goalType || 'wealth-building',
-      total_ctc: totalCtcVal,
-      basic_component: basicCompVal,
-      monthly_take_home: takeHomeVal,
-      sold_property_amount: Number(p.sold_property_amount !== undefined ? p.sold_property_amount : (p.soldPropertyAmount || 0)),
-      has_lump_sum: hasLump,
-      lump_sum_amount: lumpAmount,
-      goals: p.goals || p.investment_goals || undefined,
-      investment_goals: p.investment_goals || p.goals || undefined,
-      // Tax deduction fields (WG-DEDUCTIONS-COLLECTION)
-      section_80c: Number(p.section80C !== undefined ? p.section80C : (p.section_80c || 0)),
-      section_80ccd1b: Number(p.section80CCD1B !== undefined ? p.section80CCD1B : (p.section_80ccd1b || p.nps80CCD1B || p.section80CCD || 0)),
-      section_80d_self: Number(p.section80D_self !== undefined ? p.section80D_self : (p.section_80d_self || 0)),
-      section_80d_parents: Number(p.section80D_parents !== undefined ? p.section80D_parents : (p.section_80d_parents || 0)),
-      parents_senior: Boolean(p.parentsSenior !== undefined ? p.parentsSenior : p.parents_senior),
-      hra: Number(p.hra || 0),
-      home_loan_interest: Number(p.homeLoanInterest !== undefined ? p.homeLoanInterest : (p.home_loan_interest || 0)),
-      section_80eea: Number(p.section80EEA !== undefined ? p.section80EEA : (p.section_80eea || 0)),
-      income_source: p.incomeSource || p.income_source || 'salary',
-    };
-    return request('POST', '/profile/build', payload, requestOptions);
-  }
-
-  // Backward-compatible positional arguments handling
-  const monthlyIncome = firstArg;
-  return request('POST', '/profile/build', {
-    monthly_income: monthlyIncome,
-    age,
-    monthly_savings: monthlySavings,
-    regime,
-    investment_horizon: investmentHorizon,
-    liquid_savings: liquidSavings,
-    existing_debt: existingDebt,
-    dependents,
-    emergency_fund_months: emergencyFundMonths,
-    risk_tolerance: riskTolerance,
-    goal_type: goalType,
-    total_ctc: totalCTC || (monthlyIncome * 12),
-    basic_component: basicComponent || ((totalCTC || (monthlyIncome * 12)) * 0.5),
-    monthly_take_home: monthlyTakeHome || monthlyIncome,
-    sold_property_amount: soldPropertyAmount,
-    has_lump_sum: hasLumpSum,
-    lump_sum_amount: hasLumpSum ? lumpSumAmount : 0
-  });
+export async function buildProfile(profile, requestOptions = {}) {
+  return request('POST', '/profile/build', toFinancialProfilePayload(profile), requestOptions);
 }
 
 export async function getCurrentProfile(options = {}) {
   return request('GET', '/profile/current', null, { retries: 0, ...options });
 }
 
-export async function updateProfile(profileId, payload) {
-  return request('PUT', `/profile/${profileId}`, payload);
+export async function updateProfile(profileId, profile, requestOptions = {}) {
+  return request(
+    'PUT',
+    `/profile/${profileId}`,
+    toFinancialProfilePayload(profile, { requireVersion: true }),
+    requestOptions,
+  );
 }
-
 // ─── RECOMMENDATIONS ─────────────────────────────────────
 export async function getRecommendations(profileId, options = {}) {
   return request('POST', '/recommend', { profileId }, options);
@@ -420,36 +355,46 @@ export async function getInstruments(type, sort = 'rate', order = 'desc', limit 
   return request('GET', `/instruments?${params.toString()}`);
 }
 
-export async function rankInvestmentCandidates(candidates, userProfile, options = {}, requestOptions = {}) {
+export async function rankInvestmentCandidates(profileId, parentInstrumentId, candidates, requestOptions = {}) {
+  const displayCandidates = (candidates || []).map(candidate => ({
+    ...(candidate.id ? { id: candidate.id } : {}),
+    name: candidate.name,
+    ...(candidate.highlight ? { highlight: candidate.highlight } : {}),
+    ...(candidate.badge ? { badge: candidate.badge } : {}),
+    ...(candidate.provider ? { provider: candidate.provider } : {}),
+    ...(candidate.platform ? { platform: candidate.platform } : {}),
+    ...(candidate.minInvestment ? { minInvestment: candidate.minInvestment } : {}),
+    ...(candidate.tenure ? { tenure: candidate.tenure } : {}),
+  }));
   return request('POST', '/instruments/rank-wti', {
-    candidates,
-    userProfile,
-    options,
+    profileId,
+    parentInstrumentId,
+    candidates: displayCandidates,
   }, requestOptions);
 }
 
 // ─── PROJECTIONS ─────────────────────────────────────────
 export async function getProjections(profileId, instruments, monthlyInvestment, years) {
-  return request('POST', '/projection', {
+  const payload = {
     profileId,
     instruments,
     monthly_investment: monthlyInvestment,
-    years: years || [5, 10, 15, 20],
-  });
+  };
+  if (years !== undefined) payload.years = years;
+  return request('POST', '/projection', payload);
 }
 
 // ─── MONTE CARLO ─────────────────────────────────────────
-export async function runMonteCarlo(instrument, monthlyInvestment, years, targetAmount, profileId = null, currentSavings = 0) {
+export async function runMonteCarlo(instrument, monthlyInvestment, years, targetAmount, profileId) {
   const payload = {
+    profileId,
     instrument,
     monthly_investment: monthlyInvestment,
     years,
-    current_savings: currentSavings || 0,
   };
   if (targetAmount !== null && targetAmount !== undefined && targetAmount !== '') {
     payload.target_amount = targetAmount;
   }
-  if (profileId) payload.profileId = profileId;
   return request('POST', '/montecarlo/montecarlo', payload);
 }
 
@@ -489,16 +434,16 @@ export async function sendChatMessage(message, sessionId, options = {}) {
   return request('POST', '/chat/message', { message, session_id: sessionId }, { timeoutMs: 45000, ...options });
 }
 
-export async function getChatHistory(sessionId) {
+export async function getChatHistory(sessionId, options = {}) {
   const params = new URLSearchParams({ session_id: String(sessionId), limit: '50' });
-  return request('GET', `/chat/history?${params.toString()}`);
+  return request('GET', `/chat/history?${params.toString()}`, null, options);
 }
 
 export async function clearChatSession(sessionId) {
   return request('DELETE', `/chat/session/${encodeURIComponent(sessionId)}`);
 }
 
-export async function computeTax(income, regime = 'new', deductions = {}) {
+export async function computeTax(income, regime, deductions = {}) {
   const params = new URLSearchParams({ income: String(income), regime });
   Object.entries(deductions).forEach(([k, v]) => {
     if (v !== undefined && v !== null && v !== '') {
@@ -518,8 +463,9 @@ export async function compareTax(income, deductions = {}) {
   return request('GET', `/tax/compare?${params.toString()}`);
 }
 
-export async function rebalancePortfolio(currentAllocation, targetAllocation, threshold = 2.0, partialRatio = 1.0, holdingMonths = 24) {
+export async function rebalancePortfolio(profileId, currentAllocation, targetAllocation, threshold, partialRatio, holdingMonths) {
   return request('POST', '/portfolio/rebalance', {
+    profileId,
     current_allocation: currentAllocation,
     target_allocation: targetAllocation,
     threshold,
@@ -529,17 +475,19 @@ export async function rebalancePortfolio(currentAllocation, targetAllocation, th
 }
 
 export async function updateRecommendationWeights(profileId, weights) {
-  const numericWeights = Object.fromEntries(
-    Object.entries(weights || {}).map(([key, value]) => [key, Math.max(0, Number(value) || 0)])
-  );
-  const total = Object.values(numericWeights).reduce((sum, value) => sum + value, 0);
-  const normalizedWeights = total > 0
-    ? Object.fromEntries(Object.entries(numericWeights).map(([key, value]) => [key, value / total]))
-    : numericWeights;
-  return request('POST', '/recommend/weights', { profileId, weights: normalizedWeights });
+  if (!weights || typeof weights !== 'object' || Array.isArray(weights)) {
+    throw new TypeError('weights must be an explicit instrument-weight map');
+  }
+  const entries = Object.entries(weights);
+  if (!entries.length || entries.some(([, value]) => !Number.isFinite(value) || value < 0 || value > 1)) {
+    throw new TypeError('Every recommendation weight must be a number from 0 to 1');
+  }
+  const total = entries.reduce((sum, [, value]) => sum + value, 0);
+  if (Math.abs(total - 1) > 0.0001) throw new RangeError('Recommendation weights must sum to exactly 1');
+  return request('POST', '/recommend/weights', { profileId, weights });
 }
 
-export async function optimisePortfolio(profileId, assets, strategy = 'max_sharpe') {
+export async function optimisePortfolio(profileId, assets, strategy) {
   return request('POST', '/portfolio/optimise', {
     profileId,
     assets,
@@ -548,15 +496,15 @@ export async function optimisePortfolio(profileId, assets, strategy = 'max_sharp
 }
 
 // ─── POST-TAX RETURN (WG-038: backend single source of truth) ────
-export async function computePostTaxReturn(instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge) {
+export async function computePostTaxReturn(instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource) {
   return request('POST', '/tax/post-tax-return', {
-    instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge,
+    instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource,
   });
 }
 
-export async function computePostTaxReturnBatch(instruments, annualIncome, regime, userAge) {
+export async function computePostTaxReturnBatch(instruments, annualIncome, regime, userAge, incomeSource) {
   return request('POST', '/tax/post-tax-return/batch', {
-    instruments, annualIncome, regime, userAge,
+    instruments, annualIncome, regime, userAge, incomeSource,
   });
 }
 

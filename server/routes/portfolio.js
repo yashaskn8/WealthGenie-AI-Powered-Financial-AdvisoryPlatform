@@ -1,158 +1,112 @@
-/**
- * WealthGenie Portfolio Optimisation Route
- * ─────────────────────────────────────────
- * POST /api/portfolio/optimise
- *
- * Accepts an asset universe and strategy, computes post-tax returns
- * for the authenticated user's tax profile, and returns optimal weights.
- *
- * @module routes/portfolio
- */
-
 import { Router } from 'express';
-import { verifyJWT, isOwner, isValidObjectId } from '../middleware/authMiddleware.js';
+import { verifyJWT } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
 import { optimisePortfolio, computeRebalance } from '../services/portfolioEngine.js';
-import { calculatePostTaxReturnSafe } from '../services/postTaxCalculator.js';
 import { INSTRUMENT_PARAMS } from '../services/instrumentConstants.js';
+import {
+  assertPortfolioSuitable,
+  enforceAllocationTargets,
+  resolveConcentrationCap,
+} from '../services/RecommendationPipeline.js';
+import { buildRecommendationProfile } from '../services/recommendationProfile.js';
 import FinancialProfile from '../models/FinancialProfile.js';
-import { validate, rebalanceSchema } from '../validation/schemas.js';
+import {
+  personalizedOptimiseSchema,
+  personalizedRebalanceSchema,
+  validateStrict,
+} from '../validation/financialSchemas.js';
 
 const router = Router();
 
-/** Default asset universe when client doesn't specify */
-const DEFAULT_ASSETS = ['Equity_MF', 'Debt_MF', 'Gold', 'PPF', 'FD'];
+function loadOwnedProfile(profileId, userId) {
+  return FinancialProfile.findOne({ _id: profileId, userId }).lean();
+}
 
-/** Allowed optimisation strategies */
-const VALID_STRATEGIES = ['min_variance', 'max_sharpe', 'risk_parity'];
-
-/**
- * POST /api/portfolio/optimise [Protected]
- *
- * Body:
- *   profileId  {string}    — MongoDB ObjectId for the user's FinancialProfile
- *   assets     {string[]}  — (optional) asset classes to include (default: DEFAULT_ASSETS)
- *   strategy   {string}    — (optional) 'min_variance' | 'max_sharpe' | 'risk_parity' (default: 'max_sharpe')
- *
- * Response:
- *   {
- *     strategy,
- *     weights:             { asset: weight },
- *     expected_return,
- *     volatility,
- *     sharpe_ratio,
- *     risk_contributions?  (only for risk_parity)
- *   }
- */
-router.post(
-  '/optimise',
-  verifyJWT,
-  asyncHandler(async (req, res) => {
-    const { profileId, assets, strategy } = req.body;
-
-    /* ── Validate profileId ─────────────────────────────────────────── */
-    if (!profileId || !isValidObjectId(profileId)) {
-      throw createError(400, `Invalid profileId: ${profileId}`, 'A valid profile ID is required.');
+function validateTargetConcentration(targetAllocation) {
+  const groupTotals = new Map();
+  for (const [key, weight] of Object.entries(targetAllocation)) {
+    const cap = resolveConcentrationCap({ id: key, type: key, name: key });
+    if (cap) groupTotals.set(cap.key, (groupTotals.get(cap.key) || 0) + Number(weight));
+  }
+  for (const [key, total] of groupTotals.entries()) {
+    const cap = resolveConcentrationCap({ id: key, type: key, name: key });
+    if (cap && total > cap.maxPct + 0.0001) {
+      const error = createError(400, `${key} allocation exceeds ${cap.maxPct}%`, 'Allocation exceeds suitability limits.');
+      error.code = 'CONCENTRATION_CAP_EXCEEDED';
+      throw error;
     }
+  }
+}
 
-    /* ── Validate strategy ──────────────────────────────────────────── */
-    const selectedStrategy = strategy || 'max_sharpe';
-    if (!VALID_STRATEGIES.includes(selectedStrategy)) {
-      throw createError(
-        400,
-        `Invalid strategy: ${strategy}`,
-        `Strategy must be one of: ${VALID_STRATEGIES.join(', ')}`
-      );
+router.post('/optimise', verifyJWT, validateStrict(personalizedOptimiseSchema), asyncHandler(async (req, res) => {
+  const { profileId, assets, strategy } = req.body;
+  const stored = await loadOwnedProfile(profileId, req.user.userId);
+  if (!stored) throw createError(404, 'Profile not found or access denied', 'Financial profile not found.');
+  const profile = buildRecommendationProfile(stored);
+
+  for (const key of assets) {
+    if (!INSTRUMENT_PARAMS[key]) throw createError(400, `Unknown asset key: ${key}`, 'Unknown instrument.');
+  }
+  const suitability = assertPortfolioSuitable(profile, assets);
+  const nominalReturns = assets.map(key => INSTRUMENT_PARAMS[key].nominalRate / 100);
+  const rawResult = optimisePortfolio(assets, nominalReturns, strategy);
+  const capped = enforceAllocationTargets(assets.map(key => {
+    const rawWeight = Number(rawResult.weights[key]);
+    if (!Number.isFinite(rawWeight)) {
+      throw createError(500, `Optimizer omitted a finite weight for ${key}`, 'Portfolio optimization failed.');
     }
-
-    /* ── Validate and resolve asset keys ────────────────────────────── */
-    const assetKeys = Array.isArray(assets) && assets.length > 0 ? assets : DEFAULT_ASSETS;
-
-    // Ensure every requested asset exists in INSTRUMENT_PARAMS
-    for (const key of assetKeys) {
-      if (!INSTRUMENT_PARAMS[key]) {
-        throw createError(
-          400,
-          `Unknown asset key: ${key}`,
-          `"${key}" is not a recognised instrument. Check /api/instruments for valid keys.`
-        );
-      }
-    }
-
-    if (assetKeys.length < 2) {
-      throw createError(
-        400,
-        'At least 2 assets required for portfolio optimisation',
-        'Please provide at least 2 asset classes for meaningful diversification.'
-      );
-    }
-
-    /* ── Fetch profile ──────────────────────────────────────────────── */
-    const profile = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
-    if (!profile) {
-      throw createError(404, `Profile not found: ${profileId}`, 'Financial profile not found.');
-    }
-    if (!isOwner(profile, req.user.userId)) {
-      throw createError(403, `Unauthorised profile access: ${profileId}`, 'Access denied.');
-    }
-
-    /* ── Compute post-tax returns for each asset ────────────────────── */
-    const postTaxReturns = assetKeys.map((key) => {
-      const nominalRate = INSTRUMENT_PARAMS[key].nominalRate / 100; // decimal
-      const ptResult = calculatePostTaxReturnSafe(
-        key,
-        nominalRate,
-        profile.annualIncome,
-        profile.investmentHorizon || 15,
-        profile.taxRegime || 'new'
-      );
-      return ptResult.postTaxReturn; // already decimal
-    });
-
-    /* ── Run optimiser ──────────────────────────────────────────────── */
-    const result = optimisePortfolio(assetKeys, postTaxReturns, selectedStrategy);
-
-    /* ── Format response ────────────────────────────────────────────── */
-    const response = {
-      strategy: result.strategy,
-      weights: result.weights,
-      expected_return: result.expectedReturn,
-      volatility: result.volatility,
+    return {
+      id: key,
+      type: key,
+      name: INSTRUMENT_PARAMS[key].name,
+      score: rawWeight * 100,
     };
+  }));
+  const weights = Object.fromEntries(capped.map(instrument => [instrument.id, instrument.allocationWeight]));
 
-    if (result.sharpe !== undefined) {
-      response.sharpe_ratio = result.sharpe;
-    }
-    if (result.riskContributions) {
-      response.risk_contributions = result.riskContributions;
-    }
+  res.json({
+    strategy: rawResult.strategy,
+    weights,
+    expected_return: Object.entries(weights).reduce(
+      (sum, [key, weight]) => sum + INSTRUMENT_PARAMS[key].nominalRate / 100 * weight,
+      0,
+    ),
+    volatility: rawResult.volatility,
+    sharpe_ratio: rawResult.sharpe,
+    return_basis: 'PRE_TAX_NOMINAL',
+    simulation_classification: 'PROFILE_GROUNDED',
+    final_suitability_risk: suitability.finalRisk,
+    suitability_reason_codes: suitability.reasonCodes,
+  });
+}));
 
-    res.json(response);
-  })
-);
+router.post('/rebalance', verifyJWT, validateStrict(personalizedRebalanceSchema), asyncHandler(async (req, res) => {
+  const {
+    profileId, current_allocation, target_allocation, threshold, partial_ratio, holding_months,
+  } = req.body;
+  const stored = await loadOwnedProfile(profileId, req.user.userId);
+  if (!stored) throw createError(404, 'Profile not found or access denied', 'Financial profile not found.');
+  const profile = buildRecommendationProfile(stored);
 
-/**
- * POST /api/portfolio/rebalance [Protected]
- * Calculates weight drift, overweight/underweight positions, suggested correction actions,
- * and before/after CAGRs and risk scores.
- */
-router.post(
-  '/rebalance',
-  verifyJWT,
-  validate(rebalanceSchema),
-  asyncHandler(async (req, res) => {
-    const { current_allocation, target_allocation, threshold, partial_ratio, holding_months } = req.body;
+  const currentKeys = Object.keys(current_allocation);
+  if (currentKeys.some(key => !INSTRUMENT_PARAMS[key])) {
+    throw createError(400, 'Current allocation contains an unknown instrument.', 'Unknown instrument.');
+  }
+  const targetTotal = Object.values(target_allocation).reduce((sum, value) => sum + Number(value), 0);
+  if (Math.abs(targetTotal - 100) > 0.01) {
+    throw createError(400, 'Target allocation must sum to exactly 100%.', 'Invalid target allocation.');
+  }
+  const positiveTargets = Object.entries(target_allocation).filter(([, weight]) => weight > 0).map(([key]) => key);
+  const suitability = assertPortfolioSuitable(profile, positiveTargets);
+  validateTargetConcentration(target_allocation);
 
-    const result = computeRebalance(
-      current_allocation,
-      target_allocation,
-      threshold,
-      partial_ratio,
-      holding_months
-    );
-
-    res.json(result);
-  })
-);
+  const result = computeRebalance(current_allocation, target_allocation, threshold, partial_ratio, holding_months);
+  res.json({
+    ...result,
+    simulation_classification: 'PROFILE_GROUNDED',
+    final_suitability_risk: suitability.finalRisk,
+    suitability_reason_codes: suitability.reasonCodes,
+  });
+}));
 
 export default router;

@@ -104,6 +104,8 @@ def get_model_registry(db_path=None):
             ) from e
 
     from model.registry.registry_store import ModelRegistry
-    registry = ModelRegistry(db_path=db_path)
+    configured_local_path = os.environ.get("ML_REGISTRY_DB_PATH", "").strip()
+    resolved_db_path = db_path or (configured_local_path if configured_local_path else None)
+    registry = ModelRegistry(db_path=resolved_db_path)
     logger.info("Using SQLite ModelRegistry (backend=local_disk)")
     return registry

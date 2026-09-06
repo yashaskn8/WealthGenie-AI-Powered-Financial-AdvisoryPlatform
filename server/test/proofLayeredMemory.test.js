@@ -1,9 +1,11 @@
 import { describe, it, before, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { LayeredMemoryManager } from '../services/layeredMemoryManager.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 describe('CLAIM 4 — Layered Long-Term Memory Architecture Verification Suite', () => {
   const TEST_USER = 'user-memory-test-001';
+  const PROFILE = canonicalProfile();
 
   afterEach(() => {
     LayeredMemoryManager.resetStores();
@@ -33,7 +35,7 @@ describe('CLAIM 4 — Layered Long-Term Memory Architecture Verification Suite',
     // Verify it's absent from prompt context assembly too
     const ctx = LayeredMemoryManager.buildRetrievedContext(
       'Tell me about ELSS',
-      { userId: TEST_USER },
+      PROFILE,
       [], null, [],
       { userId: TEST_USER, now: baseTime + 600 }
     );
@@ -77,15 +79,16 @@ describe('CLAIM 4 — Layered Long-Term Memory Architecture Verification Suite',
     const midTerm = LayeredMemoryManager.getActiveMidTermMemories(TEST_USER, farFuture);
     assert.equal(midTerm.length, 0, 'Mid-term memory must have decayed');
 
-    // Build context at far future — long-term facts in profileMemory, no mid-term
+    // Long-term facts stay in a clearly non-authoritative compartment.
     const ctx = LayeredMemoryManager.buildRetrievedContext(
       'What is my retirement plan?',
-      { userId: TEST_USER, age: 35 },
+      PROFILE,
       [], null, [],
       { userId: TEST_USER, now: farFuture }
     );
-    assert.equal(ctx.profileMemory.spouseName, 'Priya', 'Long-term fact must appear in profileMemory');
-    assert.equal(ctx.profileMemory.retirementGoalAge, 55, 'Long-term fact must appear in profileMemory');
+    assert.equal(ctx.profileMemory.spouseName, undefined, 'Long-term facts must not become profile inputs');
+    assert.equal(ctx.nonAuthoritativeMemory.spouseName, 'Priya');
+    assert.equal(ctx.nonAuthoritativeMemory.retirementGoalAge, 55);
     assert.equal(ctx.midTermMemory.length, 0, 'No decayed mid-term memories in context');
 
     // OUT-OF-BAND TAMPERING TEST: Mutate long-term fact spouseName out-of-band (simulating DB mutation)
@@ -102,12 +105,12 @@ describe('CLAIM 4 — Layered Long-Term Memory Architecture Verification Suite',
     // Assembled context must also exclude tampered spouseName
     const tamperedCtx = LayeredMemoryManager.buildRetrievedContext(
       'What is my retirement plan?',
-      { userId: TEST_USER, age: 35 },
+      PROFILE,
       [], null, [],
       { userId: TEST_USER, now: farFuture }
     );
-    assert.equal(tamperedCtx.profileMemory.spouseName, undefined, 'Tampered long-term fact spouseName must not appear in profileMemory');
-    assert.equal(tamperedCtx.profileMemory.retirementGoalAge, 55, 'Untampered long-term fact retirementGoalAge must appear in profileMemory');
+    assert.equal(tamperedCtx.nonAuthoritativeMemory.spouseName, undefined);
+    assert.equal(tamperedCtx.nonAuthoritativeMemory.retirementGoalAge, 55);
   });
 
   it('3. Relevance + recency scoring ranks query-relevant memories higher', () => {
@@ -155,14 +158,14 @@ describe('CLAIM 4 — Layered Long-Term Memory Architecture Verification Suite',
     const session3Time = baseTime + 500;
     const ctx = LayeredMemoryManager.buildRetrievedContext(
       'What is my retirement goal?',
-      { userId: TEST_USER, age: 32 },
+      canonicalProfile({ age: 32 }),
       [], null, [],
       { userId: TEST_USER, now: session3Time }
     );
 
-    // Long-term fact from Session 1 must be present
-    assert.equal(ctx.profileMemory.primaryGoal, 'Retire by 50 with ₹5Cr corpus',
-      'Session 1 long-term fact must influence Session 3');
+    assert.equal(ctx.profileMemory.primaryGoal, undefined,
+      'Conversation memory must not become an authoritative profile goal');
+    assert.equal(ctx.nonAuthoritativeMemory.primaryGoal, 'Retire by 50 with ₹5Cr corpus');
 
     // Mid-term from Session 2 must be absent (decayed)
     assert.equal(ctx.midTermMemory.length, 0,

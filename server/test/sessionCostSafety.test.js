@@ -7,6 +7,7 @@ import User from '../models/User.js';
 import ConversationHistory from '../models/ConversationHistory.js';
 import Goal from '../models/Goal.js';
 import Recommendation from '../models/Recommendation.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 describe('Phase 4: Session-Level Cost & Runaway-Loop Safety Protection', () => {
   const testUserId = '64b0f0000000000000000001';
@@ -18,15 +19,13 @@ describe('Phase 4: Session-Level Cost & Runaway-Loop Safety Protection', () => {
         lean: async () => ({
           _id: '64b0f0000000000000000002',
           userId: testUserId,
-          age: 32,
-          income: 150000,
-          annualIncome: 1800000,
-          savings: 45000,
-          monthlySavings: 45000,
-          riskCategory: 'Moderate',
-          taxRegime: 'new',
-          investmentHorizon: 15,
-          recommendedEquityAllocation: 60,
+          ...canonicalProfile({
+            age: 32,
+            monthlyTakeHome: 150000,
+            monthlySavings: 45000,
+            liquidSavings: 450000,
+            investmentHorizonYears: 15,
+          }),
         }),
       }),
     });

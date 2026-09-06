@@ -19,6 +19,7 @@ import Recommendation from '../models/Recommendation.js';
 import Goal from '../models/Goal.js';
 import User from '../models/User.js';
 import ConversationHistory from '../models/ConversationHistory.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 const mockUserId = '60d5ecb8b3b3a72d9c8e4a11';
 const mockSessionId = 'test-session-123';
@@ -32,13 +33,13 @@ const mockUser = {
 const mockProfile = {
   _id: '60d5ecb8b3b3a72d9c8e4a22',
   userId: mockUserId,
-  age: 32,
-  annualIncome: 1200000,
-  monthlySavings: 30000,
-  riskCategory: 'Moderate',
-  taxRegime: 'new',
-  investmentHorizon: 15,
-  recommendedEquityAllocation: 60,
+  ...canonicalProfile({
+    age: 32,
+    monthlySavings: 30000,
+    investmentHorizonYears: 15,
+    hasLumpSum: true,
+    lumpSumAmount: 500000,
+  }),
 };
 
 describe('GenieChat V3 Enterprise Architecture Tests', () => {
@@ -173,7 +174,8 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
   it('Phase 4 & 5: LayeredMemoryManager constructs context dynamically without dumping full raw history', () => {
     const memory = LayeredMemoryManager.buildRetrievedContext('SIP planning', mockProfile, [], null, []);
     assert.equal(memory.profileMemory.age, 32);
-    assert.equal(memory.preferenceMemory.taxRegime, 'new');
+    assert.equal(memory.preferenceMemory.riskTolerance, 'Moderate');
+    assert.equal(memory.preferenceMemory.taxRegime, undefined);
 
     const formattedPrompt = LayeredMemoryManager.formatForPrompt(memory);
     assert.match(formattedPrompt, /"age":\s*32/);
@@ -328,6 +330,6 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
 
     assert.equal(result.provider, 'local_fallback');
     assert.equal(result.tool_results, undefined);
-    assert.match(result.response, /connectivity issues|Portfolio Allocation/i);
+    assert.match(result.response, /live model is temporarily unavailable|authoritative recommendation/i);
   });
 });

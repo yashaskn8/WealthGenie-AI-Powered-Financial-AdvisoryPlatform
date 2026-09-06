@@ -1,81 +1,78 @@
 import { Router } from 'express';
-import { verifyJWT, isOwner, isValidObjectId } from '../middleware/authMiddleware.js';
+import { verifyJWT } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
-import { validate, projectionSchema } from '../validation/schemas.js';
+import { personalizedProjectionSchema, validateStrict } from '../validation/financialSchemas.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import { generateProjections } from '../services/projectionEngine.js';
-import { calculatePostTaxReturnSafe } from '../services/postTaxCalculator.js';
 import { computeXIRR, computeSIPXIRR } from '../services/xirrCalculator.js';
 import { buildRateLookup } from '../services/instrumentConstants.js';
+import { buildRecommendationProfile, buildProfileGroundedSimulation } from '../services/recommendationProfile.js';
+import { assertPortfolioSuitable } from '../services/RecommendationPipeline.js';
 
 const router = Router();
 
 const RATE_LOOKUP = buildRateLookup();
+const PROJECTION_INFLATION_ASSUMPTION = 0.05;
+const PERSONALIZED_CONTRIBUTION_STEP_UP = 0;
 
 /**
  * POST /api/projection [Protected]
  * Generate wealth projections for multiple instruments over time.
  */
-router.post('/', verifyJWT, validate(projectionSchema), asyncHandler(async (req, res) => {
+router.post('/', verifyJWT, validateStrict(personalizedProjectionSchema), asyncHandler(async (req, res) => {
   const { profileId, instruments, monthly_investment, years } = req.body;
 
-  if (!isValidObjectId(profileId)) {
-    throw createError(400, 'Invalid profileId', 'Invalid profile ID.');
-  }
-
-  const profile = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
-  if (!profile) {
+  const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
+  if (!stored) {
     throw createError(404, `Profile not found: ${profileId}`, 'Profile not found.');
   }
-
-  // Authorization: verify the profile belongs to the requesting user
-  if (!isOwner(profile, req.user.userId)) {
-    throw createError(403, `Unauthorized profile access: ${profileId}`, 'Access denied.');
+  const profile = buildRecommendationProfile(stored);
+  const projectionYears = years;
+  if (projectionYears.some(year => year > profile.investmentHorizonYears)) {
+    throw createError(400, 'Projection years cannot exceed the Financial Profile horizon.', 'Projection horizon exceeds profile.');
   }
+  const simulation = buildProfileGroundedSimulation(profile, {
+    monthlyInvestment: monthly_investment,
+    years: Math.max(...projectionYears),
+  });
+  const suitability = assertPortfolioSuitable(profile, instruments);
 
-  const investAmount = monthly_investment || profile.savings;
-  const projYears = years || [5, 10, 15, 20];
-
-  // Guard: reject zero or negative investment amounts instead of producing misleading flat-line projections
-  if (!Number.isFinite(investAmount) || investAmount <= 0) {
-    throw createError(400,
-      `Invalid investment amount: ${investAmount} (monthly_investment: ${monthly_investment}, profile.savings: ${profile.savings})`,
-      'Monthly investment amount must be greater than zero.'
-    );
-  }
-
-  // Build instrument list with post-tax rates
-  const instKeys = instruments || ['FD', 'ELSS', 'Equity_MF', 'Debt_MF'];
+  // Use authoritative pre-tax nominal rates. A tax profile is not inferred.
+  const instKeys = instruments;
   const instList = instKeys.map(key => {
     const nominalRate = RATE_LOOKUP[key];
     if (nominalRate === undefined) {
-      console.warn(`[Projection] Unknown instrument key: '${key}'. Using 7.0% default. Add this key to RATE_LOOKUP.`);
+      throw createError(400, `Unknown instrument key: ${key}`, 'Unknown instrument.');
     }
-    const safeRate = nominalRate ?? 7.0;
-    const ptResult = calculatePostTaxReturnSafe(
-      key,
-      safeRate / 100,
-      profile.annualIncome,
-      profile.investmentHorizon || 15,
-      profile.taxRegime || 'new'
-    );
-
-    // Invariant check: post-tax rate should not exceed nominal rate
-    if (ptResult.effectiveYield > safeRate + 0.01) {
-      console.error(`[Projection INVARIANT] ${key}: effectiveYield ${ptResult.effectiveYield}% exceeds nominal ${safeRate}%. Clamping.`);
-      ptResult.effectiveYield = safeRate;
-    }
-
-    return { name: key, type: key, postTaxRate: ptResult.effectiveYield };
+    return { name: key, type: key, nominalRate };
   });
 
-  const postTaxRates = {};
-  instList.forEach(i => { postTaxRates[i.name] = i.postTaxRate; });
+  const annualRates = {};
+  instList.forEach(i => { annualRates[i.name] = i.nominalRate; });
 
-  const initialLumpSum = (profile.hasLumpSum && profile.lumpSumAmount > 0) ? profile.lumpSumAmount : 0;
-  const projections = generateProjections(investAmount, instList, postTaxRates, projYears, 0.05, 0.10, initialLumpSum);
+  const projections = generateProjections(
+    simulation.monthlyContribution,
+    instList,
+    annualRates,
+    projectionYears,
+    PROJECTION_INFLATION_ASSUMPTION,
+    PERSONALIZED_CONTRIBUTION_STEP_UP,
+    simulation.initialCapital,
+  );
 
-  res.json(projections);
+  res.json({
+    ...projections,
+    simulation_classification: simulation.classification,
+    return_basis: 'PRE_TAX_NOMINAL',
+    initial_capital: simulation.initialCapital,
+    monthly_contribution: simulation.monthlyContribution,
+    final_suitability_risk: suitability.finalRisk,
+    assumptions: {
+      inflation_rate: PROJECTION_INFLATION_ASSUMPTION,
+      contribution_step_up_rate: PERSONALIZED_CONTRIBUTION_STEP_UP,
+      contribution_step_up_reason: 'No future savings growth is inferred from the Financial Profile.',
+    },
+  });
 }));
 
 /**

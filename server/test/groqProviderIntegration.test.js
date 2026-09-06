@@ -9,6 +9,7 @@ import Recommendation from '../models/Recommendation.js';
 import Goal from '../models/Goal.js';
 import User from '../models/User.js';
 import ConversationHistory from '../models/ConversationHistory.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 const mockUserId = '60d5ecb8b3b3a72d9c8e4a11';
 const mockSessionId = 'test-groq-session';
@@ -22,13 +23,15 @@ const mockUser = {
 const mockProfile = {
   _id: '60d5ecb8b3b3a72d9c8e4a22',
   userId: mockUserId,
-  age: 35,
-  annualIncome: 2000000,
-  monthlySavings: 40000,
-  riskCategory: 'Aggressive',
-  taxRegime: 'new',
-  investmentHorizon: 20,
-  recommendedEquityAllocation: 70,
+  ...canonicalProfile({
+    age: 35,
+    monthlyTakeHome: 150000,
+    monthlySavings: 40000,
+    riskTolerance: 'Aggressive',
+    investmentHorizonYears: 20,
+    hasLumpSum: true,
+    lumpSumAmount: 1000000,
+  }),
 };
 
 describe('Groq Provider Native Tool-Calling Integration Tests', () => {
@@ -327,7 +330,18 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
                     {
                       function: {
                         name: 'tax_calculator',
-                        arguments: JSON.stringify({ income: 2000000, regime: 'new' }),
+                        arguments: JSON.stringify({
+                          income: 2000000,
+                          incomeSource: 'salary',
+                          age: 35,
+                          regime: 'new',
+                          section80C: 0,
+                          nps80CCD1B: 0,
+                          section80D_self: 0,
+                          section80D_parents: 0,
+                          parentsSenior: false,
+                          hra: 0,
+                        }),
                       },
                     },
                   ],

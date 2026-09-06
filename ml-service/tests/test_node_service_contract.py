@@ -17,20 +17,21 @@ FIXTURES = json.loads(
 
 def test_express_prediction_request_is_accepted_by_fastapi_schema():
     request = PredictRequest.model_validate(FIXTURES["prediction_request"])
-    assert request.existing_debt == 12
-    assert request.goal_type == "wealth-building"
+    assert request.emi_burden_pct == 12
+    assert request.investment_goals == ["Wealth Growth"]
+    assert request.feature_schema_version == "recommendation-features-4.0.0"
 
 
 def test_prediction_success_response_matches_fastapi_schema():
     response = PredictResponse.model_validate(FIXTURES["prediction_response"])
     assert response.primary == "ETF"
-    assert response.model_version == "rf-3.1.0"
+    assert response.model_version == "4.0.0"
     assert response.explanation is not None
 
 
 def test_prediction_request_rejects_unknown_casing_or_duplicate_fields():
     with pytest.raises(ValidationError):
-        PredictRequest.model_validate({**FIXTURES["prediction_request"], "annualIncome": 1800000})
+        PredictRequest.model_validate({**FIXTURES["prediction_request"], "annual_income": 1800000})
     with pytest.raises(ValidationError):
         PredictRequest.model_validate({**FIXTURES["prediction_request"], "existing_debt_emi_ratio_pct": 12})
 

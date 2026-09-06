@@ -46,7 +46,7 @@ const actionCardSchema = Joi.object({
   title: Joi.string().required().max(150),
   subtitle: Joi.string().max(200).optional(),
   description: Joi.string().max(500).optional(),
-  metrics: Joi.array().items(metricSchema).min(1).max(5).required(),
+  metrics: Joi.array().items(metricSchema).max(5).required(),
   actions: Joi.array().items(actionSchema).min(1).max(3).required(),
   severity: Joi.string().valid('info', 'success', 'warning', 'danger').default('info'),
   priority: Joi.number().integer().min(1).max(10).optional(),
@@ -61,6 +61,37 @@ function containsPrototypePollution(jsonStr) {
   return /"__proto__"|"constructor"|"prototype"/i.test(jsonStr);
 }
 
+function evidenceValues(evidence) {
+  const numbers = [];
+  const strings = new Set();
+  const visit = value => {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      numbers.push(value);
+      if (value >= 0 && value <= 1) numbers.push(value * 100);
+    } else if (typeof value === 'string') {
+      strings.add(value.toLowerCase());
+    } else if (Array.isArray(value)) {
+      value.forEach(visit);
+    } else if (value && typeof value === 'object') {
+      Object.values(value).forEach(visit);
+    }
+  };
+  visit(evidence);
+  return { numbers, strings };
+}
+
+function metricHasEvidence(metric, available) {
+  const numericMatches = [...metric.value.matchAll(/[\d,.]+/g)]
+    .map(match => Number(match[0].replace(/,/g, '')))
+    .filter(Number.isFinite);
+  if (numericMatches.length) {
+    return numericMatches.every(claim => available.numbers.some(actual =>
+      Math.abs(actual - claim) <= Math.max(0.01, Math.abs(actual) * 0.0001)
+    ));
+  }
+  return [...available.strings].some(value => value === metric.value.toLowerCase());
+}
+
 /**
  * Parses and validates ACTION_CARD JSON blocks embedded in chat response text.
  * Strips invalid card blocks without throwing errors or breaking text responses.
@@ -68,7 +99,7 @@ function containsPrototypePollution(jsonStr) {
  * @param {string} responseText
  * @returns {{ cleanedText: string, validCards: Array<object>, validationSummary: object }}
  */
-export function validateAndSanitizeActionCards(responseText) {
+export function validateAndSanitizeActionCards(responseText, financialEvidence = []) {
   if (!responseText || typeof responseText !== 'string') {
     return { cleanedText: responseText || '', validCards: [], validationSummary: { totalFound: 0, validCount: 0, strippedCount: 0 } };
   }
@@ -80,6 +111,7 @@ export function validateAndSanitizeActionCards(responseText) {
   let totalFound = 0;
 
   let cleanedText = responseText;
+  const availableEvidence = evidenceValues(financialEvidence);
 
   while ((match = cardRegex.exec(responseText)) !== null) {
     totalFound++;
@@ -99,8 +131,10 @@ export function validateAndSanitizeActionCards(responseText) {
       // Validate strictly against Joi schema
       const { error, value } = actionCardSchema.validate(parsedJson);
 
-      if (error) {
-        console.warn('[ActionCardValidator] Card validation failed, stripping card block:', error.details[0]?.message);
+      const ungroundedMetric = !error && value.metrics.some(metric => !metricHasEvidence(metric, availableEvidence));
+      if (error || ungroundedMetric) {
+        console.warn('[ActionCardValidator] Card validation failed, stripping card block:',
+          error?.details?.[0]?.message || 'metric is not backed by tool or recommendation evidence');
         cleanedText = cleanedText.replace(fullMatchBlock, '');
         strippedCount++;
       } else {

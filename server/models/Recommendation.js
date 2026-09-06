@@ -1,17 +1,24 @@
 import mongoose from 'mongoose';
 
 const instrumentDetailSchema = new mongoose.Schema({
+  id: String,
   name: String,
   type: String,
+  assetClass: String,
   nominalReturn: Number,
   postTaxReturn: Number,
   effectiveYield: Number,
+  returnBasis: String,
   expenseRatio: Number,
   riskLevel: String,
+  riskScore: Number,
   lockIn: Number,
   tags: [String],
   taxNotes: String,
   sharpeRatio: Number,
+  score: Number,
+  scoreFactors: mongoose.Schema.Types.Mixed,
+  allocation_pct: Number,
   allocationWeight: Number,
 }, { _id: false });
 

@@ -1,20 +1,23 @@
 import { describe, it, expect } from 'vitest';
 import { GOAL_TYPES, getGoalTypeById, getGoalTypeByLabel, hexToRgb } from '../goalCatalog';
 
-describe('goalCatalog (WG-031)', () => {
-  it('exports all 8 required goal types with valid structure', () => {
+describe('presentation-only goal catalog', () => {
+  it('exports only display metadata for all eight custom-goal presets', () => {
     expect(GOAL_TYPES).toHaveLength(8);
     const ids = GOAL_TYPES.map(g => g.id);
     expect(ids).toEqual([
       'retirement',
+      'emergency_fund',
       'home_purchase',
       'child_education',
-      'emergency_fund',
       'vehicle',
       'wealth_growth',
       'tax_saving',
       'custom',
     ]);
+    GOAL_TYPES.forEach(goal => {
+      expect(Object.keys(goal).sort()).toEqual(['Icon', 'color', 'id', 'label']);
+    });
   });
 
   it('correctly maps getGoalTypeById for exact and normalized IDs', () => {
@@ -35,44 +38,6 @@ describe('goalCatalog (WG-031)', () => {
   it('correctly converts hex colors to RGB strings via hexToRgb', () => {
     expect(hexToRgb('#f59e0b')).toBe('245, 158, 11');
     expect(hexToRgb('#10b981')).toBe('16, 185, 129');
-    expect(hexToRgb('invalid')).toBe('99, 102, 241');
-  });
-
-  it('provides accurate numeric default target and year calculations for quickStartEligible goals', () => {
-    const retirement = getGoalTypeById('retirement');
-    expect(retirement.quickStartEligible).toBe(true);
-    expect(retirement.defaultTargetMultiplierOfAnnualIncome).toBe(25);
-    // age 30 -> 60 - 30 = 30 years to retire
-    expect(retirement.computeYearsToGoal(30)).toBe(30);
-    // monthly expenses 40k -> real-terms 40,000 * 12 * 25 = 12,000,000 (₹1.2 Crore)
-    const target = retirement.computeTarget(40000);
-    expect(target).toBe(12000000);
-
-    const emergency = getGoalTypeById('emergency_fund');
-    expect(emergency.quickStartEligible).toBe(true);
-    expect(emergency.defaultTargetMonthsOfExpenses).toBe(6);
-    expect(emergency.defaultYearsToGoal).toBe(1.5);
-    expect(emergency.computeTarget(40000)).toBe(240000);
-
-    const wealth = getGoalTypeById('wealth_growth');
-    expect(wealth.quickStartEligible).toBe(true);
-    expect(wealth.defaultTargetMultiplierOfAnnualIncome).toBe(5);
-    expect(wealth.computeTarget(600000)).toBe(3000000);
-
-    const tax = getGoalTypeById('tax_saving');
-    expect(tax.quickStartEligible).toBe(true);
-    expect(tax.defaultTarget).toBe(150000);
-    expect(tax.computeTarget()).toBe(150000);
-  });
-
-  it('WG-036: retirement computeTarget output does not vary with yearsToRetire (locks in single backend inflation layer)', () => {
-    const retirement = getGoalTypeById('retirement');
-    const targetWith1Arg = retirement.computeTarget(40000);
-    const targetWith2Args = retirement.computeTarget(40000, 30);
-    const targetWith50Years = retirement.computeTarget(40000, 50);
-
-    expect(targetWith1Arg).toBe(12000000);
-    expect(targetWith2Args).toBe(12000000);
-    expect(targetWith50Years).toBe(12000000);
+    expect(hexToRgb('invalid')).toBeNull();
   });
 });

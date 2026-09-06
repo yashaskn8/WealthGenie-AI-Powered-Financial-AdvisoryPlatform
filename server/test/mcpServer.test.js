@@ -59,7 +59,18 @@ describe('Phase 1: WealthGenie MCP Server Core & Schema Parity Tests', () => {
   });
 
   it('tools/call: tax_calculator execution parity with FinancialToolRegistry', async () => {
-    const payload = { income: 1500000, regime: 'new' };
+    const payload = {
+      income: 1500000,
+      incomeSource: 'salary',
+      age: 35,
+      regime: 'new',
+      section80C: 0,
+      nps80CCD1B: 0,
+      section80D_self: 0,
+      section80D_parents: 0,
+      parentsSenior: false,
+      hra: 0,
+    };
     const directResult = await FinancialToolRegistry.executeTool('tax_calculator', payload);
     const mcpResult = await WealthGenieMcpServer.executeTool('tax_calculator', payload);
 
@@ -98,6 +109,8 @@ describe('Phase 1: WealthGenie MCP Server Core & Schema Parity Tests', () => {
       current_allocation: { Equity_MF: 70, Debt_MF: 30 },
       target_allocation: { Equity_MF: 50, Debt_MF: 50 },
       threshold: 5.0,
+      partial_ratio: 1,
+      holding_months: 12,
     };
     const directResult = await FinancialToolRegistry.executeTool('rebalance_calculator', payload);
     const mcpResult = await WealthGenieMcpServer.executeTool('rebalance_calculator', payload);

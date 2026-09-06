@@ -24,7 +24,7 @@ class BasePredictor(ABC):
     @abstractmethod
     def predict(self, feature_array: np.ndarray) -> Dict[str, Any]:
         """
-        Executes model inference on feature matrix X (1x16 or Nx16).
+        Executes model inference on a v4 feature matrix (1x19 or Nx19).
         Returns primary, secondary, tertiary predictions, confidence scores, and latency.
         """
         pass

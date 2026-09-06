@@ -12,10 +12,22 @@ import { checkMLHealth, getMLPrediction, getRuleBasedFallback } from '../service
 import { queryRAG } from '../services/ragClient.js';
 import { computeCAGR, generateProjections, lumpSumFV, realReturn, reverseSIPFromFV, sipFV, stepUpSipFV } from '../services/projectionEngine.js';
 import { calculatePostTaxReturn, calculatePostTaxReturnSafe } from '../services/postTaxCalculator.js';
-import { encodeRiskCategory, getRiskProfile } from '../services/riskProfiler.js';
+import { assessSuitabilityRisk, encodeRiskCategory, getRiskProfile } from '../services/riskProfiler.js';
+import { buildLlmFinancialContext, buildMlProfileInput } from '../services/recommendationProfile.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 process.env.JWT_SECRET = 'service-coverage-test-secret';
 process.env.NODE_ENV = 'test';
+
+function mlInput(overrides = {}) {
+  const profile = canonicalProfile(overrides);
+  return buildMlProfileInput(profile, assessSuitabilityRisk(profile));
+}
+
+function llmProfile(overrides = {}) {
+  const profile = canonicalProfile(overrides);
+  return buildLlmFinancialContext(profile, assessSuitabilityRisk(profile));
+}
 
 test('geminiService uses Gemini before Groq and falls back deterministically', async (t) => {
   const originalPost = axios.post;
@@ -35,8 +47,8 @@ test('geminiService uses Gemini before Groq and falls back deterministically', a
     if (originalGroq === undefined) delete process.env.GROQ_API_KEY; else process.env.GROQ_API_KEY = originalGroq;
   });
 
-  const advisory = await generateAdvisory({ age: 32, annualIncome: 900000, monthlySavings: 20000, taxSlab: 0.1, riskCategory: 'Moderate', instruments: [], horizon: 10 });
-  const goalAdvice = await getGoalAdvisory('Suggest one adjustment.', { age: 32, annualIncome: 900000, riskCategory: 'Moderate' });
+  const advisory = await generateAdvisory({ profile: llmProfile({ age: 32, monthlySavings: 20000 }), instruments: [] });
+  const goalAdvice = await getGoalAdvisory('Suggest one adjustment.', llmProfile({ age: 32, monthlySavings: 20000 }));
 
   assert.equal(advisory.text, 'Gemini response');
   assert.equal(goalAdvice, 'Gemini response');
@@ -60,11 +72,11 @@ test('geminiChatService returns profile setup guidance when no profile exists', 
   assert.match(result.response, /financial profile/i);
 });
 
-test('genieChatSystemPrompt grounds prompt in profile, tax, recommendations, and goals', () => {
+test('genieChatSystemPrompt grounds prompt only in canonical profile, recommendations, and separate goals', () => {
   const prompt = buildSystemPrompt(
     { name: 'Priya', email: 'p@example.com' },
-    { income: 100000, annualIncome: 1200000, savings: 25000, age: 35, riskCategory: 'Moderate', recommendedEquityAllocation: 50, taxRegime: 'new', investmentHorizon: 15 },
-    { instruments: [{ name: 'Nifty 50 ETF', type: 'ETF', postTaxReturn: 10.8 }] },
+    canonicalProfile({ age: 35, monthlySavings: 25000, investmentHorizonYears: 15 }),
+    { instruments: [{ name: 'Nifty 50 ETF', type: 'ETF', nominalReturn: 10.8, allocationWeight: 0.5 }] },
     null,
     [{ goal_name: 'Retirement', target_amount: 5000000, target_date: '2045-01-01' }]
   );
@@ -74,12 +86,16 @@ test('genieChatSystemPrompt grounds prompt in profile, tax, recommendations, and
   assert.match(prompt, /Retirement/);
   assert.match(prompt, /ACTION_CARD/);
   assert.match(prompt, /SEBI/);
+  const authoritativeSections = prompt.split('# Hard boundaries')[0];
+  assert.doesNotMatch(authoritativeSections, /annual income|tax slab/i);
 });
 
-test('instrumentConstants exposes immutable rates and live override path', () => {
+test('instrumentConstants exposes immutable rates and live override path', (t) => {
+  t.after(() => updateLiveParam('FD', 7.5, 0.005));
   assert.equal(getNominalRate('FD'), 7.5);
   assert.equal(getVolatility('FD'), 0.005);
-  assert.equal(getNominalRate('UNKNOWN'), 7.0);
+  assert.equal(getNominalRate('UNKNOWN'), null);
+  assert.equal(getVolatility('UNKNOWN'), null);
   assert.equal(toMonthlyRate(0.12), 0.01);
   assert.ok(toMonthlyRate(0.12, true) > 0.009);
   assert.throws(() => { INSTRUMENT_PARAMS.FD = {}; }, /immutable/i);
@@ -140,7 +156,7 @@ test('mlClient posts to enriched endpoint and falls back on service failure', as
     return { data: {
       primary: 'ETF', secondary: 'Debt_MF', tertiary: 'ELSS',
       confidence_scores: { ETF: 0.7 }, decision_path: ['risk = Moderate'],
-      model_version: 'test-rf-1', explanation: null,
+      model_version: '4.0.0', feature_schema_version: 'recommendation-features-4.0.0', explanation: null,
     } };
   };
   axios.get = async (url, config) => {
@@ -149,42 +165,21 @@ test('mlClient posts to enriched endpoint and falls back on service failure', as
   };
   t.after(() => { axios.post = originalPost; axios.get = originalGet; console.warn = originalWarn; });
 
-  const prediction = await getMLPrediction({
-    age: 40,
-    annual_income: 1200000,
-    monthly_savings: 25000,
-    risk_category: 'Moderate',
-    liquid_savings: 50000,
-    existing_debt: 10,
-    dependents: 1,
-    emergency_fund_months: 3,
-    risk_tolerance: 'Moderate',
-    goal_type: 'wealth-building'
-  });
+  const prediction = await getMLPrediction(mlInput({
+    age: 40, monthlySavings: 25000, liquidSavings: 50000, emergencyFundMonths: 3,
+  }));
   const health = await checkMLHealth();
 
-  // Test incomplete profile fallback routing
-  const incompleteFallback = await getMLPrediction({
-    age: 40,
-    annual_income: 1200000,
-    monthly_savings: 25000,
-    risk_category: 'Moderate'
-  });
-  assert.equal(incompleteFallback.fallback, true);
+  await assert.rejects(
+    getMLPrediction({ age: 40, monthly_savings: 25000 }),
+    /recommendation-features-4\.0\.0/,
+  );
 
   axios.post = async () => { throw new Error('offline'); };
-  const fallback = await getMLPrediction({
-    age: 60,
-    annual_income: 2200000,
-    monthly_savings: 50000,
-    risk_category: 'Conservative',
-    liquid_savings: 100000,
-    existing_debt: 0,
-    dependents: 0,
-    emergency_fund_months: 6,
-    risk_tolerance: 'Conservative',
-    goal_type: 'retirement'
-  });
+  const fallback = await getMLPrediction(mlInput({
+    age: 60, monthlyTakeHome: 200000, monthlySavings: 50000,
+    liquidSavings: 100000, riskTolerance: 'Conservative', investmentGoals: ['Retirement'],
+  }));
 
   assert.match(postedUrl, /\/predict\/enriched$/);
   // When ML_SERVICE_API_KEY is set, the header must carry its value.
@@ -198,11 +193,14 @@ test('mlClient posts to enriched endpoint and falls back on service failure', as
   assert.ok(warnings.some(w => w.includes('fallback')));
 });
 
-test('mlClient rule fallback produces usable picks and scores', () => {
-  const fallback = getRuleBasedFallback({ age: 65, annual_income: 3000000, monthly_savings: 50000, risk_category: 'Aggressive' });
+test('mlClient rule fallback produces suitable picks from the v4 feature contract', () => {
+  const fallback = getRuleBasedFallback(mlInput({
+    age: 35, monthlyTakeHome: 200000, monthlySavings: 50000,
+    riskTolerance: 'Aggressive', investmentHorizonYears: 20,
+  }));
 
-  assert.equal(fallback.primary, 'ETF');
-  assert.equal(fallback.secondary, 'SCSS');
+  assert.equal(fallback.primary, 'Index_MF');
+  assert.equal(fallback.secondary, 'Hybrid_MF');
   assert.equal(fallback.fallback, true);
   assert.ok(Object.values(fallback.confidence_scores).every(Number.isFinite));
 });
@@ -217,7 +215,7 @@ test('mlClient reads the ML URL and API key at request time', async (t) => {
     return { data: {
       primary: 'ETF', secondary: 'Debt_MF', tertiary: 'ELSS',
       confidence_scores: { ETF: 0.7 }, decision_path: ['risk = Moderate'],
-      model_version: 'test-rf-1', explanation: null,
+      model_version: '4.0.0', feature_schema_version: 'recommendation-features-4.0.0', explanation: null,
     } };
   };
   t.after(() => {
@@ -226,18 +224,7 @@ test('mlClient reads the ML URL and API key at request time', async (t) => {
     if (originalKey === undefined) delete process.env.ML_SERVICE_API_KEY; else process.env.ML_SERVICE_API_KEY = originalKey;
   });
 
-  const profile = {
-    age: 40,
-    annual_income: 1200000,
-    monthly_savings: 25000,
-    risk_category: 'Moderate',
-    liquid_savings: 50000,
-    existing_debt: 10,
-    dependents: 1,
-    emergency_fund_months: 3,
-    risk_tolerance: 'Moderate',
-    goal_type: 'wealth-building',
-  };
+  const profile = mlInput({ age: 40, monthlySavings: 25000, emergencyFundMonths: 3 });
 
   process.env.ML_SERVICE_URL = 'http://ml-one:8000/';
   process.env.ML_SERVICE_API_KEY = 'first-key';
@@ -259,7 +246,9 @@ test('projectionEngine formulas are numerically stable and internally consistent
   const fv = sipFV(sip, 0.10, 10);
   const lump = lumpSumFV(100000, 0.10, 5);
   const stepUp = stepUpSipFV(10000, 0.10, 5, 0.10);
-  const projections = generateProjections(10000, [{ name: 'ETF', type: 'ETF' }], { ETF: 10 }, [5, 10]);
+  const projections = generateProjections(
+    10000, [{ name: 'ETF', type: 'ETF' }], { ETF: 10 }, [5, 10], 0.05, 0.10, 0,
+  );
 
   assert.ok(Math.abs(fv - target) / target < 0.001);
   assert.ok(lump > 100000);
@@ -270,24 +259,34 @@ test('projectionEngine formulas are numerically stable and internally consistent
 });
 
 test('riskProfiler classifies profiles and encodes categories', () => {
-  const aggressive = getRiskProfile(25, 5000000, 30, 5, 0, 200000, 0);
-  const conservative = getRiskProfile(70, 200000, 1, 0, 4, 1000, 50000);
+  const aggressive = getRiskProfile(canonicalProfile({
+    age: 25, monthlyTakeHome: 400000, monthlySavings: 120000,
+    liquidSavings: 1000000, emergencyFundMonths: 12,
+    riskTolerance: 'Aggressive', investmentHorizonYears: 30,
+  }));
+  const conservative = getRiskProfile(canonicalProfile({
+    age: 70, monthlyTakeHome: 50000, monthlySavings: 5000,
+    liquidSavings: 10000, emergencyFundMonths: 1, emiBurdenPct: 70,
+    financialDependents: 4, riskTolerance: 'Conservative', investmentHorizonYears: 1,
+  }));
 
   assert.equal(aggressive.category, 'Aggressive');
   assert.equal(conservative.category, 'Conservative');
   assert.equal(encodeRiskCategory('Moderate-Aggressive'), 3);
-  assert.equal(encodeRiskCategory('Unknown'), 2);
+  assert.throws(() => encodeRiskCategory('Unknown'), /Unknown risk category/);
 });
 
 test('postTaxCalculator respects EEE exemptions and taxable instruments', () => {
-  const ppf = calculatePostTaxReturn('PPF', 0.071, 1200000, 15, 'new');
-  const fd = calculatePostTaxReturnSafe('FD', 0.07, 3000000, 3, 'new', 10000, 35);
-  const invalid = calculatePostTaxReturn('FD', Number.NaN, -1, -1, 'new');
+  const ppf = calculatePostTaxReturn('PPF', 0.071, 1200000, 15, 'new', 10000, 35, 'salary');
+  const fd = calculatePostTaxReturnSafe('FD', 0.07, 3000000, 3, 'new', 10000, 35, 'salary');
 
   assert.equal(ppf.taxRate, 0);
   assert.equal(ppf.postTaxReturn, 0.071);
   assert.ok(fd.postTaxReturn < 0.07);
-  assert.ok(Number.isFinite(invalid.postTaxReturn));
+  assert.throws(
+    () => calculatePostTaxReturn('FD', Number.NaN, -1, -1, 'new', 0, 35, 'salary'),
+    /nominalRate/,
+  );
 });
 
 test('ragClient and mlClient propagate verified X-Verified-User-Id header downstream', async (t) => {
@@ -313,7 +312,7 @@ test('ragClient and mlClient propagate verified X-Verified-User-Id header downst
       return { data: {
         primary: 'ETF', secondary: 'Debt_MF', tertiary: 'ELSS',
         confidence_scores: { ETF: 0.7 }, decision_path: ['risk = Moderate'],
-        model_version: 'test-rf-1', explanation: null,
+        model_version: '4.0.0', feature_schema_version: 'recommendation-features-4.0.0', explanation: null,
       } };
     }
     return { data: {} };
@@ -339,18 +338,11 @@ test('ragClient and mlClient propagate verified X-Verified-User-Id header downst
   assert.equal(ragCapturedBody?.tenant_id, undefined, 'tenant_id must not be sent in RAG request body');
 
   // 2. Test mlClient getMLPrediction forwards verified user header
-  const mlRes = await getMLPrediction({
-    age: 35,
-    annual_income: 1500000,
-    monthly_savings: 30000,
-    risk_category: 'Moderate',
-    liquid_savings: 100000,
-    existing_debt: 5,
-    dependents: 1,
-    emergency_fund_months: 6,
-    risk_tolerance: 'Moderate',
-    goal_type: 'wealth-building',
-  }, 'test-corr-id-456', testUserId);
+  const mlRes = await getMLPrediction(
+    mlInput({ age: 35, monthlySavings: 30000, liquidSavings: 100000 }),
+    'test-corr-id-456',
+    testUserId,
+  );
 
   assert.ok(mlRes);
   assert.equal(mlCapturedHeaders?.['X-Verified-User-Id'], testUserId);

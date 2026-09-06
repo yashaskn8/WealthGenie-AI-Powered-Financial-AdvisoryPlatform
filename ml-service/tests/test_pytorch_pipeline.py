@@ -22,12 +22,15 @@ from model.architecture.model import FinancialMLP
 from model.training.train_pytorch import train_pytorch_model
 from model.evaluation.evaluate import evaluate_pytorch_model, compare_models
 from model.serving.inference import PyTorchInferenceEngine
+from model.data.feature_engineering import FEATURE_NAMES
+
+N_FEATURES = len(FEATURE_NAMES)
 
 
 @pytest.fixture
 def sample_data():
     set_random_seed(42)
-    return prepare_synthetic_training_data(num_samples=200, seed=42)
+    return prepare_synthetic_training_data(num_samples=600, seed=42)
 
 
 @pytest.fixture
@@ -62,12 +65,12 @@ def test_feature_preprocessor(sample_data, tmp_path):
 def test_financial_dataset_and_dataloaders(sample_data):
     X, y = sample_data
     dataset = FinancialDataset(X, y)
-    assert len(dataset) == 200
+    assert len(dataset) == 600
 
     x_tensor, y_tensor = dataset[0]
     assert isinstance(x_tensor, torch.Tensor)
     assert isinstance(y_tensor, torch.Tensor)
-    assert x_tensor.shape == (16,)
+    assert x_tensor.shape == (N_FEATURES,)
 
     preprocessor = FeaturePreprocessor()
     config = TrainingConfig(batch_size=32, test_split=0.2, val_split=0.2)
@@ -77,14 +80,14 @@ def test_financial_dataset_and_dataloaders(sample_data):
 
     assert len(train_loader.dataset) > 0
     assert len(val_loader.dataset) > 0
-    assert len(test_loader.dataset) == 40
+    assert len(test_loader.dataset) == 120
 
 
 def test_financial_mlp_architecture():
-    config = PyTorchModelConfig(input_dim=16, hidden_dims=[32, 16], output_dim=6)
+    config = PyTorchModelConfig(input_dim=N_FEATURES, hidden_dims=[32, 16], output_dim=6)
     model = FinancialMLP(config)
     
-    batch_x = torch.randn(8, 16)
+    batch_x = torch.randn(8, N_FEATURES)
     logits = model(batch_x)
     assert logits.shape == (8, 6)
 
@@ -95,7 +98,7 @@ def test_financial_mlp_architecture():
 
 def test_train_pytorch_model_loop(sample_data, tmp_artifact_paths):
     X, y = sample_data
-    model_config = PyTorchModelConfig(input_dim=16, hidden_dims=[32, 16], output_dim=6)
+    model_config = PyTorchModelConfig(input_dim=N_FEATURES, hidden_dims=[32, 16], output_dim=6)
     training_config = TrainingConfig(epochs=5, batch_size=32, patience=3)
 
     results = train_pytorch_model(
@@ -115,7 +118,7 @@ def test_train_pytorch_model_loop(sample_data, tmp_artifact_paths):
 def test_pytorch_inference_engine(sample_data, tmp_artifact_paths):
     X, y = sample_data
     train_pytorch_model(
-        model_config=PyTorchModelConfig(input_dim=16, hidden_dims=[32, 16], output_dim=6),
+        model_config=PyTorchModelConfig(input_dim=N_FEATURES, hidden_dims=[32, 16], output_dim=6),
         training_config=TrainingConfig(epochs=3, batch_size=32),
         paths=tmp_artifact_paths,
         X=X,

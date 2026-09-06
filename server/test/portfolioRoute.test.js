@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import portfolioRoutes from '../routes/portfolio.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import { closeServer, rawRequest } from '../test-utils/httpTestUtils.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 process.env.JWT_SECRET = 'portfolio-route-test-secret';
 
@@ -18,9 +19,7 @@ test('portfolio optimise route responds for all frontend-exposed strategies', as
     lean: async () => ({
       _id: profileId,
       userId,
-      annualIncome: 1_200_000,
-      investmentHorizon: 15,
-      taxRegime: 'new',
+      ...canonicalProfile({ investmentHorizonYears: 15 }),
     }),
   };
 

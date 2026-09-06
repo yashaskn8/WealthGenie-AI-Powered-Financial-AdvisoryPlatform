@@ -115,11 +115,18 @@ test('OpenAPI preserves major runtime-required request fields', () => {
   const expected = new Map([
     ['POST /api/auth/register', ['name', 'email', 'password']],
     ['POST /api/auth/login', ['email', 'password']],
-    ['POST /api/profile/build', ['monthly_income', 'age', 'monthly_savings', 'liquid_savings', 'dependents', 'emergency_fund_months', 'risk_tolerance', 'goal_type']],
+    ['POST /api/profile/build', [
+      'monthly_take_home', 'monthly_savings', 'age', 'risk_tolerance',
+      'sold_property_proceeds', 'has_lump_sum', 'lump_sum_amount',
+      'liquid_savings', 'emi_burden_pct', 'financial_dependents',
+      'emergency_fund_months', 'investment_goals', 'investment_horizon_years',
+    ]],
     ['POST /api/recommend', ['profileId']],
-    ['POST /api/goals/create', ['goal_name', 'target_amount', 'target_date']],
-    ['POST /api/montecarlo/montecarlo', ['instrument', 'monthly_investment', 'years']],
-    ['POST /api/portfolio/rebalance', ['current_allocation', 'target_allocation']],
+    ['POST /api/goals/create', ['goal_name', 'target_amount', 'target_date', 'current_savings', 'profileId', 'priority']],
+    ['POST /api/montecarlo/montecarlo', ['profileId', 'instrument', 'monthly_investment', 'years']],
+    ['POST /api/portfolio/rebalance', [
+      'profileId', 'current_allocation', 'target_allocation', 'threshold', 'partial_ratio', 'holding_months',
+    ]],
     ['POST /api/chat/message', ['message']],
   ]);
   const operations = new Map(contractOperations().map((entry) => [operationKey(entry), entry.operation]));

@@ -40,7 +40,7 @@ function _parseTaxDeductionsFromQuery(query) {
 router.get('/compute', validateQuery(taxComputeSchema), asyncHandler(async (req, res) => {
   // Joi coerces query strings to numbers via taxComputeSchema
   const income = Number(req.query.income);
-  const regime = req.query.regime || 'new';
+  const regime = req.query.regime;
 
   if (!Number.isFinite(income) || income < 0) {
     return sendError(req, res, 400, 'Income must be a valid positive number.', 'INCOME_INVALID');
@@ -63,7 +63,7 @@ router.get('/compute', validateQuery(taxComputeSchema), asyncHandler(async (req,
  * Compare both tax regimes and return the recommended one.
  */
 router.get('/compare', validateQuery(taxCompareSchema), asyncHandler(async (req, res) => {
-  const income = Number(req.query.income !== undefined ? req.query.income : req.query.annualIncome);
+  const income = Number(req.query.income);
 
   if (!Number.isFinite(income) || income < 0) {
     return sendError(req, res, 400, 'Income must be a valid positive number.', 'INCOME_INVALID');
@@ -126,7 +126,9 @@ router.get('/compare', validateQuery(taxCompareSchema), asyncHandler(async (req,
  * for users with gross income under ~â‚¹12.75L.
  */
 router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(async (req, res) => {
-  const { instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge } = req.body;
+  const {
+    instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource,
+  } = req.body;
 
   const result = calculatePostTaxReturnSafe(
     instrumentType,
@@ -136,9 +138,10 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
     regime,
     monthlySIP,
     userAge,
+    incomeSource,
   );
 
-  res.json(result);
+  res.json({ ...result, calculation_classification: 'SEPARATE_TAX_WHAT_IF' });
 }));
 
 /**
@@ -147,7 +150,7 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
  * Used by PostTaxAnalysis.jsx to compute all instrument post-tax returns in one call.
  */
 router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncHandler(async (req, res) => {
-  const { instruments, annualIncome, regime, userAge } = req.body;
+  const { instruments, annualIncome, regime, userAge, incomeSource } = req.body;
 
   const results = instruments.map(inv => ({
     instrumentType: inv.instrumentType,
@@ -159,10 +162,11 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
       regime,
       inv.monthlySIP,
       userAge,
+      incomeSource,
     ),
   }));
 
-  res.json({ results });
+  res.json({ calculation_classification: 'SEPARATE_TAX_WHAT_IF', results });
 }));
 
 export default router;

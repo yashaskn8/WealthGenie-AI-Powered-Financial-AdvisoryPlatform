@@ -15,6 +15,7 @@ import profileRoutes from '../routes/profile.js';
 import goalsRoutes from '../routes/goals.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
 
 const JWT_SECRET = 'idempotency-test-secret-key';
 process.env.JWT_SECRET = JWT_SECRET;
@@ -60,19 +61,13 @@ test('IDEMPOTENCY HTTP VERIFICATION: duplicate mutating request returns cached r
   const token = signToken(userId);
   const idempotencyKey = crypto.randomUUID();
 
-  const payload = {
-    monthly_income: 150000,
+  const payload = canonicalProfilePayload({
+    monthlyTakeHome: 150000,
     age: 30,
-    monthly_savings: 50000,
-    liquid_savings: 300000,
-    existing_debt: 0,
-    dependents: 1,
-    emergency_fund_months: 6,
-    risk_tolerance: 'Moderate',
-    goal_type: 'wealth-building',
-    investment_horizon: 10,
-    regime: 'new',
-  };
+    monthlySavings: 50000,
+    liquidSavings: 300000,
+    financialDependents: 1,
+  });
 
   // 1. Check DB record count before any requests
   const countBefore = await FinancialProfile.countDocuments({ userId });

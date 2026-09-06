@@ -26,6 +26,7 @@ import FinancialProfile from '../models/FinancialProfile.js';
 import Goal from '../models/Goal.js';
 import Recommendation from '../models/Recommendation.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
+import { canonicalProfile, canonicalProfilePayload } from './helpers/canonicalProfile.js';
 
 const testSecret = ['test', 'auth', 'jwt', 'key'].join('-');
 process.env.JWT_SECRET = process.env.JWT_SECRET || testSecret;
@@ -59,10 +60,8 @@ test.before(async () => {
 
   profileA = await FinancialProfile.create({
     userId: userAId,
-    income: 50000, age: 30, savings: 15000,
-    annualIncome: 600000, taxSlab: 0.10, effectiveTaxRate: 0.08,
-    taxRegime: 'new', riskCategory: 'Moderate', riskScore: 50,
-    investableAmount: 15000, investmentHorizon: 10,
+    ...canonicalProfile({ monthlyTakeHome: 50000, monthlySavings: 15000, age: 30 }),
+    recommendationProfileVersion: 'financial-profile-1.0.0',
   });
 
   goalA = await Goal.create({
@@ -105,11 +104,9 @@ test('Authorization: User B cannot UPDATE User A profile (PUT /api/profile/:id)'
         authorization: `Bearer ${tokenB}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({
-        monthly_income: 999999, age: 30, monthly_savings: 15000, investment_horizon: 10,
-        regime: 'new', liquid_savings: 100000, existing_debt: 0, dependents: 0,
-        emergency_fund_months: 6, risk_tolerance: 'Moderate', goal_type: 'wealth-building', version: 1,
-      }),
+      body: JSON.stringify({ ...canonicalProfilePayload({
+        monthlyTakeHome: 999999, monthlySavings: 15000, age: 30,
+      }), version: 1 }),
     });
     assert.ok(
       res.status === 403 || res.status === 404,
@@ -203,7 +200,7 @@ test('Authorization: User B cannot RUN PROJECTION on User A profile (POST /api/p
       },
       body: JSON.stringify({
         profileId: profileA._id.toString(),
-        horizonYears: 10,
+        instruments: ['FD'], monthly_investment: 5000, years: [5, 10],
       }),
     });
     assert.ok(res.status === 403 || res.status === 404, `Expected 403 or 404, got ${res.status}`);
@@ -213,7 +210,7 @@ test('Authorization: User B cannot RUN PROJECTION on User A profile (POST /api/p
 test('Authorization: User B cannot RUN MONTE CARLO on User A profile (POST /api/montecarlo)', async () => {
   const app = buildTestApp();
   await withServer(app, async (baseUrl) => {
-    const res = await rawRequest(`${baseUrl}/api/montecarlo`, {
+    const res = await rawRequest(`${baseUrl}/api/montecarlo/montecarlo`, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${tokenB}`,
@@ -221,7 +218,7 @@ test('Authorization: User B cannot RUN MONTE CARLO on User A profile (POST /api/
       },
       body: JSON.stringify({
         profileId: profileA._id.toString(),
-        numSimulations: 100,
+        instrument: 'FD', monthly_investment: 5000, years: 5,
       }),
     });
     assert.ok(res.status === 403 || res.status === 404, `Expected 403 or 404, got ${res.status}`);

@@ -31,13 +31,21 @@ from model.data.preprocessing import (
     compute_dataset_hash_from_arrays,
     get_dataset_generation_params,
 )
-from model.data.feature_engineering import engineer_features
+from model.data.feature_engineering import FEATURE_NAMES, FEATURE_SCHEMA_VERSION
 
 logger = logging.getLogger("wealthgenie.drift_monitor")
 
 _BASE_DIR = Path(__file__).resolve().parent.parent.parent
-_SAVED_MODELS_DIR = _BASE_DIR / "model" / "saved_models"
-_SAVED_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+_DEFAULT_CANDIDATE_MODELS_DIR = _BASE_DIR / "model" / "saved_models"
+
+
+def _candidate_models_dir() -> Path:
+    """Resolve candidate output at call time so tests and operators can isolate it."""
+    import os
+    configured = os.environ.get("ML_CANDIDATE_MODEL_DIR", "").strip()
+    target = Path(configured) if configured else _DEFAULT_CANDIDATE_MODELS_DIR
+    target.mkdir(parents=True, exist_ok=True)
+    return target
 
 
 class InferenceBuffer:
@@ -90,39 +98,14 @@ def generate_synthetic_feature_batch(
     Generates a batch of synthetic feature observations for drift verification.
     If shift_feature is specified, alters that feature's distribution by shift_multiplier/offset.
     """
-    np.random.seed(seed)
-    age = np.random.randint(22, 60, size=n_samples).astype(float)
-    annual_income = np.random.lognormal(mean=14.0, sigma=0.6, size=n_samples)  # ~1.2M - 3M INR
-    monthly_savings = annual_income * np.random.uniform(0.10, 0.40, size=n_samples) / 12.0
-    investment_horizon = np.random.randint(1, 30, size=n_samples).astype(float)
-    liquid_savings = monthly_savings * np.random.uniform(3, 24, size=n_samples)
-    existing_debt = np.random.uniform(0.0, 50.0, size=n_samples)
-    dependents = np.random.choice([0, 1, 2, 3, 4], size=n_samples, p=[0.3, 0.3, 0.25, 0.1, 0.05]).astype(float)
-    emergency_fund_months = liquid_savings / np.maximum(monthly_savings * 1.5, 1000.0)
-    risk_tolerance = np.random.choice(
-        ["Conservative", "Moderate", "Aggressive"],
-        size=n_samples,
-        p=[0.3, 0.5, 0.2],
-    )
+    features, _ = prepare_synthetic_training_data(num_samples=n_samples, seed=seed)
+    df = pd.DataFrame(features, columns=FEATURE_NAMES)
 
-    # Use the serving-time feature pipeline so drift checks compare identical
-    # units and formulas instead of a second, divergent approximation.
-    df = pd.DataFrame([
-        engineer_features(
-            age=age[i],
-            annual_income=annual_income[i],
-            monthly_savings=monthly_savings[i],
-            investment_horizon=investment_horizon[i],
-            liquid_savings=liquid_savings[i],
-            existing_debt=existing_debt[i],
-            dependents=int(dependents[i]),
-            emergency_fund_months=emergency_fund_months[i],
-            risk_tolerance=str(risk_tolerance[i]),
+    if shift_feature and shift_feature not in df.columns:
+        raise ValueError(
+            f"shift_feature must use {FEATURE_SCHEMA_VERSION}; unsupported feature: {shift_feature}"
         )
-        for i in range(n_samples)
-    ])
-
-    if shift_feature and shift_feature in df.columns:
+    if shift_feature:
         df[shift_feature] = (df[shift_feature] * shift_multiplier) + shift_offset
         logger.info(f"Applied simulated distribution shift to '{shift_feature}' (mult={shift_multiplier}, offset={shift_offset})")
 
@@ -147,8 +130,9 @@ def trigger_candidate_retrain(
     candidate_id = f"candidate_{uuid.uuid4().hex[:8]}"
 
     if architecture.lower() in ["randomforest", "rf", "random_forest"]:
-        candidate_artifact_path = _SAVED_MODELS_DIR / f"rf_{candidate_id}.pkl"
-        candidate_le_path = _SAVED_MODELS_DIR / f"le_{candidate_id}.pkl"
+        candidate_dir = _candidate_models_dir()
+        candidate_artifact_path = candidate_dir / f"rf_{candidate_id}.pkl"
+        candidate_le_path = candidate_dir / f"le_{candidate_id}.pkl"
 
         # Generate fresh training dataset
         seed = int(time.time()) % 100000
@@ -184,22 +168,14 @@ def trigger_candidate_retrain(
         data_hash = compute_dataset_hash_from_arrays(X, np.array(y_indices))
         lineage_params = get_dataset_generation_params(num_samples=num_samples, seed=seed)
 
-        feature_cols = [
-            "age", "annual_income", "monthly_savings", "investment_horizon",
-            "liquid_savings", "existing_debt", "dependents", "emergency_fund_months",
-            "risk_score", "stated_tolerance_score", "savings_rate",
-            "debt_to_income_ratio", "emergency_fund_adequacy_ratio",
-            "risk_capacity_vs_stated_tolerance_gap", "horizon_adjusted_urgency_score",
-            "dependents_adjusted_burden_score",
-        ]
-        df_train = pd.DataFrame(X, columns=feature_cols[:X.shape[1]])
+        df_train = pd.DataFrame(X, columns=FEATURE_NAMES)
         ref_dist = compute_reference_distributions(df_train, list(df_train.columns))
 
         metrics = {
             "rule_approximation_fidelity": round(train_acc, 4),
             "balanced_accuracy": round(train_acc * 0.92, 4),
             "macro_f1": round(train_acc * 0.915, 4),
-            "independent_cfp_benchmark_accuracy": 0.2526,
+            "metric_interpretation": "policy-approximation fidelity, not investment outcome accuracy",
         }
         hparams = {
             "n_estimators": 100,
@@ -209,6 +185,8 @@ def trigger_candidate_retrain(
             "model_type": "RandomForestClassifier",
             "dataset_lineage": lineage_params,
             "registered_by": registered_by,
+            "feature_schema_version": FEATURE_SCHEMA_VERSION,
+            "feature_names": FEATURE_NAMES,
         }
 
         # Register in persistent store
@@ -264,12 +242,21 @@ def check_drift_and_trigger_retrain(
     if not active_version:
         raise ValueError(f"No active model found in registry for architecture '{architecture}'.")
 
+    active_hyperparameters = active_version.get("hyperparameters") or {}
+    if active_hyperparameters.get("feature_schema_version") != FEATURE_SCHEMA_VERSION:
+        raise ValueError(
+            f"Active model uses stale feature schema: "
+            f"{active_hyperparameters.get('feature_schema_version')!r}"
+        )
+
     ref_distributions = active_version.get("reference_distributions")
     if not ref_distributions:
         # Fallback: compute reference distributions from base profiles data
         logger.warning(f"Active model '{active_version['version_id']}' has no reference_distributions. Generating baseline...")
         base_df = generate_synthetic_feature_batch(n_samples=500, seed=42)
         ref_distributions = compute_reference_distributions(base_df, list(base_df.columns))
+    if set(ref_distributions) != set(FEATURE_NAMES):
+        raise ValueError("Active model reference distributions do not match the v4 feature allowlist")
 
     if input_df is None or input_df.empty:
         input_df = inference_buffer.get_dataframe()
@@ -282,6 +269,14 @@ def check_drift_and_trigger_retrain(
             "retrain_triggered": False,
             "buffer_size": inference_buffer.size(),
         }
+
+    missing = set(FEATURE_NAMES) - set(input_df.columns)
+    unexpected = set(input_df.columns) - set(FEATURE_NAMES)
+    if missing or unexpected:
+        raise ValueError(
+            f"Drift input feature contract mismatch: missing={sorted(missing)}, "
+            f"unexpected={sorted(unexpected)}"
+        )
 
     # Run PSI drift analysis
     drift_report = run_drift_check(ref_distributions, input_df)

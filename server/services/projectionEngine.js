@@ -24,17 +24,17 @@ import { toMonthlyRate } from './instrumentConstants.js';
  * convention for lump-sum investment projections.
  *
  * @param {number} principal - One-time investment amount (₹)
- * @param {number} annualRate - Post-tax annual return rate (decimal, e.g. 0.07)
+ * @param {number} annualRate - Annual return assumption (decimal, e.g. 0.07)
  * @param {number} years - Number of years
  * @returns {number} Future value (non-negative)
  */
 export function lumpSumFV(principal, annualRate, years) {
-  if (!Number.isFinite(principal) || principal <= 0) return 0;
-  if (!Number.isFinite(years) || years <= 0) return 0;
-  if (!Number.isFinite(annualRate)) return 0;
-  // Clamp rate to prevent absurd values (max 50% p.a.)
-  const safeRate = Math.max(-0.5, Math.min(annualRate, 0.50));
-  return Math.max(0, principal * Math.pow(1 + safeRate, years));
+  if (!Number.isFinite(principal) || principal < 0) throw new TypeError('principal must be an explicit non-negative number');
+  if (!Number.isFinite(years) || years <= 0) throw new TypeError('years must be an explicit positive number');
+  if (!Number.isFinite(annualRate) || annualRate <= -1 || annualRate > 1) {
+    throw new RangeError('annualRate must be an explicit decimal greater than -1 and at most 1');
+  }
+  return principal * Math.pow(1 + annualRate, years);
 }
 
 /**
@@ -50,19 +50,18 @@ export function lumpSumFV(principal, annualRate, years) {
  * @returns {number} Future value (non-negative)
  */
 export function sipFV(monthlyInvestment, annualRate, years) {
-  if (!Number.isFinite(monthlyInvestment) || monthlyInvestment <= 0) return 0;
-  if (!Number.isFinite(years) || years <= 0) return 0;
-  if (!Number.isFinite(annualRate)) return 0;
-
-  // Clamp rate to prevent absurd values
-  const safeRate = Math.max(-0.5, Math.min(annualRate, 0.50));
-  const r = toMonthlyRate(safeRate);
+  if (!Number.isFinite(monthlyInvestment) || monthlyInvestment <= 0) throw new TypeError('monthlyInvestment must be an explicit positive number');
+  if (!Number.isFinite(years) || years <= 0) throw new TypeError('years must be an explicit positive number');
+  if (!Number.isFinite(annualRate) || annualRate <= -1 || annualRate > 1) {
+    throw new RangeError('annualRate must be an explicit decimal greater than -1 and at most 1');
+  }
+  const r = toMonthlyRate(annualRate);
   const n = years * 12;
 
   // Edge case: zero rate → simple sum
   if (Math.abs(r) < 1e-10) return monthlyInvestment * n;
 
-  return Math.max(0, monthlyInvestment * ((Math.pow(1 + r, n) - 1) / r) * (1 + r));
+  return monthlyInvestment * ((Math.pow(1 + r, n) - 1) / r) * (1 + r);
 }
 
 /**
@@ -75,11 +74,15 @@ export function sipFV(monthlyInvestment, annualRate, years) {
  * @param {number} annualStepUpRate - Annual step-up percentage (decimal, e.g. 0.10 for 10%)
  * @returns {number} Future value (non-negative)
  */
-export function stepUpSipFV(monthlyInvestment, annualRate, years, annualStepUpRate = 0.10) {
-  if (!Number.isFinite(monthlyInvestment) || monthlyInvestment <= 0) return 0;
-  if (!Number.isFinite(years) || years <= 0) return 0;
-  if (!Number.isFinite(annualRate)) return 0;
-  if (!Number.isFinite(annualStepUpRate) || annualStepUpRate < 0) annualStepUpRate = 0;
+export function stepUpSipFV(monthlyInvestment, annualRate, years, annualStepUpRate) {
+  if (!Number.isFinite(monthlyInvestment) || monthlyInvestment <= 0) throw new TypeError('monthlyInvestment must be an explicit positive number');
+  if (!Number.isFinite(years) || years <= 0) throw new TypeError('years must be an explicit positive number');
+  if (!Number.isFinite(annualRate) || annualRate <= -1 || annualRate > 1) {
+    throw new RangeError('annualRate must be an explicit decimal greater than -1 and at most 1');
+  }
+  if (!Number.isFinite(annualStepUpRate) || annualStepUpRate < 0) {
+    throw new TypeError('annualStepUpRate must be an explicit non-negative decimal');
+  }
 
   const r = toMonthlyRate(annualRate);
   const g = annualStepUpRate;
@@ -105,7 +108,7 @@ export function stepUpSipFV(monthlyInvestment, annualRate, years, annualStepUpRa
     currentSIP *= (1 + g);
   }
 
-  return Math.max(0, balance);
+  return balance;
 }
 
 /**
@@ -118,9 +121,11 @@ export function stepUpSipFV(monthlyInvestment, annualRate, years, annualStepUpRa
  * @returns {number} Required monthly SIP (₹)
  */
 export function reverseSIPFromFV(targetFV, annualRate, years) {
-  if (!Number.isFinite(targetFV) || targetFV <= 0) return 0;
-  if (!Number.isFinite(years) || years <= 0) return 0;
-  if (!Number.isFinite(annualRate)) return 0;
+  if (!Number.isFinite(targetFV) || targetFV <= 0) throw new TypeError('targetFV must be an explicit positive number');
+  if (!Number.isFinite(years) || years <= 0) throw new TypeError('years must be an explicit positive number');
+  if (!Number.isFinite(annualRate) || annualRate <= -1 || annualRate > 1) {
+    throw new RangeError('annualRate must be an explicit decimal greater than -1 and at most 1');
+  }
 
   const r = toMonthlyRate(annualRate);
   const n = years * 12;
@@ -142,9 +147,9 @@ export function reverseSIPFromFV(targetFV, annualRate, years) {
  * @returns {number} CAGR as decimal (e.g. 0.12 for 12%)
  */
 export function computeCAGR(initialValue, finalValue, years) {
-  if (!Number.isFinite(initialValue) || initialValue <= 0) return 0;
-  if (!Number.isFinite(finalValue) || finalValue <= 0) return 0;
-  if (!Number.isFinite(years) || years <= 0) return 0;
+  if (!Number.isFinite(initialValue) || initialValue <= 0) throw new TypeError('initialValue must be an explicit positive number');
+  if (!Number.isFinite(finalValue) || finalValue <= 0) throw new TypeError('finalValue must be an explicit positive number');
+  if (!Number.isFinite(years) || years <= 0) throw new TypeError('years must be an explicit positive number');
   return Math.pow(finalValue / initialValue, 1 / years) - 1;
 }
 
@@ -153,12 +158,14 @@ export function computeCAGR(initialValue, finalValue, years) {
  * real_rate = ((1 + nominal) / (1 + inflation)) - 1
  *
  * @param {number} nominalRate - Nominal annual return (decimal)
- * @param {number} inflationRate - Annual inflation rate (decimal, default 5%)
+ * @param {number} inflationRate - Explicit annual inflation rate (decimal)
  * @returns {number} Real return as decimal
  */
-export function realReturn(nominalRate, inflationRate = 0.05) {
-  if (!Number.isFinite(nominalRate)) return 0;
-  if (!Number.isFinite(inflationRate) || inflationRate <= -1) return nominalRate;
+export function realReturn(nominalRate, inflationRate) {
+  if (!Number.isFinite(nominalRate)) throw new TypeError('nominalRate must be finite');
+  if (!Number.isFinite(inflationRate) || inflationRate < 0) {
+    throw new TypeError('inflationRate must be an explicit non-negative decimal');
+  }
   return ((1 + nominalRate) / (1 + inflationRate)) - 1;
 }
 
@@ -167,31 +174,44 @@ export function realReturn(nominalRate, inflationRate = 0.05) {
  *
  * @param {number} monthlyInvestment - Monthly SIP amount per instrument (₹)
  * @param {Array<{name: string, type: string}>} instruments - Array of instrument objects
- * @param {Object} postTaxRates - Map of instrument name → post-tax annual rate (decimal)
- * @param {number[]} years - Projection years (default: [5, 10, 15, 20])
+ * @param {Object} annualRates - Map of instrument name → annual rate (percentage or decimal)
+ * @param {number[]} years - Explicit projection years
  * @returns {{ labels, series, totalInvested, chartData }}
  */
 export function generateProjections(
   monthlyInvestment,
   instruments,
-  postTaxRates,
-  years = [5, 10, 15, 20],
-  inflationRate = 0.05,
-  annualStepUpRate = 0.10,
-  initialLumpSum = 0
+  annualRates,
+  years,
+  inflationRate,
+  annualStepUpRate,
+  initialLumpSum
 ) {
-  // Input guards
   if (!Number.isFinite(monthlyInvestment) || monthlyInvestment <= 0) {
-    return { labels: years, series: [], totalInvested: {}, chartData: [] };
+    throw new TypeError('monthlyInvestment must be a positive finite number');
   }
-  if (!instruments || instruments.length === 0) {
-    return { labels: years, series: [], totalInvested: {}, chartData: [] };
+  if (!Array.isArray(instruments) || instruments.length === 0) {
+    throw new TypeError('instruments must be a non-empty array');
   }
-  if (!Number.isFinite(inflationRate) || inflationRate < 0) inflationRate = 0.05;
-  if (!Number.isFinite(annualStepUpRate) || annualStepUpRate < 0) annualStepUpRate = 0.10;
-  const safeLumpSum = Math.max(0, Number(initialLumpSum) || 0);
-
-  const labels = [...years].filter(y => Number.isFinite(y) && y > 0);
+  if (!annualRates || typeof annualRates !== 'object' || Array.isArray(annualRates)) {
+    throw new TypeError('annualRates must be an explicit instrument-rate map');
+  }
+  if (!Array.isArray(years) || years.length === 0
+      || years.some(year => !Number.isInteger(year) || year < 1 || year > 30)
+      || new Set(years).size !== years.length) {
+    throw new TypeError('years must be a non-empty unique array of integers from 1 to 30');
+  }
+  if (!Number.isFinite(inflationRate) || inflationRate < 0 || inflationRate > 1) {
+    throw new TypeError('inflationRate must be an explicit decimal from 0 to 1');
+  }
+  if (!Number.isFinite(annualStepUpRate) || annualStepUpRate < 0 || annualStepUpRate > 1) {
+    throw new TypeError('annualStepUpRate must be an explicit decimal from 0 to 1');
+  }
+  if (!Number.isFinite(initialLumpSum) || initialLumpSum < 0) {
+    throw new TypeError('initialLumpSum must be an explicit non-negative number');
+  }
+  const safeLumpSum = initialLumpSum;
+  const labels = [...years];
 
   // Total invested at each year mark (nominal, flat SIP + initial lump sum)
   const totalInvested = {};
@@ -213,20 +233,19 @@ export function generateProjections(
 
   // Build series for each instrument
   const series = instruments.map(inst => {
-    let rate = postTaxRates[inst.name] || postTaxRates[inst.type] || 0;
-
-    // Guard: NaN or Infinity rates default to 0
+    const hasNameRate = Object.prototype.hasOwnProperty.call(annualRates, inst.name);
+    const hasTypeRate = Object.prototype.hasOwnProperty.call(annualRates, inst.type);
+    const rate = hasNameRate ? annualRates[inst.name] : (hasTypeRate ? annualRates[inst.type] : undefined);
     if (!Number.isFinite(rate)) {
-      console.warn(`[Projection] Non-finite rate for ${inst.name}: ${rate}, defaulting to 0`);
-      rate = 0;
+      throw new TypeError(`Missing or invalid annual rate for ${inst.name}`);
     }
 
-    // CRITICAL: postTaxRates values come from effectiveYield which is in PERCENTAGE (e.g. 6.5 for 6.5%).
+    // Catalog rates are percentages (for example 6.5 for 6.5%).
     // sipFV expects a DECIMAL rate (e.g. 0.065). Convert here.
     const decimalRate = rate > 1 ? rate / 100 : rate;
 
-    if (decimalRate === 0) {
-      console.warn(`[Projection] Zero effective rate for ${inst.name}. Chart will show flat-line (no growth).`);
+    if (decimalRate <= -1 || decimalRate > 1) {
+      throw new RangeError(`Annual rate for ${inst.name} must be greater than -100% and at most 100%`);
     }
 
     // Nominal projections (flat SIP + initial lump sum)
@@ -252,8 +271,9 @@ export function generateProjections(
 
     return {
       name: inst.name,
-      type: inst.type || 'Unknown',
-      postTaxRate: parseFloat((decimalRate * 100).toFixed(2)),
+      type: inst.type,
+      nominalRate: parseFloat((decimalRate * 100).toFixed(2)),
+      returnBasis: 'PRE_TAX_NOMINAL',
       realRate: parseFloat((realRate * 100).toFixed(2)),
       data,
       realData,

@@ -24,6 +24,7 @@ import { blacklistToken } from '../config/redis.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { withServer, jsonRequest as jsonFetch, rawRequest } from '../test-utils/httpTestUtils.js';
+import { canonicalProfile, canonicalProfilePayload } from './helpers/canonicalProfile.js';
 
 process.env.JWT_SECRET = 'security-test-secret';
 process.env.NODE_ENV = 'test';
@@ -49,19 +50,10 @@ function buildApp() {
 }
 
 
-const VALID_PROFILE_BODY = {
-  monthly_income: 80000,
-  age: 30,
-  monthly_savings: 20000,
-  regime: 'new',
-  investment_horizon: 15,
-  liquid_savings: 100000,
-  existing_debt: 0,
-  dependents: 0,
-  emergency_fund_months: 6,
-  risk_tolerance: 'Moderate',
-  goal_type: 'wealth-building',
-};
+const VALID_PROFILE_BODY = canonicalProfilePayload({
+  monthlyTakeHome: 80000, monthlySavings: 20000, age: 30,
+  liquidSavings: 100000, investmentHorizonYears: 15,
+});
 
 async function ensureDb() {
   await setupTestDatabase();
@@ -75,7 +67,7 @@ test.after(async () => {
 });
 
 // ── 1. Mass Assignment Prevention ────────────────────────────────────
-test('Security: mass assignment fields are stripped by schema validation', async () => {
+test('Security: mass assignment fields are rejected by strict schema validation', async () => {
   await ensureDb();
   const token = signToken(USER_A_ID);
 
@@ -93,16 +85,9 @@ test('Security: mass assignment fields are stripped by schema validation', async
       headers: { authorization: `Bearer ${token}` },
     });
 
-    assert.equal(response.status, 201);
-    const profileId = body.profileId;
-    assert.ok(profileId);
-
-    // Read the document directly from database to verify those fields do not exist
-    const savedDoc = await FinancialProfile.findById(profileId).lean();
-    assert.equal(savedDoc.role, undefined, 'role field should not be saved');
-    assert.equal(savedDoc.is_admin, undefined, 'is_admin field should not be saved');
-    assert.equal(savedDoc.isAdmin, undefined, 'isAdmin field should not be saved');
-    assert.equal(savedDoc.someUnusedField, undefined, 'someUnusedField should not be saved');
+    assert.equal(response.status, 400);
+    assert.equal(body.code, 'VALIDATION_ERROR');
+    assert.equal(await FinancialProfile.countDocuments({ userId: USER_A_ID }), 0);
   });
 });
 
@@ -113,19 +98,8 @@ test('Security: user B cannot modify user A profile via IDOR', async () => {
   // Create profile A directly in DB
   const profileA = await FinancialProfile.create({
     userId: USER_A_ID,
-    monthlyIncome: 80000,
-    age: 30,
-    savings: 20000,
-    annualIncome: 960000,
-    taxSlabDecimal: 0.1,
-    effectiveTaxRatePercent: 5.2,
-    taxRegime: 'new',
-    riskCategory: 'Moderate',
-    riskScore: 50,
-    riskDescription: 'Moderate risk',
-    recommendedEquityAllocation: 50,
-    investableAmount: 20000,
-    investmentHorizon: 15,
+    ...canonicalProfile({ monthlyTakeHome: 80000, monthlySavings: 20000, age: 30 }),
+    recommendationProfileVersion: 'financial-profile-1.0.0',
   });
 
   const tokenB = signToken(USER_B_ID);
@@ -136,7 +110,7 @@ test('Security: user B cannot modify user A profile via IDOR', async () => {
       method: 'PUT',
       body: JSON.stringify({
         ...VALID_PROFILE_BODY,
-        monthly_income: 120000,
+        monthly_take_home: 120000,
         version: profileA.version || 1,
       }),
       headers: { authorization: `Bearer ${tokenB}` },
@@ -147,7 +121,7 @@ test('Security: user B cannot modify user A profile via IDOR', async () => {
 
     // Verify DB remains unchanged
     const doc = await FinancialProfile.findById(profileA._id).lean();
-    assert.equal(doc.monthlyIncome, 80000, 'Profile A monthlyIncome must not be updated by User B');
+    assert.equal(doc.monthlyTakeHome, 80000, 'Profile A monthly take-home must not be updated by User B');
   });
 });
 
@@ -246,21 +220,30 @@ test('WG-005: POST /api/instruments/rank-wti returns 400 for malformed userProfi
 });
 
 test('WG-005: POST /api/instruments/rank-wti returns 200 for valid authenticated request', async () => {
+  await ensureDb();
   const token = signToken(USER_A_ID);
+  let profile = await FinancialProfile.findOne({ userId: USER_A_ID });
+  if (!profile) {
+    profile = await FinancialProfile.create({
+      userId: USER_A_ID,
+      ...canonicalProfile({ monthlyTakeHome: 80000, monthlySavings: 20000, age: 30 }),
+      recommendationProfileVersion: 'financial-profile-1.0.0',
+    });
+  }
   await withServer(buildInstrumentApp(), async (baseUrl) => {
     const { response, body } = await jsonFetch(`${baseUrl}/api/instruments/rank-wti`, {
       method: 'POST',
       body: JSON.stringify({
-        candidates: [{ name: 'PPF' }, { name: 'ELSS' }],
-        userProfile: { age: 30, riskCategory: 'Moderate', investment_horizon: 15 },
-        options: { regimeApplied: true, regimeKey: 'new' },
+        profileId: profile._id.toString(),
+        parentInstrumentId: 'index_mf',
+        candidates: [{ name: 'Direct Index Plan' }, { name: 'Low-Cost Index Plan' }],
       }),
       headers: { authorization: `Bearer ${token}` },
     });
     assert.equal(response.status, 200, 'rank-wti must succeed with valid auth + valid payload');
     assert.ok(body.success, 'Response should include success flag');
     assert.ok(Array.isArray(body.products), 'Response should include products array');
-    assert.equal(body.total, 2, 'Should return 2 ranked products');
+      assert.equal(body.total, 2, 'Should return both provider presentation options');
   });
 });
 
@@ -331,7 +314,7 @@ test('WG-003: PUT /api/profile/:profileId updates existing profile in-place', as
 
       const { response: putRes, body: putBody } = await jsonFetch(`${baseUrl}/api/profile/${profileId}`, {
         method: 'PUT',
-        body: JSON.stringify({ ...VALID_PROFILE_BODY, monthly_income: 95000, version: postBody.version || 1 }),
+        body: JSON.stringify({ ...VALID_PROFILE_BODY, monthly_take_home: 95000, version: postBody.version || 1 }),
         headers: { authorization: `Bearer ${token}` },
       });
       assert.equal(putRes.status, 200, 'PUT /api/profile/:profileId should succeed with valid version');

@@ -1,3 +1,6 @@
+import { buildRecommendationProfile } from './recommendationProfile.js';
+import { assessSuitabilityRisk } from './riskProfiler.js';
+
 /**
  * Explainability Engine (Phase 6)
  * Generates transparent, deterministic explanation metadata for financial advice.
@@ -13,18 +16,19 @@ export class ExplainabilityEngine {
    * @returns {object} Explainability metadata object
    */
   static generateExplanation(profile = {}, toolResults = [], verificationMetadata = {}) {
+    const canonical = buildRecommendationProfile(profile);
+    const suitability = assessSuitabilityRisk(canonical);
     const enginesUsed = new Set();
     const assumptions = [];
     const affectedAttributes = [];
 
-    if (profile.age) affectedAttributes.push(`Investor Age (${profile.age} yrs)`);
-    if (profile.riskCategory) affectedAttributes.push(`Risk Profile (${profile.riskCategory})`);
-    if (profile.taxRegime) affectedAttributes.push(`Tax Regime (${profile.taxRegime})`);
-    if (profile.totalCTC) affectedAttributes.push(`Total CTC (₹${profile.totalCTC.toLocaleString('en-IN')})`);
-    if (profile.basicComponent) affectedAttributes.push(`Basic Component (₹${profile.basicComponent.toLocaleString('en-IN')})`);
-    if (profile.monthlyTakeHome) affectedAttributes.push(`Monthly Take-Home (₹${profile.monthlyTakeHome.toLocaleString('en-IN')})`);
-    if (profile.soldPropertyAmount) affectedAttributes.push(`Property Sale Proceeds (₹${profile.soldPropertyAmount.toLocaleString('en-IN')})`);
-    if (profile.hasLumpSum && profile.lumpSumAmount) affectedAttributes.push(`Lump Sum Deployment (₹${profile.lumpSumAmount.toLocaleString('en-IN')})`);
+    affectedAttributes.push(`Investor Age (${canonical.age} yrs)`);
+    affectedAttributes.push(`Risk Preference (${canonical.riskTolerance})`);
+    affectedAttributes.push(`Final Suitability (${suitability.finalRisk})`);
+    affectedAttributes.push(`Monthly Take-Home (₹${canonical.monthlyTakeHome.toLocaleString('en-IN')})`);
+    affectedAttributes.push(`Monthly Savings (₹${canonical.monthlySavings.toLocaleString('en-IN')})`);
+    affectedAttributes.push(`Investment Horizon (${canonical.investmentHorizonYears} yrs)`);
+    if (canonical.hasLumpSum) affectedAttributes.push(`Deployable Lump Sum (₹${canonical.lumpSumAmount.toLocaleString('en-IN')})`);
 
     toolResults.forEach(res => {
       if (res.tool === 'sip_projection') {
@@ -43,12 +47,12 @@ export class ExplainabilityEngine {
     const confidenceScore = isVerified ? 0.98 : 0.85;
 
     return {
-      whyThisRecommendation: 'Grounded on investor financial profile, risk tolerance, and canonical engine verification.',
+      whyThisRecommendation: `Grounded on the frozen Financial Profile; final suitability ${suitability.finalRisk} does not exceed stated ${canonical.riskTolerance} preference.`,
       financialEnginesUsed: Array.from(enginesUsed),
       assumptionsUsed: assumptions.length > 0 ? assumptions : ['Standard compounding & SEBI regulatory boundaries'],
       affectedProfileAttributes: affectedAttributes,
       confidenceScore,
-      limitations: ['Projections do not guarantee future returns. Market risks apply.'],
+      limitations: ['Projections do not guarantee future returns.', 'Tax impact is not personalized without a separate explicit tax profile.'],
       riskDisclosure: 'Past performance is not indicative of future returns. Mutual fund investments are subject to market risks.',
     };
   }

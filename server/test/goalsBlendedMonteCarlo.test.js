@@ -7,9 +7,9 @@ import { buildCovarianceMatrix, portfolioReturn, portfolioVol } from '../service
 test('Blended Portfolio Monte Carlo: diversification reduces portfolio volatility and improves goal probability', () => {
   // Setup sample instruments matching a moderate recommendation portfolio
   const instruments = [
-    { name: 'Public Provident Fund (PPF)', type: 'PPF', allocationWeight: 0.50, postTaxReturn: 7.1 },
-    { name: 'Nifty 50 Index Fund', type: 'Equity_MF', allocationWeight: 0.25, postTaxReturn: 14.5 },
-    { name: 'Invesco QQQ Trust ETF', type: 'ETF', allocationWeight: 0.25, postTaxReturn: 12.5 },
+    { name: 'Public Provident Fund (PPF)', type: 'PPF', allocationWeight: 0.50, nominalReturn: 7.1 },
+    { name: 'Nifty 50 Index Fund', type: 'Equity_MF', allocationWeight: 0.25, nominalReturn: 14.5 },
+    { name: 'Invesco QQQ Trust ETF', type: 'ETF', allocationWeight: 0.25, nominalReturn: 12.5 },
   ];
 
   // 1. Single instrument standalone volatility (Equity_MF)
@@ -18,7 +18,7 @@ test('Blended Portfolio Monte Carlo: diversification reduces portfolio volatilit
 
   // 2. Blended portfolio metrics using covariance matrix
   const weights = instruments.map(i => i.allocationWeight);
-  const returnsDecimal = instruments.map(i => i.postTaxReturn / 100);
+  const returnsDecimal = instruments.map(i => i.nominalReturn / 100);
   const assetKeys = instruments.map(i => i.type);
 
   const blendedReturnDecimal = portfolioReturn(weights, returnsDecimal);
@@ -36,22 +36,24 @@ test('Blended Portfolio Monte Carlo: diversification reduces portfolio volatilit
 
   const blendedPortfolioMC = runMonteCarloWithGoal({
     monthlyInvestment,
-    postTaxAnnualReturn: blendedReturnDecimal,
+    annualExpectedReturn: blendedReturnDecimal,
     annualVolatility: blendedVolDecimal,
     years,
     simulations: 2000,
     targetAmount,
     currentSavings: 100_000,
+    inflationRate: 0.05,
   });
 
   const equalReturnEquityMC = runMonteCarloWithGoal({
     monthlyInvestment,
-    postTaxAnnualReturn: blendedReturnDecimal,
+    annualExpectedReturn: blendedReturnDecimal,
     annualVolatility: singleVol.stdDev,
     years,
     simulations: 2000,
     targetAmount,
     currentSavings: 100_000,
+    inflationRate: 0.05,
   });
 
   // Verify valid probability in [0, 1]
@@ -66,12 +68,11 @@ test('Stage 5 Optimizer / Goals glue: _getBlendedPortfolioMetrics returns decima
   const { _getBlendedPortfolioMetrics } = await import('../routes/goals.js');
   const { reverseSIP } = await import('../services/monteCarloEngine.js');
 
-  // Test 1: Fallback path when no recommendation exists (returns decimal scale)
-  const noRecMetrics = await _getBlendedPortfolioMetrics('507f1f77bcf86cd799439011', null, 'Equity_MF');
-  assert.ok(noRecMetrics.postTaxReturn > 0 && noRecMetrics.postTaxReturn < 1.0,
-    `Fallback postTaxReturn (${noRecMetrics.postTaxReturn}) must be on DECIMAL scale (< 1.0, e.g. 0.12)`);
-  assert.ok(noRecMetrics.volatility > 0 && noRecMetrics.volatility < 1.0,
-    `Fallback volatility (${noRecMetrics.volatility}) must be on DECIMAL scale (< 1.0, e.g. 0.18)`);
+  // No fallback return assumption is permitted when an authoritative recommendation is absent.
+  await assert.rejects(
+    _getBlendedPortfolioMetrics('507f1f77bcf86cd799439011', null, 'Equity_MF', { instruments: [] }),
+    error => error.code === 'RECOMMENDATION_REQUIRED',
+  );
 
   // Test 2: Sanity check reverseSIP with decimal rate vs 100x buggy percentage rate
   const targetAmount = 1_000_000;
@@ -83,46 +84,46 @@ test('Stage 5 Optimizer / Goals glue: _getBlendedPortfolioMetrics returns decima
   assert.ok(saneSIP > 5000 && saneSIP < 20000,
     `Required SIP (${saneSIP}) with decimal rate 0.103 must be realistic (₹5k - ₹20k/mo)`);
 
-  const buggySIP = reverseSIP(targetAmount, 10.3, years, currentSavings);
-  assert.equal(buggySIP, 0, 'Passing 10.3 (percentage) into reverseSIP incorrectly produces 0 required SIP');
+  assert.throws(() => reverseSIP(targetAmount, 10.3, years, currentSavings), /annualRate/);
 
   // Test 3: Sanity check Monte Carlo p50 output scale
   const mcDecimal = runMonteCarloWithGoal({
     monthlyInvestment: saneSIP,
-    postTaxAnnualReturn: decimalRate,
+    annualExpectedReturn: decimalRate,
     annualVolatility: 0.068,
     years,
     simulations: 500,
     targetAmount,
     currentSavings,
+    inflationRate: 0.05,
   });
   assert.ok(mcDecimal.p50[4] > targetAmount * 0.8 && mcDecimal.p50[4] < targetAmount * 3.0,
     `Monte Carlo P50 (${mcDecimal.p50[4]}) must be realistic (< 3x target), not 2.7e+27`);
 
-  const mcBuggy = runMonteCarloWithGoal({
+  assert.throws(() => runMonteCarloWithGoal({
     monthlyInvestment: saneSIP,
-    postTaxAnnualReturn: 10.3,
+    annualExpectedReturn: 10.3,
     annualVolatility: 0.068,
     years,
     simulations: 500,
     targetAmount,
     currentSavings,
-  });
-  assert.ok(mcBuggy.p50[4] > 1e+20, 'Passing 10.3 (percentage) into Monte Carlo causes p50 explosion > 1e+20');
+    inflationRate: 0.05,
+  }), /annualExpectedReturn/);
 
   // Test 4: Direct test of main blended-weight branch of _getBlendedPortfolioMetrics with multi-instrument recommendation
   const mockRec = {
     instruments: [
-      { name: 'Public Provident Fund', type: 'PPF', allocationWeight: 0.50, postTaxReturn: 7.1 },
-      { name: 'Nifty 50 Index Fund', type: 'Equity_MF', allocationWeight: 0.25, postTaxReturn: 14.5 },
-      { name: 'Invesco QQQ ETF', type: 'ETF', allocationWeight: 0.25, postTaxReturn: 12.5 },
+      { name: 'Public Provident Fund', type: 'PPF', allocationWeight: 0.50, nominalReturn: 7.1 },
+      { name: 'Nifty 50 Index Fund', type: 'Equity_MF', allocationWeight: 0.25, nominalReturn: 14.5 },
+      { name: 'Invesco QQQ ETF', type: 'ETF', allocationWeight: 0.25, nominalReturn: 12.5 },
     ],
   };
 
   const mockMetrics = await _getBlendedPortfolioMetrics(null, null, 'Equity_MF', mockRec);
-  assert.ok(mockMetrics.postTaxReturn > 0 && mockMetrics.postTaxReturn < 1.0,
-    `Main path blended postTaxReturn (${mockMetrics.postTaxReturn}) must be on DECIMAL scale (< 1.0, e.g. 0.103)`);
-  assert.equal(mockMetrics.postTaxReturn, 0.103);
+  assert.ok(mockMetrics.expectedReturn > 0 && mockMetrics.expectedReturn < 1.0,
+    `Main path blended expectedReturn (${mockMetrics.expectedReturn}) must be on DECIMAL scale (< 1.0, e.g. 0.103)`);
+  assert.equal(mockMetrics.expectedReturn, 0.103);
   assert.ok(mockMetrics.volatility > 0 && mockMetrics.volatility < 0.10,
     `Main path blended volatility (${mockMetrics.volatility}) must be on DECIMAL scale and diversified (< 0.10)`);
 });

@@ -1,7 +1,7 @@
 """
-register_model.py — CLI to register a trained model checkpoint into the registry.
+register_model.py — CLI to register a v4 model checkpoint into the registry.
 
-Reads Phase 4's rigor report automatically to populate metrics.
+Reads the versioned v4 rigor report to populate honest policy-fidelity metrics.
 Computes and stores reference distributions for drift monitoring.
 
 Usage:
@@ -13,7 +13,6 @@ Usage:
 """
 
 import argparse
-import hashlib
 import json
 import sys
 from pathlib import Path
@@ -23,109 +22,79 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import pandas as pd
-from model.registry.registry_store import ModelRegistry, compute_data_hash
+from model.registry.registry_store import ModelRegistry
 from model.registry.drift_detection import compute_reference_distributions
+from model.data.feature_engineering import FEATURE_NAMES, FEATURE_SCHEMA_VERSION
+from model.data.preprocessing import (
+    compute_dataset_hash_from_arrays,
+    prepare_synthetic_training_data,
+)
 
 
-DATA_DIR = PROJECT_ROOT / "data"
-PROFILES_CSV = DATA_DIR / "investment_profiles.csv"
 MODEL_DIR = PROJECT_ROOT / "model"
 
-MODEL_FEATURES = [
-    "age", "annual_income", "monthly_savings", "investment_horizon",
-    "liquid_savings", "existing_debt", "dependents", "emergency_fund_months",
-    "risk_score", "stated_tolerance_score", "savings_rate",
-    "debt_to_income_ratio", "emergency_fund_adequacy_ratio",
-    "risk_capacity_vs_stated_tolerance_gap", "horizon_adjusted_urgency_score",
-    "dependents_adjusted_burden_score",
-]
+MODEL_FEATURES = FEATURE_NAMES
 
 
 def load_rigor_report(metrics_path: Path) -> dict:
-    """Load Phase 4 rigor evaluation report."""
+    """Load and validate a frozen-architecture v4 rigor report."""
     with open(metrics_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        report = json.load(f)
+    audit = report.get("feature_contract_audit") or {}
+    if (
+        audit.get("feature_schema_version") != FEATURE_SCHEMA_VERSION
+        or audit.get("feature_names") != FEATURE_NAMES
+        or audit.get("finding") != "PASS"
+    ):
+        raise ValueError("Rigor report does not prove the ordered v4 feature allowlist")
+    return report
 
 
 def extract_architecture_metrics(rigor_report: dict, architecture: str) -> dict:
     """
     Extract the correct metrics for a given architecture.
 
-    IMPORTANT: Rule-approximation fidelity comes from multi_model_benchmark.json's
-    test_accuracy field (computed on the held-out test split — the established,
-    approved Phase 4 numbers: RF=0.9563, MLP=0.9560, FT=0.9705).
-
-    The rigor_evaluation_report.json's multi_model_independent_benchmark section
-    stores numbers computed on the FULL dataset with potentially different checkpoint
-    files, so we only use it for CFP benchmark accuracy and audit fields.
+    Legacy v3 multi-model and CFP figures are intentionally not imported: they
+    were computed from unauthorized annual-income/debt features and cannot be
+    evidence for a v4 candidate.
     """
-    # --- CFP benchmark + audit data from rigor report ---
-    multi_model = rigor_report.get("multi_model_independent_benchmark", {})
-    rigor_arch_map = {
-        "RandomForest": "RandomForest",
-        "PyTorch_MLP": "PyTorch_FinancialMLP",
-        "FT_Transformer": "FT_Transformer",
-    }
-    rigor_key = rigor_arch_map.get(architecture, architecture)
-    rigor_metrics = multi_model.get(rigor_key, {})
-
-    # --- Fidelity (test_accuracy) from multi_model_benchmark.json ---
-    benchmark_path = MODEL_DIR.parent / "reports" / "multi_model_benchmark.json"
-    fidelity = None
-    if benchmark_path.exists():
-        with open(benchmark_path, "r", encoding="utf-8") as f:
-            benchmark = json.load(f)
-        bench_arch_map = {
-            "RandomForest": "random_forest",
-            "PyTorch_MLP": "pytorch_mlp",
-            "FT_Transformer": "ft_transformer",
-        }
-        bench_key = bench_arch_map.get(architecture, "")
-        model_data = benchmark.get("models", {}).get(bench_key, {})
-        fidelity = model_data.get("test_accuracy")
-
-    return {
-        "rule_approximation_fidelity": fidelity,
-        "independent_cfp_benchmark_accuracy": rigor_metrics.get("independent_cfp_benchmark_accuracy"),
-        "feature_overlap_audit": rigor_report.get("feature_overlap_audit", {}),
-        "formula_overlap_percentage": rigor_report.get("independent_organic_benchmark", {})
-            .get("formula_logic_audit", {})
-            .get("formula_overlap_percentage"),
+    if architecture not in {"RandomForest", "PyTorch_MLP", "FT_Transformer"}:
+        raise ValueError(f"Unsupported architecture: {architecture}")
+    metric_reframe = rigor_report.get("metric_reframe") or {}
+    metrics = {
+        "feature_contract_audit": rigor_report["feature_contract_audit"],
+        "formula_logic_overlap_audit": rigor_report.get("formula_logic_overlap_audit", {}),
         "noise_robustness": rigor_report.get("noise_robustness", {}),
+        "metric_interpretation": "policy-approximation fidelity, not investment outcome accuracy",
     }
+    if architecture == "RandomForest":
+        fidelity = metric_reframe.get("policy_approximation_fidelity_random_forest")
+        if fidelity is None:
+            raise ValueError("Rigor report lacks RandomForest v4 policy-fidelity evidence")
+        metrics["rule_approximation_fidelity"] = fidelity
+    return metrics
 
 
 def extract_hyperparameters(architecture: str) -> dict:
     """
-    Load the full hyperparameter config for a given architecture from
-    the benchmark report or config files.
+    Load only hyperparameters accompanied by architecture-specific v4 metadata.
     """
-    benchmark_path = MODEL_DIR.parent / "reports" / "multi_model_benchmark.json"
-    if benchmark_path.exists():
-        with open(benchmark_path, "r", encoding="utf-8") as f:
-            benchmark = json.load(f)
-
-        models = benchmark.get("models", {})
-        arch_key_map = {
-            "RandomForest": "random_forest",
-            "PyTorch_MLP": "pytorch_mlp",
-            "FT_Transformer": "ft_transformer",
-        }
-        key = arch_key_map.get(architecture, "")
-        if key in models:
-            model_data = models[key]
-            # Extract architecture-specific config
-            hparams = {}
-            if "architecture" in model_data:
-                hparams.update(model_data["architecture"])
-            for param in ("n_estimators", "max_depth", "epochs_completed",
-                          "max_epochs", "best_val_loss"):
-                if param in model_data:
-                    hparams[param] = model_data[param]
-            hparams["training_time_seconds"] = model_data.get("training_time_seconds")
-            return hparams
-
-    return {"note": "hyperparameters extracted from benchmark report"}
+    metadata_paths = {
+        "RandomForest": MODEL_DIR / "metadata.json",
+        "PyTorch_MLP": MODEL_DIR / "saved_models" / "pytorch_metadata.json",
+        "FT_Transformer": MODEL_DIR / "saved_models" / "ft_transformer_metadata.json",
+    }
+    metadata_path = metadata_paths.get(architecture)
+    if metadata_path is None or not metadata_path.exists():
+        raise ValueError(f"Versioned metadata is missing for {architecture}")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if metadata.get("feature_schema_version") != FEATURE_SCHEMA_VERSION or metadata.get("feature_names") != FEATURE_NAMES:
+        raise ValueError(f"{architecture} metadata does not match the ordered v4 feature allowlist")
+    hparams = dict(metadata.get("model_config") or {})
+    for name in ("n_estimators", "max_depth", "epochs_completed", "best_val_loss"):
+        if name in metadata:
+            hparams[name] = metadata[name]
+    return hparams
 
 
 def main():
@@ -143,7 +112,7 @@ def main():
     )
     parser.add_argument(
         "--metrics", type=str, required=True,
-        help="Path to Phase 4 rigor_evaluation_report.json"
+        help="Path to the v4 rigor_evaluation_report.json"
     )
     parser.add_argument(
         "--set-active", action="store_true", default=False,
@@ -179,24 +148,35 @@ def main():
     metrics = extract_architecture_metrics(rigor_report, args.architecture)
     hyperparameters = extract_hyperparameters(args.architecture)
 
-    # Compute training data hash for lineage
-    training_data_hash = "unavailable"
-    if PROFILES_CSV.exists():
-        training_data_hash = compute_data_hash(PROFILES_CSV)
-
-    # Compute reference distributions for drift monitoring
-    reference_distributions = None
-    if PROFILES_CSV.exists():
-        df = pd.read_csv(PROFILES_CSV)
-        reference_distributions = compute_reference_distributions(df, MODEL_FEATURES)
-
-    # Training timestamp from metadata
+    # Validate versioned metadata and reproduce the same v4 feature contract
+    # used by the trainer. A legacy CSV is never accepted as model lineage.
     metadata_path = MODEL_DIR / "metadata.json"
     training_timestamp = "unknown"
-    if metadata_path.exists():
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            meta = json.load(f)
-        training_timestamp = meta.get("trained_at", training_timestamp)
+    if not metadata_path.exists():
+        print(f"ERROR: Versioned metadata not found: {metadata_path}")
+        sys.exit(1)
+    with open(metadata_path, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+    if meta.get("feature_schema_version") != FEATURE_SCHEMA_VERSION or meta.get("feature_names") != FEATURE_NAMES:
+        print("ERROR: Refusing to register stale or incompatible feature metadata")
+        sys.exit(1)
+    lineage = meta.get("dataset_lineage") or {}
+    sample_count = int(lineage.get("num_samples", 2_000))
+    seed = int(lineage.get("seed", 42))
+    reference_x, reference_y = prepare_synthetic_training_data(num_samples=sample_count, seed=seed)
+    training_data_hash = compute_dataset_hash_from_arrays(reference_x, reference_y)
+    if meta.get("training_data_hash") not in (None, training_data_hash):
+        print("ERROR: Refusing to register artifact whose training-data hash cannot be reproduced")
+        sys.exit(1)
+    reference_distributions = compute_reference_distributions(
+        pd.DataFrame(reference_x, columns=MODEL_FEATURES), MODEL_FEATURES
+    )
+    training_timestamp = meta.get("trained_at", training_timestamp)
+    hyperparameters.update({
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "feature_names": FEATURE_NAMES,
+        "dataset_lineage": lineage,
+    })
 
     # Register
     db_path = Path(args.db_path) if args.db_path else None

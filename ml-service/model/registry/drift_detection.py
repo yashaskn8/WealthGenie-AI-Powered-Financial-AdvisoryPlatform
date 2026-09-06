@@ -122,11 +122,27 @@ def compute_feature_psi(
     Compute PSI for a single feature given its reference distribution
     and a new batch of observations.
     """
-    bin_edges = np.array(reference_dist["bin_edges"])
+    bin_edges = np.array(reference_dist["bin_edges"], dtype=float)
     ref_proportions = np.array(reference_dist["bin_proportions"])
 
+    if bin_edges.ndim != 1 or len(bin_edges) != len(ref_proportions) + 1:
+        raise ValueError("reference distribution has incompatible histogram bins")
+
+    finite_data = np.asarray(new_data, dtype=float)
+    finite_data = finite_data[np.isfinite(finite_data)]
+    if len(finite_data) == 0:
+        return 0.0
+
+    # Values outside the reference min/max are themselves strong drift evidence.
+    # np.histogram silently drops those values when given finite outer edges,
+    # which previously let extreme income shifts look stable. Keep the learned
+    # internal cut points but make the outer buckets exhaustive.
+    exhaustive_edges = bin_edges.copy()
+    exhaustive_edges[0] = -np.inf
+    exhaustive_edges[-1] = np.inf
+
     # Histogram the new data using the SAME bin edges as training
-    new_counts, _ = np.histogram(new_data, bins=bin_edges)
+    new_counts, _ = np.histogram(finite_data, bins=exhaustive_edges)
     total = new_counts.sum()
     if total == 0:
         return 0.0

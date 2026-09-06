@@ -96,7 +96,13 @@ test('Property: portfolio rebalance drift index is always between 0 and 100', ()
         Gold: fc.double({ min: 0, max: 100, noNaN: true, noInfinity: true }),
       }),
       (current, target) => {
-        const result = computeRebalance(current, target, 2.0, 1.0, 24);
+        const currentTotal = Object.values(current).reduce((sum, value) => sum + value, 0);
+        const targetTotal = Object.values(target).reduce((sum, value) => sum + value, 0);
+        fc.pre(currentTotal > 0 && targetTotal > 0);
+        const normalizedTarget = Object.fromEntries(
+          Object.entries(target).map(([key, value]) => [key, value / targetTotal * 100]),
+        );
+        const result = computeRebalance(current, normalizedTarget, 2.0, 1.0, 24);
         
         // If current value was zero, assets array might be empty
         if (result.total_portfolio_value > 0) {
@@ -152,10 +158,12 @@ test('Property: Monte Carlo percentile bands are strictly ordered (p10 <= p25 <=
       (monthlyInvestment, rate, vol, years) => {
         const result = runMonteCarloWithGoal({
           monthlyInvestment,
-          postTaxAnnualReturn: rate,
+          annualExpectedReturn: rate,
           annualVolatility: vol,
           years,
           simulations: 200, // Small count for fast property execution
+          inflationRate: 0.05,
+          currentSavings: 0,
           targetAmount: monthlyInvestment * 12 * years * 1.5,
         });
 

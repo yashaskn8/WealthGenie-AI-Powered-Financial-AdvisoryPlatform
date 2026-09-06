@@ -5,6 +5,9 @@ import { computeTax } from './taxEngine.js';
 import { computeXIRR } from './xirrCalculator.js';
 import { solveMinVariance, solveMaxSharpe, solveRiskParity, computeRebalance } from './portfolioEngine.js';
 import { PrometheusMetrics } from './metricsCollector.js';
+import { INSTRUMENT_PARAMS } from './instrumentConstants.js';
+import { buildRecommendationProfile } from './recommendationProfile.js';
+import { assertPortfolioSuitable, enforceAllocationTargets } from './RecommendationPipeline.js';
 
 /**
  * WealthGenie Centralized Financial Tool Registry
@@ -20,6 +23,32 @@ const VALID_ASSET_KEYS = [
 ];
 
 const SAFE_ALLOCATION_KEY_REGEX = /^(?!__proto__|constructor|prototype|toString|valueOf)[a-zA-Z0-9_-]{1,50}$/;
+
+function canonicalContextProfile(context) {
+  return context?.profile ? buildRecommendationProfile(context.profile) : null;
+}
+
+function assertProjectionWithinProfile(context, { monthlyInvestment, principal, years }) {
+  const profile = canonicalContextProfile(context);
+  if (!profile) return null;
+  if (monthlyInvestment !== undefined && monthlyInvestment > profile.monthlySavings) {
+    throw new Error(`monthlyInvestment exceeds Financial Profile capacity of ${profile.monthlySavings}`);
+  }
+  const deployableLumpSum = profile.hasLumpSum ? profile.lumpSumAmount : 0;
+  if (principal !== undefined && principal > deployableLumpSum) {
+    throw new Error(`principal exceeds declared deployable lump sum of ${deployableLumpSum}`);
+  }
+  if (years > profile.investmentHorizonYears) {
+    throw new Error(`years exceeds Financial Profile horizon of ${profile.investmentHorizonYears}`);
+  }
+  return profile;
+}
+
+function calculationClassification(context) {
+  return context?.profile
+    ? 'NON_RECOMMENDATION_PROFILE_CONSTRAINED_WHAT_IF'
+    : 'NON_RECOMMENDATION_WHAT_IF';
+}
 
 /**
  * Recursively strips dangerous object keys to prevent prototype pollution.
@@ -111,7 +140,11 @@ class ToolRegistry {
     const sanitizedArgs = sanitizeToolInputs(args);
 
     // Step 2: Validate inputs against tool Joi schema
-    const { error, value } = tool.schema.validate(sanitizedArgs, { stripUnknown: true });
+    const { error, value } = tool.schema.validate(sanitizedArgs, {
+      stripUnknown: false,
+      allowUnknown: false,
+      abortEarly: false,
+    });
     if (error) {
       PrometheusMetrics.recordToolExecution(name, false);
       return {
@@ -152,10 +185,11 @@ class ToolRegistry {
         annualRate: Joi.number().min(0.001).max(0.50).required(), // decimal, e.g. 0.12 for 12%
         years: Joi.number().min(1).max(50).required(),
       }),
-      executor: async ({ monthlyInvestment, annualRate, years }) => {
+      executor: async ({ monthlyInvestment, annualRate, years }, context) => {
+        assertProjectionWithinProfile(context, { monthlyInvestment, years });
         const futureValue = sipFV(monthlyInvestment, annualRate, years);
         const totalInvested = monthlyInvestment * years * 12;
-        const totalReturns = Math.max(0, futureValue - totalInvested);
+        const totalReturns = futureValue - totalInvested;
         return {
           monthlyInvestment,
           annualRatePct: annualRate * 100,
@@ -163,6 +197,8 @@ class ToolRegistry {
           totalInvested: Math.round(totalInvested),
           futureValue: Math.round(futureValue),
           totalReturns: Math.round(totalReturns),
+          classification: calculationClassification(context),
+          returnBasis: 'USER_SUPPLIED_NOMINAL_ASSUMPTION',
         };
       },
     });
@@ -176,15 +212,18 @@ class ToolRegistry {
         annualRate: Joi.number().min(0.001).max(0.50).required(),
         years: Joi.number().min(1).max(50).required(),
       }),
-      executor: async ({ principal, annualRate, years }) => {
+      executor: async ({ principal, annualRate, years }, context) => {
+        assertProjectionWithinProfile(context, { principal, years });
         const futureValue = lumpSumFV(principal, annualRate, years);
-        const totalReturns = Math.max(0, futureValue - principal);
+        const totalReturns = futureValue - principal;
         return {
           principal,
           annualRatePct: annualRate * 100,
           years,
           futureValue: Math.round(futureValue),
           totalReturns: Math.round(totalReturns),
+          classification: calculationClassification(context),
+          returnBasis: 'USER_SUPPLIED_NOMINAL_ASSUMPTION',
         };
       },
     });
@@ -197,7 +236,7 @@ class ToolRegistry {
         targetAmount: Joi.number().min(1000).max(10000000000).required(),
         annualRate: Joi.number().min(0.001).max(0.50).required(),
         years: Joi.number().min(1).max(50).required(),
-        currentSavings: Joi.number().min(0).max(10000000000).default(0),
+        currentSavings: Joi.number().min(0).max(10000000000).required(),
       }),
       executor: async ({ targetAmount, annualRate, years, currentSavings }) => {
         const requiredMonthlySip = reverseSIP(targetAmount, annualRate, years, currentSavings);
@@ -207,6 +246,8 @@ class ToolRegistry {
           years,
           currentSavings,
           requiredMonthlySip: Math.round(requiredMonthlySip),
+          classification: 'NON_RECOMMENDATION_GOAL_WHAT_IF',
+          returnBasis: 'USER_SUPPLIED_NOMINAL_ASSUMPTION',
         };
       },
     });
@@ -218,16 +259,23 @@ class ToolRegistry {
       schema: Joi.object({
         income: Joi.number().min(0).max(1000000000).required(),
         basicSalary: Joi.number().min(0).max(1000000000).optional(),
-        regime: Joi.string().valid('new', 'old').default('new'),
-        section80C: Joi.number().min(0).max(150000).default(0),
-        nps80CCD1B: Joi.number().min(0).max(50000).default(0),
-        section80D: Joi.number().min(0).max(100000).default(0),
-        hra: Joi.number().min(0).max(100000000).default(0),
+        incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').required(),
+        age: Joi.number().integer().min(18).max(120).required(),
+        regime: Joi.string().valid('new', 'old').required(),
+        section80C: Joi.number().min(0).max(150000).required(),
+        nps80CCD1B: Joi.number().min(0).max(50000).required(),
+        section80D_self: Joi.number().min(0).max(50000).required(),
+        section80D_parents: Joi.number().min(0).max(50000).required(),
+        parentsSenior: Joi.boolean().required(),
+        hra: Joi.number().min(0).max(100000000).required(),
       }),
-      executor: async ({ income, basicSalary, regime, section80C, nps80CCD1B, section80D, hra }) => {
-        const deductions = { basicSalary, section80C, nps80CCD1B, section80D, hra };
-        const taxResult = computeTax(income, regime, deductions);
-        return taxResult;
+      executor: async ({ income, basicSalary, incomeSource, age, regime, section80C, nps80CCD1B, section80D_self, section80D_parents, parentsSenior, hra }) => {
+        const deductions = {
+          basicSalary, age, section80C, nps80CCD1B, section80D_self,
+          section80D_parents, parents_senior: parentsSenior, hra,
+        };
+        const taxResult = computeTax(income, regime, deductions, incomeSource);
+        return { ...taxResult, classification: 'SEPARATE_TAX_WHAT_IF' };
       },
     });
 
@@ -244,7 +292,7 @@ class ToolRegistry {
         ).min(2).required(),
       }),
       executor: async ({ cashflows }) => {
-        return computeXIRR(cashflows);
+        return { ...computeXIRR(cashflows), classification: 'HISTORICAL_RETURN_CALCULATION' };
       },
     });
 
@@ -253,22 +301,33 @@ class ToolRegistry {
       description: 'Optimizes asset weights for minimum variance, maximum Sharpe ratio, or risk parity.',
       version: '2.1.0',
       schema: Joi.object({
-        strategy: Joi.string().valid('min_variance', 'max_sharpe', 'risk_parity').default('min_variance'),
-        assets: Joi.array().items(Joi.string().valid(...VALID_ASSET_KEYS)).min(2).max(10).default(['Equity_MF', 'Debt_MF', 'Gold']),
+        strategy: Joi.string().valid('min_variance', 'max_sharpe', 'risk_parity').required(),
+        assets: Joi.array().items(Joi.string().valid(...VALID_ASSET_KEYS)).min(2).max(10).unique().required(),
       }),
-      executor: async ({ strategy, assets }) => {
-        const defaultReturns = { Equity_MF: 0.12, Debt_MF: 0.07, Gold: 0.08, ELSS: 0.12, FD: 0.065 };
-        const postTaxReturns = assets.map(a => defaultReturns[a] || 0.08);
+      executor: async ({ strategy, assets }, context) => {
+        const profile = canonicalContextProfile(context);
+        if (profile) assertPortfolioSuitable(profile, assets);
+        const nominalReturns = assets.map(asset => INSTRUMENT_PARAMS[asset].nominalRate / 100);
 
         let result;
         if (strategy === 'max_sharpe') {
-          result = solveMaxSharpe(assets, postTaxReturns);
+          result = solveMaxSharpe(assets, nominalReturns);
         } else if (strategy === 'risk_parity') {
-          result = solveRiskParity(assets, postTaxReturns);
+          result = solveRiskParity(assets, nominalReturns);
         } else {
-          result = solveMinVariance(assets, postTaxReturns);
+          result = solveMinVariance(assets, nominalReturns);
         }
-        return { strategy, ...result };
+        const capped = enforceAllocationTargets(assets.map(asset => ({
+          id: asset, type: asset, name: INSTRUMENT_PARAMS[asset].name,
+          score: Number(result.weights[asset]) * 100,
+        })));
+        return {
+          strategy,
+          ...result,
+          weights: Object.fromEntries(capped.map(asset => [asset.id, asset.allocationWeight])),
+          classification: calculationClassification(context),
+          returnBasis: 'PRE_TAX_NOMINAL',
+        };
       },
     });
 
@@ -279,10 +338,22 @@ class ToolRegistry {
       schema: Joi.object({
         current_allocation: Joi.object().pattern(SAFE_ALLOCATION_KEY_REGEX, Joi.number().min(0)).required(),
         target_allocation: Joi.object().pattern(SAFE_ALLOCATION_KEY_REGEX, Joi.number().min(0).max(100)).required(),
-        threshold: Joi.number().min(0).max(50).default(2.0),
+        threshold: Joi.number().min(0).max(50).required(),
+        partial_ratio: Joi.number().min(0.1).max(1).required(),
+        holding_months: Joi.number().min(0).max(600).required(),
       }),
-      executor: async ({ current_allocation, target_allocation, threshold }) => {
-        return computeRebalance(current_allocation, target_allocation, threshold);
+      executor: async ({ current_allocation, target_allocation, threshold, partial_ratio, holding_months }, context) => {
+        const profile = canonicalContextProfile(context);
+        if (profile) {
+          assertPortfolioSuitable(profile, Object.entries(target_allocation).filter(([, value]) => value > 0).map(([key]) => key));
+        }
+        const total = Object.values(target_allocation).reduce((sum, weight) => sum + weight, 0);
+        if (Math.abs(total - 100) > 0.01) throw new Error('target_allocation must sum to exactly 100');
+        return {
+          ...computeRebalance(current_allocation, target_allocation, threshold, partial_ratio, holding_months),
+          classification: calculationClassification(context),
+          assumptions: { threshold, partial_ratio, holding_months },
+        };
       },
     });
   }

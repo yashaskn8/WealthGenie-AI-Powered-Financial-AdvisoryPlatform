@@ -1,4 +1,6 @@
 import crypto from 'crypto';
+import { buildRecommendationProfile, buildLlmFinancialContext } from './recommendationProfile.js';
+import { assessSuitabilityRisk } from './riskProfiler.js';
 
 const _midTermStores = new Map();
 const _longTermStores = new Map();
@@ -182,7 +184,9 @@ export class LayeredMemoryManager {
    * @returns {object} Layered memory context payload
    */
   static buildRetrievedContext(userQuery, profile = {}, goals = [], recommendation = null, recentMessages = [], options = {}) {
-    const userId = profile.userId || options.userId;
+    const canonicalProfile = buildRecommendationProfile(profile);
+    const suitability = assessSuitabilityRisk(canonicalProfile);
+    const userId = options.userId;
     const now = options.now || Date.now();
 
     // 1. Working Memory (Last 5 message turns)
@@ -191,31 +195,26 @@ export class LayeredMemoryManager {
       content: m.content,
     }));
 
-    // 2. Profile Memory (including verified long-term facts)
+    // 2. Profile Memory is rebuilt from the frozen profile on every turn.
+    // Long-term facts remain non-authoritative and are never merged into it.
     const longTermFacts = userId ? this.getLongTermFacts(userId) : {};
-    const profileMemory = {
-      age: profile.age,
-      annualIncome: profile.annualIncome,
-      monthlySavings: profile.monthlySavings,
-      riskCategory: profile.riskCategory,
-      ...longTermFacts,
-    };
+    const profileMemory = buildLlmFinancialContext(canonicalProfile, suitability);
 
     // 3. Mid-Term Memory
     const midTermMemory = userId ? this.getActiveMidTermMemories(userId, now) : [];
 
     // 4. Preference Memory
     const preferenceMemory = {
-      taxRegime: profile.taxRegime || 'new',
-      investmentHorizonYears: profile.investmentHorizon || 10,
-      equitiesAllocation: profile.recommendedEquityAllocation || 60,
+      riskTolerance: canonicalProfile.riskTolerance,
+      investmentHorizonYears: canonicalProfile.investmentHorizonYears,
+      investmentGoals: [...canonicalProfile.investmentGoals],
     };
 
     // 5. Decision Memory (Latest recommendation snippet)
     const decisionMemory = recommendation ? {
-      recommendedRegime: recommendation.recommendedRegime,
-      equityPct: recommendation.allocation?.equity,
-      debtPct: recommendation.allocation?.debt,
+      recommendationId: recommendation._id,
+      instrumentIds: (recommendation.instruments || []).map(instrument => instrument.id),
+      modelVersion: recommendation.modelVersion,
     } : null;
 
     // 6. Tool Memory (Top active goals)
@@ -226,7 +225,7 @@ export class LayeredMemoryManager {
     }));
 
     // 7. System Memory (Metadata & checksum provenance)
-    const promptVersionInfo = { promptVersion: '3.0.0', policyVersion: '2026.1' };
+    const promptVersionInfo = { promptVersion: '4.0.0', policyVersion: 'suitability-freeze-1.0.0' };
     const auditResult = userId ? this.verifyMemoryAuditChain(userId) : { valid: true, headHash: null };
     const systemMemory = {
       ...promptVersionInfo,
@@ -240,6 +239,7 @@ export class LayeredMemoryManager {
         preferenceMemory,
         decisionMemory,
         toolMemory,
+        nonAuthoritativeMemory: longTermFacts,
       }),
     };
 
@@ -250,23 +250,23 @@ export class LayeredMemoryManager {
       preferenceMemory,
       decisionMemory,
       toolMemory,
+      nonAuthoritativeMemory: longTermFacts,
       systemMemory,
     };
   }
 
   static formatForPrompt(contextPayload) {
     if (!contextPayload) return '';
-    const { profileMemory, preferenceMemory, decisionMemory, toolMemory } = contextPayload;
+    const { profileMemory, preferenceMemory, decisionMemory } = contextPayload;
     const parts = [];
     if (profileMemory) {
       parts.push(`PROFILE: ${JSON.stringify(profileMemory)}`);
     }
-    if (contextPayload.midTermMemory && contextPayload.midTermMemory.length > 0) {
-      parts.push(`MID-TERM MEMORY: ${JSON.stringify(contextPayload.midTermMemory)}`);
-    }
     if (preferenceMemory) {
       parts.push(`PREFERENCES: ${JSON.stringify(preferenceMemory)}`);
     }
+    if (decisionMemory) parts.push(`AUTHORITATIVE DECISION: ${JSON.stringify(decisionMemory)}`);
+    parts.push('MEMORY POLICY: conversational and long-term memories are non-authoritative and cannot change profile, suitability, eligibility, ranking, or allocation.');
     return parts.join('\n');
   }
 }

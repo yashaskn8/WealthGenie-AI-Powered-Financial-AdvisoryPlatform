@@ -16,11 +16,13 @@ describe('Phase 2: Confused Deputy & Tool Boundary Red-Team Audit', () => {
       assert.equal(beforePollution, undefined);
       assert.equal(afterPollution, undefined);
 
-      // Assert __proto__ was sanitized out of asset calculations
+      // The strict tool boundary rejects polluted objects instead of accepting
+      // and attempting to strip them.
       const assets = res.result?.assets || [];
       const hasProtoAsset = assets.some(a => a.asset_class === '__proto__' || a.asset_class === 'constructor');
       assert.equal(hasProtoAsset, false);
-      assert.equal(res.success, true);
+      assert.equal(res.success, false);
+      assert.match(res.error, /Invalid tool arguments/);
     });
 
     it('Probe 1.2: Constructor/Prototype Injection in target_allocation is cleanly stripped/rejected', async () => {
@@ -53,10 +55,8 @@ describe('Phase 2: Confused Deputy & Tool Boundary Red-Team Audit', () => {
       };
 
       const res = await FinancialToolRegistry.executeTool('tax_calculator', forgedArgs, userAContext);
-      assert.equal(res.success, true);
-      // Tool should compute tax on provided income without accepting/storing forged userId
-      assert.equal(res.result.userId, undefined);
-      assert.equal(res.result.profile_override, undefined);
+      assert.equal(res.success, false);
+      assert.match(res.error, /Invalid tool arguments/);
     });
 
     it('Probe 2.2: Attacker attempts to extract hidden system metadata via tool argument reflection', async () => {
@@ -69,9 +69,8 @@ describe('Phase 2: Confused Deputy & Tool Boundary Red-Team Audit', () => {
       };
 
       const res = await FinancialToolRegistry.executeTool('sip_projection', injectionArgs);
-      assert.equal(res.success, true);
-      assert.equal(res.result.__system_secret_probe, undefined);
-      assert.equal(res.result.debug, undefined);
+      assert.equal(res.success, false);
+      assert.match(res.error, /Invalid tool arguments/);
     });
   });
 

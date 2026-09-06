@@ -13,14 +13,14 @@ import {
 } from '../services/taxEngine.js';
 
 test('new regime Section 87A rebate zeros tax at the FY2025-26 threshold', () => {
-  const result = computeTax(1_275_000, 'new');
+  const result = computeTax(1_275_000, 'new', {}, 'salary');
   assert.equal(result.taxableIncome, 1_200_000);
   assert.equal(result.taxAmount, 0);
   assert.equal(result.rebateApplied, true);
 });
 
 test('new regime marginal relief caps the rebate cliff immediately above threshold', () => {
-  const result = computeTax(1_276_000, 'new');
+  const result = computeTax(1_276_000, 'new', {}, 'salary');
   assert.equal(result.taxableIncome, 1_201_000);
   assert.equal(result.taxBeforeCess, 1_000);
   assert.equal(result.taxAmount, 1_040);
@@ -33,7 +33,7 @@ test('old regime applies granular Section 80D self and parent caps', () => {
     section80D_parents: 60_000,
     parents_senior: true,
     age: 35,
-  });
+  }, 'salary');
 
   assert.equal(result.allowed80D, 75_000);
   assert.equal(result.oldRegimeDeductions, 75_000);
@@ -84,18 +84,23 @@ test('calculateTaxableIncome computes standard deduction based on income source'
 });
 
 test('calculateTaxableIncome computes Section 80CCD(2) employer NPS contributions for private vs govt employees', () => {
-  // Private employee default (10% of basic salary)
-  const pvtDefault = calculateTaxableIncome(1_000_000, 'new', { nps80CCD2: 60_000 });
-  // basicSalary = 500,000 (50%), maxLimit = 50,000 (10%) -> allowed = 50,000
+  // Private employee: the tax context must state salary facts explicitly.
+  const pvtDefault = calculateTaxableIncome(1_000_000, 'new', {
+    nps80CCD2: 60_000, basicSalary: 500_000, isGovtEmployee: false,
+  }, 'salary');
   assert.equal(pvtDefault.nps80CCD2, 50_000);
 
   // Private employee explicit basic salary
-  const pvtExplicit = calculateTaxableIncome(1_000_000, 'new', { basicSalary: 600_000, nps80CCD2: 70_000 });
+  const pvtExplicit = calculateTaxableIncome(1_000_000, 'new', {
+    basicSalary: 600_000, nps80CCD2: 70_000, isGovtEmployee: false,
+  }, 'salary');
   // maxLimit = 60,000 -> allowed = 60,000
   assert.equal(pvtExplicit.nps80CCD2, 60_000);
 
   // Government employee (14% of basic salary)
-  const govt = calculateTaxableIncome(1_000_000, 'new', { isGovtEmployee: true, nps80CCD2: 70_000 });
+  const govt = calculateTaxableIncome(1_000_000, 'new', {
+    basicSalary: 500_000, isGovtEmployee: true, nps80CCD2: 70_000,
+  }, 'salary');
   // basicSalary = 500,000, maxLimit = 70,000 (14%) -> allowed = 70,000
   assert.equal(govt.nps80CCD2, 70_000);
 });
@@ -112,7 +117,7 @@ test('calculateTaxableIncome applies old regime deductions (80C, 80CCD(1B), HRA,
     savingsInterest: 15_000, // 80TTA capped at 10,000
     other: 20_000,
     age: 30,
-  });
+  }, 'salary');
 
   // Allowed: 150k (80C) + 50k (NPS) + 25k (80D self) + 120k (HRA) + 200k (Loan) + 150k (80EEA) + 10k (80TTA) + 20k (Other) = 725,000
   assert.equal(young.allowed80D, 25_000);
@@ -124,7 +129,7 @@ test('calculateTaxableIncome applies old regime deductions (80C, 80CCD(1B), HRA,
     section80D_self: 60_000, // capped at 50,000 (senior)
     savingsInterest: 60_000, // 80TTB capped at 50,000
     age: 65,
-  });
+  }, 'salary');
   // Allowed 80D self (senior) = 50,000; allowed 80TTB = 50,000
   assert.equal(senior.allowed80D, 50_000);
   assert.equal(senior.oldRegimeDeductions, 100_000);
@@ -154,29 +159,23 @@ test('computeSurcharge and computeMarginalRelief handle high incomes under new v
   assert.ok(res50L10kNew.marginalReliefAmount > 0);
 });
 
-test('computeTax handles edge cases: negative/invalid income, fallbacks, and alias functions', () => {
-  // Invalid negative income falls back to 0
-  const invalid = computeTax(-500_000, 'new');
-  assert.equal(invalid.annualIncome, 0);
-  assert.equal(invalid.taxAmount, 0);
-  assert.equal(invalid.effectiveRate, 0);
-
-  // Non-existent regime falls back to 'new'
-  const badRegime = computeTax(1_000_000, 'invalid-regime');
-  assert.equal(badRegime.regime, 'new');
+test('computeTax rejects missing and invalid tax context and preserves its explicit alias', () => {
+  assert.throws(() => computeTax(-500_000, 'new', {}, 'salary'), /annualIncome/);
+  assert.throws(() => computeTax(1_000_000, 'invalid-regime', {}, 'salary'), /regime/);
+  assert.throws(() => computeTax(1_000_000, 'new'), /incomeSource/);
 
   // Alias wrapper computeTaxWithDeductions returns identical breakdown
-  const aliasRes = computeTaxWithDeductions(1_000_000, 'new');
-  assert.equal(aliasRes.taxAmount, computeTax(1_000_000, 'new').taxAmount);
+  const aliasRes = computeTaxWithDeductions(1_000_000, 'new', {}, 'salary');
+  assert.equal(aliasRes.taxAmount, computeTax(1_000_000, 'new', {}, 'salary').taxAmount);
 });
 
 test('compareTaxRegimes recommends lower tax regime between new and old', () => {
   // High deductions make old regime better
-  const resOldBetter = compareTaxRegimes(1_500_000, { section80C: 150_000, hra: 300_000, homeLoanInterest: 200_000 });
+  const resOldBetter = compareTaxRegimes(1_500_000, { section80C: 150_000, hra: 300_000, homeLoanInterest: 200_000 }, 'salary');
   assert.equal(resOldBetter.recommended, 'old');
 
   // No deductions make new regime better
-  const resNewBetter = compareTaxRegimes(1_500_000, {});
+  const resNewBetter = compareTaxRegimes(1_500_000, {}, 'salary');
   assert.equal(resNewBetter.recommended, 'new');
 });
 
@@ -193,7 +192,7 @@ test('getEffectiveMarginalRate computes exact marginal tax impact of additional 
   assert.equal(rate15L, 0.156);
 
   // At 0 income
-  const rateZero = getEffectiveMarginalRate(0, 'new');
+  const rateZero = getEffectiveMarginalRate(0, 'new', {}, 'salary');
   assert.equal(rateZero, 0);
 });
 
@@ -201,24 +200,24 @@ test('WG-040: getEffectiveMarginalRate notch artifact fix at Section 87A rebate 
   // 1. ₹12,66,000 through ₹12,75,000 (new regime) -> assert === 0 for every value in range
   const testIncomesNewRegime = [1266000, 1268000, 1270000, 1272000, 1275000];
   for (const inc of testIncomesNewRegime) {
-    const rate = getEffectiveMarginalRate(inc, 'new');
+    const rate = getEffectiveMarginalRate(inc, 'new', {}, 'salary');
     assert.equal(rate, 0, `Income ₹${inc} (new regime) owes ₹0 tax under 87A rebate and must report 0 marginal rate, got ${rate}`);
   }
 
   // 2. ₹12,80,000 (new regime) -> assert > 0 (real tax liability starts here, ₹5,200)
-  const rate1280k = getEffectiveMarginalRate(1280000, 'new');
+  const rate1280k = getEffectiveMarginalRate(1280000, 'new', {}, 'salary');
   assert.ok(rate1280k > 0, `Income ₹12,80,000 (new regime) has real tax liability and must report > 0 marginal rate, got ${rate1280k}`);
 
   // 3. ₹5,50,000 (old regime) -> assert === 0 (₹0 tax owed under old regime rebate)
-  const rate550kOld = getEffectiveMarginalRate(550000, 'old');
+  const rate550kOld = getEffectiveMarginalRate(550000, 'old', {}, 'salary');
   assert.equal(rate550kOld, 0, `Income ₹5,50,000 (old regime) owes ₹0 tax under 87A rebate and must report 0 marginal rate, got ${rate550kOld}`);
 
   // 4. Regression: ₹10,00,000 (new regime) still === 0
-  const rate10L = getEffectiveMarginalRate(1000000, 'new');
+  const rate10L = getEffectiveMarginalRate(1000000, 'new', {}, 'salary');
   assert.equal(rate10L, 0, 'Income ₹10,00,000 (new regime) must report 0 marginal rate');
 
   // 5. Regression: ₹30,00,000 (new regime) returns a normal, non-zero, non-clamped rate
-  const rate30L = getEffectiveMarginalRate(3000000, 'new');
+  const rate30L = getEffectiveMarginalRate(3000000, 'new', {}, 'salary');
   assert.ok(rate30L > 0 && rate30L < 0.45, `Income ₹30,00,000 (new regime) must report normal marginal rate (0 < rate < 0.45), got ${rate30L}`);
 });
 
@@ -236,7 +235,7 @@ test('computeTax exact tax amounts at new regime slab boundaries', () => {
   assert.equal(res12L.taxAmount, 0);
 
   // ₹12,75,000 salary: taxable = 12,75,000 - 75,000(SD) = 12,00,000 -> rebate applies -> 0
-  const res1275K = computeTax(1_275_000, 'new');
+  const res1275K = computeTax(1_275_000, 'new', {}, 'salary');
   assert.equal(res1275K.taxAmount, 0);
   assert.equal(res1275K.rebateApplied, true);
 
@@ -345,7 +344,7 @@ test('computeTax surcharge rates at exact thresholds for both regimes', () => {
 
 test('compareTaxRegimes returns exact savings between regimes', () => {
   // No deductions: new regime always better
-  const noDeduct = compareTaxRegimes(1_000_000, {});
+  const noDeduct = compareTaxRegimes(1_000_000, {}, 'salary');
   assert.equal(noDeduct.recommended, 'new');
   assert.ok(typeof noDeduct.newRegime.taxAmount === 'number');
   assert.ok(typeof noDeduct.oldRegime.taxAmount === 'number');
@@ -359,7 +358,8 @@ test('compareTaxRegimes returns exact savings between regimes', () => {
     homeLoanInterest: 200_000,
     section80D_self: 25_000,
     nps80CCD1B: 50_000,
-  });
+    age: 35,
+  }, 'salary');
   assert.equal(heavyDeduct.recommended, 'old');
   assert.ok(heavyDeduct.oldRegime.taxAmount < heavyDeduct.newRegime.taxAmount);
 });
@@ -418,34 +418,31 @@ test('computeMarginalRelief at 50L, 1Cr, 2Cr, and 5Cr thresholds', () => {
 
 test('calculateTaxableIncome section80D fallback and self_senior flag', () => {
   // section80D fallback when section80D_self and section80D_parents are not provided
-  const fallback80D = calculateTaxableIncome(1_000_000, 'old', { section80D: 120_000 });
+  const fallback80D = calculateTaxableIncome(1_000_000, 'old', { section80D: 120_000, age: 35 }, 'salary');
   assert.equal(fallback80D.allowed80D, 100_000); // capped at 100,000
 
   // self_senior boolean flag overrides age
-  const seniorFlag = calculateTaxableIncome(1_000_000, 'old', { section80D_self: 60_000, self_senior: true, age: 30 });
+  const seniorFlag = calculateTaxableIncome(1_000_000, 'old', { section80D_self: 60_000, self_senior: true, age: 30 }, 'salary');
   assert.equal(seniorFlag.allowed80D, 50_000); // senior cap applied
 });
 
 test('calculateTaxableIncome savingsInterest 80TTA vs 80TTB age boundaries', () => {
   // Age 59: 80TTA applies (capped at 10,000)
-  const age59 = calculateTaxableIncome(1_000_000, 'old', { savingsInterest: 20_000, age: 59 });
+  const age59 = calculateTaxableIncome(1_000_000, 'old', { savingsInterest: 20_000, age: 59 }, 'salary');
   assert.equal(age59.oldRegimeDeductions, 10_000);
 
   // Age 60: 80TTB applies (capped at 50,000)
-  const age60 = calculateTaxableIncome(1_000_000, 'old', { savingsInterest: 60_000, age: 60 });
+  const age60 = calculateTaxableIncome(1_000_000, 'old', { savingsInterest: 60_000, age: 60 }, 'salary');
   assert.equal(age60.oldRegimeDeductions, 50_000);
 });
 
 test('computeTax zero/invalid/NaN income, effectiveRate precision', () => {
   // Zero income
-  const zeroRes = computeTax(0, 'new');
+  const zeroRes = computeTax(0, 'new', {}, 'salary');
   assert.equal(zeroRes.taxAmount, 0);
   assert.equal(zeroRes.effectiveRate, 0);
 
-  // NaN income
-  const nanRes = computeTax(NaN, 'new');
-  assert.equal(nanRes.taxAmount, 0);
-  assert.equal(nanRes.effectiveRate, 0);
+  assert.throws(() => computeTax(NaN, 'new', {}, 'salary'), /annualIncome/);
 
   // Positive income effective rate calculation
   const posRes = computeTax(2_000_000, 'new', {}, 'business');
@@ -453,30 +450,13 @@ test('computeTax zero/invalid/NaN income, effectiveRate precision', () => {
   assert.equal(posRes.effectiveRate, expectedEff);
 });
 
-test('getTaxSlab, compareTaxRegimes, getEffectiveMarginalRate fallback and guard branches', () => {
-  // getTaxSlab with invalid regime -> falls back to 'new'
-  const invReg = getTaxSlab(1_000_000, 'invalid_regime');
-  const newReg = getTaxSlab(1_000_000, 'new');
-  assert.equal(invReg, newReg);
-
-  // getTaxSlab with NaN / negative income
-  const nanSlab = getTaxSlab(NaN);
-  assert.equal(nanSlab, 0);
-  const negSlab = getTaxSlab(-500_000);
-  assert.equal(negSlab, 0);
-
-  // compareTaxRegimes with NaN / negative income
-  const nanComp = compareTaxRegimes(NaN);
-  assert.equal(nanComp.recommended, 'new');
-  assert.equal(nanComp.newRegime.taxAmount, 0);
-
-  const negComp = compareTaxRegimes(-100_000);
-  assert.equal(negComp.recommended, 'new');
-  assert.equal(negComp.newRegime.taxAmount, 0);
-
-  // getEffectiveMarginalRate with deltaIncome <= 0
-  assert.equal(getEffectiveMarginalRate(1_000_000, 'new', {}, 'salary', CURRENT_FY, 0), 0);
-  assert.equal(getEffectiveMarginalRate(1_000_000, 'new', {}, 'salary', CURRENT_FY, -100), 0);
+test('tax helpers reject incomplete or invalid contexts', () => {
+  assert.throws(() => getTaxSlab(1_000_000, 'invalid_regime', {}, 'salary'), /regime/);
+  assert.throws(() => getTaxSlab(NaN, 'new', {}, 'salary'), /annualIncome/);
+  assert.throws(() => getTaxSlab(-500_000, 'new', {}, 'salary'), /annualIncome/);
+  assert.throws(() => compareTaxRegimes(NaN, {}, 'salary'), /annualIncome/);
+  assert.throws(() => compareTaxRegimes(-100_000, {}, 'salary'), /annualIncome/);
+  assert.throws(() => compareTaxRegimes(1_000_000, {}), /incomeSource/);
 
   // computeTaxWithDeductions with different income sources
   const pensionTax = computeTaxWithDeductions(1_000_000, 'new', {}, 'pension');
@@ -486,6 +466,5 @@ test('getTaxSlab, compareTaxRegimes, getEffectiveMarginalRate fallback and guard
   // Salary/pension has standard deduction, business does not
   assert.ok(pensionTax.taxAmount <= bizTax.taxAmount);
 });
-
 
 

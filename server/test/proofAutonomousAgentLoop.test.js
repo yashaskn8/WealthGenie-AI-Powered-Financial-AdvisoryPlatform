@@ -22,6 +22,9 @@ describe('CLAIM 2 — Autonomous Agentic Tool Loops Hardened Verification Suite'
             arguments: {
               current_allocation: { Equity_MF: 700000, Debt_MF: 300000 },
               target_allocation: { Equity_MF: 50, Debt_MF: 50 },
+              threshold: 2,
+              partial_ratio: 1,
+              holding_months: 24,
             },
           }],
           isFinal: false,
@@ -40,7 +43,11 @@ describe('CLAIM 2 — Autonomous Agentic Tool Loops Hardened Verification Suite'
             responseText: `Hop 2: High drift (₹${correction}) detected. Calculating tax impact.`,
             toolCalls: [{
               tool: 'tax_calculator',
-              arguments: { income: correction, regime: 'new' },
+              arguments: {
+                income: correction, incomeSource: 'salary', age: 35, regime: 'new',
+                section80C: 0, nps80CCD1B: 0, section80D_self: 0,
+                section80D_parents: 0, parentsSenior: false, hra: 0,
+              },
             }],
             isFinal: false,
           };
@@ -66,6 +73,9 @@ describe('CLAIM 2 — Autonomous Agentic Tool Loops Hardened Verification Suite'
             arguments: {
               current_allocation: { Equity_MF: 500000, Debt_MF: 500000 }, // Exactly 50/50 target
               target_allocation: { Equity_MF: 50, Debt_MF: 50 },
+              threshold: 2,
+              partial_ratio: 1,
+              holding_months: 24,
             },
           }],
           isFinal: false,
@@ -82,7 +92,11 @@ describe('CLAIM 2 — Autonomous Agentic Tool Loops Hardened Verification Suite'
         if (correction > 10000) {
           return {
             responseText: `Hop 2: High drift (₹${correction}). Calculating tax.`,
-            toolCalls: [{ tool: 'tax_calculator', arguments: { income: correction, regime: 'new' } }],
+            toolCalls: [{ tool: 'tax_calculator', arguments: {
+              income: correction, incomeSource: 'salary', age: 35, regime: 'new',
+              section80C: 0, nps80CCD1B: 0, section80D_self: 0,
+              section80D_parents: 0, parentsSenior: false, hra: 0,
+            } }],
             isFinal: false,
           };
         }
@@ -171,6 +185,9 @@ describe('CLAIM 2 — Autonomous Agentic Tool Loops Hardened Verification Suite'
             arguments: {
               current_allocation: { Equity_MF: 600000, Debt_MF: 400000 },
               target_allocation: { Equity_MF: 50, Debt_MF: 50 },
+              threshold: 2,
+              partial_ratio: 1,
+              holding_months: 24,
             },
           }],
           isFinal: false,
@@ -205,7 +222,11 @@ describe('CLAIM 2 — Autonomous Agentic Tool Loops Hardened Verification Suite'
       const toolToCall = (hopIndex % 2 === 1) ? 'sip_projection' : 'tax_calculator';
       const args = (hopIndex % 2 === 1)
         ? { monthlyInvestment: 10000, annualRate: 0.12, years: 10 }
-        : { income: 500000, regime: 'new' };
+        : {
+          income: 500000, incomeSource: 'salary', age: 35, regime: 'new',
+          section80C: 0, nps80CCD1B: 0, section80D_self: 0,
+          section80D_parents: 0, parentsSenior: false, hra: 0,
+        };
 
       return {
         responseText: `Hop ${hopIndex}: Invoking ${toolToCall}`,

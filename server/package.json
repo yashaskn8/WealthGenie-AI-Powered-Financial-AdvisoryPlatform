@@ -17,7 +17,8 @@
     "loadtest": "node scripts/loadtest.js",
     "seed": "node config/seedInstruments.js",
     "catalog:sync": "node scripts/syncFrontendCatalog.js",
-    "eval": "node scripts/run-eval.js"
+    "eval": "node scripts/run-eval.js",
+    "profile:migrate": "node scripts/migrateFinancialProfilesV4.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

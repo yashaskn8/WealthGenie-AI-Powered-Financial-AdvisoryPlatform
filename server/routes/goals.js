@@ -1,646 +1,298 @@
-/* eslint complexity: ["error", 25] */
 import { Router } from 'express';
-import mongoose from 'mongoose';
-import { verifyJWT, isOwner, isValidObjectId } from '../middleware/authMiddleware.js';
+import { verifyJWT, isValidObjectId } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
-import { validate, goalSchema, goalUpdateSchema } from '../validation/schemas.js';
+import { customGoalSchema, customGoalUpdateSchema, validateStrict } from '../validation/financialSchemas.js';
 import Goal from '../models/Goal.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import { reverseSIP, runMonteCarloWithGoal, getInstrumentVolatility } from '../services/monteCarloEngine.js';
 import { buildCovarianceMatrix, portfolioReturn, portfolioVol } from '../services/portfolioEngine.js';
 import { getGoalAdvisory } from '../services/geminiService.js';
+import {
+  buildRecommendationProfile,
+  buildLlmFinancialContext,
+} from '../services/recommendationProfile.js';
+import { assessSuitabilityRisk } from '../services/riskProfiler.js';
 import { idempotency } from '../middleware/idempotency.js';
 
 const router = Router();
+const GOAL_INFLATION_ASSUMPTION = 0.05;
 
-function _determineGoalStatus(prob, gap, userMonthlySavings) {
-  if (prob !== null && prob !== undefined) {
-    if (prob >= 0.65) return 'on_track';
-    if (prob >= 0.35) return 'at_risk';
-    return 'off_track';
-  }
-  if (gap <= 0) return 'on_track';
-  if (gap <= userMonthlySavings * 0.25) return 'at_risk';
+const staleAdvicePatterns = ['temporarily unavailable', 'could not process', 'api key not configured'];
+
+function isStaleAdvice(advice) {
+  if (!advice || typeof advice !== 'string') return true;
+  return staleAdvicePatterns.some(pattern => advice.toLowerCase().includes(pattern));
+}
+
+function determineGoalStatus(probability, gap, monthlyCapacity) {
+  if (probability >= 0.65 && gap <= 0) return 'on_track';
+  if (probability >= 0.35 || gap <= monthlyCapacity * 0.25) return 'at_risk';
   return 'off_track';
 }
 
-/**
- * Detect stale/error advice that should be regenerated.
- */
-const STALE_ADVICE_PATTERNS = [
-  'temporarily unavailable',
-  'could not process',
-  'api key not configured',
-];
-
-function isStaleAdvice(advice) {
-  if (!advice || typeof advice !== 'string' || advice.trim().length === 0) return true;
-  const normalisedAdvice = advice.toLowerCase();
-  return STALE_ADVICE_PATTERNS.some(p => normalisedAdvice.includes(p));
+async function findOwnedProfile(profileId, userId) {
+  if (!isValidObjectId(profileId)) return null;
+  return FinancialProfile.findOne({ _id: profileId, userId }).lean();
 }
 
-async function findOwnedProfileById(profileId, userId) {
-  const id = profileId?.toString?.() || profileId;
-  if (!id || !isValidObjectId(id)) return null;
-  return FinancialProfile.findOne({ _id: id, userId }).lean();
-}
-
-/**
- * Generate AI advice for a goal. Handles errors gracefully with a fallback.
- */
-async function generateGoalAdvice(goal, profile, userMonthlySavings) {
+function computeYearsRemaining(targetDate) {
+  const date = new Date(targetDate);
   const now = new Date();
-  const yearsRemaining = Math.max(1, Math.round(
-    (new Date(goal.target_date) - now) / (365.25 * 24 * 60 * 60 * 1000)
-  ));
-
-  const profileContext = {
-    age: profile?.age || 30,
-    annualIncome: profile?.annualIncome || 600000,
-    riskCategory: profile?.riskCategory || 'Moderate',
-  };
-
-  const prompt = `User is ${goal.status.replace(/_/g, ' ')} for goal "${goal.goal_name}" `
-    + `worth ₹${goal.target_amount.toLocaleString('en-IN')} in ${yearsRemaining} years. `
-    + `Required SIP: ₹${(goal.recommended_sip || 0).toLocaleString('en-IN')}/month. `
-    + `Their current savings capacity: ₹${(userMonthlySavings || 10000).toLocaleString('en-IN')}/month. `
-    + `Suggest one specific actionable financial adjustment in 2 sentences.`;
-
-  try {
-    const advice = await getGoalAdvisory(prompt, profileContext);
-    return advice;
-  } catch (_) {
-    const instrument = (goal.recommended_instrument || 'Equity MF').replace(/_/g, ' ');
-    return `To stay on track for your "${goal.goal_name}" goal, maintain a monthly SIP of `
-      + `₹${(goal.recommended_sip || 5000).toLocaleString('en-IN')} in ${instrument}.`;
-  }
-}
-
-/**
- * Resolve the user's financial profile — first from explicit profileId, then latest.
- */
-async function _resolveProfile(profileId, userId) {
-  if (profileId) {
-    if (!isValidObjectId(profileId)) {
-      throw createError(400, 'Invalid profileId in goal create', 'Invalid profile ID.');
-    }
-    const profile = await FinancialProfile.findById(profileId).lean();
-    if (!profile) {
-      throw createError(404, `Profile not found for goal create: ${profileId}`, 'Profile not found.');
-    }
-    if (!isOwner(profile, userId)) {
-      throw createError(403, `Unauthorized goal-profile access: ${profileId}`, 'Access denied.');
-    }
-    return profile;
-  }
-  return FinancialProfile.findOne({ userId }).sort({ createdAt: -1 }).lean();
-}
-
-/**
- * Compute years remaining from target date, with validation.
- */
-function _computeYearsRemaining(target_date) {
-  const targetDateObj = new Date(target_date);
-  const now = new Date();
-
-  const sixMonthsFromNow = new Date();
+  const sixMonthsFromNow = new Date(now);
   sixMonthsFromNow.setMonth(sixMonthsFromNow.getMonth() + 6);
-  if (targetDateObj < sixMonthsFromNow) {
-    throw createError(400,
-      `Goal target_date too close: ${target_date} (minimum: ${sixMonthsFromNow.toISOString()})`,
-      'Target date must be at least 6 months from today for meaningful projections.'
-    );
+  const fiftyYearsFromNow = new Date(now);
+  fiftyYearsFromNow.setFullYear(fiftyYearsFromNow.getFullYear() + 50);
+  if (!Number.isFinite(date.getTime()) || date < sixMonthsFromNow || date > fiftyYearsFromNow) {
+    throw createError(400, 'Goal target date must be between 6 months and 50 years from today.', 'Invalid target date.');
   }
-
-  const msRemaining = targetDateObj - now;
-  const rawYears = msRemaining / (365.25 * 24 * 60 * 60 * 1000);
-  const yearsRemaining = Math.max(0.5, Math.floor(rawYears * 4) / 4);
-
-  if (!Number.isFinite(yearsRemaining)) {
-    throw createError(400, `Invalid target_date produced NaN years: ${target_date}`, 'Invalid target date.');
-  }
-  return { targetDateObj, yearsRemaining };
+  return Math.floor(((date - now) / (365.25 * 24 * 60 * 60 * 1000)) * 4) / 4;
 }
 
-/**
- * Compute post-tax return rate for the given instrument + profile.
- */
-async function _computePostTaxRate(instrument, vol, profile, yearsRemaining) {
-  let postTaxRate = vol.mean;
-  if (profile) {
-    try {
-      const { calculatePostTaxReturn } = await import('../services/postTaxCalculator.js');
-      const ptResult = calculatePostTaxReturn(
-        instrument, vol.mean,
-        profile.annualIncome || (profile.income * 12),
-        yearsRemaining, profile.taxRegime || 'new'
-      );
-      postTaxRate = ptResult.postTaxReturn;
-    } catch (_) {
-      // Fallback to pre-tax if post-tax calc fails
-    }
-  }
-  return postTaxRate;
+function toDecimalRate(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) throw new TypeError('Recommendation return must be finite');
+  return Math.abs(number) > 1 ? number / 100 : number;
 }
 
-/**
- * Helper to convert percentage-scale return (e.g. 10.3%) to decimal scale (e.g. 0.103)
- */
-const _toDecimalRate = (r) => {
-  const num = Number(r) || 0;
-  return Math.abs(num) > 1.0 ? num / 100 : num;
-};
-
-/**
- * Compute blended portfolio expected return and covariance-based volatility
- * across all recommended instruments for a user (always returns DECIMAL scale rates e.g. 0.103).
- */
-async function _getBlendedPortfolioMetrics(userId, profileId, fallbackInstrument = 'Equity_MF', overrideRec = null) {
-  let latestRec = overrideRec;
-  if (!latestRec) {
-    try {
-      if (profileId && isValidObjectId(profileId)) {
-        latestRec = await Recommendation.findOne({ userId, profileId }).sort({ generatedAt: -1 }).lean();
-      }
-      if (!latestRec && userId && isValidObjectId(userId)) {
-        latestRec = await Recommendation.findOne({ userId }).sort({ generatedAt: -1 }).lean();
-      }
-    } catch (_) {
-      // Fall back gracefully if DB query fails or invalid ID passed
-    }
+/** Uses only the persisted authoritative recommendation for this exact profile. */
+export async function _getBlendedPortfolioMetrics(userId, profileId, _unused = undefined, overrideRec = null) {
+  const recommendation = overrideRec || await Recommendation.findOne({ userId, profileId }).sort({ generatedAt: -1 }).lean();
+  const instruments = recommendation?.instruments?.filter(instrument =>
+    instrument.type && Number(instrument.allocationWeight) > 0 && Number.isFinite(Number(instrument.nominalReturn))
+  );
+  if (!instruments?.length) {
+    const error = new Error('Generate an authoritative recommendation before creating or recalculating goals.');
+    error.status = 409;
+    error.code = 'RECOMMENDATION_REQUIRED';
+    throw error;
   }
-
-  const instruments = latestRec?.instruments;
-  if (!Array.isArray(instruments) || instruments.length === 0) {
-    const vol = getInstrumentVolatility(fallbackInstrument);
-    return {
-      postTaxReturn: vol.mean, // decimal scale e.g. 0.12
-      volatility: vol.stdDev,
-      primaryInstrument: fallbackInstrument,
-    };
-  }
-
-  const valid = instruments.filter(i => (i.type || i.backendType) && Number(i.allocationWeight) > 0);
-  if (valid.length === 0) {
-    const primary = instruments[0]?.type || fallbackInstrument;
-    const vol = getInstrumentVolatility(primary);
-    return {
-      postTaxReturn: instruments[0]?.postTaxReturn ? _toDecimalRate(instruments[0].postTaxReturn) : vol.mean,
-      volatility: vol.stdDev,
-      primaryInstrument: primary,
-    };
-  }
-
-  const totalWeight = valid.reduce((sum, i) => sum + Number(i.allocationWeight), 0);
-  const weights = valid.map(i => Number(i.allocationWeight) / totalWeight);
-
-  const returnsDecimal = valid.map(i => _toDecimalRate(i.postTaxReturn || 10.0));
-
-  const assetKeys = valid.map(i => i.type || i.backendType);
-
-  const blendedReturnDecimal = parseFloat(portfolioReturn(weights, returnsDecimal).toFixed(4));
-
-  let blendedVolDecimal;
+  const totalWeight = instruments.reduce((sum, instrument) => sum + Number(instrument.allocationWeight), 0);
+  if (!(totalWeight > 0)) throw new TypeError('Persisted recommendation has invalid allocation weights');
+  const weights = instruments.map(instrument => Number(instrument.allocationWeight) / totalWeight);
+  const returns = instruments.map(instrument => toDecimalRate(instrument.nominalReturn));
+  const assetKeys = instruments.map(instrument => instrument.type);
+  const expectedReturn = Number(portfolioReturn(weights, returns).toFixed(4));
+  let volatility;
   try {
-    const { matrix: cov } = buildCovarianceMatrix(assetKeys);
-    blendedVolDecimal = Math.max(0.005, parseFloat(portfolioVol(cov, weights).toFixed(4)));
-  } catch (_) {
-    const fallbackVol = getInstrumentVolatility(valid[0]?.type || fallbackInstrument);
-    blendedVolDecimal = fallbackVol.stdDev;
+    volatility = Number(portfolioVol(buildCovarianceMatrix(assetKeys).matrix, weights).toFixed(4));
+  } catch {
+    const componentVolatilities = assetKeys.map(key => {
+      const parameters = getInstrumentVolatility(key);
+      if (!parameters) throw new TypeError(`No volatility parameters for ${key}`);
+      return parameters.stdDev;
+    });
+    volatility = Math.sqrt(componentVolatilities.reduce(
+      (sum, component, index) => sum + (weights[index] * component) ** 2,
+      0,
+    ));
   }
-
   return {
-    postTaxReturn: blendedReturnDecimal, // decimal scale e.g. 0.103 for 10.3%
-    volatility: blendedVolDecimal,
-    primaryInstrument: valid[0]?.type || fallbackInstrument,
+    expectedReturn,
+    volatility,
+    primaryInstrument: instruments[0].type,
+    returnBasis: 'PRE_TAX_NOMINAL',
   };
 }
 
-/**
- * Validate Monte Carlo invariants and clamp out-of-bounds probability.
- */
-function _validateMcResult(mcResult) {
-  if (mcResult.goal_probability !== null) {
-    if (!Number.isFinite(mcResult.goal_probability) || mcResult.goal_probability < 0 || mcResult.goal_probability > 1) {
-      console.error(`[Goals INVARIANT] goal_probability out of bounds: ${mcResult.goal_probability}. Clamping.`);
-      mcResult.goal_probability = Math.max(0, Math.min(1, mcResult.goal_probability || 0));
-    }
+function validateMonteCarlo(result) {
+  if (!Number.isFinite(result.goal_probability) || result.goal_probability < 0 || result.goal_probability > 1) {
+    throw new Error('Monte Carlo engine returned an invalid goal probability');
   }
-  const lastIdx = mcResult.p50.length - 1;
-  if (lastIdx >= 0 && mcResult.p10[lastIdx] > mcResult.p90[lastIdx]) {
-    console.error('[Goals INVARIANT] p10 > p90 - Monte Carlo band inversion detected.');
+  const lastIndex = result.p50.length - 1;
+  if (lastIndex < 0 || result.p10[lastIndex] > result.p90[lastIndex]) {
+    throw new Error('Monte Carlo engine returned invalid percentile bands');
   }
-  return lastIdx;
+  return lastIndex;
 }
 
-/**
- * Build Recharts-compatible chart data array from MC result.
- */
-function _buildChartData(mcResult) {
-  return mcResult.years_array.map((yr, i) => ({
-    year: yr,
-    p10: mcResult.p10[i],
-    p25: mcResult.p25[i],
-    p50: mcResult.p50[i],
-    p75: mcResult.p75[i],
-    p90: mcResult.p90[i],
+function chartData(result) {
+  return result.years_array.map((year, index) => ({
+    year,
+    p10: result.p10[index], p25: result.p25[index], p50: result.p50[index],
+    p75: result.p75[index], p90: result.p90[index],
   }));
 }
 
-async function _syncProfileGoals(profileId, userId, session) {
-  if (!userId) return;
-  const userGoals = await Goal.find({ userId }, 'goal_name').session(session).lean();
-  const goalNames = userGoals.map(g => g.goal_name).filter(Boolean);
-  let syncResult;
-  if (profileId) {
-    syncResult = await FinancialProfile.updateOne(
-      { _id: profileId, userId },
-      { $set: { goals: goalNames, lastGoalCreatedAt: new Date() } },
-      { session },
-    );
-  } else {
-    syncResult = await FinancialProfile.updateMany(
-      { userId },
-      { $set: { goals: goalNames, lastGoalCreatedAt: new Date() } },
-      { session },
-    );
-  }
-  if (syncResult.matchedCount < 1) {
-    throw new Error('Goal transaction could not synchronize an owned FinancialProfile.');
+async function generateGoalAdvice(goal, profile) {
+  const suitability = assessSuitabilityRisk(profile);
+  const context = buildLlmFinancialContext(profile, suitability);
+  const yearsRemaining = computeYearsRemaining(goal.target_date);
+  const prompt = `Custom planning goal "${goal.goal_name}" targets ₹${Number(goal.target_amount).toLocaleString('en-IN')} in ${yearsRemaining} years. The computed monthly SIP is ₹${Number(goal.recommended_sip).toLocaleString('en-IN')} against a Financial Profile savings capacity of ₹${profile.monthlySavings.toLocaleString('en-IN')}. Goal status is ${String(goal.status).replace(/_/g, ' ')}. Suggest one adjustment without treating the custom goal name as a Financial Profile input.`;
+  try {
+    return await getGoalAdvisory(prompt, context);
+  } catch {
+    return `Review the target date or target amount because the required ₹${Number(goal.recommended_sip).toLocaleString('en-IN')} monthly SIP must stay within your ₹${profile.monthlySavings.toLocaleString('en-IN')} savings capacity.`;
   }
 }
 
-/**
- * Persist a goal and its denormalized profile state in one MongoDB transaction.
- * Standalone MongoDB is intentionally unsupported for this authoritative write.
- */
-export async function persistGoalAtomically(goalData, profileId, { testHooks = {} } = {}) {
-  await Promise.all([Goal.init(), FinancialProfile.init()]);
-  const session = await mongoose.startSession();
-  let goal = null;
-  try {
-    await session.withTransaction(async () => {
-      const goals = await Goal.create([goalData], { session });
-      goal = goals[0];
-      await testHooks.afterGoalCreate?.(session, goal);
-      await _syncProfileGoals(profileId, goalData.userId, session);
-      await testHooks.afterProfileSync?.(session, goal);
-    }, {
-      readConcern: { level: 'snapshot' },
-      writeConcern: { w: 'majority' },
-    });
-  } catch (error) {
-    if (/Transaction numbers are only allowed|replica set|does not support retryable writes/i.test(error.message || '')) {
-      const transactionError = new Error(
-        'Atomic goal persistence requires a transaction-capable MongoDB replica set. No sequential fallback is permitted.',
-        { cause: error },
-      );
-      transactionError.status = 503;
-      transactionError.clientMessage = 'Goal persistence is temporarily unavailable.';
-      transactionError.code = 'GOAL_TRANSACTIONS_REQUIRED';
-      throw transactionError;
-    }
-    throw error;
-  } finally {
-    await session.endSession();
-  }
+export async function persistGoalAtomically(goalData, _profileId, { testHooks = {} } = {}) {
+  await Goal.init();
+  const goal = await Goal.create(goalData);
+  await testHooks.afterGoalCreate?.(null, goal);
   return goal;
 }
 
-/**
- * POST /api/goals/create [Protected]
- * Create a new financial goal with automated SIP computation and Monte Carlo analysis.
- */
-router.post('/create', verifyJWT, idempotency(), validate(goalSchema), asyncHandler(async (req, res) => {
-  const { goal_name, target_amount, target_date, current_savings, profileId, priority } = req.body;
-
-  const profile = await _resolveProfile(profileId, req.user.userId);
-  if (!profile) {
-    throw createError(409, 'Goal creation requires a financial profile', 'Build a financial profile before creating goals.');
-  }
-
-  // Duplicate goal name check
-  const existingGoal = await Goal.findOne({
-    userId: req.user.userId,
-    goal_name: { $regex: new RegExp(`^${goal_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
-  }).lean();
-  if (existingGoal) {
-    throw createError(409,
-      `Duplicate goal name: "${goal_name}" for user ${req.user.userId}`,
-      `A goal named "${goal_name}" already exists. Use a different name.`
-    );
-  }
-
-  const { targetDateObj, yearsRemaining } = _computeYearsRemaining(target_date);
-
-  const { postTaxReturn: postTaxRate, volatility: annualVol, primaryInstrument: recommendedInstrument } =
-    await _getBlendedPortfolioMetrics(req.user.userId, profile?._id);
-
-  // Compute inflation-adjusted target amount (default inflation: 5%)
-  const inflationAdjustedTarget = Math.round(target_amount * Math.pow(1.05, yearsRemaining));
-
-  // Factor in user's lump sum capital
-  const lumpSumCapital = (profile && profile.hasLumpSum) ? (profile.lumpSumAmount || 0) : 0;
-  const totalUpfrontSavings = (current_savings || 0) + lumpSumCapital;
-
-  const rawSIP = reverseSIP(inflationAdjustedTarget, postTaxRate, yearsRemaining, totalUpfrontSavings);
-  const requiredSIP = Math.max(500, Math.round(Number.isFinite(rawSIP) ? rawSIP : 5000));
-
-  const mcResult = runMonteCarloWithGoal({
-    monthlyInvestment: requiredSIP,
-    postTaxAnnualReturn: postTaxRate,
-    annualVolatility: annualVol,
+async function calculateGoalPlan({ profile, profileId, userId, targetAmount, targetDate, currentSavings }) {
+  const yearsRemaining = computeYearsRemaining(targetDate);
+  const metrics = await _getBlendedPortfolioMetrics(userId, profileId);
+  const inflationAdjustedTarget = Math.round(targetAmount * (1 + GOAL_INFLATION_ASSUMPTION) ** yearsRemaining);
+  const rawSip = reverseSIP(inflationAdjustedTarget, metrics.expectedReturn, yearsRemaining, currentSavings);
+  if (!Number.isFinite(rawSip)) throw new Error('Unable to calculate required SIP');
+  const requiredSip = Math.max(0, Math.round(rawSip));
+  const result = runMonteCarloWithGoal({
+    monthlyInvestment: requiredSip,
+    annualExpectedReturn: metrics.expectedReturn,
+    annualVolatility: metrics.volatility,
     years: yearsRemaining,
     simulations: 5000,
+    inflationRate: GOAL_INFLATION_ASSUMPTION,
     targetAmount: inflationAdjustedTarget,
-    currentSavings: totalUpfrontSavings,
+    currentSavings,
   });
-
-  const lastIdx = _validateMcResult(mcResult);
-  const chartData = _buildChartData(mcResult);
-
-  const userMonthlySavings = profile?.savings || 10000;
-  const gap = requiredSIP - userMonthlySavings;
-  const status = _determineGoalStatus(mcResult.goal_probability, gap, userMonthlySavings);
-
-  const geminiAdvice = await generateGoalAdvice({
-    goal_name, target_amount, target_date: targetDateObj,
-    recommended_sip: requiredSIP, recommended_instrument: recommendedInstrument, status,
-  }, profile, userMonthlySavings);
-
-  const goalData = {
-    userId: req.user.userId,
-    profileId: profile?._id,
-    goal_name, target_amount,
-    inflation_adjusted_target: inflationAdjustedTarget,
-    target_date: targetDateObj,
-    current_savings: current_savings || 0,
-    recommended_sip: requiredSIP,
-    recommended_instrument: recommendedInstrument,
-    probability_of_success: mcResult.goal_probability,
-    gap_amount: Math.max(0, gap),
-    status,
-    priority: priority || 'Medium',
-    monte_carlo_summary: {
-      p10: mcResult.p10[lastIdx], p25: mcResult.p25[lastIdx],
-      p50: mcResult.p50[lastIdx], p75: mcResult.p75[lastIdx],
-      p90: mcResult.p90[lastIdx], simulations_run: mcResult.simulations_run,
-    },
-    chart_data: chartData,
-    mc_computed_at: new Date(),
-    years_remaining: yearsRemaining,
-    gemini_advice: geminiAdvice,
+  const lastIndex = validateMonteCarlo(result);
+  const gap = Math.max(0, requiredSip - profile.monthlySavings);
+  return {
+    yearsRemaining,
+    metrics,
+    inflationAdjustedTarget,
+    requiredSip,
+    result,
+    lastIndex,
+    gap,
+    status: determineGoalStatus(result.goal_probability, gap, profile.monthlySavings),
   };
+}
 
+router.post('/create', verifyJWT, idempotency(), validateStrict(customGoalSchema), asyncHandler(async (req, res) => {
+  const { goal_name, target_amount, target_date, current_savings, profileId, priority } = req.body;
+  const stored = await findOwnedProfile(profileId, req.user.userId);
+  if (!stored) throw createError(404, 'Profile not found or access denied', 'Build a financial profile first.');
+  const profile = buildRecommendationProfile(stored);
+
+  const duplicate = await Goal.exists({
+    userId: req.user.userId,
+    goal_name: { $regex: new RegExp(`^${goal_name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+  });
+  if (duplicate) throw createError(409, `Duplicate goal name: ${goal_name}`, 'A goal with this name already exists.');
+
+  const plan = await calculateGoalPlan({
+    profile, profileId, userId: req.user.userId, targetAmount: target_amount,
+    targetDate: target_date, currentSavings: current_savings,
+  });
+  const data = {
+    userId: req.user.userId,
+    profileId,
+    goal_name,
+    target_amount,
+    inflation_adjusted_target: plan.inflationAdjustedTarget,
+    target_date: new Date(target_date),
+    current_savings,
+    recommended_sip: plan.requiredSip,
+    recommended_instrument: plan.metrics.primaryInstrument,
+    probability_of_success: plan.result.goal_probability,
+    gap_amount: plan.gap,
+    status: plan.status,
+    priority,
+    monte_carlo_summary: {
+      p10: plan.result.p10[plan.lastIndex], p25: plan.result.p25[plan.lastIndex],
+      p50: plan.result.p50[plan.lastIndex], p75: plan.result.p75[plan.lastIndex],
+      p90: plan.result.p90[plan.lastIndex], simulations_run: plan.result.simulations_run,
+    },
+    chart_data: chartData(plan.result),
+    mc_computed_at: new Date(),
+    years_remaining: plan.yearsRemaining,
+    simulation_classification: 'NON_RECOMMENDATION_GOAL_WHAT_IF',
+    return_basis: plan.metrics.returnBasis,
+    inflation_assumption: GOAL_INFLATION_ASSUMPTION,
+  };
+  data.gemini_advice = await generateGoalAdvice(data, profile);
   let goal;
   try {
-    goal = await persistGoalAtomically(goalData, profile._id);
-  } catch (createErr) {
-    if (createErr.code === 11000) {
-      throw createError(409,
-        `Concurrent duplicate goal name: "${goal_name}" for user ${req.user.userId}`,
-        `A goal named "${goal_name}" already exists. Use a different name.`
-      );
-    }
-    throw createErr;
+    goal = await persistGoalAtomically(data, profileId);
+  } catch (error) {
+    if (error.code === 11000) throw createError(409, `Duplicate goal name: ${goal_name}`, 'A goal with this name already exists.');
+    throw error;
   }
-
-  res.status(201).json({
-    goal: {
-      goalId: goal._id,
-      ...goal.toObject(),
-      chartData,
-      years_remaining: yearsRemaining,
-    },
-  });
+  res.status(201).json({ goal: { ...goal.toObject(), goalId: goal._id, chartData: data.chart_data } });
 }));
 
-/**
- * GET /api/goals [Protected]
- * List all goals for the current user.
- * Automatically regenerates AI advice if it contains stale/error text.
- */
 router.get('/', verifyJWT, asyncHandler(async (req, res) => {
   const goals = await Goal.find({ userId: req.user.userId }).sort({ target_date: 1 });
-
-  const staleGoals = goals.filter(g => isStaleAdvice(g.gemini_advice));
-
-  if (staleGoals.length > 0) {
-    // Regenerate advice with a timeout - don't block the response for too long
-    const regenerationPromises = staleGoals.map(async (g) => {
-      try {
-        const profile = await findOwnedProfileById(g.profileId, req.user.userId);
-        const userMonthlySavings = profile?.savings || 10000;
-        const newAdvice = await generateGoalAdvice(g, profile, userMonthlySavings);
-
-        if (!isStaleAdvice(newAdvice)) {
-          await Goal.findOneAndUpdate({ _id: g._id, userId: req.user.userId }, { gemini_advice: newAdvice });
-        }
-      } catch (e) {
-        console.warn('[Goals] Advice regeneration failed for', g.goal_name, ':', e.message);
+  for (const goal of goals.filter(item => isStaleAdvice(item.gemini_advice))) {
+    try {
+      const stored = await findOwnedProfile(goal.profileId, req.user.userId);
+      if (!stored) continue;
+      const profile = buildRecommendationProfile(stored);
+      const advice = await generateGoalAdvice(goal, profile);
+      if (!isStaleAdvice(advice)) {
+        goal.gemini_advice = advice;
+        await goal.save();
       }
-    });
-
-    // Wait up to 8 seconds for regeneration, then respond with whatever we have
-    let regenerationTimerId;
-    const timeoutPromise = new Promise(resolve => {
-      regenerationTimerId = setTimeout(resolve, 8000);
-    });
-    await Promise.race([
-      Promise.allSettled(regenerationPromises),
-      timeoutPromise,
-    ]);
-    clearTimeout(regenerationTimerId);
-  }
-
-  // Refetch goals to ensure fresh advice is included, and compute dynamic chartData for all goals
-  const freshGoals = await Goal.find({ userId: req.user.userId }).sort({ target_date: 1 });
-  
-  const goalsArr = await Promise.all(freshGoals.map(async (g) => {
-    const targetDateObj = new Date(g.target_date);
-    const now = new Date();
-    const msRemaining = targetDateObj - now;
-    const rawYears = msRemaining / (365.25 * 24 * 60 * 60 * 1000);
-    const yearsRemaining = Math.max(0.5, Math.floor(rawYears * 4) / 4);
-    
-    let chartData;
-    const isCacheValid = g.chart_data && 
-                         g.chart_data.length > 0 && 
-                         g.mc_computed_at && 
-                         g.years_remaining === yearsRemaining && 
-                         (Date.now() - new Date(g.mc_computed_at).getTime()) < 24 * 60 * 60 * 1000;
-
-    if (isCacheValid) {
-      // Use cached chartData from Goal model
-      chartData = g.chart_data.map(item => ({
-        year: item.year,
-        p10: item.p10,
-        p25: item.p25,
-        p50: item.p50,
-        p75: item.p75,
-        p90: item.p90,
-      }));
-    } else {
-      // Cache is stale or missing - run Monte Carlo and update DB
-      const { postTaxReturn: postTaxRate, volatility: annualVol } =
-        await _getBlendedPortfolioMetrics(req.user.userId, g.profileId, g.recommended_instrument || 'Equity_MF');
-      
-      const targetAmt = g.inflation_adjusted_target || g.target_amount;
-      const mcResult = runMonteCarloWithGoal({
-        monthlyInvestment: g.recommended_sip || 5000,
-        postTaxAnnualReturn: postTaxRate,
-        annualVolatility: annualVol,
-        years: yearsRemaining,
-        simulations: 2000,
-        targetAmount: targetAmt,
-        currentSavings: g.current_savings || 0,
-      });
-
-      chartData = _buildChartData(mcResult);
-      const lastIdx = mcResult.p50.length - 1;
-
-      // Cache it back to database asynchronously (don't block the request)
-      Goal.findOneAndUpdate({ _id: g._id, userId: req.user.userId }, {
-        chart_data: chartData,
-        mc_computed_at: new Date(),
-        years_remaining: yearsRemaining,
-        probability_of_success: mcResult.goal_probability,
-        monte_carlo_summary: {
-          p10: mcResult.p10[lastIdx], p25: mcResult.p25[lastIdx],
-          p50: mcResult.p50[lastIdx], p75: mcResult.p75[lastIdx],
-          p90: mcResult.p90[lastIdx], simulations_run: mcResult.simulations_run,
-        }
-      }).catch(err => console.error('[Goals Cache] Failed to write cache to DB:', err.message));
+    } catch (error) {
+      console.warn('[Goals] Advice regeneration failed:', error.message);
     }
-
-    return {
-      ...g.toObject(),
-      chartData,
-      years_remaining: yearsRemaining,
-    };
-  }));
-
-  res.json({ goals: goalsArr });
+  }
+  res.json({ goals: goals.map(goal => ({ ...goal.toObject(), chartData: goal.chart_data })) });
 }));
 
-/**
- * PATCH /api/goals/:goalId/refresh-advice [Protected]
- * Manually refresh AI advice for a specific goal.
- */
 router.patch('/:goalId/refresh-advice', verifyJWT, asyncHandler(async (req, res) => {
-  const { goalId } = req.params;
-
-  if (!isValidObjectId(goalId)) {
-    throw createError(400, 'Invalid goalId', 'Invalid goal ID.');
-  }
-
-  const goal = await Goal.findOne({ _id: goalId, userId: req.user.userId });
-  if (!goal) {
-    throw createError(404, `Goal not found: ${goalId}`, 'Goal not found.');
-  }
-
-  const profile = await findOwnedProfileById(goal.profileId, req.user.userId);
-  const userMonthlySavings = profile?.savings || 10000;
-  const newAdvice = await generateGoalAdvice(goal, profile, userMonthlySavings);
-
-  goal.gemini_advice = newAdvice;
+  if (!isValidObjectId(req.params.goalId)) throw createError(400, 'Invalid goalId', 'Invalid goal ID.');
+  const goal = await Goal.findOne({ _id: req.params.goalId, userId: req.user.userId });
+  if (!goal) throw createError(404, 'Goal not found', 'Goal not found.');
+  const stored = await findOwnedProfile(goal.profileId, req.user.userId);
+  if (!stored) throw createError(409, 'The goal profile is unavailable.', 'Financial profile unavailable.');
+  const profile = buildRecommendationProfile(stored);
+  goal.gemini_advice = await generateGoalAdvice(goal, profile);
   await goal.save();
-
-  res.json({ goalId: goal._id, gemini_advice: newAdvice });
+  res.json({ goalId: goal._id, gemini_advice: goal.gemini_advice });
 }));
 
-/**
- * PATCH /api/goals/:goalId [Protected]
- * Update a goal's priority, savings, or target, and recompute Monte Carlo fields.
- */
-router.patch('/:goalId', verifyJWT, validate(goalUpdateSchema), asyncHandler(async (req, res) => {
-  const { goalId } = req.params;
-  const { priority, current_savings, target_amount } = req.body;
+router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyncHandler(async (req, res) => {
+  if (!isValidObjectId(req.params.goalId)) throw createError(400, 'Invalid goalId', 'Invalid goal ID.');
+  const goal = await Goal.findOne({ _id: req.params.goalId, userId: req.user.userId });
+  if (!goal) throw createError(404, 'Goal not found', 'Goal not found.');
+  const stored = await findOwnedProfile(goal.profileId, req.user.userId);
+  if (!stored) throw createError(409, 'The goal profile is unavailable.', 'Financial profile unavailable.');
+  const profile = buildRecommendationProfile(stored);
+  if (req.body.priority !== undefined) goal.priority = req.body.priority;
+  if (req.body.target_amount !== undefined) goal.target_amount = req.body.target_amount;
+  if (req.body.current_savings !== undefined) goal.current_savings = req.body.current_savings;
 
-  if (!isValidObjectId(goalId)) {
-    throw createError(400, 'Invalid goalId', 'Invalid goal ID.');
-  }
-
-  const goal = await Goal.findOne({ _id: goalId, userId: req.user.userId });
-  if (!goal) {
-    throw createError(404, `Goal not found: ${goalId}`, 'Goal not found.');
-  }
-
-  if (priority !== undefined) goal.priority = priority;
-  if (current_savings !== undefined) goal.current_savings = Number(current_savings);
-  if (target_amount !== undefined) goal.target_amount = Number(target_amount);
-
-  if (current_savings !== undefined || target_amount !== undefined) {
-    const profile = await findOwnedProfileById(goal.profileId, req.user.userId) ||
-                    await FinancialProfile.findOne({ userId: req.user.userId }).sort({ createdAt: -1 }).lean();
-    
-    const now = new Date();
-    const msRemaining = new Date(goal.target_date) - now;
-    const yearsRemaining = Math.max(0.5, Math.floor((msRemaining / (365.25 * 24 * 60 * 60 * 1000)) * 4) / 4);
-
-    const { postTaxReturn: postTaxRate, volatility: annualVol } =
-      await _getBlendedPortfolioMetrics(req.user.userId, goal.profileId, goal.recommended_instrument || 'Equity_MF');
-
-    const inflationAdjustedTarget = Math.round(goal.target_amount * Math.pow(1.05, yearsRemaining));
-    goal.inflation_adjusted_target = inflationAdjustedTarget;
-
-    const rawSIP = reverseSIP(inflationAdjustedTarget, postTaxRate, yearsRemaining, goal.current_savings);
-    goal.recommended_sip = Math.max(500, Math.round(Number.isFinite(rawSIP) ? rawSIP : 5000));
-
-    const mcResult = runMonteCarloWithGoal({
-      monthlyInvestment: goal.recommended_sip,
-      postTaxAnnualReturn: postTaxRate,
-      annualVolatility: annualVol,
-      years: yearsRemaining,
-      simulations: 2000,
-      targetAmount: inflationAdjustedTarget,
-      currentSavings: goal.current_savings || 0,
+  if (req.body.target_amount !== undefined || req.body.current_savings !== undefined) {
+    const plan = await calculateGoalPlan({
+      profile, profileId: goal.profileId, userId: req.user.userId,
+      targetAmount: goal.target_amount, targetDate: goal.target_date,
+      currentSavings: goal.current_savings,
     });
-
-    goal.probability_of_success = mcResult.goal_probability;
-    goal.gap_amount = Math.max(0, goal.recommended_sip - (profile?.savings || 10000));
-    
-    const lastIdx = mcResult.p50.length - 1;
+    goal.inflation_adjusted_target = plan.inflationAdjustedTarget;
+    goal.recommended_sip = plan.requiredSip;
+    goal.recommended_instrument = plan.metrics.primaryInstrument;
+    goal.probability_of_success = plan.result.goal_probability;
+    goal.gap_amount = plan.gap;
+    goal.status = plan.status;
     goal.monte_carlo_summary = {
-      p10: mcResult.p10[lastIdx], p25: mcResult.p25[lastIdx],
-      p50: mcResult.p50[lastIdx], p75: mcResult.p75[lastIdx],
-      p90: mcResult.p90[lastIdx], simulations_run: mcResult.simulations_run,
+      p10: plan.result.p10[plan.lastIndex], p25: plan.result.p25[plan.lastIndex],
+      p50: plan.result.p50[plan.lastIndex], p75: plan.result.p75[plan.lastIndex],
+      p90: plan.result.p90[plan.lastIndex], simulations_run: plan.result.simulations_run,
     };
-
-    goal.chart_data = _buildChartData(mcResult);
+    goal.chart_data = chartData(plan.result);
     goal.mc_computed_at = new Date();
-    goal.years_remaining = yearsRemaining;
-    goal.status = _determineGoalStatus(mcResult.goal_probability, goal.gap_amount, profile?.savings || 10000);
-    goal.gemini_advice = await generateGoalAdvice(goal, profile, profile?.savings || 10000);
+    goal.years_remaining = plan.yearsRemaining;
+    goal.simulation_classification = 'NON_RECOMMENDATION_GOAL_WHAT_IF';
+    goal.return_basis = plan.metrics.returnBasis;
+    goal.inflation_assumption = GOAL_INFLATION_ASSUMPTION;
+    goal.gemini_advice = await generateGoalAdvice(goal, profile);
   }
-
   await goal.save();
-  await _syncProfileGoals(goal.profileId, req.user.userId);
   res.json({ success: true, goal });
 }));
 
-/**
- * DELETE /api/goals/:goalId [Protected]
- * Delete a financial goal.
- */
 router.delete('/:goalId', verifyJWT, asyncHandler(async (req, res) => {
-  const { goalId } = req.params;
-
-  if (!isValidObjectId(goalId)) {
-    throw createError(400, 'Invalid goalId', 'Invalid goal ID.');
-  }
-
-  const goal = await Goal.findOneAndDelete({ _id: goalId, userId: req.user.userId });
-  if (!goal) {
-    throw createError(404, `Goal not found for delete: ${goalId}`, 'Goal not found.');
-  }
-
-  await _syncProfileGoals(goal.profileId, req.user.userId);
-
-  res.json({ deleted: true, goalId });
+  if (!isValidObjectId(req.params.goalId)) throw createError(400, 'Invalid goalId', 'Invalid goal ID.');
+  const goal = await Goal.findOneAndDelete({ _id: req.params.goalId, userId: req.user.userId });
+  if (!goal) throw createError(404, 'Goal not found', 'Goal not found.');
+  res.json({ deleted: true, goalId: goal._id });
 }));
 
-export { _getBlendedPortfolioMetrics };
 export default router;
-

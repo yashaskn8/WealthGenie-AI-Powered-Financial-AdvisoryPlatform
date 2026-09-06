@@ -40,8 +40,10 @@ export function boxMuller(u1, u2) {
  * Compute percentile from a sorted array using linear interpolation.
  */
 export function percentile(sortedArr, p) {
-    if (sortedArr.length === 0)
-        return 0;
+    if (!Array.isArray(sortedArr) || sortedArr.length === 0 || sortedArr.some(value => !Number.isFinite(value)))
+        throw new TypeError('sortedArr must be a non-empty array of finite numbers');
+    if (!Number.isFinite(p) || p < 0 || p > 100)
+        throw new RangeError('p must be an explicit percentile from 0 to 100');
     const idx = (p / 100) * (sortedArr.length - 1);
     const lower = Math.floor(idx);
     const upper = Math.ceil(idx);
@@ -50,9 +52,11 @@ export function percentile(sortedArr, p) {
     return sortedArr[lower] + (sortedArr[upper] - sortedArr[lower]) * (idx - lower);
 }
 export function buildProjectionHorizon(years) {
-    const numericYears = Number(years);
-    const requestedYears = Number.isFinite(numericYears) && numericYears > 0 ? numericYears : 1;
-    const totalMonths = Math.max(1, Math.round(requestedYears * 12));
+    if (!Number.isFinite(years) || years <= 0 || years > 30) {
+        throw new RangeError('years must be an explicit finite number from 0 (exclusive) to 30');
+    }
+    const totalMonths = Math.round(years * 12);
+    if (totalMonths < 1) throw new RangeError('years must represent at least one month');
     const checkpointMonths = [];
     for (let month = 12; month < totalMonths; month += 12) {
         checkpointMonths.push(month);
@@ -68,8 +72,13 @@ export function buildProjectionHorizon(years) {
     };
 }
 export function annuityDueFV(monthlyInvestment, monthlyRate, totalMonths) {
-    if (!monthlyInvestment || monthlyInvestment <= 0 || totalMonths <= 0)
-        return 0;
+    if (!Number.isFinite(monthlyInvestment) || monthlyInvestment < 0)
+        throw new TypeError('monthlyInvestment must be an explicit non-negative number');
+    if (!Number.isFinite(monthlyRate) || monthlyRate <= -1)
+        throw new RangeError('monthlyRate must be an explicit decimal greater than -1');
+    if (!Number.isInteger(totalMonths) || totalMonths <= 0)
+        throw new RangeError('totalMonths must be an explicit positive integer');
+    if (monthlyInvestment === 0) return 0;
     if (Math.abs(monthlyRate) < 1e-12) {
         return monthlyInvestment * totalMonths;
     }
@@ -107,17 +116,20 @@ export function computeSequenceRisk(finalValues, simulations, years, monthlyWith
 /**
  * Compute implied annual volatility and Sharpe ratio proxy.
  */
-export function computeRiskMetrics(p50Values, p10Values, years, riskFreeRate = 0.065, postTaxAnnualReturn = 0.08) {
+export function computeRiskMetrics(p50Values, p10Values, years, riskFreeRate, annualExpectedReturn) {
+    if (!Number.isFinite(riskFreeRate) || !Number.isFinite(annualExpectedReturn)) {
+        throw new TypeError('riskFreeRate and annualExpectedReturn must be explicit finite decimals');
+    }
     if (!p50Values || !p10Values || p50Values.length === 0 || p10Values.length === 0 || years <= 0) {
         return { impliedVol: 0, sharpeRatio: 0 };
     }
     const p50Last = p50Values[p50Values.length - 1];
     const p10Last = p10Values[p10Values.length - 1];
-    let impliedVol = 0.05; // default fallback
+    let impliedVol = 0;
     if (p50Last > 0 && p10Last > 0 && p50Last > p10Last) {
         impliedVol = Math.log(p50Last / p10Last) / (1.28155 * Math.sqrt(years));
     }
-    const sharpeRatio = impliedVol > 0.0001 ? (postTaxAnnualReturn - riskFreeRate) / impliedVol : 0;
+    const sharpeRatio = impliedVol > 0.0001 ? (annualExpectedReturn - riskFreeRate) / impliedVol : 0;
     return {
         impliedVol: parseFloat(impliedVol.toFixed(4)),
         sharpeRatio: parseFloat(sharpeRatio.toFixed(4)),
@@ -126,38 +138,37 @@ export function computeRiskMetrics(p50Values, p10Values, years, riskFreeRate = 0
 /**
  * Run Monte Carlo simulation for SIP investment using GBM.
  */
-export function runMonteCarlo({ monthlyInvestment, postTaxAnnualReturn, annualVolatility, years, simulations = 10000, inflationRate = 0.05, isRealTrack = false, currentSavings = 0, }) {
+export function runMonteCarlo({ monthlyInvestment, annualExpectedReturn, annualVolatility, years, simulations, inflationRate, isRealTrack = false, currentSavings, }) {
     const horizon = buildProjectionHorizon(years);
     years = horizon.years;
-    const safeInvestment = Number.isFinite(Number(monthlyInvestment)) && Number(monthlyInvestment) > 0
-        ? Number(monthlyInvestment)
-        : 0;
-    const safeSavings = Number.isFinite(Number(currentSavings)) && Number(currentSavings) > 0
-        ? Number(currentSavings)
-        : 0;
-    // Input guards
-    if (safeInvestment <= 0 && safeSavings <= 0) {
-        return emptyResult(years, simulations);
+    if (!Number.isFinite(monthlyInvestment) || monthlyInvestment < 0) {
+        throw new TypeError('monthlyInvestment must be an explicit non-negative number');
     }
-    if (!years || years <= 0 || !Number.isFinite(years)) {
-        return emptyResult(1, simulations);
+    if (!Number.isFinite(currentSavings) || currentSavings < 0) {
+        throw new TypeError('currentSavings must be an explicit non-negative number');
     }
-    if (!Number.isFinite(postTaxAnnualReturn))
-        postTaxAnnualReturn = 0.08;
-    let safeVolatility = (!Number.isFinite(annualVolatility) || annualVolatility < 0) ? 0.05 : annualVolatility;
-    // Cap simulations to prevent resource exhaustion (DoS vector)
-    simulations = Math.min(Math.max(simulations, 100), 50000);
-    // Warn on negative post-tax returns (possible during extreme market conditions)
-    if (postTaxAnnualReturn < 0 && !isRealTrack) {
-        console.warn(`[MC] Negative post-tax return: ${(postTaxAnnualReturn * 100).toFixed(2)}%. `
+    if (monthlyInvestment === 0 && currentSavings === 0) {
+        throw new RangeError('monthlyInvestment or currentSavings must be greater than zero');
+    }
+    if (!Number.isFinite(annualExpectedReturn) || annualExpectedReturn <= -1 || annualExpectedReturn > 1) {
+        throw new RangeError('annualExpectedReturn must be an explicit decimal greater than -1 and at most 1');
+    }
+    if (!Number.isFinite(annualVolatility) || annualVolatility < 0 || annualVolatility > 0.60) {
+        throw new RangeError('annualVolatility must be an explicit decimal from 0 to 0.60');
+    }
+    if (!Number.isInteger(simulations) || simulations < 100 || simulations > 50000) {
+        throw new RangeError('simulations must be an explicit integer from 100 to 50000');
+    }
+    if (!Number.isFinite(inflationRate) || inflationRate < 0 || inflationRate > 1) {
+        throw new RangeError('inflationRate must be an explicit decimal from 0 to 1');
+    }
+    const safeInvestment = monthlyInvestment;
+    const safeSavings = currentSavings;
+    const safeVolatility = annualVolatility;
+    // Warn on negative return assumptions (possible during extreme market conditions)
+    if (annualExpectedReturn < 0 && !isRealTrack) {
+        console.warn(`[MC] Negative annual return assumption: ${(annualExpectedReturn * 100).toFixed(2)}%. `
             + `Simulation will proceed but projections may show capital erosion.`);
-    }
-    // Clamp volatility to sane range: 0.1% to 60%
-    if (safeVolatility > 0.60) {
-        if (!isRealTrack) {
-            console.warn(`[MC] Extreme volatility ${(safeVolatility * 100).toFixed(1)}% clamped to 60%.`);
-        }
-        safeVolatility = 0.60;
     }
     const { totalMonths, checkpointMonths, yearsArray } = horizon;
     const checkpointMonthToIndex = new Map(checkpointMonths.map((month, index) => [month, index]));
@@ -167,7 +178,7 @@ export function runMonteCarlo({ monthlyInvestment, postTaxAnnualReturn, annualVo
     const halfSims = Math.ceil(simulations / 2);
     const actualSims = halfSims * 2;
     // Deterministic SIP + lump sum FV for control variate (aligned with continuous GBM expected yield)
-    const r = toMonthlyRate(postTaxAnnualReturn, true);
+    const r = toMonthlyRate(annualExpectedReturn, true);
     const fvSIP = annuityDueFV(safeInvestment, r, totalMonths);
     const fvSavings = safeSavings * Math.pow(1 + r, totalMonths);
     const deterministicFV = fvSIP + fvSavings;
@@ -192,7 +203,7 @@ export function runMonteCarlo({ monthlyInvestment, postTaxAnnualReturn, annualVo
         for (let monthIdx = 0; monthIdx < totalMonths; monthIdx++) {
             balance1 += safeInvestment;
             const z = zValues[monthIdx];
-            balance1 *= sampleLogNormalMonthly(postTaxAnnualReturn, safeVolatility, z);
+            balance1 *= sampleLogNormalMonthly(annualExpectedReturn, safeVolatility, z);
             const checkpointIdx = checkpointMonthToIndex.get(monthIdx + 1);
             if (checkpointIdx !== undefined) {
                 allSimResults[checkpointIdx].push(balance1);
@@ -204,7 +215,7 @@ export function runMonteCarlo({ monthlyInvestment, postTaxAnnualReturn, annualVo
         for (let monthIdx = 0; monthIdx < totalMonths; monthIdx++) {
             balance2 += safeInvestment;
             const z = zValues[monthIdx];
-            balance2 *= sampleLogNormalMonthly(postTaxAnnualReturn, safeVolatility, -z);
+            balance2 *= sampleLogNormalMonthly(annualExpectedReturn, safeVolatility, -z);
             const checkpointIdx = checkpointMonthToIndex.get(monthIdx + 1);
             if (checkpointIdx !== undefined) {
                 allSimResults[checkpointIdx].push(balance2);
@@ -254,10 +265,10 @@ export function runMonteCarlo({ monthlyInvestment, postTaxAnnualReturn, annualVo
     }
     let realTrackResult = null;
     if (!isRealTrack) {
-        const realReturn = (1 + postTaxAnnualReturn) / (1 + inflationRate) - 1;
+        const realReturn = (1 + annualExpectedReturn) / (1 + inflationRate) - 1;
         realTrackResult = runMonteCarlo({
             monthlyInvestment: safeInvestment,
-            postTaxAnnualReturn: realReturn,
+            annualExpectedReturn: realReturn,
             annualVolatility: safeVolatility,
             years,
             simulations,
@@ -273,13 +284,13 @@ export function runMonteCarlo({ monthlyInvestment, postTaxAnnualReturn, annualVo
     const p90_real = !isRealTrack && realTrackResult ? realTrackResult.p90 : [];
     const mean_real = !isRealTrack && realTrackResult ? realTrackResult.mean : [];
     const sequenceOfReturnsRisk = computeSequenceRisk(finalValues, actualSims, years, 0);
-    const baseSharpe = safeVolatility > 0.001 ? (postTaxAnnualReturn - RISK_FREE_RATE) / safeVolatility : 0;
+    const baseSharpe = safeVolatility > 0.001 ? (annualExpectedReturn - RISK_FREE_RATE) / safeVolatility : 0;
     const sharpeSensitivity = {
-        minus_5pct: (safeVolatility - 0.05) > 0.001 ? (postTaxAnnualReturn - RISK_FREE_RATE) / (safeVolatility - 0.05) : 0,
-        minus_2pct: (safeVolatility - 0.02) > 0.001 ? (postTaxAnnualReturn - RISK_FREE_RATE) / (safeVolatility - 0.02) : 0,
+        minus_5pct: (safeVolatility - 0.05) > 0.001 ? (annualExpectedReturn - RISK_FREE_RATE) / (safeVolatility - 0.05) : 0,
+        minus_2pct: (safeVolatility - 0.02) > 0.001 ? (annualExpectedReturn - RISK_FREE_RATE) / (safeVolatility - 0.02) : 0,
         base: baseSharpe,
-        plus_2pct: (postTaxAnnualReturn - RISK_FREE_RATE) / (safeVolatility + 0.02),
-        plus_5pct: (postTaxAnnualReturn - RISK_FREE_RATE) / (safeVolatility + 0.05),
+        plus_2pct: (annualExpectedReturn - RISK_FREE_RATE) / (safeVolatility + 0.02),
+        plus_5pct: (annualExpectedReturn - RISK_FREE_RATE) / (safeVolatility + 0.05),
     };
     const response = {
         years_array: yearsArray,
@@ -295,7 +306,7 @@ export function runMonteCarlo({ monthlyInvestment, postTaxAnnualReturn, annualVo
         response.real = realTrackResult;
         response.inflationRateUsed = inflationRate;
         response.sequenceRisk = sequenceOfReturnsRisk;
-        response.riskMetrics = computeRiskMetrics(p50, p10, years, RISK_FREE_RATE, postTaxAnnualReturn);
+        response.riskMetrics = computeRiskMetrics(p50, p10, years, RISK_FREE_RATE, annualExpectedReturn);
         response.variance_reduction = 'halton_qmc+antithetic+control_variates';
         response.sequence_of_returns_risk = sequenceOfReturnsRisk;
         response.sharpe_ratio_sensitivity = sharpeSensitivity;
@@ -306,23 +317,14 @@ export function runMonteCarlo({ monthlyInvestment, postTaxAnnualReturn, annualVo
 /**
  * Generate an empty result set (for invalid inputs).
  */
-export function emptyResult(years, simulations) {
-    const horizon = buildProjectionHorizon(years);
-    const zeros = Array.from({ length: horizon.yearsArray.length }, () => 0);
-    return {
-        years_array: horizon.yearsArray,
-        p10: [...zeros], p25: [...zeros], p50: [...zeros],
-        p75: [...zeros], p90: [...zeros], mean: [...zeros],
-        finalValues: [],
-        simulations_run: simulations || 0,
-    };
-}
-/**
- * Compute the probability that a goal amount is reached.
- */
+/** Compute the probability that a goal amount is reached. */
 export function computeGoalProbability(terminalValues, targetAmount) {
-    if (!terminalValues || terminalValues.length === 0 || !targetAmount || targetAmount <= 0)
-        return 0;
+    if (!Array.isArray(terminalValues) || terminalValues.length === 0
+        || terminalValues.some(value => !Number.isFinite(value))) {
+        throw new TypeError('terminalValues must be a non-empty array of finite values');
+    }
+    if (!Number.isFinite(targetAmount) || targetAmount <= 0)
+        throw new RangeError('targetAmount must be an explicit positive number');
     const successes = terminalValues.filter(v => v >= targetAmount).length;
     return parseFloat((successes / terminalValues.length).toFixed(4));
 }
@@ -330,8 +332,10 @@ export function computeGoalProbability(terminalValues, targetAmount) {
  * Compute the Wilson score confidence interval for a binomial proportion.
  */
 export function computeWilsonCI(p, n) {
-    if (n <= 0 || p === null)
-        return { lower: 0, upper: 0 };
+    if (!Number.isFinite(p) || p < 0 || p > 1)
+        throw new RangeError('p must be an explicit probability from 0 to 1');
+    if (!Number.isInteger(n) || n <= 0)
+        throw new RangeError('n must be an explicit positive integer');
     const z = 1.95996; // 95% confidence level
     const pVal = Math.min(Math.max(p, 0), 1);
     const factor = (z * z) / n;
@@ -350,9 +354,13 @@ export function computeWilsonCI(p, n) {
  */
 export function runMonteCarloWithGoal(params) {
     const { targetAmount, ...mcParams } = params;
+    if (targetAmount !== null && targetAmount !== undefined
+        && (!Number.isFinite(targetAmount) || targetAmount <= 0)) {
+        throw new RangeError('targetAmount must be null or a positive finite number');
+    }
     const result = runMonteCarlo(mcParams);
     // Reuse terminal values from the primary simulation run
-    const goalProbability = targetAmount && result.finalValues
+    const goalProbability = targetAmount !== null && targetAmount !== undefined && result.finalValues
         ? computeGoalProbability(result.finalValues, targetAmount)
         : null;
     const goalProbabilityCI = goalProbability !== null
@@ -367,7 +375,7 @@ export function runMonteCarloWithGoal(params) {
         ...cleanResult,
         goal_probability: goalProbability,
         goal_probability_ci: goalProbabilityCI,
-        target_amount: targetAmount || null,
+        target_amount: targetAmount ?? null,
     };
 }
 /**
@@ -375,27 +383,27 @@ export function runMonteCarloWithGoal(params) {
  */
 export function getInstrumentVolatility(instrumentType, overrideMean) {
     const params = INSTRUMENT_PARAMS[instrumentType];
-    if (!params) {
-        console.warn(`[MC] Unknown instrument type: '${instrumentType}'. Using default params {mean: 0.08, stdDev: 0.05}.`);
+    if (!params) return null;
+    if (overrideMean !== undefined && !Number.isFinite(overrideMean)) {
+        throw new TypeError('overrideMean must be a finite decimal when supplied');
     }
-    const defaults = params || { mean: 0.08, stdDev: 0.05 };
     return {
-        mean: overrideMean !== undefined ? overrideMean : defaults.mean,
-        stdDev: defaults.stdDev,
+        mean: overrideMean !== undefined ? overrideMean : params.mean,
+        stdDev: params.stdDev,
     };
 }
 /**
  * Reverse SIP formula — compute monthly SIP required to reach a target.
  */
-export function reverseSIP(targetAmount, annualRate, years, currentSavings = 0) {
+export function reverseSIP(targetAmount, annualRate, years, currentSavings) {
     if (!Number.isFinite(targetAmount) || targetAmount <= 0)
-        return 0;
+        throw new RangeError('targetAmount must be a positive finite number');
     if (!Number.isFinite(years) || years <= 0)
-        return 0;
-    if (!Number.isFinite(annualRate) || annualRate < 0)
-        annualRate = 0;
+        throw new RangeError('years must be a positive finite number');
+    if (!Number.isFinite(annualRate) || annualRate <= -1 || annualRate > 1)
+        throw new RangeError('annualRate must be a decimal greater than -1 and at most 1');
     if (!Number.isFinite(currentSavings) || currentSavings < 0)
-        currentSavings = 0;
+        throw new RangeError('currentSavings must be an explicit non-negative finite number');
     const r = toMonthlyRate(annualRate, true);
     const n = years * 12;
     const fvCurrent = currentSavings > 0

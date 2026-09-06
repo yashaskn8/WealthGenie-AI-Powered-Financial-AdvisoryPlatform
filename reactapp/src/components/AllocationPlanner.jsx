@@ -24,12 +24,6 @@ const getCategoryIcon = (cat) => {
   return <Wallet size={20} />;
 };
 
-const RISK_PRESETS = [
-  { id: 'Safe & Stable', label: 'Safe & Stable' },
-  { id: 'Balanced Growth', label: 'Balanced Growth' },
-  { id: 'Aggressive Growth', label: 'Aggressive Growth' },
-];
-
 const CATEGORY_EXPLANATIONS = {
   'Equity': 'Company Shares — High growth potential over time',
   'Debt': 'Fixed Income & FD — Steady, reliable interest income',
@@ -41,12 +35,7 @@ const CATEGORY_EXPLANATIONS = {
 };
 
 const AllocationPlanner = ({ profile, recommendations = [] }) => {
-  const savings = Number(profile?.monthly_savings) || 12000;
-
-  const riskView = (
-    (profile?.riskCategory || '').includes('Aggressive') ? 'Aggressive Growth' : 
-    (profile?.riskCategory || '').includes('Conservative') ? 'Safe & Stable' : 'Balanced Growth'
-  );
+  const savings = Number(profile?.monthly_savings);
 
   // Only convert backend-authoritative weights into chart presentation fields.
   const allocation = useMemo(() => {
@@ -59,9 +48,9 @@ const AllocationPlanner = ({ profile, recommendations = [] }) => {
           ? Number(item.allocationWeight) * 100
           : (total > 0 ? (Number(item.monthly_allocation) / total) * 100 : 0),
         monthlyAmount: Number(item.monthly_allocation || 0),
-        postTaxRate: Number(item.postTaxReturn ?? item.effectiveYield ?? 0),
-        cat: item.cat || item.category || item.assetClass || 'Other',
-        riskLabel: item.riskLabel || item.riskLevel || 'Medium',
+        nominalRate: Number(item.nominalReturn),
+        cat: item.cat || item.category || item.assetClass || 'Unclassified',
+        riskLabel: item.riskLabel || item.riskLevel || 'Not established',
         gradId: grad.id,
         themeColor: grad.primary,
         glowColor: grad.glow,
@@ -71,7 +60,7 @@ const AllocationPlanner = ({ profile, recommendations = [] }) => {
 
   // Compute blended return
   const blendedReturn = useMemo(() => {
-    return allocation.reduce((sum, a) => sum + (a.allocationPct / 100) * a.postTaxRate, 0);
+    return allocation.reduce((sum, a) => sum + (a.allocationPct / 100) * a.nominalRate, 0);
   }, [allocation]);
 
   // KPI exposures
@@ -82,11 +71,7 @@ const AllocationPlanner = ({ profile, recommendations = [] }) => {
   const altExposure = useMemo(() =>
     allocation.filter(a => a.cat === "Commodity" || a.cat === "Alternative" || a.cat === "Gold").reduce((s, a) => s + a.allocationPct, 0), [allocation]);
   
-  const rationaleText = useMemo(() => {
-    if (riskView === 'Aggressive Growth') return "Focuses on growing your money as much as possible over the long term using high-growth equity shares to beat inflation.";
-    if (riskView === 'Safe & Stable') return "Prioritizes keeping your hard-earned money safe with government-backed savings and fixed deposits with minimal risk.";
-    return "Combines safety and growth. Spreads your money across categories to capture market growth while keeping a strong safety cushion.";
-  }, [riskView]);
+  const rationaleText = 'This mix is a presentation of the server-approved instruments and weights. Risk preference is a ceiling; measured capacity may reduce it.';
 
   const [hoveredSlice, setHoveredSlice] = useState(null);
 
@@ -125,18 +110,7 @@ const AllocationPlanner = ({ profile, recommendations = [] }) => {
         {/* Risk Presets Segmented Toggle */}
         <div className="risk-presets-container">
           <div className="risk-presets-segmented">
-            {RISK_PRESETS.filter(preset => preset.id === riskView).map(preset => {
-              const isActive = riskView === preset.id;
-              return (
-                <button
-                  key={preset.id}
-                  className={`risk-preset-btn ${isActive ? 'active' : ''}`}
-                  aria-label="Current backend risk strategy"
-                >
-                  <span>{preset.label}</span>
-                </button>
-              );
-            })}
+            <span className="risk-preset-btn active">Server-approved mix</span>
           </div>
         </div>
 
@@ -342,8 +316,8 @@ const AllocationPlanner = ({ profile, recommendations = [] }) => {
                     <span className="metric-val text-sky">₹{a.monthlyAmount?.toLocaleString("en-IN")}</span>
                   </div>
                   <div className="metric-pill">
-                    <span className="metric-label">Return (after tax)</span>
-                    <span className="metric-val text-green">{a.postTaxRate}%/yr</span>
+                    <span className="metric-label">Pre-tax nominal return</span>
+                    <span className="metric-val text-green">{Number.isFinite(a.nominalRate) ? `${a.nominalRate}%/yr` : 'Not established'}</span>
                   </div>
                   <div className="metric-pill">
                     <span className="metric-label">Safety & Risk</span>
@@ -373,12 +347,12 @@ const AllocationPlanner = ({ profile, recommendations = [] }) => {
       >
         <div className="ap-blended-bar">
           <div className="blended-left">
-            <div className="blended-label">ESTIMATED ANNUAL RETURN (POST-TAX)</div>
+            <div className="blended-label">ESTIMATED ANNUAL RETURN (PRE-TAX NOMINAL)</div>
             <div className="blended-value">
               {blendedReturn.toFixed(1)}% <span className="per-year">per year</span>
             </div>
             <div className="blended-sub">
-              Calculated using current interest rates & post-tax projections.
+              Weighted from the server-approved portfolio assumptions; no tax profile is inferred.
             </div>
           </div>
           <div className="blended-right">

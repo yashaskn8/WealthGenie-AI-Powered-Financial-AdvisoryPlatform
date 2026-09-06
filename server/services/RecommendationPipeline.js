@@ -1,1494 +1,474 @@
-/**
- * WealthGenie — Backend Recommendation Pipeline
- * ──────────────────────────────────────────────
- * Metadata-driven recommendation service that replaces hardcoded
- * instrument overrides with configurable scoring logic.
- *
- * ARCHITECTURE:
- *   This pipeline is the backend's independent recommendation engine.
- *   It orchestrates four modular stages:
- *     1. Eligibility Filtering  — remove instruments the user cannot hold
- *     2. Scoring                — multi-factor weighted utility per instrument
- *     3. Ranking                — sort by score, apply ML confidence boost
- *     4. Diversity Enforcement  — ensure top-N spans min asset classes
- *
- *   The pipeline consumes:
- *     - The backend's authoritative catalog (server/data/investmentDatabase.js)
- *     - ML confidence scores from mlClient.js
- *     - User profile data from FinancialProfile
- *     - Tax slab computation from taxEngine.js
- *
- *   It does NOT duplicate the frontend scoring engine. Instead it reuses
- *   the existing backend tax infrastructure (getEffectiveMarginalRate, calculatePostTaxReturnSafe)
- *   and adds only the metadata-driven scoring logic required for independent
- *   backend recommendations.
- */
-
-import { getEffectiveMarginalRate } from './taxEngine.js';
-import { calculatePostTaxReturnSafe } from './postTaxCalculator.js';
-import { INSTRUMENT_PARAMS, RISK_FREE_RATE } from './instrumentConstants.js';
 import { investmentDatabase, CONCENTRATION_CAPS } from '../data/investmentDatabase.js';
-import { encodeRiskCategory } from './riskProfiler.js';
-import { optimisePortfolio } from './portfolioEngine.js';
-import { getLiveInstrumentParams } from './marketDataService.js';
+import { INSTRUMENT_PARAMS } from './instrumentConstants.js';
+import { buildRecommendationProfile } from './recommendationProfile.js';
+import { assessSuitabilityRisk } from './riskProfiler.js';
 
-// ═══════════════════════════════════════════════════════════════════
-// PIPELINE CONFIGURATION — centralized, no magic numbers
-// ═══════════════════════════════════════════════════════════════════
-const PIPELINE_CONFIG = {
-  USE_OPTIMIZER: true,
-  TOP_N: 5,
-  MIN_ASSET_CLASSES: 3,
+export const PIPELINE_CONFIG = Object.freeze({
+  version: 'recommendation-pipeline-4.0.0',
+  topN: 8,
+  scoreWeights: Object.freeze({
+    expectedReturn: 0.25,
+    riskFit: 0.25,
+    liquidity: 0.15,
+    goalFit: 0.15,
+    horizonFit: 0.10,
+    cost: 0.05,
+    mlConfidence: 0.05,
+  }),
+});
 
-  // Weight ranges
-  WEIGHT_FLOOR: 0.5,
-  WEIGHT_CEIL: 3.0,
+export const INSTRUMENT_KEY_MAP = Object.freeze({
+  ppf: 'PPF', scss: 'SCSS', sukanya: 'SSY', ssy: 'SSY', rbi_bonds: 'RBI_Bond',
+  rbi_retail_direct_gilt: 'RBI_Bond', g_sec: 'G-Sec', sgb: 'SGB', nps: 'NPS',
+});
 
-  // Return scoring
-  RETURN_MULTIPLIER: 3.5,
+const RISK_LABEL_SCORE = Object.freeze({
+  'Very Low': 1, Low: 1, 'Low-Medium': 2, 'Medium-Low': 2,
+  Medium: 3, 'Medium-High': 4, High: 4, 'Very High': 5,
+});
 
-  // Risk alignment
-  RISK_PERFECT_BONUS: 20,
-  RISK_CLOSE_BONUS: 12,
-  RISK_MISMATCH_PENALTY: 10,
-  RISK_SEVERE_PENALTY: 18,
-  VOLATILITY_BASELINE: 0.15,
+const round = (value, digits = 2) => Number(Number(value).toFixed(digits));
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
-  // Tax efficiency
-  TAX_PENALTY_SCALE: 8,       // (5 - taxEfficiencyScore) * marginalRate * scale
-
-  // Liquidity
-  LIQUIDITY_CENTER: 3,
-  LIQUIDITY_SCALE: 4,
-
-  // Goal alignment
-  GOAL_TAG_POINTS: 5,
-  GOAL_TAG_CAP: 15,
-
-  // Horizon match
-  HORIZON_PERFECT: 15,
-  HORIZON_GOOD: 10,
-  HORIZON_PARTIAL: 5,
-  HORIZON_LOCK_FIT: 15,
-  HORIZON_NO_LOCK: 5,
-  HORIZON_SEVERE_MISMATCH_PENALTY: 10,
-
-  // Cost
-  COST_FREE_BONUS: 3,
-  COST_PENALTY_SCALE: 100,
-
-  // ML confidence integration
-  ML_BOOST_WEIGHT: 25,        // points per 1.0 confidence (scaled)
-};
-
-// ═══════════════════════════════════════════════════════════════════
-// RISK RECONCILIATION ENGINE (Section 3 — Mandatory, never skip)
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Extract instrument risk value (1–5) from catalog metadata.
- * Source of truth: inv.dynamicData.risk.value (with fallbacks to legacy fields).
- * @param {Object} inv - Catalog instrument object
- * @returns {number} Risk value (1–5, defaulting to 3)
- */
-export function getInstrumentRisk(inv) {
-  return inv.dynamicData?.risk?.value ?? inv.riskLevel ?? inv.risk ?? 3;
+export function resolveBackendType(instrument = {}) {
+  const id = String(instrument.id || '').toLowerCase();
+  if (INSTRUMENT_KEY_MAP[id]) return INSTRUMENT_KEY_MAP[id];
+  const explicit = String(instrument.type || '');
+  if (INSTRUMENT_PARAMS[explicit]) return explicit;
+  const text = `${instrument.id || ''} ${instrument.name || ''} ${instrument.category || ''}`.toLowerCase();
+  if (/small.?cap/.test(text)) return 'Smallcap_MF';
+  if (/mid.?cap/.test(text)) return 'Midcap_MF';
+  if (/index fund|index mutual/.test(text)) return 'Index_MF';
+  if (/liquid/.test(text)) return 'Liquid_MF';
+  if (/arbitrage/.test(text)) return 'Arbitrage_MF';
+  if (/hybrid|balanced/.test(text)) return 'Hybrid_MF';
+  if (/elss/.test(text)) return 'ELSS';
+  if (/debt|bond fund/.test(text)) return 'Debt_MF';
+  if (/mutual fund|equity fund|flexi|large.?cap/.test(text)) return 'Equity_MF';
+  if (/gold/.test(text)) return 'Gold';
+  if (/etf/.test(text)) return 'ETF';
+  if (/fixed deposit|\bfd\b/.test(text)) return 'FD';
+  return explicit || null;
 }
 
-/**
- * Derive instrument risk tier from catalog dynamicData.risk.value.
- * Section 4 CATALOG: 1–2 → 'Low', 3 → 'Medium', 4–5 → 'High'.
- * Source: investment_master.json — never hardcoded.
- */
-export function instrumentRiskTier(inv) {
-  const riskValue = getInstrumentRisk(inv);
-  if (riskValue <= 2) return 'Low';
-  if (riskValue === 3) return 'Medium';
-  return 'High';
+export function getInstrumentRisk(instrument = {}) {
+  const numeric = Number(instrument.dynamicData?.risk?.value ?? instrument.riskLevel ?? instrument.risk);
+  if (Number.isFinite(numeric) && numeric >= 1 && numeric <= 5) return numeric;
+  const label = instrument.dynamicData?.risk?.level || instrument.riskLabel || instrument.riskLevel || instrument.risk;
+  return RISK_LABEL_SCORE[label] ?? null;
 }
 
-/**
- * Section 3 Risk-Reconciliation Algorithm.
- *
- * Capacity (C): from riskProfiler.js encodeRiskCategory() + 1 (0–4 → 1–5).
- * Preference (T): single source = profile.risk_tolerance.
- *   'Conservative' → 1, 'Moderate' → 3, 'Aggressive' → 5.
- * final_score = MIN(T, C + 1), clamped [1, 5].
- *
- * @param {Object} profile - FinancialProfile document (lean)
- * @returns {Object} Reconciliation result with final_risk_tier, scores, notes, flags
- */
-export function reconcileRisk(profile) {
-  const result = {
-    capacity_score: null,
-    preference_score: null,
-    final_score: null,
-    final_risk_tier: '',
-    reconciliation_note: '',
-    advisory_note: '',
-    capacity_missing: false,
-    preference_missing: false,
+export function instrumentRiskTier(instrument = {}) {
+  const score = getInstrumentRisk(instrument);
+  if (score === null) return 'UNKNOWN';
+  if (score <= 2) return 'LOW';
+  if (score === 3) return 'MEDIUM';
+  return 'HIGH';
+}
+
+export function reconcileRisk(profileInput) {
+  const suitability = assessSuitabilityRisk(profileInput);
+  return {
+    final_risk_tier: suitability.finalRisk,
+    final_score: suitability.finalLevel,
+    capacity_score: suitability.capacityScore,
+    capacity_tier: suitability.capacityRisk,
+    preference_score: suitability.preferenceLevel,
+    preference_tier: suitability.preferenceRisk,
+    reconciliation_note: suitability.finalLevel < suitability.preferenceLevel
+      ? 'Risk capacity reduced the stated risk preference.'
+      : 'Risk preference is within measured capacity.',
+    advisory_note: suitability.finalLevel < suitability.preferenceLevel
+      ? 'Recommendations are capped below the stated preference because of financial capacity.'
+      : '',
+    reason_codes: [...suitability.reasonCodes],
+    excluded_due_to_eligibility: [],
   };
-
-  const TIER_NAMES = {
-    1: 'Conservative', 2: 'Conservative-Moderate', 3: 'Moderate',
-    4: 'Moderate-Aggressive', 5: 'Aggressive',
-  };
-
-  // Section 3.1: Map capacity to C ∈ [1,5].
-  // encodeRiskCategory() returns 0–4. The +1 converts to the 1–5 scale
-  // required by the reconciliation algorithm. If encodeRiskCategory's
-  // output range ever changes, this +1 must be revisited.
-  const capacityCategory = profile.riskCategory;
-  let C = null;
-  if (capacityCategory && typeof capacityCategory === 'string' &&
-      ['Conservative', 'Conservative-Moderate', 'Moderate', 'Moderate-Aggressive', 'Aggressive'].includes(capacityCategory)) {
-    C = encodeRiskCategory(capacityCategory) + 1; // 0–4 → 1–5
-  }
-
-  // Section 3.2: Map stated preference to T ∈ [1,5].
-  // Single source of truth: profile.risk_tolerance (Joi-validated, Mongoose-persisted).
-  const PREFERENCE_MAP = { 'Conservative': 1, 'Moderate': 3, 'Aggressive': 5 };
-  const preference = profile.risk_tolerance;
-  let T = null;
-  if (preference && PREFERENCE_MAP[preference] !== undefined) {
-    T = PREFERENCE_MAP[preference];
-  }
-
-  // Section 3.5: If only one of C/T is supplied, use it as final_score
-  if (C === null && T === null) {
-    result.capacity_missing = true;
-    result.preference_missing = true;
-    result.final_score = 3;
-    result.reconciliation_note = 'Both capacity and preference missing. Defaulting to Moderate (tier 3) — flagged, not silent.';
-  } else if (C === null) {
-    result.capacity_missing = true;
-    result.preference_score = T;
-    result.final_score = T;
-    result.reconciliation_note = `Capacity not supplied. Using stated preference (T=${T}) as final score.`;
-  } else if (T === null) {
-    result.preference_missing = true;
-    result.capacity_score = C;
-    result.final_score = C;
-    result.reconciliation_note = `Preference not supplied. Using computed capacity (C=${C}) as final score.`;
-  } else {
-    result.capacity_score = C;
-    result.preference_score = T;
-    // Section 3.3: final_score = MIN(T, C + 1), clamped to [1,5].
-    // Preference can pull DOWN freely. Preference can pull UP by at most +1 past capacity.
-    result.final_score = Math.max(1, Math.min(5, Math.min(T, C + 1)));
-
-    if (T <= C) {
-      result.reconciliation_note = `Preference (T=${T}) pulled tier down from capacity (C=${C}). Final: ${result.final_score}.`;
-    } else if (T > C + 1) {
-      result.reconciliation_note = `Preference (T=${T}) exceeds capacity+1 (C+1=${C + 1}), capped. Final: ${result.final_score}.`;
-    } else {
-      result.reconciliation_note = `Preference (T=${T}) within capacity range (C=${C}). Final: ${result.final_score}.`;
-    }
-
-    // Section 3.4: If |C − T| > 2, populate advisory_note
-    if (Math.abs(C - T) > 2) {
-      result.advisory_note =
-        `Significant mismatch between risk capacity (${capacityCategory}, C=${C}) ` +
-        `and stated preference (${preference}, T=${T}). ` +
-        `Your financial profile suggests ${capacityCategory} risk capacity, ` +
-        `but you selected ${preference} preference. ` +
-        `The engine reconciled to tier ${result.final_score} to protect against over-exposure.`;
-    }
-  }
-
-  result.final_risk_tier = TIER_NAMES[result.final_score] || 'Moderate';
-  return result;
 }
 
-/**
- * Original tier-midpoint heuristic allocation implementation.
- * Used when PIPELINE_CONFIG.USE_OPTIMIZER is false or as fallback on optimizer failure.
- */
-function enforceAllocationTargetsHeuristic(instruments, reconciledTier, profile) {
-  if (!instruments.length) return instruments;
+function exclusionReason(instrument, profile, finalLevel) {
+  const risk = getInstrumentRisk(instrument);
+  if (risk === null) return 'RISK_CLASSIFICATION_NOT_ESTABLISHED';
+  if (risk > finalLevel) return 'RISK_EXCEEDS_FINAL_SUITABILITY';
 
-  // Section 6 target ranges [min%, max%] by tier
-  const TARGETS = {
-    1: { Low: [65, 80], Medium: [15, 25], High: [0, 10] },
-    2: { Low: [45, 60], Medium: [25, 35], High: [10, 20] },
-    3: { Low: [25, 35], Medium: [30, 40], High: [25, 35] },
-    4: { Low: [10, 20], Medium: [25, 35], High: [45, 55] },
-    5: { Low: [0, 10],  Medium: [20, 30], High: [60, 70] },
-  };
+  const expectedReturn = instrument.expectedReturn ?? instrument.dynamicData?.expectedReturn?.avg;
+  if (!Number.isFinite(Number(expectedReturn))) return 'RETURN_ASSUMPTION_NOT_ESTABLISHED';
+  const liquidityScore = instrument.liquidityScore ?? instrument.dynamicData?.liquidity?.score;
+  if (!Number.isFinite(Number(liquidityScore))) return 'LIQUIDITY_CLASSIFICATION_NOT_ESTABLISHED';
+  const expenseRatio = instrument.expenseRatio ?? instrument.dynamicData?.expenseRatio;
+  if (!Number.isFinite(Number(expenseRatio))) return 'COST_ASSUMPTION_NOT_ESTABLISHED';
+  const goalTags = instrument.goalTags ?? instrument.dynamicData?.goalTags;
+  if (!Array.isArray(goalTags)) return 'GOAL_CLASSIFICATION_NOT_ESTABLISHED';
 
-  // Deep copy targets (Section 5 may mutate for emergency fund override)
-  const targets = {};
-  const srcTargets = TARGETS[reconciledTier] || TARGETS[3];
-  for (const k of ['Low', 'Medium', 'High']) targets[k] = [...srcTargets[k]];
+  if (!instrument.eligibility || typeof instrument.eligibility !== 'object'
+      || Array.isArray(instrument.eligibility)) return 'ELIGIBILITY_NOT_ESTABLISHED';
+  const eligibility = instrument.eligibility;
+  if (eligibility.minAge !== null && eligibility.minAge !== undefined
+      && Number.isFinite(Number(eligibility.minAge)) && profile.age < Number(eligibility.minAge)) return 'MINIMUM_AGE_NOT_MET';
+  if (eligibility.maxAge !== null && eligibility.maxAge !== undefined
+      && Number.isFinite(Number(eligibility.maxAge)) && profile.age > Number(eligibility.maxAge)) return 'MAXIMUM_AGE_EXCEEDED';
+  if (Number(eligibility.minAnnualIncome) > 0) return 'GROSS_INCOME_ELIGIBILITY_NOT_ESTABLISHED';
+  if (eligibility.hasGirlChild === true) return 'GIRL_CHILD_ELIGIBILITY_NOT_ESTABLISHED';
+  if (eligibility.requiresDemat === true) return 'DEMAT_ELIGIBILITY_NOT_ESTABLISHED';
 
-  // Section 5: tier ≥ 4 → LOW capped at 20%, UNLESS emergency_fund_months < 3
-  if (reconciledTier >= 4) {
-    const emergencyMonths = Number(profile.emergency_fund_months) || 0;
-    if (emergencyMonths < 3) {
-      targets.Low = [20, 35]; // Override: top up liquid slice first
-    }
+  const minMonthlyRaw = eligibility.minMonthlySavings ?? instrument.minMonthlyInvestment;
+  if (minMonthlyRaw === undefined || !Number.isFinite(Number(minMonthlyRaw))) {
+    return 'MINIMUM_INVESTMENT_NOT_ESTABLISHED';
   }
+  const minMonthly = Number(minMonthlyRaw);
+  if (Number.isFinite(minMonthly) && profile.monthlySavings < minMonthly) return 'MINIMUM_INVESTMENT_NOT_MET';
 
-  // Assign tier to each instrument from catalog dynamicData.risk.value
-  instruments.forEach(inv => { inv.tier = instrumentRiskTier(inv); });
-
-  // Group instruments by tier
-  const groups = { Low: [], Medium: [], High: [] };
-  instruments.forEach(inv => { (groups[inv.tier] || groups.Medium).push(inv); });
-
-  // Compute target allocation midpoint per tier (only for populated tiers)
-  const allocs = {};
-  let total = 0;
-  for (const tier of ['Low', 'Medium', 'High']) {
-    if (groups[tier].length > 0) {
-      const [min, max] = targets[tier];
-      allocs[tier] = (min + max) / 2;
-      total += allocs[tier];
-    } else {
-      allocs[tier] = 0;
-    }
-  }
-
-  // Normalize to sum to 100
-  if (total > 0) {
-    for (const tier of ['Low', 'Medium', 'High']) {
-      allocs[tier] = (allocs[tier] / total) * 100;
-    }
-  }
-
-  // Within each tier, distribute proportionally by score
-  instruments.forEach(inv => {
-    const group = groups[inv.tier];
-    const tierAlloc = allocs[inv.tier] || 0;
-    const groupScore = group.reduce((s, i) => s + Math.max(0, i.score || 0), 0);
-    const share = groupScore > 0 ? Math.max(0, inv.score || 0) / groupScore : 1 / group.length;
-    inv.allocation_pct = parseFloat((share * tierAlloc).toFixed(1));
-  });
-
-  // Fix rounding to exactly 100
-  const sum = instruments.reduce((s, i) => s + i.allocation_pct, 0);
-  const residual = parseFloat((100 - sum).toFixed(1));
-  if (Math.abs(residual) > 0.05 && instruments.length > 0) {
-    const maxInst = instruments.reduce((a, b) => a.allocation_pct >= b.allocation_pct ? a : b);
-    maxInst.allocation_pct = parseFloat((maxInst.allocation_pct + residual).toFixed(1));
-  }
-
-  // Update allocationWeight for backward compatibility (0–1 scale)
-  instruments.forEach(inv => {
-    inv.allocationWeight = parseFloat((inv.allocation_pct / 100).toFixed(4));
-  });
-
-  return applyConcentrationCaps(instruments);
-}
-
-export function resolveConcentrationCap(inv) {
-  if (!inv) return null;
-  const idKey = (inv.id || inv.instrumentId || '').toLowerCase().replace(/[^a-z0-9_]/g, '');
-  const typeKey = (inv.backendType || inv.type || '').toLowerCase().replace(/[^a-z0-9_]/g, '');
-
-  if (CONCENTRATION_CAPS[idKey]) return { key: idKey, maxPct: CONCENTRATION_CAPS[idKey].maxPct };
-  if (CONCENTRATION_CAPS[typeKey]) return { key: typeKey, maxPct: CONCENTRATION_CAPS[typeKey].maxPct };
-  if (idKey.includes('smallcap') || idKey.includes('small_cap') || typeKey.includes('smallcap') || typeKey.includes('small_cap')) {
-    return { key: 'smallcap_mf', maxPct: CONCENTRATION_CAPS.smallcap_mf?.maxPct ?? 15 };
-  }
-  if (idKey.includes('midcap') || idKey.includes('mid_cap') || typeKey.includes('midcap') || typeKey.includes('mid_cap')) {
-    return { key: 'midcap_mf', maxPct: CONCENTRATION_CAPS.midcap_mf?.maxPct ?? 20 };
-  }
-  if (idKey.includes('sgb') || typeKey.includes('sgb')) {
-    return { key: 'sgb', maxPct: CONCENTRATION_CAPS.sgb?.maxPct ?? 10 };
-  }
-  if (idKey.includes('gold') || typeKey.includes('gold')) {
-    return { key: 'gold_etf', maxPct: CONCENTRATION_CAPS.gold_etf?.maxPct ?? 10 };
-  }
-  if (idKey.includes('nps') || typeKey.includes('nps')) {
-    return { key: 'nps', maxPct: CONCENTRATION_CAPS.nps?.maxPct ?? 25 };
-  }
-  if (idKey.includes('direct_equity') || idKey.includes('stock') || typeKey.includes('direct_equity')) {
-    return { key: 'direct_equity', maxPct: CONCENTRATION_CAPS.direct_equity?.maxPct ?? 20 };
-  }
+  const minimumHorizonRaw = instrument.idealHorizon?.min ?? instrument.dynamicData?.idealHorizon?.min;
+  const lockInRaw = instrument.lockIn ?? instrument.dynamicData?.liquidity?.lockIn;
+  if (!Number.isFinite(Number(minimumHorizonRaw))) return 'MINIMUM_HORIZON_NOT_ESTABLISHED';
+  if (!Number.isFinite(Number(lockInRaw))) return 'LOCK_IN_NOT_ESTABLISHED';
+  const minimumHorizon = Number(minimumHorizonRaw);
+  const lockIn = Number(lockInRaw);
+  if (Number.isFinite(minimumHorizon) && minimumHorizon > profile.investmentHorizonYears) return 'HORIZON_BELOW_MINIMUM';
+  if (Number.isFinite(lockIn) && lockIn > profile.investmentHorizonYears) return 'LOCK_IN_EXCEEDS_HORIZON';
   return null;
 }
 
-/**
- * Enforce per-instrument and aggregate category concentration caps defined in CONCENTRATION_CAPS.
- * Prevents circumvention via multi-instrument allocation spreading across economically correlated assets.
- */
-function applyConcentrationCaps(instruments) {
-  if (!instruments || instruments.length === 0) return instruments;
-
-  const allInstrumentsCapped = instruments.length > 0 && instruments.every(inv => resolveConcentrationCap(inv) !== null);
-  const totalCaps = instruments.reduce((s, inv) => s + (resolveConcentrationCap(inv)?.maxPct || 100), 0);
-
-  if (allInstrumentsCapped && totalCaps < 100) {
-    // All-capped fallback: scale capped weights proportionally to caps
-    instruments.forEach(inv => {
-      const cap = resolveConcentrationCap(inv)?.maxPct || 100;
-      inv.allocation_pct = parseFloat(((cap / totalCaps) * 100).toFixed(1));
-    });
-    const finalSum = instruments.reduce((s, i) => s + i.allocation_pct, 0);
-    const residual = parseFloat((100 - finalSum).toFixed(1));
-    if (Math.abs(residual) > 0.01) {
-      instruments[0].allocation_pct = parseFloat((instruments[0].allocation_pct + residual).toFixed(1));
-    }
-    instruments.forEach(inv => {
-      inv.allocation_pct = parseFloat(Math.max(0, inv.allocation_pct).toFixed(1));
-      inv.allocationWeight = parseFloat((inv.allocation_pct / 100).toFixed(4));
-    });
-    return instruments;
-  }
-
-  let iterations = 0;
-  const maxIterations = 10;
-
-  while (iterations < maxIterations) {
-    iterations++;
-    let currentExcess = 0;
-
-    // 1. Check and clamp aggregate category totals (anti-gaming concentration defense)
-    const categoryGroups = new Map();
-    instruments.forEach(inv => {
-      const capInfo = resolveConcentrationCap(inv);
-      if (capInfo) {
-        if (!categoryGroups.has(capInfo.key)) {
-          categoryGroups.set(capInfo.key, { maxPct: capInfo.maxPct, items: [] });
-        }
-        categoryGroups.get(capInfo.key).items.push(inv);
-      }
-    });
-
-    for (const [key, group] of categoryGroups.entries()) {
-      const groupTotal = group.items.reduce((s, i) => s + (i.allocation_pct || 0), 0);
-      if (groupTotal > group.maxPct + 0.001) {
-        const excess = groupTotal - group.maxPct;
-        currentExcess += excess;
-        const scale = group.maxPct / groupTotal;
-        group.items.forEach(inv => {
-          inv.allocation_pct = parseFloat((inv.allocation_pct * scale).toFixed(2));
-        });
-      }
-    }
-
-    // 2. Check and clamp individual instrument caps
-    instruments.forEach(inv => {
-      const capInfo = resolveConcentrationCap(inv);
-      if (capInfo && inv.allocation_pct > capInfo.maxPct + 0.001) {
-        currentExcess += inv.allocation_pct - capInfo.maxPct;
-        inv.allocation_pct = capInfo.maxPct;
-      }
-    });
-
-    if (currentExcess <= 0.01) break;
-
-    const roomInstruments = instruments.filter(inv => {
-      const capInfo = resolveConcentrationCap(inv);
-      return !capInfo || inv.allocation_pct < capInfo.maxPct - 0.001;
-    });
-
-    if (roomInstruments.length > 0) {
-      const totalRoomWeight = roomInstruments.reduce((s, i) => s + Math.max(1, i.allocation_pct || i.score || 1), 0);
-      roomInstruments.forEach(inv => {
-        const share = Math.max(1, inv.allocation_pct || inv.score || 1) / totalRoomWeight;
-        inv.allocation_pct += currentExcess * share;
-      });
-    } else {
-      break;
-    }
-  }
-
-  // Ensure exact 100.0% sum normalization without breaching any category cap
-  const finalSum = instruments.reduce((s, i) => s + i.allocation_pct, 0);
-  const residual = parseFloat((100 - finalSum).toFixed(1));
-  if (Math.abs(residual) > 0.05 && instruments.length > 0) {
-    const eligibleForResidual = instruments.filter(inv => {
-      const capInfo = resolveConcentrationCap(inv);
-      if (!capInfo) return true;
-      // Check individual cap
-      if (inv.allocation_pct + residual > capInfo.maxPct) return false;
-      // Check group aggregate cap
-      const groupAllocs = instruments.filter(x => resolveConcentrationCap(x)?.key === capInfo.key).reduce((s, x) => s + x.allocation_pct, 0);
-      return groupAllocs + residual <= capInfo.maxPct + 0.001;
-    });
-    const targetInst = eligibleForResidual.length > 0
-      ? eligibleForResidual.reduce((a, b) => a.allocation_pct >= b.allocation_pct ? a : b)
-      : instruments.filter(inv => !resolveConcentrationCap(inv)).reduce((a, b) => a.allocation_pct >= b.allocation_pct ? a : b, instruments[0]);
-    if (targetInst) {
-      targetInst.allocation_pct = parseFloat(Math.max(0, targetInst.allocation_pct + residual).toFixed(1));
-    }
-  }
-
-  // Round all allocation_pct to 1 decimal place first
-  instruments.forEach(inv => {
-    inv.allocation_pct = parseFloat(Math.max(0, inv.allocation_pct).toFixed(1));
-  });
-
-  // Strict post-rounding category group clamp: ensure no group ever exceeds maxPct by even 0.01%
-  const finalCategoryGroups = new Map();
-  instruments.forEach(inv => {
-    const capInfo = resolveConcentrationCap(inv);
-    if (capInfo) {
-      if (!finalCategoryGroups.has(capInfo.key)) {
-        finalCategoryGroups.set(capInfo.key, { maxPct: capInfo.maxPct, items: [] });
-      }
-      finalCategoryGroups.get(capInfo.key).items.push(inv);
-    }
-  });
-
-  for (const [, group] of finalCategoryGroups.entries()) {
-    let groupSum = parseFloat(group.items.reduce((s, i) => s + i.allocation_pct, 0).toFixed(1));
-    while (groupSum > group.maxPct + 0.001) {
-      const diff = parseFloat((groupSum - group.maxPct).toFixed(1));
-      const step = Math.min(diff, 0.1);
-      const largestInGroup = group.items.reduce((a, b) => a.allocation_pct >= b.allocation_pct ? a : b);
-      largestInGroup.allocation_pct = parseFloat(Math.max(0, largestInGroup.allocation_pct - step).toFixed(1));
-      const uncappedInst = instruments.find(i => !resolveConcentrationCap(i));
-      if (uncappedInst) {
-        uncappedInst.allocation_pct = parseFloat((uncappedInst.allocation_pct + step).toFixed(1));
-      }
-      groupSum = parseFloat(group.items.reduce((s, i) => s + i.allocation_pct, 0).toFixed(1));
-    }
-  }
-
-  // Final 100.0% sum normalization after adjustments
-  const roundedSum = parseFloat(instruments.reduce((s, i) => s + i.allocation_pct, 0).toFixed(1));
-  const finalResidual = parseFloat((100.0 - roundedSum).toFixed(1));
-  if (Math.abs(finalResidual) > 0.01 && instruments.length > 0) {
-    const uncappedInst = instruments.find(i => !resolveConcentrationCap(i)) || instruments[0];
-    uncappedInst.allocation_pct = parseFloat((uncappedInst.allocation_pct + finalResidual).toFixed(1));
-  }
-
-  instruments.forEach(inv => {
-    inv.allocation_pct = parseFloat(Math.max(0, inv.allocation_pct).toFixed(1));
-    inv.allocationWeight = parseFloat((inv.allocation_pct / 100).toFixed(4));
-  });
-
-  return instruments;
-}
-
-/**
- * Enforce Section 6 allocation targets by risk tier category (Low/Medium/High)
- * using Max-Sharpe mean-variance optimization from portfolioEngine.js,
- * clamped to regulatory risk-tier guardrails.
- *
- * @param {Array} instruments - Scored instrument array from pipeline
- * @param {number} reconciledTier - Final reconciled tier (1–5)
- * @param {Object} profile - User profile for emergency fund check
- * @returns {Array} Instruments with allocation_pct and updated allocationWeight
- */
-function enforceAllocationTargets(instruments, reconciledTier, profile) {
-  if (!instruments || !instruments.length) return instruments;
-
-  if (!PIPELINE_CONFIG.USE_OPTIMIZER) {
-    return enforceAllocationTargetsHeuristic(instruments, reconciledTier, profile);
-  }
-
-  try {
-    // 1. Collect unique asset classes (backendType) in stable first-seen order
-    const assetClassGroups = new Map();
-    for (const inv of instruments) {
-      const key = inv.backendType || resolveBackendType(inv);
-      if (!assetClassGroups.has(key)) {
-        assetClassGroups.set(key, []);
-      }
-      assetClassGroups.get(key).push(inv);
-    }
-    const uniqueAssetKeys = Array.from(assetClassGroups.keys());
-
-    // 2. Compute score-weighted average postTaxReturn per unique asset class
-    // Convert percentage-scale postTaxReturn (e.g. 7.1%) to decimal scale (0.071) for portfolioEngine.js compatibility, matching routes/portfolio.js
-    const toDecimalReturn = (r) => {
-      const num = Number(r) || 0;
-      return Math.abs(num) > 1.0 ? num / 100 : num;
-    };
-
-    const postTaxReturns = uniqueAssetKeys.map(key => {
-      const group = assetClassGroups.get(key);
-      const totalScore = group.reduce((sum, inv) => sum + Math.max(0, inv.score || 0), 0);
-      if (totalScore > 0) {
-        return group.reduce((sum, inv) => sum + Math.max(0, inv.score || 0) * toDecimalReturn(inv.postTaxReturn), 0) / totalScore;
-      }
-      const simpleSum = group.reduce((sum, inv) => sum + toDecimalReturn(inv.postTaxReturn), 0);
-      return simpleSum / group.length;
-    });
-
-    // 3. Run Max-Sharpe portfolio optimizer
-    const optResult = optimisePortfolio(uniqueAssetKeys, postTaxReturns, 'max_sharpe');
-    const optWeights = optResult?.weights || {};
-
-    // 4. Distribute each asset class's optimizer weight down to individual instruments proportionally by score
-    instruments.forEach(inv => {
-      const key = inv.backendType || resolveBackendType(inv);
-      const group = assetClassGroups.get(key) || [inv];
-      const classWeightDecimal = Number(optWeights[key]) || 0;
-      const groupScore = group.reduce((s, i) => s + Math.max(0, i.score || 0), 0);
-      const share = groupScore > 0 ? Math.max(0, inv.score || 0) / groupScore : 1 / group.length;
-      inv.rawOptimizerPct = share * classWeightDecimal * 100;
-    });
-
-    // 5. Enforce risk-tier guardrails (Section 6 TARGETS + Section 5 emergency override)
-    const TARGETS = {
-      1: { Low: [65, 80], Medium: [15, 25], High: [0, 10] },
-      2: { Low: [45, 60], Medium: [25, 35], High: [10, 20] },
-      3: { Low: [25, 35], Medium: [30, 40], High: [25, 35] },
-      4: { Low: [10, 20], Medium: [25, 35], High: [45, 55] },
-      5: { Low: [0, 10],  Medium: [20, 30], High: [60, 70] },
-    };
-
-    const targets = {};
-    const srcTargets = TARGETS[reconciledTier] || TARGETS[3];
-    for (const k of ['Low', 'Medium', 'High']) targets[k] = [...srcTargets[k]];
-
-    if (reconciledTier >= 4) {
-      const emergencyMonths = Number(profile?.emergency_fund_months) || 0;
-      if (emergencyMonths < 3) {
-        targets.Low = [20, 35];
-      }
-    }
-
-    instruments.forEach(inv => { inv.tier = instrumentRiskTier(inv); });
-
-    const tierGroups = { Low: [], Medium: [], High: [] };
-    instruments.forEach(inv => { (tierGroups[inv.tier] || tierGroups.Medium).push(inv); });
-
-    const rawTierTotals = {};
-    for (const tier of ['Low', 'Medium', 'High']) {
-      rawTierTotals[tier] = tierGroups[tier].reduce((sum, inv) => sum + (inv.rawOptimizerPct || 0), 0);
-    }
-
-    const clampedTierTotals = {};
-    let totalClampedTarget = 0;
-    for (const tier of ['Low', 'Medium', 'High']) {
-      if (tierGroups[tier].length > 0) {
-        const [min, max] = targets[tier];
-        const clamped = Math.max(min, Math.min(max, rawTierTotals[tier]));
-        clampedTierTotals[tier] = clamped;
-        totalClampedTarget += clamped;
-      } else {
-        clampedTierTotals[tier] = 0;
-      }
-    }
-
-    if (totalClampedTarget > 0) {
-      for (const tier of ['Low', 'Medium', 'High']) {
-        if (tierGroups[tier].length > 0) {
-          clampedTierTotals[tier] = (clampedTierTotals[tier] / totalClampedTarget) * 100;
-        }
-      }
-    }
-
-    for (const tier of ['Low', 'Medium', 'High']) {
-      const group = tierGroups[tier];
-      if (!group || group.length === 0) continue;
-      const targetTierPct = clampedTierTotals[tier] || 0;
-      const currentTierPct = rawTierTotals[tier] || 0;
-
-      if (currentTierPct > 0) {
-        group.forEach(inv => {
-          inv.allocation_pct = Math.max(0, (inv.rawOptimizerPct / currentTierPct) * targetTierPct);
-        });
-      } else {
-        const groupScore = group.reduce((s, i) => s + Math.max(0, i.score || 0), 0);
-        group.forEach(inv => {
-          const share = groupScore > 0 ? Math.max(0, inv.score || 0) / groupScore : 1 / group.length;
-          inv.allocation_pct = Math.max(0, share * targetTierPct);
-        });
-      }
-    }
-
-    instruments.forEach(inv => {
-      inv.allocation_pct = parseFloat(Math.max(0, inv.allocation_pct || 0).toFixed(1));
-      delete inv.rawOptimizerPct;
-    });
-
-    const sumPct = parseFloat(instruments.reduce((s, i) => s + i.allocation_pct, 0).toFixed(1));
-    const residual = parseFloat((100 - sumPct).toFixed(1));
-    if (Math.abs(residual) > 0.05 && instruments.length > 0) {
-      const maxInst = instruments.reduce((a, b) => a.allocation_pct >= b.allocation_pct ? a : b);
-      maxInst.allocation_pct = parseFloat(Math.max(0, maxInst.allocation_pct + residual).toFixed(1));
-    }
-
-    instruments.forEach(inv => {
-      inv.allocationWeight = parseFloat((inv.allocation_pct / 100).toFixed(4));
-    });
-
-    return applyConcentrationCaps(instruments);
-  } catch (err) {
-    console.warn('[RecommendationPipeline] Portfolio optimizer failed:', err.message, instruments.map(i => i.backendType || i.id));
-    return enforceAllocationTargetsHeuristic(instruments, reconciledTier, profile);
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// STAGE 1: ELIGIBILITY FILTERING
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Filter instruments the user is eligible to hold based on metadata.
- * @param {Array} instruments - Full instrument catalog
- * @param {Object} profile - User's financial profile
- * @returns {Array} Eligible instruments
- */
-export function filterEligible(instruments, profile, reconciledTier = null) {
-  const age = Number(profile.age) || 30;
-  const income = Number(profile.monthly_income || profile.income) || 0;
-  const annualIncome = Number(profile.annualIncome) || (income * 12);
-  const monthlySavings = Number(profile.savings || profile.monthly_savings) || 0;
-  const horizon = Number(profile.investmentHorizon || profile.investment_horizon || profile.horizon) || 10;
+export function filterEligible(instruments, profileInput, reconciledTier = null) {
+  const profile = buildRecommendationProfile(profileInput);
+  const finalLevel = reconciledTier ?? assessSuitabilityRisk(profile).finalLevel;
+  const eligible = [];
   const excluded = [];
-
-  const eligible = instruments.filter(inv => {
-    // Section 5: Tier ≤ 2 → HARD-EXCLUDE every HIGH-tier instrument
-    if (reconciledTier !== null && reconciledTier <= 2 && instrumentRiskTier(inv) === 'High') {
-      excluded.push({ instrument: inv.name || inv.id, reason: `HIGH-tier instrument hard-excluded for tier ${reconciledTier}` });
-      return false;
-    }
-
-    const elig = inv.eligibility;
-    if (!elig) return true; // No eligibility rules = universally eligible
-
-    // Section 5: SCSS → reject unless age ≥ 60 (enforced via minAge in eligibility)
-    if (elig.minAge && age < elig.minAge) {
-      excluded.push({ instrument: inv.name || inv.id, reason: `Age ${age} below minimum ${elig.minAge}` });
-      return false;
-    }
-    if (elig.maxAge !== null && elig.maxAge !== undefined && age > elig.maxAge) {
-      excluded.push({ instrument: inv.name || inv.id, reason: `Age ${age} above maximum ${elig.maxAge}` });
-      return false;
-    }
-
-    // Income gate
-    if (elig.minAnnualIncome && annualIncome < elig.minAnnualIncome) return false;
-
-    // Savings gate
-    if (elig.minMonthlySavings && monthlySavings < elig.minMonthlySavings) return false;
-    if (inv.dynamicData?.minMonthlyInvestment && monthlySavings < inv.dynamicData.minMonthlyInvestment) return false;
-
-    // Section 5: Sukanya Samriddhi → reject unless user has a girl child
-    if (elig.hasGirlChild && !profile.hasGirlChild && !profile.has_daughter_under_10) {
-      excluded.push({ instrument: inv.name || inv.id, reason: 'Requires girl child (Sukanya Samriddhi eligibility)' });
-      return false;
-    }
-
-    // Section 5: NPS → warn if investment_horizon < (60 − age)
-    if (inv.id === 'nps' && horizon < (60 - age)) {
-      excluded.push({
-        instrument: inv.name || inv.id,
-        reason: `NPS WARNING: horizon ${horizon}y < years to retirement ${60 - age}y. Funds locked until age 60.`,
-        type: 'warning',
-      });
-    }
-
-    // Risk alignment (uses reconciled tier when available, legacy fallback otherwise)
-    if (reconciledTier === null) {
-      const riskCat = (profile.riskCategory || '').toLowerCase();
-      const invRisk = getInstrumentRisk(inv);
-      if ((riskCat === 'high' || riskCat === 'aggressive' || riskCat === 'very high') && invRisk <= 2) return false;
-      if ((riskCat === 'conservative' || riskCat === 'low' || riskCat === 'very low') && invRisk >= 4) return false;
-    }
-
-    return true;
-  });
-
+  for (const instrument of instruments || []) {
+    const reasonCode = exclusionReason(instrument, profile, finalLevel);
+    if (reasonCode) excluded.push({ id: instrument.id, name: instrument.name, reasonCode });
+    else eligible.push(instrument);
+  }
   return { eligible, excluded };
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// STAGE 2: SCORING — multi-factor weighted utility
-// ═══════════════════════════════════════════════════════════════════
+export function parseProfile(profileInput) {
+  const profile = buildRecommendationProfile(profileInput);
+  const suitability = assessSuitabilityRisk(profile);
+  return Object.freeze({
+    age: profile.age,
+    monthlyTakeHome: profile.monthlyTakeHome,
+    monthlySavings: profile.monthlySavings,
+    risk: suitability.finalRisk,
+    riskLevel: suitability.finalLevel,
+    horizon: profile.investmentHorizonYears,
+    goals: [...profile.investmentGoals],
+    liquidSavings: profile.liquidSavings,
+    emergencyFundMonths: profile.emergencyFundMonths,
+    emiBurdenPct: profile.emiBurdenPct,
+    financialDependents: profile.financialDependents,
+  });
+}
 
-/**
- * Parse and normalize a raw user profile into the standard shape used by
- * the recommendation pipeline (deriveWeights, scoreRisk, filterEligible).
- *
- * **WG-026 DEFAULT FALLBACK DOCUMENTATION**
- * Every field below has an explicit default. These are intentional safe
- * defaults for the recommendation engine — they ensure the pipeline never
- * crashes on missing data. However, callers should be aware that silent
- * defaults can mask data quality issues upstream.
- *
- * Required fields (should always be present from profile creation):
- *   - age, annualIncome, savings, riskCategory, investmentHorizon, taxRegime
- *
- * Optional/derived fields (legitimately default to 0/false/empty):
- *   - hasLumpSum, lumpSumAmount, soldPropertyAmount, goals
- *   - totalCTC (defaults to annualIncome), basicComponent (defaults to 50% of CTC)
- *   - monthlyTakeHome (defaults to annualIncome / 12)
- *
- * @param {Object} profile - Raw profile document from MongoDB
- * @param {string|null} reconciledRiskStr - Reconciled risk tier from risk engine (overrides profile.riskCategory)
- * @returns {Object} Normalized profile for pipeline consumption
- */
-function parseProfile(profile, reconciledRiskStr = null, options = {}) {
-  const isStrict = options.strict || options.throwOnMissingRequired;
-  if (!profile || typeof profile !== 'object') {
-    if (isStrict) throw new Error('Invalid profile object');
-    profile = {};
-  }
-
-  // Required fields checking for strict mode
-  if (isStrict) {
-    if (profile.age === undefined || profile.age === null || Number(profile.age) <= 0) {
-      throw new Error('Missing or invalid required profile field: age');
-    }
-    const hasIncome = profile.annualIncome !== undefined || profile.monthly_income !== undefined || profile.income !== undefined;
-    if (!hasIncome) {
-      throw new Error('Missing or invalid required profile field: annualIncome');
-    }
-    const hasSavings = profile.savings !== undefined || profile.monthly_savings !== undefined;
-    if (!hasSavings) {
-      throw new Error('Missing or invalid required profile field: savings');
-    }
-  }
-
-  const age = Number(profile.age) || 30;
-  const income = Number(profile.monthly_income || profile.income) || 0;
-  const annualIncome = Number(profile.annualIncome) || (income > 0 ? income * 12 : 600000);
-  const savings = Number(profile.savings || profile.monthly_savings) || 10000;
-  // Use reconciled risk tier if provided; single source = profile.riskCategory
-  const risk = (reconciledRiskStr || profile.riskCategory || 'Moderate').toLowerCase();
-  const horizon = Number(profile.investmentHorizon || profile.investment_horizon || profile.horizon) || 10;
-  // WG-021: Canonical source is profile.goals, but fall back to investment_goals/goal_type
-  // for profiles created via onboarding (ProfileEditor) where goals.js sync hasn't run
-  const goals = (Array.isArray(profile.goals) && profile.goals.length > 0)
-    ? profile.goals
-    : (Array.isArray(profile.investment_goals) && profile.investment_goals.length > 0)
-      ? profile.investment_goals
-      : (profile.goal_type && profile.goal_type !== 'wealth-building' ? [profile.goal_type] : []);
-  const taxRegime = profile.taxRegime || profile.regime || 'new';
-
-  const hasLumpSum = Boolean(profile.hasLumpSum);
-  const lumpSumAmount = hasLumpSum ? (Number(profile.lumpSumAmount) || 0) : 0;
-  const soldPropertyAmount = Number(profile.soldPropertyAmount) || 0;
-  const totalCTC = Number(profile.totalCTC) || annualIncome;
-  const basicComponent = Number(profile.basicComponent) || (totalCTC * 0.5);
-  const monthlyTakeHome = Number(profile.monthlyTakeHome) || (annualIncome / 12);
-
-  // Re-use backend tax slab calculator passing basicComponent for 80CCD(2) employer NPS accuracy (rebate-aware)
-  const mr = getEffectiveMarginalRate(annualIncome, taxRegime, { basicSalary: basicComponent }, 'salary');
-
-  return {
-    age, annualIncome, savings, risk, horizon, goals, taxRegime, mr,
-    hasLumpSum, lumpSumAmount, soldPropertyAmount, totalCTC, basicComponent, monthlyTakeHome
+export function deriveWeights(parsedProfile) {
+  const shortHorizon = parsedProfile.horizon <= 3;
+  const emergencyPriority = parsedProfile.goals.includes('Emergency Fund') || parsedProfile.emergencyFundMonths < 3;
+  const goalWeight = parsedProfile.goals.length > 1 ? 0.17 : 0.13;
+  const weights = {
+    expectedReturn: shortHorizon ? 0.15 : 0.25,
+    riskFit: parsedProfile.riskLevel <= 2 ? 0.32 : 0.25,
+    liquidity: emergencyPriority ? 0.24 : 0.15,
+    goalFit: goalWeight,
+    horizonFit: shortHorizon ? 0.14 : 0.10,
+    cost: 0.05,
+    mlConfidence: 0.05,
   };
+  const total = Object.values(weights).reduce((sum, value) => sum + value, 0);
+  return Object.freeze(Object.fromEntries(Object.entries(weights).map(([key, value]) => [key, value / total])));
 }
 
-/**
- * Derive dynamic weights from user profile.
- * Mirrors the frontend's weight derivation logic.
- */
-function deriveWeights(p) {
-  const clamp = (v) => Math.max(PIPELINE_CONFIG.WEIGHT_FLOOR, Math.min(PIPELINE_CONFIG.WEIGHT_CEIL, v));
-
-  // α — Return: long horizon + high risk + available lump sum → prioritize growth
-  let alpha = 1.0;
-  if (p.horizon >= 15) alpha += 0.5;
-  if (p.horizon >= 20) alpha += 0.3;
-  if (p.risk === 'aggressive' || p.risk === 'moderate-aggressive') alpha += 0.5;
-  else if (p.risk === 'conservative') alpha -= 0.3;
-  if (p.hasLumpSum && p.lumpSumAmount > 0) alpha += 0.3;
-
-  // β — Risk: older age + low risk → penalize risky instruments
-  let beta = 1.0;
-  if (p.age >= 50) beta += 0.8;
-  else if (p.age >= 40) beta += 0.4;
-  if (p.risk === 'conservative') beta += 0.8;
-  else if (p.risk === 'aggressive') beta -= 0.4;
-
-  // γ — Tax: high slab → penalize slab-taxed instruments
-  let gamma = p.mr > 0 ? (p.mr / 0.312) * 1.5 : 0;
-
-  // δ — Liquidity: reduced liquidity stress if user has lump sum capital or property proceeds
-  let delta = 0.8;
-  const emergencyCover = p.annualIncome > 0 ? (p.savings * 12 / p.annualIncome) : 0;
-  if (emergencyCover < 0.2) delta += 0.6;
-  if (p.hasLumpSum && p.lumpSumAmount > 0) delta = Math.max(0.5, delta - 0.2);
-
-  // ε — Goal alignment
-  let epsilon = p.goals.length > 0 ? 1.2 : 0.5;
-
-  // ζ — Horizon match
-  let zeta = 1.0;
-  if (p.horizon <= 3) zeta += 0.5;
-  if (p.horizon >= 20) zeta += 0.3;
-
-  // η — Cost
-  let eta = 0.5;
-  if (p.horizon >= 10) eta += 0.3;
-  if (p.horizon >= 20) eta += 0.4;
-
-  return {
-    alpha: clamp(alpha), beta: clamp(beta), gamma: clamp(gamma),
-    delta: clamp(delta), epsilon: clamp(epsilon), zeta: clamp(zeta), eta: clamp(eta),
-  };
-}
-
-// ── Individual scoring sub-functions ────────────────────────────────
-
-function scoreReturn(postTaxRate) {
-  return postTaxRate * PIPELINE_CONFIG.RETURN_MULTIPLIER;
-}
-
-function scoreRisk(inv, p) {
-  const invRisk = getInstrumentRisk(inv);
-  let idealMin, idealMax;
-  if (p.risk === 'conservative' || p.risk === 'conservative-moderate') { idealMin = 1; idealMax = 2; }
-  else if (p.risk === 'aggressive' || p.risk === 'moderate-aggressive') { idealMin = 3; idealMax = 5; }
-  else { idealMin = 2; idealMax = 4; }
-
-  if (invRisk >= idealMin && invRisk <= idealMax) return -PIPELINE_CONFIG.RISK_PERFECT_BONUS;
-  const dist = invRisk < idealMin ? (idealMin - invRisk) : (invRisk - idealMax);
-  if (dist === 1) return -PIPELINE_CONFIG.RISK_CLOSE_BONUS + PIPELINE_CONFIG.RISK_MISMATCH_PENALTY;
-
-  let penalty = PIPELINE_CONFIG.RISK_SEVERE_PENALTY;
-  const vol = inv.volatility;
-  if (vol !== undefined && vol !== null) {
-    const volExcess = Math.max(0, vol - PIPELINE_CONFIG.VOLATILITY_BASELINE);
-    if (p.risk === 'conservative') penalty += volExcess * 40;
+export const scoreReturn = instrument => {
+  const value = Number(instrument.expectedReturn ?? instrument.dynamicData?.expectedReturn?.avg);
+  if (!Number.isFinite(value)) throw new TypeError('Instrument expected return is not established');
+  return clamp(value / 20 * 100, 0, 100);
+};
+export const scoreRisk = (instrument, profile) => clamp(100 - Math.abs(getInstrumentRisk(instrument) - profile.riskLevel) * 20, 0, 100);
+export const scoreLiquidity = instrument => {
+  const value = Number(instrument.liquidityScore ?? instrument.dynamicData?.liquidity?.score);
+  if (!Number.isFinite(value)) throw new TypeError('Instrument liquidity classification is not established');
+  return clamp(value * 20, 0, 100);
+};
+export const scoreCost = instrument => {
+  const value = Number(instrument.expenseRatio ?? instrument.dynamicData?.expenseRatio);
+  if (!Number.isFinite(value)) throw new TypeError('Instrument cost assumption is not established');
+  return clamp(100 - value * 2000, 0, 100);
+};
+export const scoreGoal = (instrument, profile) => {
+  const tags = instrument.goalTags ?? instrument.dynamicData?.goalTags;
+  if (!Array.isArray(tags)) throw new TypeError('Instrument goal classification is not established');
+  return profile.goals.some(goal => tags.includes(goal)) ? 100 : 35;
+};
+export const scoreHorizon = (instrument, profile) => {
+  const range = instrument.idealHorizon || instrument.dynamicData?.idealHorizon || {};
+  if (!Number.isFinite(Number(range.min)) || !Number.isFinite(Number(range.max))) {
+    throw new TypeError('Instrument horizon classification is not established');
   }
-  return penalty;
-}
-
-function scoreTax(inv, p) {
-  const taxEff = inv.taxEfficiencyScore;
-  if (taxEff !== undefined && taxEff !== null) {
-    return (5 - taxEff) * p.mr * PIPELINE_CONFIG.TAX_PENALTY_SCALE;
+  return profile.horizon >= Number(range.min) && profile.horizon <= Number(range.max ?? 30) ? 100 : 40;
+};
+export function normaliseConfidenceScores(mlResult = {}) {
+  const source = mlResult.confidence_scores || mlResult.confidenceScores || {};
+  const result = {};
+  for (const [key, value] of Object.entries(source)) {
+    const number = Number(value);
+    if (Number.isFinite(number)) result[key] = clamp(number, 0, 1);
   }
-  // Fallback: use taxType
-  if (inv.taxType === 'eee') return -12;
-  if (inv.taxType === 'slab') return p.mr * 20;
-  return 0;
-}
-
-function scoreLiquidity(inv) {
-  const liq = inv.liquidityScore;
-  if (liq !== undefined && liq !== null) {
-    return Math.max(0, (liq - PIPELINE_CONFIG.LIQUIDITY_CENTER) * PIPELINE_CONFIG.LIQUIDITY_SCALE);
-  }
-  if (inv.lockIn === 0) return 5;
-  if (inv.lockIn <= 3) return 2;
-  return 0;
-}
-
-function scoreGoal(inv, p) {
-  const tags = inv.goalTags;
-  if (tags && Array.isArray(tags) && tags.length > 0) {
-    const matchCount = p.goals.filter(g => tags.includes(g)).length;
-    return Math.min(matchCount * PIPELINE_CONFIG.GOAL_TAG_POINTS, PIPELINE_CONFIG.GOAL_TAG_CAP);
-  }
-  return 0;
-}
-
-function scoreHorizon(inv, p) {
-  let score = 0;
-  const lockIn = inv.lockIn || 0;
-  if (lockIn <= p.horizon) score += PIPELINE_CONFIG.HORIZON_LOCK_FIT;
-  if (lockIn === 0) score += PIPELINE_CONFIG.HORIZON_NO_LOCK;
-
-  const ideal = inv.idealHorizon;
-  if (ideal && ideal.min !== undefined && ideal.max !== undefined) {
-    if (p.horizon >= ideal.min && p.horizon <= ideal.max) {
-      score += PIPELINE_CONFIG.HORIZON_PERFECT;
-    } else if (p.horizon >= ideal.min - 2 && p.horizon <= ideal.max + 5) {
-      score += PIPELINE_CONFIG.HORIZON_GOOD;
-    } else if (p.horizon >= ideal.min - 5) {
-      score += PIPELINE_CONFIG.HORIZON_PARTIAL;
-    }
-    if (p.horizon < ideal.min - 5) {
-      score -= PIPELINE_CONFIG.HORIZON_SEVERE_MISMATCH_PENALTY;
-    }
-  }
-  return score;
-}
-
-function scoreCost(inv) {
-  const er = inv.expenseRatio;
-  if (er !== undefined && er !== null) {
-    if (er === 0) return -PIPELINE_CONFIG.COST_FREE_BONUS;
-    return er * PIPELINE_CONFIG.COST_PENALTY_SCALE;
-  }
-  return 0;
-}
-
-/**
- * Compute composite score for a single instrument.
- * @param {Object} inv - Instrument from catalog
- * @param {Object} p - Parsed profile
- * @param {Object} w - Derived weights
- * @param {Object} confScores - ML confidence scores keyed by backend type
- * @returns {Object} Instrument augmented with score and postTaxReturn
- */
-function computeInstrumentScore(inv, p, w, confScores) {
-  // Use backend's existing post-tax calculator via instrumentConstants
-  const backendType = resolveBackendType(inv);
-  const rate = INSTRUMENT_PARAMS[backendType]?.nominalRate 
-    ?? (inv.expectedReturn || inv.rate || 7.0);
-  const postTax = calculatePostTaxReturnSafe(
-    backendType, rate / 100,
-    p.annualIncome,
-    p.horizon,
-    p.taxRegime
-  );
-  const postTaxRate = postTax.effectiveYield || rate;
-
-  // Factor scores
-  const returnScore = scoreReturn(postTaxRate);
-  const riskPenalty = scoreRisk(inv, p);
-  const taxPenalty = scoreTax(inv, p);
-  const liquidityBonus = scoreLiquidity(inv);
-  const goalBonus = scoreGoal(inv, p);
-  const horizonMatch = scoreHorizon(inv, p);
-  const costPenalty = scoreCost(inv);
-
-  // Real Return / Inflation Drag Factor (Assumed 6% benchmark inflation)
-  const realReturn = ((1 + postTaxRate / 100) / (1 + 0.06) - 1) * 100;
-  const realYieldBonus = realReturn > 0 ? Math.min(8, realReturn * 1.5) : -Math.abs(realReturn * 2);
-
-  // Weighted composite
-  let score = 0;
-  score += w.alpha * returnScore;
-  score -= w.beta * riskPenalty;
-  score -= w.gamma * taxPenalty;
-  score += w.delta * liquidityBonus;
-  score += w.epsilon * goalBonus;
-  score += w.zeta * horizonMatch;
-  score -= w.eta * costPenalty;
-  score += realYieldBonus;
-
-  // One-time lump sum suitability boost for instruments suited for lump-sum deployment
-  if (p.hasLumpSum && p.lumpSumAmount > 0) {
-    const LUMP_SUITABLE_TYPES = ['SGB', 'RBI_Bond', 'Gold', 'Index_MF', 'ELSS', 'Debt_MF', 'Equity_MF'];
-    if (LUMP_SUITABLE_TYPES.includes(backendType)) {
-      score += 8.0;
-    }
-  }
-
-  // ML confidence boost: dynamically boost instruments whose backend type
-  // was predicted with high confidence by the ML model
-  const mlConf = confScores[backendType] || 0;
-  score += mlConf * PIPELINE_CONFIG.ML_BOOST_WEIGHT;
-
-  return {
-    ...inv,
-    score,
-    postTaxReturn: postTaxRate,
-    realReturn,
-    backendType,
-    nominalReturn: rate,
-    effectiveYield: postTaxRate,
-    taxNotes: postTax.notes,
-    sharpeRatio: computeSharpe(postTaxRate, backendType),
-  };
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// STAGE 3: RANKING
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Sort scored instruments descending by score.
- */
-function rankInstruments(scoredInstruments) {
-  return [...scoredInstruments].sort((a, b) => b.score - a.score);
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// STAGE 4: DIVERSITY ENFORCEMENT
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Enforce that top-N picks span at least MIN_ASSET_CLASSES distinct
- * asset classes. If diversity is insufficient, swap lower-ranked picks
- * with the next-best instrument from an unrepresented class.
- */
-function enforceDiversity(ranked, topN, minClasses) {
-  const result = [];
-  const usedClasses = new Set();
-  const usedIds = new Set();
-
-  // First pass: take top-N greedily
-  for (const inv of ranked) {
-    if (result.length >= topN) break;
-    if (usedIds.has(inv.id)) continue;
-    result.push(inv);
-    usedIds.add(inv.id);
-    usedClasses.add(inv.assetClass || inv.category || inv.type);
-  }
-
-  // Second pass: if we lack diversity, swap the lowest-scored pick
-  // with the best available from a missing class
-  if (usedClasses.size < minClasses && ranked.length > topN) {
-    const remaining = ranked.filter(inv => !usedIds.has(inv.id));
-    for (const candidate of remaining) {
-      const cls = candidate.assetClass || candidate.category || candidate.type;
-      if (!usedClasses.has(cls)) {
-        // Replace the lowest-scored item in result
-        const lowestIdx = result.length - 1;
-        const removed = result[lowestIdx];
-        usedClasses.delete(removed.assetClass || removed.category || removed.type);
-        result[lowestIdx] = candidate;
-        usedIds.delete(removed.id);
-        usedIds.add(candidate.id);
-        usedClasses.add(cls);
-        if (usedClasses.size >= minClasses) break;
-      }
-    }
-  }
-
   return result;
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// HELPERS
-// ═══════════════════════════════════════════════════════════════════
-
-/**
- * Map a catalog instrument to its backend core type key
- * (one of the 19 keys in instrumentConstants.js).
- * Used for tax computation and Monte Carlo parameter lookup.
- */
-const CATALOG_TO_BACKEND = {
-  ppf: 'PPF', scss: 'SCSS', sukanya: 'SSY',
-  rbi_bonds: 'RBI_Bond', sgb: 'SGB', nps: 'NPS',
-  fd: 'FD', liquid_mf: 'Liquid_MF', debt_mf: 'Debt_MF',
-  hybrid_mf: 'Hybrid_MF', index_mf: 'Index_MF',
-  elss: 'ELSS', equity_mf: 'Equity_MF', etf: 'ETF',
-  gold_etf: 'Gold', nifty_etf: 'ETF',
-  midcap_mf: 'Midcap_MF', smallcap_mf: 'Smallcap_MF',
-  arbitrage_mf: 'Arbitrage_MF', direct_equity: 'Equity_MF',
-};
-
-// Extended mappings for instruments that share a core type
-const CATEGORY_TO_BACKEND = {
-  'Government': 'RBI_Bond',
-  'Gold': 'Gold',
-  'Retirement': 'NPS',
-  'Bank Deposits': 'FD',
-  'Debt Mutual Funds': 'Debt_MF',
-  'Equity Mutual Funds': 'Equity_MF',
-  'ETFs': 'ETF',
-  'REITs & InvITs': 'ETF',
-  'Bonds & Debentures': 'Debt_MF',
-  'Insurance-linked': 'Debt_MF',
-  'Direct Equity': 'Equity_MF',
-};
-
-function resolveBackendType(inv) {
-  // Direct ID mapping takes priority
-  if (inv.id && CATALOG_TO_BACKEND[inv.id]) return CATALOG_TO_BACKEND[inv.id];
-
-  // For specific fund variants, match by common prefix
-  const id = (inv.id || '').toLowerCase();
-  if (id.includes('fd') || id.includes('fixed_deposit')) return 'FD';
-  if (id.includes('elss')) return 'ELSS';
-  if (id.includes('liquid')) return 'Liquid_MF';
-  if (id.includes('debt') || id.includes('corporate_bond') || id.includes('short_duration')) return 'Debt_MF';
-  if (id.includes('hybrid') || id.includes('balanced')) return 'Hybrid_MF';
-  if (id.includes('index') || id.includes('nifty_index')) return 'Index_MF';
-  if (id.includes('midcap')) return 'Midcap_MF';
-  if (id.includes('smallcap')) return 'Smallcap_MF';
-  if (id.includes('gold')) return 'Gold';
-  if (id.includes('arbitrage')) return 'Arbitrage_MF';
-  if (id.includes('etf')) return 'ETF';
-  if (id.includes('equity') || id.includes('flexi') || id.includes('bluechip') || id.includes('largecap')) return 'Equity_MF';
-
-  // Category fallback
-  if (inv.category && CATEGORY_TO_BACKEND[inv.category]) return CATEGORY_TO_BACKEND[inv.category];
-
-  return 'Debt_MF'; // Safe default
+export function computeInstrumentScore(instrument, profile, weights, confidenceScores = {}) {
+  const backendType = resolveBackendType(instrument);
+  const factors = {
+    expectedReturn: scoreReturn(instrument),
+    riskFit: scoreRisk(instrument, profile),
+    liquidity: scoreLiquidity(instrument),
+    goalFit: scoreGoal(instrument, profile),
+    horizonFit: scoreHorizon(instrument, profile),
+    cost: scoreCost(instrument),
+    mlConfidence: (confidenceScores[backendType] || 0) * 100,
+  };
+  const score = Object.entries(weights).reduce((sum, [key, weight]) => sum + factors[key] * weight, 0);
+  return { score: round(score), factors };
 }
 
-function computeSharpe(postTaxReturn, backendType) {
-  const vol = INSTRUMENT_PARAMS[backendType]?.volatility || 0.10;
-  const postTaxDecimal = (postTaxReturn || 0) / 100;
-  return vol > 0.001 ? parseFloat(((postTaxDecimal - RISK_FREE_RATE) / vol).toFixed(2)) : 0;
+export function rankInstruments(instruments, profile, weights, confidenceScores = {}) {
+  return [...instruments].map(instrument => ({
+    instrument,
+    ...computeInstrumentScore(instrument, profile, weights, confidenceScores),
+  })).sort((a, b) => b.score - a.score || String(a.instrument.id).localeCompare(String(b.instrument.id)));
 }
 
-/**
- * Canonical profile normalization.
- * Consolidates duplicate and overlapping field aliases (income/monthly_income/annualIncome,
- * savings/monthly_savings, horizon/investment_horizon/investmentHorizon, etc.)
- * into a single canonical data structure for all pipeline stages.
- */
-export function normalizeProfile(profile = {}, options = {}) {
-  const isStrict = options.strict || options.throwOnMissingRequired;
-  if (isStrict) {
-    if (!profile || typeof profile !== 'object') throw new Error('Invalid profile object');
-    if (profile.age === undefined || profile.age === null || Number(profile.age) <= 0) {
-      throw new Error('Missing or invalid required profile field: age');
-    }
-    const hasIncome = profile.annualIncome !== undefined || profile.monthly_income !== undefined || profile.income !== undefined;
-    if (!hasIncome) {
-      throw new Error('Missing or invalid required profile field: annualIncome');
-    }
-    const hasSavings = profile.savings !== undefined || profile.monthly_savings !== undefined;
-    if (!hasSavings) {
-      throw new Error('Missing or invalid required profile field: savings');
+export function enforceDiversity(ranked, topN = PIPELINE_CONFIG.topN, minAssetClasses = 3) {
+  const selected = ranked.slice(0, topN);
+  const represented = new Set(selected.map(row => row.instrument.assetClass || row.instrument.category));
+  if (represented.size >= minAssetClasses) return selected;
+  for (const candidate of ranked.slice(topN)) {
+    const assetClass = candidate.instrument.assetClass || candidate.instrument.category;
+    if (!represented.has(assetClass)) {
+      selected[selected.length - 1] = candidate;
+      represented.add(assetClass);
+      if (represented.size >= minAssetClasses) break;
     }
   }
-
-  const age = Number(profile.age) || 30;
-  const monthly_income = Number(profile.monthly_income || profile.income) || (Number(profile.annualIncome) ? Number(profile.annualIncome) / 12 : 50000);
-  const annualIncome = Number(profile.annualIncome) || (monthly_income * 12);
-  const monthly_savings = Number(profile.monthly_savings || profile.savings) || 10000;
-  const savings = monthly_savings;
-  const investment_horizon = Number(profile.investment_horizon || profile.investmentHorizon || profile.horizon) || 10;
-  const investmentHorizon = investment_horizon;
-  const horizon = investment_horizon;
-  const taxRegime = profile.taxRegime || profile.regime || 'new';
-  const regime = taxRegime;
-  const risk_tolerance = profile.risk_tolerance || 'Moderate';
-  const riskCategory = profile.riskCategory || 'Moderate';
-  const goals = (Array.isArray(profile.goals) && profile.goals.length > 0)
-    ? profile.goals
-    : (Array.isArray(profile.investment_goals) && profile.investment_goals.length > 0)
-      ? profile.investment_goals
-      : (profile.goal_type && profile.goal_type !== 'wealth-building' ? [profile.goal_type] : []);
-  const goal_type = goals[0] || profile.goal_type || 'wealth-building';
-
-  return {
-    ...profile,
-    age,
-    monthly_income,
-    income: monthly_income,
-    annualIncome,
-    monthly_savings,
-    savings,
-    investment_horizon,
-    investmentHorizon,
-    horizon,
-    taxRegime,
-    regime,
-    risk_tolerance,
-    riskCategory,
-    goal_type,
-    goals,
-    investment_goals: goals,
-    liquid_savings: Number(profile.liquid_savings) || 0,
-    existing_debt_emi_ratio_pct: Number(profile.existing_debt_emi_ratio_pct !== undefined ? profile.existing_debt_emi_ratio_pct : profile.existing_debt) || 0,
-    existing_debt: Number(profile.existing_debt_emi_ratio_pct !== undefined ? profile.existing_debt_emi_ratio_pct : profile.existing_debt) || 0,
-    dependents: Number(profile.dependents) || 0,
-    emergency_fund_months: Number(profile.emergency_fund_months) || 0,
-    hasLumpSum: Boolean(profile.hasLumpSum),
-    lumpSumAmount: Number(profile.lumpSumAmount) || 0,
-    soldPropertyAmount: Number(profile.soldPropertyAmount) || 0,
-    totalCTC: Number(profile.totalCTC) || annualIncome,
-    basicComponent: Number(profile.basicComponent) || (annualIncome * 0.5),
-    monthlyTakeHome: Number(profile.monthlyTakeHome) || monthly_income,
-  };
+  return selected.sort((a, b) => b.score - a.score);
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// PUBLIC API — Main Pipeline Entry Point
-// ═══════════════════════════════════════════════════════════════════
+export function resolveConcentrationCap(instrument = {}) {
+  const text = `${instrument.id || ''} ${instrument.type || ''} ${instrument.name || ''}`.toLowerCase();
+  const entries = [
+    ['smallcap_mf', /small.?cap/], ['midcap_mf', /mid.?cap/], ['direct_equity', /direct.?equity|stock/],
+    ['sgb', /sovereign gold|\bsgb\b/], ['gold_etf', /gold.*etf|etf.*gold/], ['nps', /\bnps\b|national pension/],
+  ];
+  const match = entries.find(([, pattern]) => pattern.test(text));
+  if (!match) return null;
+  return { key: match[0], maxPct: CONCENTRATION_CAPS[match[0]].maxPct };
+}
 
-/**
- * Run the full recommendation pipeline.
- *
- * @param {Object} profile - User's FinancialProfile document (lean)
- * @param {Object} mlResult - ML prediction result from mlClient.js
- * @param {Object} [options] - Optional overrides
- * @param {number} [options.topN=5] - Number of recommendations to return
- * @param {number} [options.minAssetClasses=3] - Minimum asset class diversity
- * @returns {Object} { instruments: Array, confidenceScores: Object }
- */
-export function runPipeline(profile, mlResult, options = {}) {
-  const normProfile = normalizeProfile(profile, options);
-  const topN = options.topN || PIPELINE_CONFIG.TOP_N;
-  const minClasses = options.minAssetClasses || PIPELINE_CONFIG.MIN_ASSET_CLASSES;
-
-  // Trigger live market data sync (fire-and-forget for sync callers)
-  try {
-    getLiveInstrumentParams().catch(() => {});
-  } catch (_) {}
-
-  // Normalise ML confidence scores
-  const confScores = normaliseConfidenceScores(mlResult.confidence_scores || {});
-
-  // ── Risk Reconciliation (Section 3) ──────────────────────────────
-  // reconcileRisk() is the authoritative source of the final risk tier.
-  // Its output feeds filterEligible, parseProfile/deriveWeights/scoreRisk.
-  const riskResult = reconcileRisk(normProfile);
-
-  // Stage 1: Eligibility (Section 5 gates, using reconciled tier)
-  const { eligible, excluded } = filterEligible(investmentDatabase, normProfile, riskResult.final_score);
-
-  // Stage 2: Scoring (using reconciled risk tier string)
-  const p = parseProfile(normProfile, riskResult.final_risk_tier, options);
-  const w = deriveWeights(p);
-  const scored = eligible.map(inv => computeInstrumentScore(inv, p, w, confScores));
-
-  // Stage 3: Ranking
-  const ranked = rankInstruments(scored);
-
-  // Stage 4: Diversity
-  const topPicks = enforceDiversity(ranked, topN, minClasses);
-
-  // Stage 5: Enforce Section 6 allocation targets by reconciled tier
-  enforceAllocationTargets(topPicks, riskResult.final_score, normProfile);
-
-  // Map to output format (allocationWeight set by enforceAllocationTargets)
-  const instruments = topPicks.map(inv => ({
-    name: inv.name,
-    type: inv.backendType,
-    instrumentId: inv.id,
-    nominalReturn: inv.nominalReturn,
-    postTaxReturn: inv.postTaxReturn,
-    effectiveYield: inv.effectiveYield,
-    taxNotes: inv.taxNotes,
-    sharpeRatio: inv.sharpeRatio,
-    expenseRatio: inv.expenseRatio || 0,
-    riskLevel: INSTRUMENT_PARAMS[inv.backendType]?.riskLevel || inv.riskLabel || 'Medium',
-    lockIn: inv.lockIn || 0,
-    tags: INSTRUMENT_PARAMS[inv.backendType]?.tags || [],
-    allocationWeight: inv.allocationWeight,
-    allocation_pct: inv.allocation_pct || 0,
-    tier: inv.tier || 'Medium',
-    score: parseFloat(inv.score.toFixed(2)),
+export function enforceAllocationTargets(instruments) {
+  if (!instruments.length) return instruments;
+  if (instruments.some(item => !Number.isFinite(item.score))) {
+    throw new TypeError('Every allocation candidate must have a finite score');
+  }
+  const totalScore = instruments.reduce((sum, item) => sum + Math.max(0, item.score), 0);
+  if (totalScore <= 0) throw new RangeError('Allocation scores must contain a positive value');
+  let allocations = instruments.map(item => ({
+    ...item,
+    allocation_pct: Math.max(0, item.score) / totalScore * 100,
   }));
 
-  // Fix rounding: ensure weights sum to exactly 1.0
-  const totalWeight = instruments.reduce((s, i) => s + i.allocationWeight, 0);
-  if (totalWeight > 0 && instruments.length > 0) {
-    instruments.forEach(i => { i.allocationWeight = parseFloat((i.allocationWeight / totalWeight).toFixed(4)); });
-    const roundedSum = instruments.reduce((s, i) => s + i.allocationWeight, 0);
-    const residual = parseFloat((1.0 - roundedSum).toFixed(4));
-    if (residual !== 0) {
-      const maxIdx = instruments.reduce((mi, w, i, arr) => w.allocationWeight > arr[mi].allocationWeight ? i : mi, 0);
-      instruments[maxIdx].allocationWeight = parseFloat((instruments[maxIdx].allocationWeight + residual).toFixed(4));
-    }
-  }
-
-
-  // Section 7 metadata (response-only, not persisted — see Recommendation.create() comment in routes/recommend.js)
-  const riskReconciliation = {
-    final_score: riskResult.final_score,
-    final_risk_tier: riskResult.final_risk_tier,
-    capacity_score: riskResult.capacity_score,
-    preference_score: riskResult.preference_score,
-    reconciliation_note: riskResult.reconciliation_note,
-    advisory_note: riskResult.advisory_note,
-    excluded_due_to_eligibility: excluded,
-    capacity_missing: riskResult.capacity_missing,
-    preference_missing: riskResult.preference_missing,
-  };
-
-  return { instruments, confidenceScores: confScores, riskReconciliation, computedWeights: w };
-}
-
-// ── Confidence score normalisation (reused from recommend.js) ────
-
-const INSTRUMENT_KEY_MAP = {
-  'Public_Provident_Fund': 'PPF',
-  'Bank_FD':               'FD',
-  'National_Pension':      'NPS',
-  'RBI_Bond':              'RBI_Bond',
-  'Sovereign_Gold_Bond':   'SGB',
-  'Gold_ETF':              'Gold',
-  'Nifty_Index':           'Index_MF',
-  'Balanced_Advantage':    'Hybrid_MF',
-};
-
-function normaliseConfidenceScores(rawScores) {
-  if (!rawScores || typeof rawScores !== 'object') return {};
-  const normalised = {};
-  for (const [key, value] of Object.entries(rawScores)) {
-    if (typeof value !== 'number' || !isFinite(value)) continue;
-    const mappedKey = INSTRUMENT_KEY_MAP[key] || key;
-    normalised[mappedKey] = value;
-  }
-  return normalised;
-}
-
-// ── Backend Where To Invest (WTI) Dynamic Ranking Engine ───────────
-import { getRegimeTilts } from './regimeRotationEngine.js';
-
-export function rankWhereToInvestBackend(candidates = [], profile = {}, options = {}) {
-  if (!Array.isArray(candidates) || candidates.length === 0) return [];
-
-  const { regimeApplied = false, regimeKey = 'geopolitical_conflict', sortBy = 'score' } = options;
-
-  const age = Number(profile.age || 35);
-  const annualIncome = Number(profile.annualIncome || profile.annual_income || 1000000);
-  const taxRegime = profile.taxRegime || 'new';
-  const reconciledRisk = reconcileRisk(profile);
-  const riskCat = (reconciledRisk.final_risk_tier || 'Moderate').toLowerCase();
-  const horizon = Number(profile.investmentHorizon || profile.investment_horizon || 5);
-
-  // 1. Compute marginal tax rate using backend taxEngine (rebate-aware)
-  const marginalRate = getEffectiveMarginalRate(annualIncome, taxRegime, {}, 'salary');
-
-  // 2. Fetch macro regime tilts if regime simulation is requested
-  const regimeTilts = regimeApplied ? getRegimeTilts(regimeKey) : {};
-
-  // Risk mapping 1-9
-  const RISK_MAP = {
-    'very low': 1, 'conservative': 2, 'low': 2,
-    'low-medium': 3, 'moderate': 5, 'medium': 5,
-    'moderately high': 6, 'high': 7, 'aggressive': 8, 'very high': 9
-  };
-  const userRiskNum = RISK_MAP[riskCat] || 5;
-
-  const scored = candidates.map(item => {
-    let score = 50;
-    const nameLower = (item.name || '').toLowerCase();
-    const highlightLower = (item.highlight || '').toLowerCase();
-    const badge = item.badge || '';
-
-    // Infer risk score: first try server-side authoritative catalog lookup using item.id
-    const catalogInst = investmentDatabase.find(c => c.id === item.id);
-
-    // Extract return rate: directly use numeric expectedReturn from item, or parse candidate rate, or fallback to authoritative catalog expectedReturn
-    let candidateRate = typeof item.expectedReturn === 'number' && !isNaN(item.expectedReturn)
-      ? item.expectedReturn
-      : (typeof item.rate === 'number' && !isNaN(item.rate)
-          ? item.rate
-          : (typeof item.rate === 'string' && item.rate.trim()
-              ? (parseFloat(item.rate.match(/(\d+\.?\d*)/)?.[1]) || null)
-              : null));
-
-    let nominalRate = candidateRate !== null && !isNaN(candidateRate)
-      ? candidateRate
-      : (typeof catalogInst?.expectedReturn === 'number' && !isNaN(catalogInst.expectedReturn)
-          ? catalogInst.expectedReturn
-          : (typeof catalogInst?.dynamicData?.expectedReturn?.avg === 'number' && !isNaN(catalogInst.dynamicData.expectedReturn.avg)
-              ? catalogInst.dynamicData.expectedReturn.avg
-              : null));
-
-    if (nominalRate === null || nominalRate === undefined || isNaN(nominalRate)) {
-      console.warn(`[RecommendationPipeline] Missing expectedReturn for instrument id '${item.id || item.name}'. Data quality defect.`);
-      nominalRate = 0;
-    }
-
-    let productRisk = 5;
-    const catalogRiskValue = catalogInst?.dynamicData?.risk?.value;
-    if (typeof catalogRiskValue === 'number') {
-      // Map catalog 1-5 scale -> WTI 1-9 scale (1->1, 2->3, 3->5, 4->7, 5->9)
-      productRisk = 1 + (catalogRiskValue - 1) * 2;
-    } else {
-      // Fallback keyword matching aligned with frontend wtiGenerator.js
-      if (nameLower.includes('t-bill') || nameLower.includes('overnight') || badge === '100% Sovereign') productRisk = 1;
-      else if (nameLower.includes('ppf') || nameLower.includes('scss') || nameLower.includes('rbi') || nameLower.includes('gilt') || badge.includes('Sovereign') || badge.includes('Govt Sponsored') || badge.includes('Official 54EC') || nameLower.includes('sovereign gold') || nameLower.includes('fd') || nameLower.includes('liquid') || nameLower.includes('short term') || badge.includes('CRISIL AAA') || nameLower.includes('aaa')) productRisk = 2;
-      else if (nameLower.includes('bond') || nameLower.includes('debt') || nameLower.includes('corporate bond') || badge.includes('Tax-Free') || nameLower.includes('gold etf') || nameLower.includes('gold fund') || nameLower.includes('sgb') || (nameLower.includes('gold') && !nameLower.includes('small'))) productRisk = 3;
-      else if (nameLower.includes('silver') || nameLower.includes('commodity') || nameLower.includes('reit') || nameLower.includes('invit') || nameLower.includes('balanced') || nameLower.includes('hybrid') || nameLower.includes('nps') || nameLower.includes('pension') || nameLower.includes('arbitrage') || nameLower.includes('elss')) productRisk = 4;
-      else if (nameLower.includes('dividend yield') || nameLower.includes('dividend') || badge.includes('Best Dividend') || nameLower.includes('nifty 50') || nameLower.includes('index') || nameLower.includes('bluechip') || nameLower.includes('blue-chip') || nameLower.includes('large cap') || nameLower.includes('large-cap') || nameLower.includes('s&p 500')) productRisk = 5;
-      else if (nameLower.includes('flexi') || nameLower.includes('multi cap') || nameLower.includes('value') || nameLower.includes('contra') || nameLower.includes('large & mid') || nameLower.includes('large and mid') || nameLower.includes('focused')) productRisk = 6;
-      else if (nameLower.includes('mid cap') || nameLower.includes('midcap') || nameLower.includes('mid-cap') || nameLower.includes('sector') || nameLower.includes('pharma') || nameLower.includes('defence') || nameLower.includes('banking') || nameLower.includes('infra') || nameLower.includes('it ') || nameLower.includes('technology') || nameLower.includes('consumption') || nameLower.includes('nasdaq')) productRisk = 7;
-      else if (nameLower.includes('small cap') || nameLower.includes('smallcap') || nameLower.includes('small-cap') || nameLower.includes('quant') || highlightLower.includes('momentum') || highlightLower.includes('aggressive')) productRisk = 8;
-    }
-
-    // Risk delta penalty/bonus
-    const riskDelta = Math.abs(productRisk - userRiskNum);
-    if (riskDelta === 0) score += 25;
-    else if (riskDelta === 1) score += 18;
-    else if (riskDelta === 2) score += 10;
-    else if (riskDelta >= 4) score -= 20;
-
-    // Age / Senior Citizen check
-    const isSenior = age >= 60;
-    if (isSenior) {
-      if (nameLower.includes('scss') || nameLower.includes('senior') || nameLower.includes('rbi')) score += 30;
-      if (productRisk >= 7) score -= 25;
-    } else if (age <= 30 && nominalRate > 15) {
-      score += 10;
-    }
-
-    // Backend post-tax yield calculation
-    const isEEE = badge.includes('EEE') || badge.includes('54EC') || badge.includes('100% Tax-Free') || nameLower.includes('ppf') || nameLower.includes('sukanya');
-    const isSlabTaxed = highlightLower.includes('slab rate') || nameLower.includes('fd') || nameLower.includes('fixed deposit') || nameLower.includes('scss') || nameLower.includes('rbi');
-    
-    let taxEffectRate = 0.125;
-    if (isEEE) taxEffectRate = 0;
-    else if (isSlabTaxed) taxEffectRate = marginalRate;
-
-    const postTaxYieldVal = nominalRate > 0 ? nominalRate * (1 - taxEffectRate) : 0;
-    const postTaxYieldStr = postTaxYieldVal > 0 ? `~${postTaxYieldVal.toFixed(1)}% (Post-Tax)` : item.rate;
-    const expenseRatioMatch = highlightLower.match(/\b(?:expense\s*ratio|expense|ter|er)\b\s*[:=]?\s*(\d+(?:\.\d+)?)\s*%/i);
-    const expRatioVal = expenseRatioMatch ? Number(expenseRatioMatch[1]) : null;
-
-    if (postTaxYieldVal > 0) score += Math.min(15, postTaxYieldVal * 0.6);
-
-    // Apply macro regime tilts from regimeRotationEngine
-    let regimeBoostTag = null;
-    if (regimeApplied && regimeTilts) {
-      for (const [tiltKey, tiltInfo] of Object.entries(regimeTilts)) {
-        if (nameLower.includes(tiltKey) || highlightLower.includes(tiltKey) || (tiltKey === 'defence' && nameLower.includes('defence')) || (tiltKey === 'gold' && (nameLower.includes('gold') || nameLower.includes('sgb')))) {
-          score += (tiltInfo.weightDelta || 0.15) * 100;
-          regimeBoostTag = `⚡ ${tiltInfo.label || 'Macro Regime Tilt'}`;
-          break;
-        }
+  for (let pass = 0; pass < 10; pass += 1) {
+    let overflow = 0;
+    const groups = new Map();
+    allocations.forEach((item, index) => {
+      const cap = resolveConcentrationCap(item);
+      if (!cap) return;
+      if (!groups.has(cap.key)) groups.set(cap.key, { cap: cap.maxPct, indexes: [] });
+      groups.get(cap.key).indexes.push(index);
+    });
+    const cappedIndexes = new Set();
+    groups.forEach(group => {
+      const total = group.indexes.reduce((sum, index) => sum + allocations[index].allocation_pct, 0);
+      if (total > group.cap + 1e-8) {
+        const scale = group.cap / total;
+        group.indexes.forEach(index => {
+          overflow += allocations[index].allocation_pct * (1 - scale);
+          allocations[index].allocation_pct *= scale;
+          cappedIndexes.add(index);
+        });
       }
-    }
+    });
+    if (overflow < 1e-8) break;
+    const recipients = allocations.map((_, index) => index).filter(index => !cappedIndexes.has(index) && !resolveConcentrationCap(allocations[index]));
+    if (!recipients.length) break;
+    const base = recipients.reduce((sum, index) => sum + allocations[index].allocation_pct, 0);
+    recipients.forEach(index => {
+      allocations[index].allocation_pct += overflow * (base > 0 ? allocations[index].allocation_pct / base : 1 / recipients.length);
+    });
+  }
 
-    // Tax savings note
-    let taxSavingsNote = null;
-    const effTaxWithCess = marginalRate * 1.04;
-    if (nameLower.includes('ppf') || nameLower.includes('elss') || highlightLower.includes('80c')) {
-      const max80cSavings = Math.round(150000 * effTaxWithCess);
-      if (max80cSavings > 0) taxSavingsNote = `Saves up to ₹${max80cSavings.toLocaleString('en-IN')} tax/yr under Sec 80C`;
-    } else if (nameLower.includes('nps') || highlightLower.includes('80ccd')) {
-      const npsExtraSavings = Math.round(50000 * effTaxWithCess);
-      if (npsExtraSavings > 0) taxSavingsNote = `Saves up to ₹${npsExtraSavings.toLocaleString('en-IN')} extra tax/yr under Sec 80CCD(1B)`;
-    }
-
-    // Execution route
-    let investmentRoute = 'SIP Recommended';
-    if (productRisk <= 3 || nameLower.includes('liquid') || nameLower.includes('fd') || nameLower.includes('sgb') || badge.includes('54EC')) {
-      investmentRoute = 'Lump-Sum Suitable';
-    } else if (productRisk >= 7) {
-      investmentRoute = 'Strict SIP Route';
-    }
-
-    // Profile match tag
-    let matchTag = regimeBoostTag;
-    if (!matchTag) {
-      if (isSenior && (nameLower.includes('scss') || nameLower.includes('senior') || nameLower.includes('rbi'))) matchTag = 'Senior Citizen Fit';
-      else if (marginalRate >= 0.30 && isEEE) matchTag = 'High Tax Efficiency';
-      else if (horizon <= 2 && productRisk <= 2) matchTag = 'Short-Term Parking';
-      else if (horizon >= 7 && nominalRate > 12) matchTag = 'Long-Term Compounder';
-      else if (score >= 90) matchTag = 'Top Profile Match';
-    }
-
+  const sum = allocations.reduce((total, item) => total + item.allocation_pct, 0);
+  if (!Number.isFinite(sum) || sum <= 0) throw new RangeError('Capped allocations have no positive total');
+  let assignedWeight = 0;
+  return allocations.map((item, index) => {
+    const allocationWeight = index === allocations.length - 1
+      ? round(1 - assignedWeight, 4)
+      : round(item.allocation_pct / sum, 4);
+    assignedWeight = round(assignedWeight + allocationWeight, 4);
     return {
       ...item,
-      _score: score,
-      expRatioVal,
-      postTaxYieldVal,
-      postTaxYieldStr,
-      profileMatchTag: matchTag,
-      taxSavingsNote,
-      investmentRoute
+      allocation_pct: round(allocationWeight * 100),
+      allocationWeight,
     };
   });
-
-  if (sortBy === 'postTaxYield') {
-    scored.sort((a, b) => b.postTaxYieldVal - a.postTaxYieldVal || b._score - a._score);
-  } else if (sortBy === 'expense') {
-    scored.sort((a, b) => (a.expRatioVal ?? 99) - (b.expRatioVal ?? 99) || b._score - a._score);
-  } else {
-    scored.sort((a, b) => b._score - a._score);
-  }
-
-  return scored.slice(0, 5);
 }
 
-// ── Exports for testing ─────────────────────────────────────────
-export {
-  PIPELINE_CONFIG,
-  resolveBackendType,
-  deriveWeights,
-  parseProfile,
-  enforceDiversity,
-  computeInstrumentScore,
-  scoreReturn,
-  scoreRisk,
-  scoreTax,
-  scoreLiquidity,
-  scoreCost,
-  scoreGoal,
-  scoreHorizon,
-  rankInstruments,
-  normaliseConfidenceScores,
-  INSTRUMENT_KEY_MAP,
-  enforceAllocationTargets,
-  enforceAllocationTargetsHeuristic,
+export const enforceAllocationTargetsHeuristic = enforceAllocationTargets;
+
+function presentationInstrument(row) {
+  const instrument = row.instrument;
+  const backendType = resolveBackendType(instrument);
+  const nominalReturn = round(Number(instrument.expectedReturn ?? instrument.dynamicData?.expectedReturn?.avg));
+  const params = INSTRUMENT_PARAMS[backendType] || {};
+  return {
+    id: instrument.id,
+    name: instrument.name,
+    type: backendType,
+    assetClass: instrument.assetClass || instrument.category,
+    nominalReturn,
+    effectiveYield: nominalReturn,
+    postTaxReturn: null,
+    returnBasis: 'PRE_TAX_NOMINAL',
+    expenseRatio: Number(instrument.expenseRatio ?? params.expenseRatio ?? 0),
+    riskLevel: instrument.riskLabel || instrument.dynamicData?.risk?.level || params.riskLevel,
+    riskScore: getInstrumentRisk(instrument),
+    lockIn: Number(instrument.lockIn ?? instrument.dynamicData?.liquidity?.lockIn ?? 0),
+    tags: [...(instrument.goalTags || instrument.dynamicData?.goalTags || [])],
+    taxNotes: 'Tax impact is not personalized because gross taxable income and deductions are outside the Financial Profile.',
+    score: row.score,
+    scoreFactors: row.factors,
+  };
+}
+
+export function runPipeline(profileInput, mlResult = {}, options = {}) {
+  const canonical = buildRecommendationProfile(profileInput);
+  const riskReconciliation = reconcileRisk(canonical);
+  const parsed = parseProfile(canonical);
+  const computedWeights = deriveWeights(parsed);
+  const confidenceScores = normaliseConfidenceScores(mlResult);
+  const { eligible, excluded } = filterEligible(investmentDatabase, canonical, riskReconciliation.final_score);
+  const ranked = rankInstruments(eligible, parsed, computedWeights, confidenceScores);
+  const topN = options.topN === undefined ? PIPELINE_CONFIG.topN : options.topN;
+  const minAssetClasses = options.minAssetClasses === undefined ? 3 : options.minAssetClasses;
+  if (!Number.isInteger(topN) || topN < 1 || topN > 20) throw new RangeError('topN must be an integer from 1 to 20');
+  if (!Number.isInteger(minAssetClasses) || minAssetClasses < 1 || minAssetClasses > topN) {
+    throw new RangeError('minAssetClasses must be an integer from 1 to topN');
+  }
+  const selected = enforceDiversity(ranked, topN, minAssetClasses);
+  let instruments = enforceAllocationTargets(selected.map(presentationInstrument));
+  instruments = instruments.filter(instrument => instrument.riskScore <= riskReconciliation.final_score);
+  riskReconciliation.excluded_due_to_eligibility = excluded;
+  return { instruments, confidenceScores, riskReconciliation, computedWeights };
+}
+
+/**
+ * WTI is an alternate presentation of the same server-side suitability decision.
+ * Client candidates are display selectors only; all financial metadata comes from
+ * the authoritative catalog and unknown ids fail closed.
+ */
+export function rankWhereToInvestBackend(candidates = [], profileInput, options = {}) {
+  const canonical = buildRecommendationProfile(profileInput);
+  const riskReconciliation = reconcileRisk(canonical);
+  const catalog = investmentDatabase.find(instrument => String(instrument.id) === String(options.parentInstrumentId));
+  const excluded = [];
+  if (!catalog) {
+    excluded.push({
+      id: options.parentInstrumentId,
+      reasonCode: 'CATALOG_INSTRUMENT_NOT_ESTABLISHED',
+    });
+    const empty = [];
+    Object.defineProperty(empty, 'metadata', { value: { excluded, riskReconciliation }, enumerable: false });
+    return empty;
+  }
+  const reasonCode = exclusionReason(catalog, canonical, riskReconciliation.final_score);
+  if (reasonCode) {
+    excluded.push({ id: catalog.id, name: catalog.name, reasonCode });
+    const empty = [];
+    Object.defineProperty(empty, 'metadata', { value: { excluded, riskReconciliation }, enumerable: false });
+    return empty;
+  }
+
+  const parsed = parseProfile(canonical);
+  const weights = deriveWeights(parsed);
+  const scored = computeInstrumentScore(catalog, parsed, weights, {});
+  const parent = presentationInstrument({ instrument: catalog, ...scored });
+  const ranked = candidates.map((candidate, index) => ({
+    id: candidate.id || `${catalog.id}:provider:${index + 1}`,
+    name: candidate.name,
+    provider: candidate.provider,
+    platform: candidate.platform,
+    minInvestment: candidate.minInvestment,
+    tenure: candidate.tenure,
+    highlight: candidate.highlight,
+    badge: candidate.badge,
+    parentInstrumentId: catalog.id,
+    nominalReturn: parent.nominalReturn,
+    effectiveYield: parent.effectiveYield,
+    postTaxReturn: null,
+    returnBasis: parent.returnBasis,
+    expenseRatio: parent.expenseRatio,
+    riskLevel: parent.riskLevel,
+    riskScore: parent.riskScore,
+    score: parent.score,
+    matchTags: [...new Set([...(parent.tags || []), `Suitable for ${riskReconciliation.final_risk_tier}`])],
+    investmentRoute: canonical.hasLumpSum ? 'SIP + Lump Sum' : 'SIP',
+    rankingBasis: 'AUTHORITATIVE_PARENT_INSTRUMENT_SUITABILITY_CURATED_PROVIDER_ORDER',
+  }));
+  Object.defineProperty(ranked, 'metadata', { value: { excluded, riskReconciliation }, enumerable: false });
+  return ranked;
+}
+
+export function assertPortfolioSuitable(profileInput, instruments) {
+  const canonical = buildRecommendationProfile(profileInput);
+  const suitability = assessSuitabilityRisk(canonical);
+  const violations = [];
+  for (const input of instruments || []) {
+    const exactCatalog = investmentDatabase.find(instrument => instrument.id === input);
+    if (exactCatalog) {
+      const reasonCode = exclusionReason(exactCatalog, canonical, suitability.finalLevel);
+      if (reasonCode) violations.push({ instrument: input, reasonCode });
+      continue;
+    }
+    const mappedCatalog = investmentDatabase.find(instrument => resolveBackendType(instrument) === input);
+    if (mappedCatalog) {
+      const reasonCode = exclusionReason(mappedCatalog, canonical, suitability.finalLevel);
+      if (reasonCode) violations.push({ instrument: input, reasonCode });
+    } else {
+      const params = INSTRUMENT_PARAMS[input];
+      if (!params) {
+        violations.push({ instrument: input, reasonCode: 'CATALOG_INSTRUMENT_NOT_ESTABLISHED' });
+        continue;
+      }
+      const risk = getInstrumentRisk(params);
+      if (risk === null) violations.push({ instrument: input, reasonCode: 'RISK_CLASSIFICATION_NOT_ESTABLISHED' });
+      else if (risk > suitability.finalLevel) violations.push({ instrument: input, reasonCode: 'RISK_EXCEEDS_FINAL_SUITABILITY' });
+      else if (!Number.isFinite(params.lockIn)) violations.push({ instrument: input, reasonCode: 'LOCK_IN_NOT_ESTABLISHED' });
+      else if (params.lockIn > canonical.investmentHorizonYears) violations.push({ instrument: input, reasonCode: 'LOCK_IN_EXCEEDS_HORIZON' });
+    }
+  }
+  if (violations.length) {
+    const error = new Error('Portfolio contains instruments outside the profile suitability boundary.');
+    error.code = 'PORTFOLIO_SUITABILITY_VIOLATION';
+    error.violations = violations;
+    throw error;
+  }
+  return suitability;
+}
+
+export const normalizeProfile = buildRecommendationProfile;
+
+export default {
+  runPipeline,
+  rankWhereToInvestBackend,
+  filterEligible,
+  reconcileRisk,
+  assertPortfolioSuitable,
 };

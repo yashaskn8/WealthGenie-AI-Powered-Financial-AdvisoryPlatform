@@ -8,8 +8,8 @@
  * duplicate slab logic in this file.
  */
 
-import { computeTax, getTaxSlab, getEffectiveMarginalRate } from './taxEngine.js';
-import { toMonthlyRate, CESS_RATE } from './instrumentConstants.js';
+import { getEffectiveMarginalRate } from './taxEngine.js';
+import { toMonthlyRate } from './instrumentConstants.js';
 
 // =========================================================================
 // 📘 BEGINNER NOTE: INDIAN INVESTMENT TAXATION & TERMINOLOGY
@@ -44,22 +44,18 @@ import { toMonthlyRate, CESS_RATE } from './instrumentConstants.js';
 
 function round4(n) { return parseFloat(n.toFixed(4)); }
 
-function _buildEquityLTCGPostTaxResult(nominalRate, monthlySIP, holdingYears, instrumentType, isTestMode, notePrefix = '') {
-  const effectiveTaxRate = isTestMode ? 0.125 : estimateEquityLTCGTaxRate(nominalRate, monthlySIP, holdingYears);
+function _buildEquityLTCGPostTaxResult(nominalRate, monthlySIP, holdingYears, instrumentType, notePrefix = '') {
+  const effectiveTaxRate = estimateEquityLTCGTaxRate(nominalRate, monthlySIP, holdingYears);
   const postTax = nominalRate * (1 - effectiveTaxRate);
 
   return validatePostTaxResult({
     postTaxReturn: round4(postTax),
     effectiveYield: round4(postTax * 100),
-    taxType: isTestMode ? 'LTCG 12.5% (Flat Statutory Rate)' : `Equity LTCG with Exemption (effective ${(effectiveTaxRate*100).toFixed(2)}%)`,
-    taxRate: isTestMode ? 0.125 : effectiveTaxRate,
-    notes: isTestMode
-      ? `${notePrefix}LTCG at 12.5% statutory rate.`
-      : `${notePrefix}${notePrefix ? 'Factored in ₹1.25L LTCG exemption and 4% cess.' : 'LTCG with ₹1.25L exemption and 4% cess.'}`,
+    taxType: `Equity LTCG with Exemption (effective ${(effectiveTaxRate*100).toFixed(2)}%)`,
+    taxRate: effectiveTaxRate,
+    notes: `${notePrefix}${notePrefix ? 'Factored in ₹1.25L LTCG exemption and 4% cess.' : 'LTCG with ₹1.25L exemption and 4% cess.'}`,
   }, nominalRate, instrumentType);
 }
-
-const isTestMode = typeof global !== 'undefined' && (global.jest !== undefined || process.env.NODE_ENV === 'test');
 
 /**
  * VALIDATION FUNCTION — ABSOLUTE SAFETY NET
@@ -67,51 +63,25 @@ const isTestMode = typeof global !== 'undefined' && (global.jest !== undefined |
  * This wraps every return path in calculatePostTaxReturn.
  */
 export function validatePostTaxResult(result, nominalRate, instrumentType) {
-  // Guard: NaN or non-finite inputs → return nominal as safe fallback
+  if (!Number.isFinite(nominalRate) || nominalRate < 0 || nominalRate > 1) {
+    throw new RangeError('nominalRate must be an explicit decimal from 0 to 1');
+  }
   if (!Number.isFinite(result.postTaxReturn)) {
-    console.error(
-      `[PostTax CRITICAL] ${instrumentType}: postTaxReturn is NaN/Infinity. `
-      + `Returning nominal ${nominalRate} as safe fallback.`
-    );
-    return {
-      ...result,
-      postTaxReturn: Number.isFinite(nominalRate) ? nominalRate : 0,
-      taxRate: 0,
-      validationFailed: true,
-      validationError: 'non_finite_post_tax',
-    };
+    throw new RangeError(`${instrumentType}: postTaxReturn is not finite`);
   }
 
   // ABSOLUTE RULE: post-tax return cannot exceed nominal return
   if (result.postTaxReturn > nominalRate + 0.0001) {
-    console.error(
-      `[PostTax CRITICAL] ${instrumentType}: postTaxReturn `
-      + `${result.postTaxReturn} exceeds nominalRate ${nominalRate}. `
-      + `This is impossible. Returning nominal as safe fallback.`
-    );
-    return {
-      ...result,
-      postTaxReturn: nominalRate,
-      taxRate: 0,
-      validationFailed: true,
-      validationError: 'post_tax_exceeded_nominal',
-    };
+    throw new RangeError(`${instrumentType}: postTaxReturn exceeds nominalRate`);
   }
 
   if (result.postTaxReturn < 0) {
-    console.error(
-      `[PostTax CRITICAL] ${instrumentType}: postTaxReturn is negative `
-      + `(${result.postTaxReturn}). Clamping to 0.`
-    );
-    return { ...result, postTaxReturn: 0, validationFailed: true };
+    throw new RangeError(`${instrumentType}: postTaxReturn is negative`);
   }
 
   // Tax rate must be between 0 and 1
   if (result.taxRate < 0 || result.taxRate > 1) {
-    console.error(
-      `[PostTax WARN] ${instrumentType}: taxRate (${result.taxRate}) is outside `
-      + `valid range [0, 1].`
-    );
+    throw new RangeError(`${instrumentType}: taxRate must be from 0 to 1`);
   }
 
   // EEE instruments must have taxRate = 0
@@ -145,9 +115,18 @@ export function validatePostTaxResult(result, nominalRate, instrumentType) {
  * @returns {number} Effective tax rate as a decimal (tax / totalGains)
  */
 export function estimateEquityLTCGTaxRate(nominalRate, monthlySIP, holdingYears) {
-  const safeSIP = Number(monthlySIP) || 10000;
-  const safeYears = Number(holdingYears) || 3;
-  if (safeSIP <= 0 || safeYears <= 0 || nominalRate <= 0) return 0.125 * 1.04;
+  if (!Number.isFinite(nominalRate) || nominalRate < 0 || nominalRate > 1) {
+    throw new RangeError('nominalRate must be an explicit decimal from 0 to 1');
+  }
+  if (!Number.isFinite(monthlySIP) || monthlySIP < 0) {
+    throw new TypeError('monthlySIP must be an explicit non-negative number');
+  }
+  if (!Number.isFinite(holdingYears) || holdingYears <= 0) {
+    throw new TypeError('holdingYears must be an explicit positive number');
+  }
+  if (nominalRate === 0 || monthlySIP === 0) return 0;
+  const safeSIP = monthlySIP;
+  const safeYears = holdingYears;
 
   const totalMonths = Math.round(safeYears * 12);
   const monthlyRate = toMonthlyRate(nominalRate, true);
@@ -224,17 +203,17 @@ function _calculateFDPostTax(nominalRate, marginalRate, monthlySIP, userAge, ins
 function _calculateEquityMFPostTax(nominalRate, holdingYears, monthlySIP, instrumentType) {
   const holdingMonths = holdingYears * 12;
   if (holdingMonths < 12) {
-    const stcgRate = isTestMode ? 0.20 : 0.20 * 1.04;
+    const stcgRate = 0.20 * 1.04;
     const postTax = nominalRate * (1 - stcgRate);
     return validatePostTaxResult({
       postTaxReturn: round4(postTax),
       effectiveYield: round4(postTax * 100),
-      taxType: isTestMode ? 'STCG 20% (held < 12 months)' : 'STCG 20.8% (with Cess)',
-      taxRate: isTestMode ? 0.20 : stcgRate,
+      taxType: 'STCG 20.8% (with Cess)',
+      taxRate: stcgRate,
     }, nominalRate, instrumentType);
   }
 
-  return _buildEquityLTCGPostTaxResult(nominalRate, monthlySIP, holdingYears, instrumentType, isTestMode, '');
+  return _buildEquityLTCGPostTaxResult(nominalRate, monthlySIP, holdingYears, instrumentType, '');
 }
 
 function _calculateSGBPostTax(nominalRate, marginalRate, holdingYears, isSgbRedeemedWithRBI) {
@@ -290,12 +269,12 @@ function _calculateGoldPostTax(nominalRate, marginalRate, holdingYears, instrume
     }, nominalRate, instrumentType);
   }
   const ltcgRate = 0.125;
-  const effectiveRate = isTestMode ? 0.125 : 0.125 * 1.04;
+  const effectiveRate = 0.125 * 1.04;
   const postTax = nominalRate * (1 - effectiveRate);
   return validatePostTaxResult({
     postTaxReturn: round4(postTax),
     effectiveYield: round4(postTax * 100),
-    taxType: isTestMode ? 'LTCG 12.5% (equity ETF, ≥12 months)' : `LTCG 12.5% + Cess (${isETF ? 'ETF' : 'Physical'}, ≥${isETF ? '12' : '24'} months)`,
+    taxType: `LTCG 12.5% + Cess (${isETF ? 'ETF' : 'Physical'}, ≥${isETF ? '12' : '24'} months)`,
     taxRate: ltcgRate,
   }, nominalRate, instrumentType);
 }
@@ -305,33 +284,31 @@ function _calculateHybridPostTax(nominalRate, marginalRate, holdingYears, monthl
   const holdingMonths = holdingYears * 12;
   if (isEquityClassified) {
     const ltcgRate = holdingMonths >= 12
-      ? (isTestMode ? 0.125 : estimateEquityLTCGTaxRate(nominalRate, monthlySIP, holdingYears))
-      : (isTestMode ? 0.20 : 0.20 * 1.04);
+      ? estimateEquityLTCGTaxRate(nominalRate, monthlySIP, holdingYears)
+      : 0.20 * 1.04;
     const postTax = nominalRate * (1 - ltcgRate);
     return validatePostTaxResult({
       postTaxReturn: round4(postTax),
       effectiveYield: round4(postTax * 100),
       taxType: holdingMonths >= 12
-        ? (isTestMode ? 'LTCG 12.5% (equity-classified hybrid)' : `LTCG with Exemption (effective ${(ltcgRate*100).toFixed(2)}%)`)
-        : (isTestMode ? 'STCG 20% (equity-classified hybrid)' : 'STCG 20.8% (equity-classified hybrid)'),
-      taxRate: isTestMode ? (holdingMonths >= 12 ? 0.125 : 0.20) : ltcgRate,
+        ? `LTCG with Exemption (effective ${(ltcgRate*100).toFixed(2)}%)`
+        : 'STCG 20.8% (equity-classified hybrid)',
+      taxRate: ltcgRate,
     }, nominalRate, instrumentType);
   } else {
     const isLTCG = holdingMonths > 24;
-    const effectiveTaxRate = isLTCG
-      ? (isTestMode ? 0.125 : 0.125 * 1.04)
-      : marginalRate;
+    const effectiveTaxRate = isLTCG ? 0.125 * 1.04 : marginalRate;
     const postTax = nominalRate * (1 - effectiveTaxRate);
 
     return validatePostTaxResult({
       postTaxReturn: round4(postTax),
       effectiveYield: round4(postTax * 100),
       taxType: isLTCG
-        ? (isTestMode ? 'LTCG 12.5% (hybrid 35%-65% equity, >24 months)' : 'LTCG 13% (hybrid 35%-65% equity, >24 months)')
+        ? 'LTCG 13% (hybrid 35%-65% equity, >24 months)'
         : `STCG Slab Rate (${(marginalRate*100).toFixed(0)}%, <=24 months)`,
-      taxRate: isTestMode ? (isLTCG ? 0.125 : marginalRate) : effectiveTaxRate,
+      taxRate: effectiveTaxRate,
       notes: isLTCG
-        ? (isTestMode ? 'Long-term hybrid taxation post Budget 2024: 12.5% flat (no indexation).' : 'Long-term hybrid taxation post Budget 2024: 12.5% flat + 4% cess (no indexation).')
+        ? 'Long-term hybrid taxation post Budget 2024: 12.5% flat + 4% cess (no indexation).'
         : 'Short-term hybrid gains taxed at marginal slab rate.',
     }, nominalRate, instrumentType);
   }
@@ -351,18 +328,21 @@ function _calculateHybridPostTax(nominalRate, marginalRate, holdingYears, monthl
  *                                     taxType, taxRate, notes }
  */
 export function calculatePostTaxReturn(
-  instrumentType, nominalRate, annualIncome, holdingYears = 3, regime = 'new', monthlySIP = 10000, userAge = 30, isSgbRedeemedWithRBI = true
+  instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource,
+  isSgbRedeemedWithRBI = true
 ) {
-  // Input guards
-  if (!Number.isFinite(nominalRate) || nominalRate < 0) nominalRate = 0;
-  if (!Number.isFinite(annualIncome) || annualIncome < 0) annualIncome = 0;
-  if (!Number.isFinite(holdingYears) || holdingYears < 0) holdingYears = 1;
+  if (typeof instrumentType !== 'string' || !instrumentType) throw new TypeError('instrumentType is required');
+  if (!Number.isFinite(nominalRate) || nominalRate < 0 || nominalRate > 1) throw new RangeError('nominalRate must be from 0 to 1');
+  if (!Number.isFinite(annualIncome) || annualIncome < 0) throw new TypeError('annualIncome must be an explicit non-negative number');
+  if (!Number.isFinite(holdingYears) || holdingYears <= 0) throw new TypeError('holdingYears must be an explicit positive number');
+  if (!['new', 'old'].includes(regime)) throw new TypeError('regime must be new or old');
+  if (!Number.isFinite(monthlySIP) || monthlySIP < 0) throw new TypeError('monthlySIP must be an explicit non-negative number');
+  if (!Number.isInteger(userAge) || userAge < 0 || userAge > 120) throw new TypeError('userAge must be an integer from 0 to 120');
+  if (!['salary', 'pension', 'family_pension', 'business', 'other'].includes(incomeSource)) {
+    throw new TypeError('incomeSource must be explicitly provided');
+  }
 
-  // Use getTaxSlab in test mode to maintain static test compatibility,
-  // and getEffectiveMarginalRate in production to capture true marginal tax drag (slab + surcharge + cess).
-  const marginalRate = isTestMode
-    ? getTaxSlab(annualIncome, regime) * (1 + CESS_RATE)
-    : getEffectiveMarginalRate(annualIncome, regime, {}, 'salary');
+  const marginalRate = getEffectiveMarginalRate(annualIncome, regime, {}, incomeSource);
 
   switch (instrumentType) {
     case 'SCSS':
@@ -370,7 +350,7 @@ export function calculatePostTaxReturn(
       return _calculateFDPostTax(nominalRate, marginalRate, monthlySIP, userAge, instrumentType);
 
     case 'ELSS':
-      return _buildEquityLTCGPostTaxResult(nominalRate, monthlySIP, holdingYears, 'ELSS', isTestMode, 'Lock-in 3 years. ');
+      return _buildEquityLTCGPostTaxResult(nominalRate, monthlySIP, holdingYears, 'ELSS', 'Lock-in 3 years. ');
 
     case 'Equity_MF':
     case 'ETF':
@@ -440,15 +420,7 @@ export function calculatePostTaxReturn(
       return _calculateHybridPostTax(nominalRate, marginalRate, holdingYears, monthlySIP, instrumentType);
 
     default:
-      console.warn(`[PostTax] Unknown instrument type: ${instrumentType}. Applying slab rate.`);
-      const postTax = nominalRate * (1 - marginalRate);
-      return validatePostTaxResult({
-        postTaxReturn: round4(postTax),
-        effectiveYield: round4(postTax * 100),
-        taxType: `Slab Rate (${(marginalRate*100).toFixed(0)}% — default)`,
-        taxRate: marginalRate,
-        notes: `Unknown instrument type "${instrumentType}". Defaulting to slab taxation.`,
-      }, nominalRate, instrumentType);
+      throw new RangeError(`Unsupported instrument type: ${instrumentType}`);
   }
 }
 

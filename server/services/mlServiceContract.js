@@ -4,7 +4,8 @@ const RISK_CATEGORIES = new Set([
   'Conservative', 'Conservative-Moderate', 'Moderate', 'Moderate-Aggressive', 'Aggressive',
 ]);
 const RISK_TOLERANCES = new Set(['Conservative', 'Moderate', 'Aggressive']);
-const GOAL_TYPES = new Set(['retirement', 'house purchase', 'education', 'wealth-building']);
+const INVESTMENT_GOALS = new Set(['Retirement', 'Wealth Growth', 'Tax Saving', 'Emergency Fund']);
+const FEATURE_SCHEMA_VERSION = 'recommendation-features-4.0.0';
 
 function finiteNumber(value) {
   const parsed = Number(value);
@@ -35,28 +36,32 @@ export function buildTracingHeaders(correlationId = null) {
 }
 
 export function buildPredictionRequest(profileData) {
-  const debt = profileData.existing_debt_emi_ratio_pct ?? profileData.existing_debt;
   const request = {
+    feature_schema_version: profileData.feature_schema_version,
     age: finiteNumber(profileData.age),
-    annual_income: finiteNumber(profileData.annual_income),
+    monthly_take_home: finiteNumber(profileData.monthly_take_home),
     monthly_savings: finiteNumber(profileData.monthly_savings),
-    risk_category: profileData.risk_category,
     liquid_savings: finiteNumber(profileData.liquid_savings),
-    existing_debt: finiteNumber(debt),
-    dependents: finiteNumber(profileData.dependents),
+    emi_burden_pct: finiteNumber(profileData.emi_burden_pct),
+    financial_dependents: finiteNumber(profileData.financial_dependents),
     emergency_fund_months: finiteNumber(profileData.emergency_fund_months),
     risk_tolerance: profileData.risk_tolerance,
-    goal_type: profileData.goal_type,
-    investment_horizon: finiteNumber(profileData.investment_horizon ?? 15),
+    investment_goals: Array.isArray(profileData.investment_goals) ? [...profileData.investment_goals] : null,
+    investment_horizon_years: finiteNumber(profileData.investment_horizon_years),
+    deployable_lump_sum: finiteNumber(profileData.deployable_lump_sum),
+    risk_capacity_score: finiteNumber(profileData.risk_capacity_score),
+    final_suitability_risk: profileData.final_suitability_risk,
   };
 
   const numbersValid = Object.entries(request)
-    .filter(([key]) => !['risk_category', 'risk_tolerance', 'goal_type'].includes(key))
+    .filter(([key]) => !['feature_schema_version', 'risk_tolerance', 'investment_goals', 'final_suitability_risk'].includes(key))
     .every(([, value]) => value !== null);
   if (!numbersValid
-    || !RISK_CATEGORIES.has(request.risk_category)
+    || request.feature_schema_version !== FEATURE_SCHEMA_VERSION
+    || !RISK_CATEGORIES.has(request.final_suitability_risk)
     || !RISK_TOLERANCES.has(request.risk_tolerance)
-    || !GOAL_TYPES.has(request.goal_type)) return null;
+    || !request.investment_goals?.length
+    || request.investment_goals.some(goal => !INVESTMENT_GOALS.has(goal))) return null;
   return request;
 }
 
@@ -67,13 +72,21 @@ export function normalizePredictionResponse(value) {
   if (!Object.values(value.confidence_scores).every(score => Number.isFinite(Number(score)))) return null;
   if (!Array.isArray(value.decision_path) || !value.decision_path.every(nonEmptyString)) return null;
   if (!nonEmptyString(value.model_version)) return null;
+  if (value.feature_schema_version !== FEATURE_SCHEMA_VERSION) return null;
   if (value.explanation !== null && value.explanation !== undefined && typeof value.explanation !== 'object') return null;
 
   return {
-    ...value,
+    primary: value.primary,
+    secondary: value.secondary,
+    tertiary: value.tertiary,
     confidence_scores: Object.fromEntries(
       Object.entries(value.confidence_scores).map(([key, score]) => [key, Number(score)]),
     ),
+    decision_path: [...value.decision_path],
+    explanation: value.explanation ?? null,
+    model_version: value.model_version,
+    feature_schema_version: value.feature_schema_version,
+    cited_chunk_ids: Array.isArray(value.cited_chunk_ids) ? [...value.cited_chunk_ids] : [],
     fallback: value.fallback === true,
   };
 }

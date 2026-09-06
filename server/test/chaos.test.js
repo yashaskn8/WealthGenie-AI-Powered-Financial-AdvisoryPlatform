@@ -58,6 +58,7 @@ import {
 } from '../config/redis.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
+import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
 
 const testJwtSecret = ['chaos', 'test', 'jwt', 'key'].join('-');
 process.env.JWT_SECRET = process.env.JWT_SECRET || testJwtSecret;
@@ -106,19 +107,14 @@ async function jsonFetch(url, options = {}) {
   return { response, body: text ? JSON.parse(text) : null };
 }
 
-const VALID_PROFILE_BODY = {
-  monthly_income: 80000,
+const VALID_PROFILE_BODY = canonicalProfilePayload({
+  monthlyTakeHome: 80000,
+  monthlySavings: 20000,
   age: 30,
-  monthly_savings: 20000,
-  regime: 'new',
-  investment_horizon: 15,
-  liquid_savings: 100000,
-  existing_debt: 0,
-  dependents: 0,
-  emergency_fund_months: 6,
-  risk_tolerance: 'Moderate',
-  goal_type: 'wealth-building',
-};
+  liquidSavings: 100000,
+  financialDependents: 0,
+  investmentHorizonYears: 15,
+});
 
 // Ensure DB is connected via helper
 async function ensureDb() {
@@ -297,7 +293,7 @@ test('Chaos: ML service timeout / failure returns rule-based recommendations', a
     console.log(`[CHAOS-3] Recommend: status=${recRes.status}, ml_fallback=${recBody?.ml_fallback}, model_version=${recBody?.model_version}`);
     assert.equal(recRes.status, 200, `Recommendation should succeed via fallback, got ${recRes.status}`);
     assert.equal(recBody.ml_fallback, true, 'Should fall back to rule-based recommendations after real ECONNREFUSED');
-    assert.equal(recBody.model_version, 'rule_fallback', 'Model version should be rule_fallback');
+    assert.equal(recBody.model_version, 'rule-fallback-4.0.0');
     assert.ok(recBody.instruments.length >= 1, 'Should have at least 1 instrument in fallback');
   });
 });
@@ -355,7 +351,7 @@ test('Chaos: Gemini & Groq both failing returns degraded static advisory', async
 
     console.log(`[CHAOS-4] Recommend: status=${recRes.status}, advisory_text prefix="${recBody?.advisory_text?.substring(0, 60)}..."`);
     assert.equal(recRes.status, 200);
-    assert.match(recBody.advisory_text, /Based on your profile/i,
+    assert.match(recBody.advisory_text, /Based on your approved profile/i,
       'Should fall back to static rule-based advisory text when both LLM APIs are unconfigured');
   });
 });

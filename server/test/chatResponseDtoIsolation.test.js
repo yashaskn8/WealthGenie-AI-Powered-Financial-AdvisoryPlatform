@@ -13,6 +13,7 @@ import User from '../models/User.js';
 import ConversationHistory from '../models/ConversationHistory.js';
 import { ProviderManager } from '../services/providerAbstraction.js';
 import { withServer, rawRequest } from '../test-utils/httpTestUtils.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 function buildApp() {
   const app = express();
@@ -32,14 +33,13 @@ describe('Chat Response DTO vs Audit Persistence Isolation (P0 #4 Bug Fix)', () 
   const mockProfile = {
     _id: '64b0f0000000000000000002',
     userId: mockUserId,
-    age: 32,
-    income: 150000,
-    annualIncome: 1800000,
-    savings: 500000,
-    riskCategory: 'Moderate',
-    taxRegime: 'new',
-    investmentHorizon: 15,
-    recommendedEquityAllocation: 60,
+    ...canonicalProfile({
+      age: 32,
+      monthlyTakeHome: 150000,
+      monthlySavings: 50000,
+      liquidSavings: 500000,
+      investmentHorizonYears: 15,
+    }),
   };
 
   const validToken = jwt.sign({ userId: mockUserId, email: 'isolation@example.com' }, JWT_SECRET, { expiresIn: '1h' });

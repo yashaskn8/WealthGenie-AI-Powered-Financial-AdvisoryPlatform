@@ -24,21 +24,11 @@ const CustomTooltip = ({ active, payload, label }) => {
 };
 
 const StepUpPlanner = ({ profile }) => {
-  const [baseSIP, setBaseSIP] = useState(profile?.monthly_savings || 12000);
+  const [baseSIP, setBaseSIP] = useState(profile.monthly_savings);
   const [stepUpPercent, setStepUpPercent] = useState(10);
-  const [years, setYears] = useState(profile?.investment_horizon || 15);
+  const [years, setYears] = useState(profile.investment_horizon_years);
   const [returnRate, setReturnRate] = useState(12);
   const [showDetails, setShowDetails] = useState(false);
-
-  const [prevMonthlySavings, setPrevMonthlySavings] = useState(profile?.monthly_savings);
-  const [prevHorizon, setPrevHorizon] = useState(profile?.investment_horizon);
-
-  if (profile?.monthly_savings !== prevMonthlySavings || profile?.investment_horizon !== prevHorizon) {
-    setPrevMonthlySavings(profile?.monthly_savings);
-    setPrevHorizon(profile?.investment_horizon);
-    setBaseSIP(profile?.monthly_savings || 12000);
-    setYears(profile?.investment_horizon || 15);
-  }
 
   // Safe numerical fallback during manual typing states
   const safeBaseSIP = Number(baseSIP) || 0;
@@ -49,7 +39,7 @@ const StepUpPlanner = ({ profile }) => {
   // Compute dynamic percentage fills for track bars
   const baseSipPct = Math.min(100, Math.max(0, ((Math.min(100000, Math.max(1000, safeBaseSIP)) - 1000) / 99000) * 100));
   const stepUpPct = Math.min(100, Math.max(0, (Math.min(50, Math.max(0, safeStepUpPercent)) / 50) * 100));
-  const yearsPct = Math.min(100, Math.max(0, ((Math.min(40, Math.max(1, safeYears)) - 1) / 39) * 100));
+  const yearsPct = Math.min(100, Math.max(0, ((Math.min(30, Math.max(1, safeYears)) - 1) / 29) * 100));
   const cagrPct = Math.min(100, Math.max(0, ((Math.min(30, Math.max(1, safeReturnRate)) - 1) / 29) * 100));
 
   const projections = useMemo(() => {
@@ -87,13 +77,13 @@ const StepUpPlanner = ({ profile }) => {
       >
         <div className="sup-page-badge">
           <TrendingUp size={12} />
-          <span>BOOSTER SAVINGS PLANNER</span>
+          <span>NON-RECOMMENDATION WHAT-IF CALCULATOR</span>
         </div>
         <h1 className="sup-page-title">
           Grow Your Monthly Savings <span className="title-gradient">(Step-Up SIP)</span>
         </h1>
         <p className="sup-page-subtitle">
-          Increase your savings slightly each year to build massive long-term wealth effortlessly.
+          Explore an explicitly hypothetical annual contribution increase and return assumption. This does not change your profile or authoritative portfolio.
         </p>
       </motion.div>
 
@@ -110,7 +100,7 @@ const StepUpPlanner = ({ profile }) => {
         <div className="onboard-text">
           <h4>How Step-Up SIP Multiplies Your Wealth</h4>
           <p>
-            A <strong>Step-Up SIP</strong> increases your monthly savings automatically by a small percentage (e.g., 10%) each year as your salary increases. This small annual adjustment compounds exponentially!
+            A <strong>Step-Up SIP</strong> models a chosen annual increase. WealthGenie does not assume your salary or savings capacity will rise; values above your declared ₹{Number(profile.monthly_savings).toLocaleString('en-IN')}/month capacity are scenario-only.
           </p>
         </div>
       </motion.div>
@@ -222,7 +212,7 @@ const StepUpPlanner = ({ profile }) => {
             {[
               { label: 'Flat (0%)', val: 0 },
               { label: '5% Increase', val: 5 },
-              { label: 'Recommended 10%', val: 10 }
+              { label: '10% scenario', val: 10 }
             ].map(preset => (
               <button
                 key={preset.val}
@@ -270,7 +260,7 @@ const StepUpPlanner = ({ profile }) => {
               value={Number(years) || 0} 
               onChange={e => setYears(Number(e.target.value))}
               min="1" 
-              max="40" 
+              max="30"
               step="1" 
               className="sup-slider slider-sky"
               style={{
@@ -279,7 +269,7 @@ const StepUpPlanner = ({ profile }) => {
             />
             <div className="sup-range-labels">
               <span>1 Year</span>
-              <span>40 Years</span>
+              <span>30 Years</span>
             </div>
           </div>
         </div>

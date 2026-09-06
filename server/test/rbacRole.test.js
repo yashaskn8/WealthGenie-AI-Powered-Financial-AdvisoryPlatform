@@ -12,6 +12,9 @@ import { withServer, jsonRequest } from '../test-utils/httpTestUtils.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { getMLPrediction } from '../services/mlClient.js';
 import { queryRAG } from '../services/ragClient.js';
+import { buildMlProfileInput } from '../services/recommendationProfile.js';
+import { assessSuitabilityRisk } from '../services/riskProfiler.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 process.env.JWT_SECRET = 'rbac-integration-test-secret';
 process.env.NODE_ENV = 'test';
@@ -120,7 +123,7 @@ test('PROOF 2: requireRole middleware enforces role constraints strictly', () =>
 // ==============================================================================
 // PROOF 3: POST /api/auth/register creates user with role: 'user' even if attacker sends role: 'admin'
 // ==============================================================================
-test('PROOF 3: POST /api/auth/register enforces default "user" role and ignores forged role parameter', async () => {
+test('PROOF 3: POST /api/auth/register rejects a forged role parameter', async () => {
   await withServer(buildAuthApp(), async (baseUrl) => {
     const uniqueEmail = `adversary-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@wealthgenie.com`;
     const registerPayload = {
@@ -136,22 +139,10 @@ test('PROOF 3: POST /api/auth/register enforces default "user" role and ignores 
       body: JSON.stringify(registerPayload),
     });
 
-    assert.equal(response.status, 201, `Register failed with ${response.status}: ${JSON.stringify(body)}`);
-    assert.ok(body.token);
-    assert.equal(body.user.role, 'user');
-    assert.equal(body.user.mobile, registerPayload.mobile);
-
-    // Decode token and verify role claim
-    const decoded = jwt.verify(body.token, process.env.JWT_SECRET);
-    assert.equal(decoded.role, 'user');
-
-    // Inspect database directly to ensure role was stored as 'user'
+    assert.equal(response.status, 400, JSON.stringify(body));
+    assert.equal(body.code, 'VALIDATION_ERROR');
     const dbUser = await User.findOne({ email: uniqueEmail }).lean();
-    assert.ok(dbUser);
-    assert.equal(dbUser.role, 'user');
-    assert.equal(dbUser.mobile, registerPayload.mobile);
-
-    await User.deleteOne({ email: uniqueEmail });
+    assert.equal(dbUser, null);
   });
 });
 
@@ -211,26 +202,19 @@ test('PROOF 5: mlClient and ragClient propagate X-Verified-User-Role downstream 
     if (url.includes('/rag/query')) {
       return { status: 200, data: { answer: 'RAG Answer', citations: [] } };
     }
-    return { status: 200, data: { primary: 'ETF', secondary: 'Debt_MF', tertiary: 'ELSS' } };
+    return { status: 200, data: {
+      primary: 'ETF', secondary: 'Debt_MF', tertiary: 'ELSS',
+      confidence_scores: { ETF: 0.7 }, decision_path: ['risk=Moderate'],
+      model_version: '4.0.0', feature_schema_version: 'recommendation-features-4.0.0',
+    } };
   };
 
   t.after(() => {
     axios.post = originalPost;
   });
 
-  const profileData = {
-    age: 35,
-    annual_income: 1200000,
-    monthly_savings: 30000,
-    risk_category: 'Moderate',
-    liquid_savings: 50000,
-    existing_debt: 0,
-    dependents: 1,
-    emergency_fund_months: 6,
-    risk_tolerance: 'Moderate',
-    goal_type: 'wealth-building',
-    investment_horizon: 10,
-  };
+  const profile = canonicalProfile({ age: 35, monthlySavings: 30000, liquidSavings: 50000 });
+  const profileData = buildMlProfileInput(profile, assessSuitabilityRisk(profile));
 
   // A. ML prediction with user role
   await getMLPrediction(profileData, 'corr-test-1', 'user-123', 'admin');

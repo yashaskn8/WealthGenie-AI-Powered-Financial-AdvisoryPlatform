@@ -66,7 +66,7 @@ def test_dataset_lineage_hash_reproducibility():
 def test_drift_detection_and_retrain_trigger(client):
     """
     STEP 1 VERIFICATION:
-    Feeds statistically shifted data (annual_income +4x shift),
+        Feeds statistically shifted data (monthly_take_home +4x shift),
     confirms PSI drift is flagged, retrain is triggered, and a new candidate
     version appears in the registry with is_active: false.
     """
@@ -75,11 +75,11 @@ def test_drift_detection_and_retrain_trigger(client):
     assert res_before.status_code == 200
     count_before = res_before.json()["count"]
 
-    # 2. Execute drift check with simulated distribution shift on annual_income
+    # 2. Execute drift check with simulated distribution shift on monthly_take_home
     payload = {
         "architecture": "RandomForest",
         "force_retrain": True,
-        "shift_feature": "annual_income",
+        "shift_feature": "monthly_take_home",
         "shift_multiplier": 4.5,
         "shift_offset": 500000.0,
         "n_samples": 300,
@@ -95,7 +95,7 @@ def test_drift_detection_and_retrain_trigger(client):
     assert drift_data["drift_detected"] is True
     assert drift_data["retrain_triggered"] is True
     assert drift_data["overall_verdict"] == "FAIL"
-    assert "annual_income" in drift_data["drifted_features"]
+    assert "monthly_take_home" in drift_data["drifted_features"]
     assert drift_data["max_psi"] >= 0.20
 
     candidate = drift_data["candidate_version"]
@@ -138,6 +138,9 @@ def test_promotion_gate_rejects_inferior_candidate(client):
     inferior_payload = {
         "model_architecture": "RandomForest",
         "artifact_path": active_rf["artifact_path"],  # valid file
+        "training_data_hash": active_rf["training_data_hash"],
+        "hyperparameters": active_rf["hyperparameters"],
+        "reference_distributions": active_rf["reference_distributions"],
         "metrics": inferior_metrics,
         "set_active": False,
         "notes": "Deliberately degraded candidate for promotion gate testing",
@@ -179,6 +182,9 @@ def test_promotion_gate_allows_valid_candidate(client):
     reg_payload = {
         "model_architecture": "RandomForest",
         "artifact_path": active_rf["artifact_path"],
+        "training_data_hash": active_rf["training_data_hash"],
+        "hyperparameters": active_rf["hyperparameters"],
+        "reference_distributions": active_rf["reference_distributions"],
         "metrics": valid_metrics,
         "set_active": False,
         "notes": "Genuinely superior candidate for promotion gate test",
@@ -225,18 +231,18 @@ def test_shadow_evaluation_mode(client):
 
     # 2. Send batch of real inference requests through /predict
     test_inputs = [
-        {"age": 25, "annual_income": 800000, "monthly_savings": 25000, "investment_horizon": 10,
-         "liquid_savings": 150000, "existing_debt": 5, "dependents": 0, "emergency_fund_months": 6,
-         "risk_tolerance": "Aggressive", "risk_category": "Aggressive", "goal_type": "wealth-building"},
-        {"age": 45, "annual_income": 2400000, "monthly_savings": 70000, "investment_horizon": 5,
-         "liquid_savings": 500000, "existing_debt": 20, "dependents": 2, "emergency_fund_months": 8,
-         "risk_tolerance": "Moderate", "risk_category": "Moderate", "goal_type": "retirement"},
-        {"age": 62, "annual_income": 1200000, "monthly_savings": 30000, "investment_horizon": 3,
-         "liquid_savings": 900000, "existing_debt": 0, "dependents": 1, "emergency_fund_months": 12,
-         "risk_tolerance": "Conservative", "risk_category": "Conservative", "goal_type": "retirement"},
-        {"age": 30, "annual_income": 1500000, "monthly_savings": 50000, "investment_horizon": 15,
-         "liquid_savings": 300000, "existing_debt": 10, "dependents": 1, "emergency_fund_months": 6,
-         "risk_tolerance": "Aggressive", "risk_category": "Moderate-Aggressive", "goal_type": "house purchase"},
+        {"feature_schema_version": "recommendation-features-4.0.0", "age": 25, "monthly_take_home": 100000, "monthly_savings": 25000, "investment_horizon_years": 10,
+         "liquid_savings": 150000, "emi_burden_pct": 5, "financial_dependents": 0, "emergency_fund_months": 6,
+         "risk_tolerance": "Aggressive", "investment_goals": ["Wealth Growth"], "deployable_lump_sum": 0, "risk_capacity_score": 75, "final_suitability_risk": "Moderate-Aggressive"},
+        {"feature_schema_version": "recommendation-features-4.0.0", "age": 45, "monthly_take_home": 200000, "monthly_savings": 70000, "investment_horizon_years": 5,
+         "liquid_savings": 500000, "emi_burden_pct": 20, "financial_dependents": 2, "emergency_fund_months": 8,
+         "risk_tolerance": "Moderate", "investment_goals": ["Retirement"], "deployable_lump_sum": 0, "risk_capacity_score": 55, "final_suitability_risk": "Moderate"},
+        {"feature_schema_version": "recommendation-features-4.0.0", "age": 62, "monthly_take_home": 100000, "monthly_savings": 30000, "investment_horizon_years": 3,
+         "liquid_savings": 900000, "emi_burden_pct": 0, "financial_dependents": 1, "emergency_fund_months": 12,
+         "risk_tolerance": "Conservative", "investment_goals": ["Retirement"], "deployable_lump_sum": 0, "risk_capacity_score": 35, "final_suitability_risk": "Conservative"},
+        {"feature_schema_version": "recommendation-features-4.0.0", "age": 30, "monthly_take_home": 125000, "monthly_savings": 50000, "investment_horizon_years": 15,
+         "liquid_savings": 300000, "emi_burden_pct": 10, "financial_dependents": 1, "emergency_fund_months": 6,
+         "risk_tolerance": "Aggressive", "investment_goals": ["Wealth Growth"], "deployable_lump_sum": 0, "risk_capacity_score": 75, "final_suitability_risk": "Moderate-Aggressive"},
     ]
 
     api_key = os.environ.get("ML_SERVICE_API_KEY", "wealthgenie_secret_api_key_2026")

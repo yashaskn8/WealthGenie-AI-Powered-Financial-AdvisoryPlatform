@@ -9,6 +9,7 @@ import Recommendation from '../models/Recommendation.js';
 import Goal from '../models/Goal.js';
 import User from '../models/User.js';
 import ConversationHistory from '../models/ConversationHistory.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 const mockUserId = '60d5ecb8b3b3a72d9c8e4a11';
 const mockSessionId = 'test-session-2pass';
@@ -22,13 +23,7 @@ const mockUser = {
 const mockProfile = {
   _id: '60d5ecb8b3b3a72d9c8e4a33',
   userId: mockUserId,
-  age: 30,
-  annualIncome: 1500000,
-  monthlySavings: 20000,
-  riskCategory: 'Moderate',
-  taxRegime: 'new',
-  investmentHorizon: 10,
-  recommendedEquityAllocation: 60,
+  ...canonicalProfile({ age: 30, monthlySavings: 20000 }),
 };
 
 describe('Phase 3: Two-Pass Tool-Grounded Chat Loop Tests', () => {

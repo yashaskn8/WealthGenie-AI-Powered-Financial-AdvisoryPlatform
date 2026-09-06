@@ -11,21 +11,17 @@ function hashProfile(profile) {
 }
 
 export async function generateAdvisory(userContext) {
-  const { age, annualIncome, monthlySavings, taxSlab, riskCategory, instruments, horizon, shapExplanation } = userContext;
+  const { profile, instruments, shapExplanation } = userContext;
   const cacheKey = `advisory:${hashProfile(userContext)}`;
 
   // Check Redis cache (1 hour TTL)
   const cached = await getCache(cacheKey);
   if (cached) return cached;
 
-  // Guard: ensure numeric fields are safe for toLocaleString/toFixed
-  const safeIncome = Number.isFinite(annualIncome) ? annualIncome : 0;
-  const safeSavings = Number.isFinite(monthlySavings) ? monthlySavings : 0;
-  const safeSlab = Number.isFinite(taxSlab) ? taxSlab : 0;
-  const safeHorizon = Number.isFinite(horizon) ? horizon : 15;
-  const safeAge = Number.isFinite(age) ? age : 30;
-
-  const instrumentList = (instruments || []).map(i => `${i.name || 'Unknown'} (${i.type || 'N/A'}) - post-tax return: ${i.postTaxReturn || 0}%`).join('\n  ');
+  if (!profile || !Number.isFinite(profile.monthlyTakeHome) || !Number.isFinite(profile.monthlySavings)) {
+    throw new TypeError('generateAdvisory requires canonical Financial Profile context');
+  }
+  const instrumentList = (instruments || []).map(i => `${i.name} (${i.type}) - nominal expected return: ${i.nominalReturn}% - allocation: ${(i.allocationWeight * 100).toFixed(1)}%`).join('\n  ');
 
   // Build SHAP context block if available
   let shapContext = '';
@@ -38,23 +34,28 @@ export async function generateAdvisory(userContext) {
 
   const prompt = `You are a certified Indian financial advisor. Based on the following investor profile, write a 3-paragraph advisory note (under 300 words total):
 
-Investor Profile:
-- Age: ${safeAge} years
-- Annual Income: ₹${safeIncome.toLocaleString('en-IN')}
-- Monthly Savings: ₹${safeSavings.toLocaleString('en-IN')}
-- Tax Slab: ${(safeSlab * 100).toFixed(0)}% marginal rate
-- Risk Category: ${riskCategory || 'Moderate'}
-- Investment Horizon: ${safeHorizon} years
+Investor Financial Profile (the complete and only approved personalization context):
+- Age: ${profile.age} years
+- Monthly take-home: ₹${profile.monthlyTakeHome.toLocaleString('en-IN')}
+- Monthly savings capacity: ₹${profile.monthlySavings.toLocaleString('en-IN')}
+- Stated risk tolerance: ${profile.riskTolerance}
+- Final suitability risk: ${profile.suitabilityRisk}
+- Investment horizon: ${profile.investmentHorizonYears} years
+- Emergency-fund coverage: ${profile.emergencyFundMonths} months
+- EMI burden: ${profile.emiBurdenPct}%
+- Financial dependents: ${profile.financialDependents}
+- Goals: ${profile.investmentGoals.join(', ')}
+- Deployable one-time lump sum: ₹${profile.deployableLumpSum.toLocaleString('en-IN')}
 
 Top 3 Recommended Instruments:
   ${instrumentList}
 ${shapContext}
 Instructions:
-Paragraph 1: Explain WHY these specific instruments suit this investor's profile (age, income, risk tolerance).
+Paragraph 1: Explain WHY these specific instruments suit this investor's approved profile and final suitability ceiling.
 Paragraph 2: Highlight 2-3 KEY RISKS the investor should be aware of.
 Paragraph 3: Provide ONE specific, actionable next step the investor should take immediately.
 
-Use simple English. Reference specific numbers from the profile. Do not use bullet points. Keep it warm and professional.`;
+Use simple English. Reference specific numbers from the profile. Do not infer annual/gross income, CTC, tax slab, deductions, property availability, family facts, or any missing financial fact. Returns are pre-tax nominal estimates, not personalized post-tax yields. Do not use bullet points. Keep it warm and professional.`;
 
   let text = '';
   let fallbackUsed = false;
@@ -129,14 +130,14 @@ Use simple English. Reference specific numbers from the profile. Do not use bull
   return result;
 }
 
-function getFallbackAdvisory({ age, riskCategory, instruments }) {
+function getFallbackAdvisory({ profile, instruments }) {
   const safeInstruments = Array.isArray(instruments) ? instruments : [];
   const topInst = safeInstruments[0]?.name || 'diversified instruments';
-  return `Based on your profile as a ${age}-year-old ${riskCategory} investor, ${topInst} aligns well with your financial goals. The recommended instruments balance growth potential with your risk tolerance, optimizing for post-tax returns under the current Indian tax regime.\n\nKey risks include market volatility affecting equity-linked instruments, interest rate changes impacting fixed-income returns, and inflation eroding purchasing power over your investment horizon. Diversification across the recommended instruments helps mitigate these risks.\n\nAs an immediate next step, consider starting a monthly SIP in your top-recommended instrument to benefit from rupee cost averaging and begin building your wealth systematically.`;
+  return `Based on your approved profile as a ${profile.age}-year-old investor with ${profile.suitabilityRisk} final suitability, ${topInst} aligns with your selected goals and ${profile.investmentHorizonYears}-year horizon. Expected returns shown are pre-tax nominal estimates because taxable income and deductions are not part of the Financial Profile.\n\nKey risks include market volatility, interest-rate changes, liquidity constraints, and inflation. The allocation is kept within your stated preference and measured capacity, but actual returns can differ materially from estimates.\n\nAs an immediate next step, review the proposed allocation and start only an amount within your ₹${profile.monthlySavings.toLocaleString('en-IN')} monthly savings capacity.`;
 }
 
 export async function getGoalAdvisory(message, profileContext) {
-  const systemPrompt = `You are WealthGenie, an AI financial advisor for Indian retail investors. The user's profile: Age ${profileContext.age}, Income INR ${profileContext.annualIncome}/yr, Risk: ${profileContext.riskCategory}. Answer concisely in 2-3 sentences. Only give financial advice relevant to Indian markets and tax laws.`;
+  const systemPrompt = `You are WealthGenie, an educational financial-planning assistant for Indian retail investors. Approved context: age ${profileContext.age}, monthly take-home INR ${profileContext.monthlyTakeHome}, monthly savings INR ${profileContext.monthlySavings}, final suitability ${profileContext.suitabilityRisk}, horizon ${profileContext.investmentHorizonYears} years. The custom goal name and target are planning inputs only and must not modify the Financial Profile or suitability. Do not infer gross income, CTC, tax slab, deductions, or missing family facts. Answer concisely in 2-3 sentences.`;
 
   const geminiKey = process.env.GEMINI_API_KEY;
   if (geminiKey) {

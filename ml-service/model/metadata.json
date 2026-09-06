@@ -1,161 +1,71 @@
 {
   "model_name": "RandomForest",
-  "git_commit_hash": "e5c286d",
-  "model_version": "3.0.0",
-  "dataset_version": "3.0.0",
-  "policy_config_version": "1.0.0",
-  "dataset_timestamp": "2026-07-23T19:28:42.559121+00:00",
-  "trained_at": "2026-07-23T19:28:42.559121+00:00",
-  "training_time_seconds": 38.21,
-  "test_accuracy": 0.9553,
-  "balanced_accuracy": 0.858,
-  "macro_f1": 0.8601,
-  "weighted_f1": 0.9558,
-  "matthews_correlation_coefficient": 0.9303,
-  "cohens_kappa": 0.9301,
-  "cross_validation_5fold": {
-    "cv_mean_accuracy": 0.953,
-    "cv_std_accuracy": 0.0023,
-    "cv_mean_macro_f1": 0.8575,
-    "cv_std_macro_f1": 0.0288,
-    "cv_mean_balanced_accuracy": 0.851,
-    "cv_std_balanced_accuracy": 0.0388
-  },
-  "calibration_diagnostics": {
-    "expected_calibration_error": 0.036,
-    "maximum_calibration_error": 0.2965,
-    "brier_score": 0.0119,
-    "brier_skill_score": 0.9857
-  },
-  "bootstrap_95ci": {
-    "accuracy": {
-      "mean": 0.9553,
-      "ci_lower": 0.9487,
-      "ci_upper": 0.961
-    },
-    "macro_f1": {
-      "mean": 0.8525,
-      "ci_lower": 0.7634,
-      "ci_upper": 0.9128
-    },
-    "balanced_accuracy": {
-      "mean": 0.858,
-      "ci_lower": 0.746,
-      "ci_upper": 0.9358
-    }
-  },
-  "baseline_accuracy": 0.2802,
-  "accuracy_delta_vs_legacy_heuristic": 0.675,
-  "confidence_threshold": 0.8362,
-  "confidence_threshold_version": "1.0.0",
-  "train_val_test_split": "60/20/20 stratified",
-  "n_samples": 20000,
-  "n_features": 16,
+  "git_commit_hash": "auto-trained-baseline",
+  "model_version": "4.0.0",
+  "dataset_version": "4.0.0",
+  "feature_schema_version": "recommendation-features-4.0.0",
   "feature_names": [
     "age",
-    "annual_income",
+    "monthly_take_home",
     "monthly_savings",
-    "investment_horizon",
+    "investment_horizon_years",
     "liquid_savings",
-    "existing_debt",
-    "dependents",
+    "emi_burden_pct",
+    "financial_dependents",
     "emergency_fund_months",
-    "risk_score",
-    "stated_tolerance_score",
+    "deployable_lump_sum",
+    "risk_capacity_score",
+    "risk_tolerance_encoded",
+    "final_suitability_risk_encoded",
     "savings_rate",
-    "debt_to_income_ratio",
-    "emergency_fund_adequacy_ratio",
-    "risk_capacity_vs_stated_tolerance_gap",
-    "horizon_adjusted_urgency_score",
-    "dependents_adjusted_burden_score"
+    "liquidity_months",
+    "goal_retirement",
+    "goal_wealth_growth",
+    "goal_tax_saving",
+    "goal_emergency_fund",
+    "emergency_fund_gap_months"
   ],
-  "class_counts": {
-    "Equity_MF": 5250,
-    "ELSS": 3843,
-    "ETF": 700,
-    "Debt_MF": 45,
-    "FD": 38,
-    "RBI_Bond": 10124
-  },
-  "class_percentages": {
-    "Equity_MF": 26.25,
-    "ELSS": 19.21,
-    "ETF": 3.5,
-    "Debt_MF": 0.22,
-    "FD": 0.19,
-    "RBI_Bond": 50.62
-  },
-  "confusion_matrix": [
-    [
-      6,
-      0,
-      0,
-      0,
-      0,
-      3
+  "n_features": 19,
+  "training_data_hash": "aad75b72a38c4d0ea5785daf356c0e5cae93c5dbac8b041cce80a46a762a5766",
+  "dataset_lineage": {
+    "generator_name": "prepare_synthetic_training_data",
+    "seed": 42,
+    "num_samples": 2000,
+    "feature_count": 19,
+    "class_count": 6,
+    "age_range": [
+      20.0,
+      75.0
     ],
-    [
-      0,
-      744,
-      0,
-      11,
-      0,
-      14
+    "monthly_take_home_range": [
+      20000.0,
+      500000.0
     ],
-    [
-      0,
-      0,
-      126,
-      12,
-      0,
-      2
+    "savings_rate_range": [
+      0.03,
+      0.7
     ],
-    [
-      0,
-      33,
-      24,
-      976,
-      0,
-      17
+    "investment_horizon_years_range": [
+      1.0,
+      30.0
     ],
-    [
-      0,
-      0,
-      0,
-      0,
-      5,
-      2
-    ],
-    [
-      2,
-      33,
-      18,
-      7,
-      1,
-      1964
+    "feature_schema_version": "recommendation-features-4.0.0",
+    "target_classes": [
+      "Equity_MF",
+      "ELSS",
+      "ETF",
+      "Debt_MF",
+      "FD",
+      "RBI_Bond"
     ]
-  ],
-  "performance_profile": {
-    "python_version": "3.12.3",
-    "platform": "Windows-11-10.0.26200-SP0",
-    "environment_hash": "2d94978357",
-    "model_size_bytes": 14209690,
-    "inference_latency_ms": {
-      "p50": 3.606,
-      "p95": 6.078,
-      "p99": 6.682
-    }
   },
-  "delta_note": "The accuracy delta measures agreement between the retrained ML model and the new NAV-derived target vs agreement with the legacy heuristic rule. It does NOT measure investment return improvement.",
-  "rigor_evaluation": {
-    "metric_interpretation": "Rule-Approximation Fidelity",
-    "note": "test_accuracy (0.9553) measures model fidelity in approximating the label_construction.py formula — NOT independent behavioral prediction. 100% of base features overlap with labeling inputs.",
-    "multi_model_independent_cfp_benchmark_accuracy": {
-      "RandomForest": 0.2526,
-      "PyTorch_FinancialMLP": 0.1750,
-      "FT_Transformer": 0.1583
-    },
-    "independent_benchmark_source": "CFP suitability benchmark (100-minus-age rule + stated tolerance score), zero formula overlap (0.00%) with training labeler",
-    "full_report": "model/rigor_evaluation_report.json"
-  }
+  "policy_config_version": "suitability-freeze-1.0.0",
+  "dataset_timestamp": "2026-09-06T18:35:20.082350+00:00",
+  "trained_at": "2026-09-06T18:35:20.082350+00:00",
+  "test_accuracy": 1.0,
+  "rule_approximation_fidelity": 1.0,
+  "balanced_accuracy": 1.0,
+  "macro_f1": 1.0,
+  "training_methodology": "deterministic synthetic approximation of the frozen suitability policy",
+  "metric_interpretation": "policy-approximation fidelity, not investment outcome accuracy"
 }

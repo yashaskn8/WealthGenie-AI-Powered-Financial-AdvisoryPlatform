@@ -15,6 +15,8 @@ test('PHASE 1.1 — Property-Based Adversarial Fuzzing of Tax Engine', async (t)
           section80D: fc.double({ min: 0, max: 150000, noNaN: true, noInfinity: true }),
           nps80CCD1B: fc.double({ min: 0, max: 100000, noNaN: true, noInfinity: true }),
           nps80CCD2: fc.double({ min: 0, max: 500000, noNaN: true, noInfinity: true }),
+          basicSalary: fc.double({ min: 0, max: 100000000, noNaN: true, noInfinity: true }),
+          isGovtEmployee: fc.boolean(),
           hra: fc.double({ min: 0, max: 1000000, noNaN: true, noInfinity: true }),
           homeLoanInterest: fc.double({ min: 0, max: 500000, noNaN: true, noInfinity: true }),
           savingsInterest: fc.double({ min: 0, max: 100000, noNaN: true, noInfinity: true }),
@@ -40,6 +42,7 @@ test('PHASE 1.1 — Property-Based Adversarial Fuzzing of Tax Engine', async (t)
         fc.record({
           section80C: fc.double({ min: 0, max: 150000, noNaN: true, noInfinity: true }),
           section80D: fc.double({ min: 0, max: 100000, noNaN: true, noInfinity: true }),
+          age: fc.integer({ min: 18, max: 95 }),
         }),
         (annualIncome, regime, deductions) => {
           const res = computeTax(annualIncome, regime, deductions, 'salary');
