@@ -380,6 +380,9 @@ const PeerComparisonPanel = ({ score, profile }) => {
           <span className="peer-vs-value peer-avg-value">N/A</span>
         </div>
       </div>
+      <div className="peer-delta-badge">
+        <ArrowUpRight size={14} /> Verified cohort benchmark unavailable
+      </div>
       <div className="peer-improvement">
         <Target size={16} color="#38bdf8" style={{ flexShrink: 0 }} />
         <span>Your profile-grounded score is available. A peer rank requires a verified, comparable cohort dataset.</span>
@@ -398,7 +401,7 @@ const ResolutionModal = ({ metric, metricData, onClose, onNavigate }) => {
       target: '6 months of essential expenses. Enter the amount only in a dedicated goal because monthly expenses are not an authorised Financial Profile input.',
       steps: [
         { action: 'Set an Emergency Fund goal', detail: 'Go to Goal Planner → New Goal → Emergency Fund.', cta: 'Go to Goal Planner', route: 'goal-planner' },
-        { action: 'Put it in easily accessible investments', detail: 'Liquid Mutual Funds and Bank FDs are best for emergency money — you can get your money back in 1–7 days.', cta: null },
+        { action: 'Review liquid options', detail: 'Use the server-ranked “Where to Invest” view to compare established access and liquidity terms; no product is selected in this score explanation.', cta: null },
         { action: 'Use your declared coverage', detail: metricData?.extra || 'Add your actual emergency-fund coverage to the Financial Profile; WealthGenie will not assume it.', cta: null },
       ],
     },
@@ -443,24 +446,37 @@ const HealthScoreScreen = ({ profile, onNavigate }) => {
   const [resolutionMetric, setResolutionMetric] = useState(null);
   const [retryKey, setRetryKey] = useState(0);
   const [healthRequest, setHealthRequest] = useState({ profileId: null, data: null, error: null });
+  const currentProfileId = profile?.profileId || null;
 
   useEffect(() => {
-    if (!profile?.profileId) return undefined;
+    if (!currentProfileId) return undefined;
     const controller = new AbortController();
-    api.getFinancialHealthScore(profile.profileId, { signal: controller.signal })
-      .then(data => setHealthRequest({ profileId: profile.profileId, data, error: null }))
+    api.getFinancialHealthScore(currentProfileId, { signal: controller.signal })
+      .then(data => {
+        const scoreValue = Number(data?.score);
+        const validSubScores = Array.isArray(data?.sub_scores) && data.sub_scores.every(metric => (
+          typeof metric?.label === 'string'
+          && (metric.value === null || (Number.isFinite(Number(metric.value)) && Number(metric.value) >= 0 && Number(metric.value) <= 100))
+        ));
+        if (!Number.isFinite(scoreValue) || scoreValue < 0 || scoreValue > 100 || !data?.grade || !validSubScores) {
+          throw new TypeError('The health service returned an incomplete score.');
+        }
+        setHealthRequest({ profileId: currentProfileId, data, error: null });
+      })
       .catch(error => {
-        if (error?.name !== 'AbortError') {
-          setHealthRequest({ profileId: profile.profileId, data: null, error: error?.message || 'Unable to load financial health score.' });
+        if (error?.code !== 'REQUEST_ABORTED') {
+          setHealthRequest({ profileId: currentProfileId, data: null, error: error?.message || 'Unable to load financial health score.' });
         }
       });
     return () => controller.abort();
-  }, [profile?.profileId, retryKey]);
+  }, [currentProfileId, retryKey]);
 
-  const isCurrentResponse = healthRequest.profileId === profile?.profileId;
+  const isCurrentResponse = healthRequest.profileId === currentProfileId;
   const healthData = isCurrentResponse ? healthRequest.data : null;
-  const healthError = isCurrentResponse ? healthRequest.error : null;
-  const score = Number(healthData?.score || 0);
+  const healthError = profile && !currentProfileId
+    ? 'Save the Financial Profile before loading its health score.'
+    : isCurrentResponse ? healthRequest.error : null;
+  const score = healthData ? Number(healthData.score) : 0;
   const grade = healthData?.grade || '';
   const color = healthData?.color || '#38bdf8';
   const subScores = (healthData?.sub_scores || []).map(metric => ({ ...metric, val: metric.value }));
@@ -633,21 +649,21 @@ const HealthScoreScreen = ({ profile, onNavigate }) => {
       {subScores.some(s => s.alert) && (
         <div className="glass-panel critical-action-panel">
           <div className="widget-title critical-widget-title">
-            <AlertTriangle size={20} color="#ef4444" /> CRITICAL ACTION REQUIRED
+            <AlertTriangle size={20} color="#ef4444" /> ATTENTION NEEDED
           </div>
           <div className="critical-items">
             {subScores.filter(s => s.alert).map((alertItem, idx) => (
               <div key={idx} className="critical-item">
                 <div className="critical-item-content">
                   <div className="critical-item-header">
-                    <strong>{alertItem.label} Shortfall</strong>
-                    <span className="critical-item-score">Score: {Math.round(alertItem.val)}/100</span>
+                    <strong>{alertItem.label}{Number.isFinite(alertItem.val) ? ' Shortfall' : ' Information Needed'}</strong>
+                    <span className="critical-item-score">{Number.isFinite(alertItem.val) ? `Score: ${Math.round(alertItem.val)}/100` : 'Not scored'}</span>
                   </div>
                   <div className="critical-item-desc">{alertItem.extra}</div>
                 </div>
                 <div className="critical-item-action">
                   <button className="btn-glass resolution-cta" onClick={() => setResolutionMetric(alertItem.label)}>
-                    VIEW RESOLUTION STEPS <ChevronRight size={14} />
+                    VIEW NEXT STEPS <ChevronRight size={14} />
                   </button>
                 </div>
               </div>

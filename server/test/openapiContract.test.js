@@ -120,6 +120,8 @@ test('OpenAPI preserves major runtime-required request fields', () => {
       'investment_goals', 'investment_horizon_years',
     ]],
     ['POST /api/recommend', ['profileId']],
+    ['POST /api/projection/stress-test', ['profileId', 'instrumentId', 'principal']],
+    ['POST /api/projection/allocation-split', ['monthlyInvestment', 'equityPct']],
     ['POST /api/goals/create', ['goal_name', 'target_amount', 'target_date', 'current_savings', 'profileId', 'priority']],
     ['POST /api/montecarlo/montecarlo', ['profileId', 'instrument', 'monthly_investment', 'years']],
     ['POST /api/portfolio/rebalance', [

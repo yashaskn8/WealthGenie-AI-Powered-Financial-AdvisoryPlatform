@@ -6,28 +6,28 @@
 
 export const INSTRUMENT_EXPLAINERS = {
   ppf: {
-    what: 'A government savings scheme where your money grows tax-free. The interest rate is guaranteed by the government, and you pay zero tax on the returns.',
-    risk_plain: 'Zero risk — your money is protected by the government.',
+    what: 'A long-term government savings scheme with an administered interest rate and tax treatment governed by current rules.',
+    risk_plain: 'Sovereign-backed principal, with inflation, liquidity and reinvestment risks still relevant.',
     lock_in_plain: '15-year term. You can take partial withdrawals after 7 years.',
-    who_for: 'Anyone who wants safe, guaranteed, tax-free growth over the long term.',
+    who_for: 'Eligible investors seeking a long-term government-backed savings allocation and able to accept restricted liquidity.',
     example: 'Invest ₹1,500/month for 15 years → approximately ₹4.9 lakhs (all tax-free).',
   },
   scss: {
-    what: 'A savings account at post offices and banks specifically for people aged 60 and above. The government guarantees the interest rate of 8.2% per year.',
-    risk_plain: 'Very low risk — your capital is fully protected by the government.',
+    what: 'A government-backed savings scheme offered through eligible post offices and banks for qualifying senior citizens. Its administered rate can change.',
+    risk_plain: 'Low credit risk, with inflation, liquidity and reinvestment risks still relevant.',
     lock_in_plain: '5-year term. You can exit early with a small penalty after 1 year.',
     who_for: 'Senior citizens who want safe, regular quarterly income.',
     example: 'Invest ₹1,200/month → earn approximately 8.2% per year, paid every quarter.',
   },
   pmvvy: {
-    what: 'A government-guaranteed pension scheme for senior citizens aged 60+. You invest a lump sum and receive a guaranteed pension every month.',
-    risk_plain: 'Very low risk — government guarantee on both principal and returns.',
+    what: 'A government-backed pension product for eligible senior citizens in which a lump sum funded a defined pension under the applicable scheme terms.',
+    risk_plain: 'Low credit risk under the scheme terms, with liquidity and inflation risks still relevant.',
     lock_in_plain: '10-year term. Premature exit allowed with a small penalty after 3 years.',
-    who_for: 'Senior citizens who want guaranteed monthly pension income.',
+    who_for: 'Eligible senior citizens comparing defined pension income with the scheme\'s liquidity constraints.',
     example: 'Invest ₹15 lakhs → receive approximately ₹9,250/month as pension for 10 years.',
   },
   fd: {
-    what: 'A fixed amount deposited in a bank for a fixed period at a guaranteed interest rate. Your deposits up to ₹5 lakhs are insured by the government.',
+    what: 'A fixed amount deposited with a bank for a selected term and contracted interest rate. Deposit insurance is subject to DICGC limits and conditions.',
     risk_plain: 'Very low — deposits up to ₹5L are insured by DICGC.',
     lock_in_plain: 'Flexible terms from 7 days to 10 years. Can break early with a small penalty.',
     who_for: 'Anyone who wants a safe, predictable return with easy access to money.',
@@ -121,8 +121,8 @@ export const INSTRUMENT_EXPLAINERS = {
 export const CARD_SUBTITLES = {
   ppf: 'Government savings — tax-free growth, 15yr term',
   scss: 'Post office savings for seniors — safe 8.2% income',
-  pmvvy: 'Government pension for seniors — guaranteed monthly income',
-  fd: 'Bank fixed deposit — guaranteed return, capital safe',
+  pmvvy: 'Government-backed pension product for eligible seniors',
+  fd: 'Bank fixed deposit — contracted rate, subject to bank and insurance limits',
   sgb: 'Government gold bonds — 8yr, interest + gold gains',
   gold_etf: 'Digital gold — tracks gold price, no physical holding',
   debt_mf: 'Bond-based fund — steadier returns than equity',

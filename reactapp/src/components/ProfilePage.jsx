@@ -180,7 +180,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
           <div className="profile-summary-badge">
             <div>
               <span className="summary-label">Take-Home</span>
-              <strong className="summary-value take-home">₹{Number(monthlyTakeHome || 0).toLocaleString('en-IN')}/mo</strong>
+              <strong className="summary-value take-home">{Number(monthlyTakeHome) > 0 ? `₹${Number(monthlyTakeHome).toLocaleString('en-IN')}/mo` : 'Not provided'}</strong>
             </div>
             <div>
               <span className="summary-label">Emergency Fund</span>

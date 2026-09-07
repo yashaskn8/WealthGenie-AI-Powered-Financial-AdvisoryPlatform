@@ -111,7 +111,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
   }, [recommendationMeta]);
 
   // Eligibility stats — goal-aware
-  const isEmergencyFundGoal = (userProfile?.investment_goals || [])[0] === 'Emergency Fund';
+  const isEmergencyFundGoal = (userProfile?.investment_goals || []).includes('Emergency Fund');
   const displayedCount = recommendations?.length || 0;
   const excludedInstruments = Array.isArray(recommendationMeta?.excluded_due_to_eligibility)
     ? recommendationMeta.excluded_due_to_eligibility
@@ -137,7 +137,10 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
     };
 
     // Filter out instruments with zero allocation (dropped by budget constraints)
-    const activeRecs = recommendations.filter(r => (r.monthly_allocation || 0) > 0);
+    const activeRecs = recommendations.filter((rec) => {
+      const monthlyAllocation = Number(rec?.monthly_allocation);
+      return Number.isFinite(monthlyAllocation) && monthlyAllocation > 0;
+    });
     if (activeRecs.length === 0) return {
       allocationDataOuter: [], tableData: [], performanceData: [], currentMonthly: 0, totalProjected: null
     };
@@ -167,7 +170,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
         fullName: rec.name,
         weight: 0, // calculated later
         ret: Number.isFinite(nominalReturn) ? `${nominalReturn.toFixed(1)}%` : '—',
-        risk: rec.riskLabel || rec.risk_level || 'Medium',
+        risk: rec.riskLabel || rec.risk_level || 'Unavailable',
         alloc: rec.monthly_allocation,
         current: (rec.monthly_allocation * 12).toLocaleString(),
         proj: Number.isFinite(projectedValue) ? projectedValue : null,
@@ -793,14 +796,14 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
           <div className="panel-card">
              <div className="panel-header">
                <span className="panel-title">
-                 {(userProfile?.investment_goals || [])[0] === 'Emergency Fund'
+                 {(userProfile?.investment_goals || []).includes('Emergency Fund')
                    ? 'Goal Achievement Timeline'
                    : 'Wealth Trajectory'}
                </span>
             </div>
 
             {(() => {
-              const isEF = (userProfile?.investment_goals || [])[0] === 'Emergency Fund';
+              const isEF = (userProfile?.investment_goals || []).includes('Emergency Fund');
 
               if (isEF) {
                 const projection = recommendationMeta?.dashboard_projection;
@@ -1162,7 +1165,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
             }}>
               <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14}}>
                 {(() => {
-                  const isEF = (userProfile?.investment_goals || [])[0] === 'Emergency Fund';
+                  const isEF = (userProfile?.investment_goals || []).includes('Emergency Fund');
                   const projection = recommendationMeta?.dashboard_projection;
                   const projectedValue = Number(projection?.total_projected);
                   const projectedMonth = Array.isArray(projection?.monthly_timeline) && projection.monthly_timeline.length > 0
@@ -1248,7 +1251,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                 return (
                   <div style={{display: 'flex', flexDirection: 'column', gap: 10}}>
                     <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-                      <span style={{fontSize: '0.72rem', color: '#94a3b8'}}>Avg Expected Return</span>
+                      <span style={{fontSize: '0.72rem', color: '#94a3b8'}}>Portfolio Nominal Assumption</span>
                       <span style={{fontSize: '0.82rem', fontWeight: 700, color: '#4ade80', fontVariantNumeric: 'tabular-nums'}}>{avgReturn !== null ? `${avgReturn}%` : 'N/A'}</span>
                     </div>
                     <div style={{height: 1, background: 'rgba(255,255,255,0.03)'}} />
@@ -1792,7 +1795,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
             SECTION 9: BROWSE BY INSTRUMENT TYPE / RISK LEVEL
             ═══════════════════════════════════════════════════════════ */}
         {recommendations && recommendations.length > 0 && (() => {
-          const isEmergencyFund = (userProfile?.investment_goals || [])[0] === 'Emergency Fund';
+          const isEmergencyFund = (userProfile?.investment_goals || []).includes('Emergency Fund');
 
           if (isEmergencyFund) {
             // FIX 6: Emergency Fund — Browse by Liquidity

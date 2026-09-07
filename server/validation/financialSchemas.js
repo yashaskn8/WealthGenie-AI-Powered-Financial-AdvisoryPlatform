@@ -68,11 +68,22 @@ export const personalizedProjectionSchema = Joi.object({
   years: Joi.array().items(Joi.number().integer().min(1).max(30)).min(1).max(10).unique().required(),
 }).unknown(false);
 
+export const stressScenarioSchema = Joi.object({
+  profileId: objectId.required(),
+  instrumentId: Joi.string().trim().min(1).max(50).required(),
+  principal: Joi.number().min(1000).max(10000000).required(),
+}).unknown(false);
+
 export const stepUpProjectionSchema = Joi.object({
   monthlyInvestment: Joi.number().greater(0).max(10000000).required(),
   annualReturnRate: Joi.number().greater(-1).max(1).required(),
   years: Joi.number().integer().min(1).max(50).required(),
   annualStepUpRate: Joi.number().min(0).max(1).required(),
+}).unknown(false);
+
+export const allocationSplitSchema = Joi.object({
+  monthlyInvestment: Joi.number().greater(0).max(10000000).required(),
+  equityPct: Joi.number().min(0).max(100).required(),
 }).unknown(false);
 
 export const projectionComparisonSchema = Joi.object({

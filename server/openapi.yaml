@@ -191,6 +191,14 @@ paths:
       x-csrf-protection: cookie-session
       requestBody: { $ref: '#/components/requestBodies/ProjectionComparison' }
       responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' } }
+  /api/projection/allocation-split:
+    post:
+      operationId: calculateAllocationSplit
+      tags: [Projections]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      x-csrf-protection: cookie-session
+      requestBody: { $ref: '#/components/requestBodies/AllocationSplit' }
+      responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' } }
   /api/projection/custom-portfolio:
     post:
       operationId: createCustomPortfolioProjection
@@ -199,6 +207,14 @@ paths:
       x-csrf-protection: cookie-session
       requestBody: { $ref: '#/components/requestBodies/CustomPortfolioProjection' }
       responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' } }
+  /api/projection/stress-test:
+    post:
+      operationId: runInstrumentStressTest
+      tags: [Projections]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      x-csrf-protection: cookie-session
+      requestBody: { $ref: '#/components/requestBodies/StressScenario' }
+      responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '409': { $ref: '#/components/responses/Conflict' } }
   /api/projection/step-up:
     post:
       operationId: calculateStepUpProjection
@@ -372,7 +388,9 @@ components:
     RankInstruments: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RankInstrumentsRequest' } } } }
     Projection: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectionRequest' } } } }
     ProjectionComparison: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ProjectionComparisonRequest' } } } }
+    AllocationSplit: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/AllocationSplitRequest' } } } }
     CustomPortfolioProjection: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/CustomPortfolioProjectionRequest' } } } }
+    StressScenario: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/StressScenarioRequest' } } } }
     StepUpProjection: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/StepUpProjectionRequest' } } } }
     Xirr: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/XirrRequest' } } } }
     MonteCarlo: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/MonteCarloRequest' } } } }
@@ -493,8 +511,10 @@ components:
     RankInstrumentsRequest: { type: object, additionalProperties: false, required: [profileId, parentInstrumentId], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, parentInstrumentId: { type: string, maxLength: 50 } } }
     ProjectionRequest: { type: object, additionalProperties: false, required: [profileId, instruments, monthly_investment, years], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, instruments: { type: array, minItems: 1, maxItems: 10, items: { type: string, maxLength: 50 } }, monthly_investment: { type: number, exclusiveMinimum: 0, maximum: 10000000 }, years: { type: array, minItems: 1, maxItems: 10, uniqueItems: true, items: { type: integer, minimum: 1, maximum: 30 } } } }
     ProjectionComparisonRequest: { type: object, additionalProperties: false, required: [monthlyInvestment, annualReturnRate, benchmarkRate, inflationRate, years], properties: { monthlyInvestment: { type: number, exclusiveMinimum: 0, maximum: 10000000 }, annualReturnRate: { type: number, exclusiveMinimum: -1, maximum: 1 }, benchmarkRate: { type: number, exclusiveMinimum: -1, maximum: 1 }, inflationRate: { type: number, minimum: 0, maximum: 1 }, years: { type: integer, minimum: 1, maximum: 50 } } }
+    AllocationSplitRequest: { type: object, additionalProperties: false, required: [monthlyInvestment, equityPct], properties: { monthlyInvestment: { type: number, exclusiveMinimum: 0, maximum: 10000000 }, equityPct: { type: number, minimum: 0, maximum: 100 } } }
     PortfolioWeights: { type: object, minProperties: 1, maxProperties: 30, additionalProperties: { type: number, minimum: 0, maximum: 1 }, description: Weights must sum to exactly 1. }
     CustomPortfolioProjectionRequest: { type: object, additionalProperties: false, required: [profileId, allocations, years], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, allocations: { $ref: '#/components/schemas/PortfolioWeights' }, years: { type: integer, minimum: 1, maximum: 30 } } }
+    StressScenarioRequest: { type: object, additionalProperties: false, required: [profileId, instrumentId, principal], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, instrumentId: { type: string, minLength: 1, maxLength: 50 }, principal: { type: number, minimum: 1000, maximum: 10000000 } } }
     StepUpProjectionRequest: { type: object, additionalProperties: false, required: [monthlyInvestment, annualReturnRate, years, annualStepUpRate], properties: { monthlyInvestment: { type: number, exclusiveMinimum: 0, maximum: 10000000 }, annualReturnRate: { type: number, exclusiveMinimum: -1, maximum: 1 }, years: { type: integer, minimum: 1, maximum: 50 }, annualStepUpRate: { type: number, minimum: 0, maximum: 1 } } }
     XirrRequest:
       oneOf:

@@ -130,6 +130,64 @@ describe('frontend API contracts', () => {
     });
   });
 
+  it('runs stress scenarios against the authoritative profile and recommendation instrument', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      calculation_classification: 'NON_RECOMMENDATION_STRESS_WHAT_IF',
+      scenarios: [],
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.runInstrumentStressTest(
+      '64b000000000000000000001',
+      'Index_MF',
+      250000,
+    );
+
+    expect(fetchMock.mock.calls[0][0]).toMatch(/\/api\/projection\/stress-test$/);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      profileId: '64b000000000000000000001',
+      instrumentId: 'Index_MF',
+      principal: 250000,
+    });
+  });
+
+  it('routes allocation what-if arithmetic through the server', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      calculation_classification: 'NON_RECOMMENDATION_ALLOCATION_WHAT_IF',
+      equityAmount: 7500,
+      debtAmount: 2500,
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.calculateAllocationSplit(10000, 75);
+
+    expect(fetchMock.mock.calls[0][0]).toMatch(/\/api\/projection\/allocation-split$/);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+      monthlyInvestment: 10000,
+      equityPct: 75,
+    });
+  });
+
+  it('loads and simulates macro-regime context through its separate server endpoints', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ key: 'normal', tilts: {} }))
+      .mockResolvedValueOnce(jsonResponse({
+        calculation_classification: 'NON_RECOMMENDATION_MACRO_WHAT_IF',
+        adjustedWeights: { Index_MF: 1 },
+      }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.getCurrentMacroRegime();
+    await api.simulateMacroRegimeAdjustment({ Index_MF: 1 }, 'normal');
+
+    expect(fetchMock.mock.calls[0][0]).toMatch(/\/api\/regime\/current$/);
+    expect(fetchMock.mock.calls[1][0]).toMatch(/\/api\/regime\/adjust$/);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
+      baseWeights: { Index_MF: 1 },
+      regimeKey: 'normal',
+    });
+  });
+
   it('adds a correlation ID and does not retry failed mutations', async () => {
     const fetchMock = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
     vi.stubGlobal('fetch', fetchMock);

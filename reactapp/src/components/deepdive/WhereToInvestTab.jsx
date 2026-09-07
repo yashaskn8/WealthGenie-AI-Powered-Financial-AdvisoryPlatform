@@ -4,12 +4,12 @@ import * as api from '../../services/api';
 import SebiDisclaimer from '../SebiDisclaimer';
 
 const RISK_LEVELS = [
-  { label: 'Low', color: '#22c55e', desc: 'Capital is safe. Government-guaranteed or DICGC-insured. Virtually zero chance of loss.' },
-  { label: 'Low to Moderate', color: '#84cc16', desc: 'Mostly safe with minor NAV fluctuations. Best for 1–3 year parking of surplus.' },
-  { label: 'Moderate', color: '#eab308', desc: 'Price volatility present. Capital may dip temporarily. Suitable for 3+ year horizon.' },
-  { label: 'Moderately High', color: '#f97316', desc: 'Significant short-term volatility. Requires 5+ year commitment for reliable returns.' },
-  { label: 'High', color: '#ef4444', desc: 'Substantial market risk. 20–30% drawdowns possible. Requires 7+ year horizon.' },
-  { label: 'Very High', color: '#dc2626', desc: 'Maximum volatility. 40%+ drawdowns possible. Only for 10+ year aggressive investors.' },
+  { label: 'Low', color: '#22c55e', desc: 'Lower relative risk. Any guarantee or insurance depends on the specific product terms.' },
+  { label: 'Low to Moderate', color: '#84cc16', desc: 'Limited price fluctuation may occur; review the product-specific liquidity and credit terms.' },
+  { label: 'Moderate', color: '#eab308', desc: 'Market-price volatility is present and capital value can decline.' },
+  { label: 'Moderately High', color: '#f97316', desc: 'Meaningful short-term volatility and loss risk are possible.' },
+  { label: 'High', color: '#ef4444', desc: 'Substantial market risk and drawdowns are possible; suitability is profile-dependent.' },
+  { label: 'Very High', color: '#dc2626', desc: 'The highest catalog risk tier; large and prolonged losses are possible.' },
 ];
 
 // Human-readable labels for sub-category tabs (professional typography)
@@ -82,12 +82,51 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
   const subKeys = subCategoryMap ? Object.keys(subCategoryMap) : [];
 
   const [activeSubTab, setActiveSubTab] = useState(subKeys[0] || null);
-  const [regimeApplied, setRegimeApplied] = useState(false);
+  const [regimePreview, setRegimePreview] = useState(null);
+  const [regimePreviewError, setRegimePreviewError] = useState(null);
+  const [regimePreviewLoading, setRegimePreviewLoading] = useState(false);
+  const [activeRegime, setActiveRegime] = useState(null);
   const [sortBy, setSortBy] = useState('score');
 
-  // This shell remains available for an explicitly server-supplied regime
-  // simulation. It never creates or applies a local recommendation tilt.
-  const activeRegime = rankingResult.catalog?.activeRegime || null;
+  useEffect(() => {
+    const controller = new AbortController();
+    api.getCurrentMacroRegime({ signal: controller.signal })
+      .then(result => setActiveRegime(result))
+      .catch(error => {
+        if (error?.code !== 'REQUEST_ABORTED') setActiveRegime(null);
+      });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    setRegimePreview(null);
+    setRegimePreviewError(null);
+  }, [parentInstrumentId]);
+
+  const toggleRegimePreview = async () => {
+    if (regimePreview) {
+      setRegimePreview(null);
+      return;
+    }
+    if (!activeRegime?.key || !parentInstrumentId) {
+      setRegimePreviewError('Macro context or instrument identifier is unavailable.');
+      return;
+    }
+    try {
+      setRegimePreviewLoading(true);
+      setRegimePreviewError(null);
+      const result = await api.simulateMacroRegimeAdjustment(
+        { [parentInstrumentId]: 1 },
+        activeRegime.key,
+      );
+      setRegimePreview(result);
+    } catch (error) {
+      setRegimePreview(null);
+      setRegimePreviewError(error.message || 'Macro tilt preview is unavailable.');
+    } finally {
+      setRegimePreviewLoading(false);
+    }
+  };
 
   useEffect(() => {
     const controller = new AbortController();
@@ -228,12 +267,13 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
               {activeRegime.disclaimer}
             </span>
             <button
-              onClick={() => setRegimeApplied(!regimeApplied)}
+              onClick={toggleRegimePreview}
+              disabled={regimePreviewLoading}
               style={{
                 padding: '6px 14px',
                 borderRadius: '6px',
                 border: 'none',
-                background: regimeApplied ? '#22c55e' : activeRegime.color,
+                background: regimePreview ? '#22c55e' : activeRegime.color,
                 color: '#020617',
                 fontSize: '0.75rem',
                 fontWeight: '700',
@@ -245,9 +285,15 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
               }}
             >
               <Activity size={14} />
-              {regimeApplied ? 'Regime Tilt Applied ✓' : 'Simulate Portfolio Auto-Adjustment'}
+              {regimePreviewLoading ? 'Running Server Preview…' : regimePreview ? 'Tilt Preview Ready ✓' : 'Run Non-Recommendation Tilt Preview'}
             </button>
           </div>
+          {regimePreview && (
+            <p style={{ fontSize: '0.72rem', color: '#94a3b8', margin: '10px 0 0' }}>
+              Server preview generated {regimePreview.explanations?.length ?? 0} contextual tilt{regimePreview.explanations?.length === 1 ? '' : 's'}. It does not change your recommendation or execute trades.
+            </p>
+          )}
+          {regimePreviewError && <p role="alert" style={{ fontSize: '0.72rem', color: '#fca5a5', margin: '10px 0 0' }}>{regimePreviewError}</p>}
         </div>
       )}
 

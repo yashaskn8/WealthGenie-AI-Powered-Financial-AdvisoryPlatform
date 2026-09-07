@@ -57,6 +57,23 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
         incomeSource,
         explicitInflationRate / 100,
       );
+      const requiredResultFields = [
+        'effectiveTaxPercent', 'postTaxGain', 'taxDragWealth', 'taxDragCAGR',
+        'totalInvested', 'nominalReturnPercent', 'postTaxReturnPercent', 'realReturnPercent',
+      ];
+      if (!Array.isArray(data?.results) || data.results.length !== recommendations.length
+          || data.results.some(result => !result?.taxType || requiredResultFields.some(
+            field => !Number.isFinite(Number(result[field])),
+          ))) {
+        throw new TypeError('The tax service returned an incomplete instrument analysis.');
+      }
+      const requiredSummaryFields = [
+        'totalTaxDrag', 'keptPerThousand', 'erodedPerThousand',
+        'retentionEfficiencyPercent', 'maxTaxRate',
+      ];
+      if (requiredSummaryFields.some(field => !Number.isFinite(Number(data?.summary?.[field])))) {
+        throw new TypeError('The tax service returned an incomplete portfolio summary.');
+      }
       setBackendPostTaxData(data);
     } catch (requestError) {
       setError(requestError?.message || 'Authoritative post-tax analysis is unavailable.');
@@ -87,14 +104,14 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
     });
   }, [recommendations, backendPostTaxData]);
 
-  const totalTaxDragRupees = backendPostTaxData?.summary?.totalTaxDrag ?? 0;
-  const keptAmount = backendPostTaxData?.summary?.keptPerThousand ?? 0;
-  const erodedAmount = backendPostTaxData?.summary?.erodedPerThousand ?? 0;
-  const efficiencyPercent = backendPostTaxData?.summary?.retentionEfficiencyPercent ?? 0;
-  const marginalRate = backendPostTaxData?.summary?.maxTaxRate ?? 0;
+  const totalTaxDragRupees = backendPostTaxData?.summary?.totalTaxDrag ?? null;
+  const keptAmount = backendPostTaxData?.summary?.keptPerThousand ?? null;
+  const erodedAmount = backendPostTaxData?.summary?.erodedPerThousand ?? null;
+  const efficiencyPercent = backendPostTaxData?.summary?.retentionEfficiencyPercent ?? null;
+  const marginalRate = backendPostTaxData?.summary?.maxTaxRate ?? null;
 
   const strokeDashoffset = useMemo(() => {
-    return 251.2 - (251.2 * efficiencyPercent) / 100;
+    return efficiencyPercent === null ? 251.2 : 251.2 - (251.2 * efficiencyPercent) / 100;
   }, [efficiencyPercent]);
 
   const actionableInsights = (backendPostTaxData?.insights || []).map(insight => ({
@@ -126,7 +143,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
   };
 
   const getTaxBadgeClass = (taxType) => {
-    const t = taxType.toLowerCase();
+    const t = String(taxType || '').toLowerCase();
     if (t.includes('eee') || t.includes('free')) return 'pta-badge--green';
     if (t.includes('slab')) return 'pta-badge--red';
     if (t.includes('equity') || t.includes('elss') || t.includes('gains') || t.includes('capital')) return 'pta-badge--purple';
@@ -156,7 +173,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
           Tax & Inflation Engine
         </div>
         <h1 className="pta-header-title">
-          Actual Returns Summary
+          Modeled Post-Tax Returns Summary
         </h1>
         <p className="pta-header-subtitle">
           Your true growth after Indian tax laws and your explicit inflation assumption
@@ -249,7 +266,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
           </div>
           <div className="pta-kpi-content">
             <span className="pta-kpi-label">Max Tax Bracket</span>
-            <span className="pta-kpi-value">{(marginalRate * 100).toFixed(0)}%</span>
+            <span className="pta-kpi-value">{marginalRate === null ? 'Not calculated' : `${(marginalRate * 100).toFixed(0)}%`}</span>
           </div>
         </div>
 
@@ -441,7 +458,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
               </svg>
 
               <div className="pta-donut-center">
-                <span className="pta-donut-pct">{efficiencyPercent.toFixed(1)}%</span>
+                <span className="pta-donut-pct">{efficiencyPercent === null ? '—' : `${efficiencyPercent.toFixed(1)}%`}</span>
                 <span className="pta-donut-sub">RETAINED</span>
               </div>
 
@@ -452,11 +469,11 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
             <div className="pta-retention-metrics">
               <div className="pta-metric-pill pta-metric-pill--green">
                 <span className="pta-metric-label">You Keep</span>
-                <span className="pta-metric-value">₹{keptAmount}</span>
+                <span className="pta-metric-value">{keptAmount === null ? '—' : formatINR(keptAmount)}</span>
               </div>
               <div className="pta-metric-pill pta-metric-pill--rose">
                 <span className="pta-metric-label">Eroded</span>
-                <span className="pta-metric-value">₹{erodedAmount}</span>
+                <span className="pta-metric-value">{erodedAmount === null ? '—' : formatINR(erodedAmount)}</span>
               </div>
             </div>
             <p className="pta-retention-footnote">Per ₹1,000 of gross profits</p>
@@ -471,7 +488,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
               <div className="pta-erosion-content">
                 <h4 className="pta-erosion-title">Projected Tax Erosion</h4>
                 <p className="pta-erosion-text">
-                  Taxes will reduce your total projected savings by roughly <strong>{formatINR(totalTaxDragRupees)}</strong> over your investment timeline.
+                  The explicit tax model estimates a reduction of roughly <strong>{formatINR(totalTaxDragRupees)}</strong> in projected gains over this horizon.
                 </p>
               </div>
             </motion.div>

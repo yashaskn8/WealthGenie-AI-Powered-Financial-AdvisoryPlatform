@@ -10,7 +10,7 @@ import { INSTRUMENT_PARAMS, buildRateLookup, getNominalRate, getVolatility, toMo
 import { fetchIndexStatistics, fetchMutualFundNAVs, checkFDRateStaleness } from '../services/marketDataService.js';
 import { checkMLHealth, getMLPrediction, getRuleBasedFallback } from '../services/mlClient.js';
 import { queryRAG } from '../services/ragClient.js';
-import { computeCAGR, generatePortfolioProjection, generateProjectionComparison, generateProjections, lumpSumFV, realReturn, reverseSIPFromFV, sipFV, stepUpSipFV } from '../services/projectionEngine.js';
+import { computeCAGR, generateAllocationSplit, generatePortfolioProjection, generateProjectionComparison, generateProjections, lumpSumFV, realReturn, reverseSIPFromFV, sipFV, stepUpSipFV } from '../services/projectionEngine.js';
 import { calculatePostTaxReturn, calculatePostTaxReturnSafe } from '../services/postTaxCalculator.js';
 import { assessSuitabilityRisk, encodeRiskCategory, getRiskProfile } from '../services/riskProfiler.js';
 import { buildLlmFinancialContext, buildMlProfileInput } from '../services/recommendationProfile.js';
@@ -276,6 +276,8 @@ test('projectionEngine formulas are numerically stable and internally consistent
   assert.ok(comparison.investmentReal > comparison.benchmarkReal);
   assert.equal(comparison.assumptions.inflationRate, 0.06);
   assert.equal(comparison.return_basis, 'PRE_TAX_NOMINAL_WITH_EXPLICIT_INFLATION_VIEW');
+  assert.equal(comparison.illustrativePurchasePowerMilestones.length, 17);
+  assert.equal(comparison.purchasePowerMilestoneBasis, 'CURATED_ILLUSTRATIVE_THRESHOLDS_NOT_LIVE_PRICES');
   assert.throws(() => generateProjectionComparison({
     monthlyInvestment: 10000,
     annualReturnRate: 0.12,
@@ -283,6 +285,16 @@ test('projectionEngine formulas are numerically stable and internally consistent
     inflationRate: 0.06,
     years: 0,
   }), /years must be an explicit integer/);
+
+  const split = generateAllocationSplit({ monthlyInvestment: 15_001, equityPct: 62.5 });
+  assert.equal(split.equityPct, 62.5);
+  assert.equal(split.debtPct, 37.5);
+  assert.equal(split.equityAmount + split.debtAmount, 15_001);
+  assert.equal(split.calculation_classification, 'NON_RECOMMENDATION_ALLOCATION_WHAT_IF');
+  assert.throws(
+    () => generateAllocationSplit({ monthlyInvestment: 10_000, equityPct: 101 }),
+    /equityPct must be an explicit percentage/,
+  );
 });
 
 test('dashboard portfolio projection uses exact authorized weights and excludes property context', () => {

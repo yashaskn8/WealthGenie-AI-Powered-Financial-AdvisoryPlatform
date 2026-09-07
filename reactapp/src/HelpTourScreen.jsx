@@ -51,7 +51,7 @@ const HelpTourScreen = () => {
       term: 'QMC',
       fullName: 'Quasi-Monte Carlo',
       definition: 'A simulation method that uses highly uniform sequences (Halton sequences) instead of pure random numbers.',
-      learnMore: 'Standard Monte Carlo uses random numbers, which leave empty gaps and clusters. QMC uses deterministic sequences to cover the possibilities evenly, accelerating calculation convergence by 10x.'
+      learnMore: 'Standard Monte Carlo uses pseudo-random samples. QMC uses low-discrepancy sequences to cover the modeled input space more evenly; any convergence improvement depends on the problem and implementation.'
     },
     {
       term: 'SHAP',
@@ -139,7 +139,7 @@ const HelpTourScreen = () => {
       title: 'Strategy Dashboard',
       tag: 'Core Engine',
       desc: 'The core control center. Utilizes a multi-layered allocation engine to map your specific age and risk appetite to a mathematically optimal basket of assets.',
-      details: 'Actively computes 15-year projections based on expected returns. Drag the Investment Horizon and Risk Profile sliders to see real-time portfolio rebalancing.',
+      details: 'Displays server-generated projections and allocation assumptions for the saved Financial Profile. Open an instrument to inspect the projection basis and suitability details.',
       step: '01'
     },
     {
@@ -154,8 +154,8 @@ const HelpTourScreen = () => {
       icon: Activity, color: '#f59e0b', colorRgb: '245, 158, 11',
       title: 'Rebalancer & SIP Step-Up',
       tag: 'Active Tools',
-      desc: 'Markets drift. The Rebalancer lets you drag sliders to adjust risk vectors manually, calculating immediate shifts to your projections.',
-      details: 'The SIP Planner models how aggressively increasing your monthly contribution changes your outcome. Try the step-up calculator to see exponential compounding in action.',
+      desc: 'Markets drift. The Rebalancer lets you propose allocation changes while the server validates the complete portfolio and calculates the resulting projection.',
+      details: 'The SIP Planner sends your explicit contribution and step-up assumptions to the server so you can compare the modeled outcomes.',
       step: '03'
     },
     {

@@ -30,17 +30,18 @@ export const GoalForm = ({ onSubmitGoal, onCancel, loading }) => {
   const [targetAmount, setTargetAmount] = useState('');
   const [targetDate, setTargetDate] = useState('');
   const [currentSavings, setCurrentSavings] = useState('');
-  const [priority, setPriority] = useState('Medium');
+  const [priority, setPriority] = useState('');
 
   const [minDate] = useState(() => new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]);
 
   const handleSubmit = (e) => {
     e.preventDefault();
+    if (currentSavings === '' || !priority) return;
     onSubmitGoal({
       goalName: goalName === 'Custom' ? customName : goalName,
       targetAmount: Number(targetAmount),
       targetDate,
-      currentSavings: Number(currentSavings) || 0,
+      currentSavings: Number(currentSavings),
       priority,
     });
   };
@@ -243,12 +244,12 @@ export const GoalForm = ({ onSubmitGoal, onCancel, loading }) => {
           </p>
           <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: 16 }}>
             <div>
-              <label style={labelStyle}>Current Savings (₹)</label>
+              <label style={labelStyle}>Current Savings (₹ — enter 0 if none)</label>
               <input
                 data-testid="goal-current-savings"
                 type="number" placeholder="e.g. 100000" value={currentSavings}
                 onChange={e => setCurrentSavings(e.target.value)}
-                style={inputStyle} min="0"
+                style={inputStyle} min="0" required
               />
             </div>
             <div>
@@ -293,11 +294,11 @@ export const GoalForm = ({ onSubmitGoal, onCancel, loading }) => {
             <button 
               data-testid="goal-submit"
               type="submit" 
-              disabled={loading}
+              disabled={loading || currentSavings === '' || !priority}
               style={{
-                flex: 2, background: loading ? '#334155' : 'linear-gradient(135deg, #0ea5e9, #10b981)',
+                flex: 2, background: loading || currentSavings === '' || !priority ? '#334155' : 'linear-gradient(135deg, #0ea5e9, #10b981)',
                 border: 'none', borderRadius: 12, padding: '14px', color: '#fff',
-                fontWeight: 700, cursor: loading ? 'not-allowed' : 'pointer', fontSize: '1rem',
+                fontWeight: 700, cursor: loading || currentSavings === '' || !priority ? 'not-allowed' : 'pointer', fontSize: '1rem',
                 boxShadow: loading ? 'none' : '0 4px 15px rgba(6, 182, 212, 0.4)',
               }}
             >

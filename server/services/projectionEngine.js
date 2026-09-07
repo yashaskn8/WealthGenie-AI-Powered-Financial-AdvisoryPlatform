@@ -1,5 +1,25 @@
 import { toMonthlyRate } from './instrumentConstants.js';
 
+const ILLUSTRATIVE_PURCHASE_POWER_MILESTONES = Object.freeze([
+  { min: 20_000, icon: '🎧', label: 'Premium wireless earbuds', amount: '~₹20K' },
+  { min: 50_000, icon: '📱', label: 'Mid-range smartphone', amount: '~₹50K' },
+  { min: 85_000, icon: '🛵', label: 'Urban scooter', amount: '~₹85K' },
+  { min: 135_000, icon: '📱', label: 'Premium smartphone', amount: '~₹1.35L' },
+  { min: 250_000, icon: '✈️', label: 'International holiday for two', amount: '~₹2.5L' },
+  { min: 500_000, icon: '💻', label: 'Premium laptop and setup', amount: '~₹5L' },
+  { min: 900_000, icon: '🚗', label: 'Compact SUV', amount: '~₹9L' },
+  { min: 1_200_000, icon: '🎓', label: 'Four-year state-college education', amount: '~₹12L' },
+  { min: 1_800_000, icon: '🚙', label: 'Mid-size SUV', amount: '~₹18L' },
+  { min: 2_500_000, icon: '💍', label: 'Illustrative wedding budget', amount: '~₹25L' },
+  { min: 4_000_000, icon: '📚', label: 'Two-year postgraduate education', amount: '~₹40L' },
+  { min: 6_000_000, icon: '🚘', label: 'Premium SUV', amount: '~₹60L' },
+  { min: 8_000_000, icon: '🏠', label: 'Illustrative two-bedroom home budget', amount: '~₹80L' },
+  { min: 12_000_000, icon: '🏢', label: 'Illustrative metro-suburb home budget', amount: '~₹1.2Cr' },
+  { min: 25_000_000, icon: '🏙️', label: 'Illustrative premium metro home budget', amount: '~₹2.5Cr' },
+  { min: 50_000_000, icon: '🏝️', label: 'Illustrative financial-independence corpus', amount: '~₹5Cr' },
+  { min: 100_000_000, icon: '🌴', label: 'Illustrative early-retirement corpus', amount: '~₹10Cr' },
+]);
+
 /**
  * WealthGenie Projection Engine
  * Generates wealth projections using Lump Sum (compound interest) and SIP formulas.
@@ -179,8 +199,38 @@ export function generateProjectionComparison({
     inflationHalfLifeYears: inflationRate > 0
       ? Number((Math.log(2) / Math.log(1 + inflationRate)).toFixed(1))
       : null,
+    illustrativePurchasePowerMilestones: ILLUSTRATIVE_PURCHASE_POWER_MILESTONES,
+    purchasePowerMilestoneBasis: 'CURATED_ILLUSTRATIVE_THRESHOLDS_NOT_LIVE_PRICES',
     yearlyBreakdown: Object.freeze(yearlyBreakdown),
     normalizedChart: Object.freeze(normalizedChart),
+  });
+}
+
+/**
+ * Split an explicit monthly amount across equity and debt for a calculator UI.
+ * This is deliberately classified as a non-recommendation what-if: it does not
+ * infer suitability, products, returns, tax, or transaction costs.
+ */
+export function generateAllocationSplit({ monthlyInvestment, equityPct }) {
+  if (!Number.isFinite(monthlyInvestment) || monthlyInvestment <= 0) {
+    throw new TypeError('monthlyInvestment must be an explicit positive number');
+  }
+  if (!Number.isFinite(equityPct) || equityPct < 0 || equityPct > 100) {
+    throw new RangeError('equityPct must be an explicit percentage from 0 to 100');
+  }
+
+  const debtPct = Number((100 - equityPct).toFixed(4));
+  const equityAmount = Number((monthlyInvestment * equityPct / 100).toFixed(2));
+  const debtAmount = Number((monthlyInvestment - equityAmount).toFixed(2));
+
+  return Object.freeze({
+    calculation_classification: 'NON_RECOMMENDATION_ALLOCATION_WHAT_IF',
+    assumptions: Object.freeze({ monthlyInvestment, equityPct }),
+    monthlyInvestment,
+    equityPct,
+    debtPct,
+    equityAmount,
+    debtAmount,
   });
 }
 

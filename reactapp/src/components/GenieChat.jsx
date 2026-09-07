@@ -15,6 +15,11 @@ import {
   GenieFAB
 } from './GenieChatSubcomponents.jsx';
 
+function formatLakhs(value) {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? `₹${(numericValue / 100000).toFixed(1)}L` : '—';
+}
+
 // ── Main Component ────────────────────────────────────────────────
 const GenieChat = ({ profile, onNavigate }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -42,6 +47,8 @@ const GenieChat = ({ profile, onNavigate }) => {
   // Rebalancer Workspace parameters
   const [targetEquity, setTargetEquity] = useState(50);
   const [rebalanceMonthlySIP, setRebalanceMonthlySIP] = useState(profile?.monthly_savings ?? 1000);
+  const [allocationSplit, setAllocationSplit] = useState(null);
+  const [allocationSplitError, setAllocationSplitError] = useState(null);
 
   // SIP Step-Up parameters
   const [sipMonthlyAmount, setSipMonthlyAmount] = useState(profile?.monthly_savings ?? 1000);
@@ -70,6 +77,33 @@ const GenieChat = ({ profile, onNavigate }) => {
       }
     }
   }, [profile]);
+
+  useEffect(() => {
+    if (activeWorkspace !== 'rebalancer') return undefined;
+    let cancelled = false;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      setAllocationSplit(null);
+      setAllocationSplitError(null);
+      api.calculateAllocationSplit(
+        rebalanceMonthlySIP,
+        targetEquity,
+        { signal: controller.signal },
+      ).then(result => {
+        if (!cancelled) setAllocationSplit(result);
+      }).catch(requestError => {
+        if (!cancelled && requestError?.code !== 'REQUEST_ABORTED') {
+          setAllocationSplit(null);
+          setAllocationSplitError(requestError.message);
+        }
+      });
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [activeWorkspace, rebalanceMonthlySIP, targetEquity]);
 
   useEffect(() => {
     if (activeWorkspace !== 'sip-planner') return undefined;
@@ -361,8 +395,14 @@ const GenieChat = ({ profile, onNavigate }) => {
                   <div className="workspace-sandbox">
                     <div className="sandbox-intro">
                       <Sparkles size={14} className="text-sky" style={{ flexShrink: 0, marginTop: 2 }} />
-                      <span>Decide how to split your money between stocks and safer options. Drag the slider to see what works best for you!</span>
+                      <span>Explore an allocation split between stocks and safer options. This is a what-if calculator, not a suitability recommendation.</span>
                     </div>
+
+                    {!allocationSplit && (
+                      <div role="status" className="sandbox-intro">
+                        {allocationSplitError ? `Allocation service unavailable: ${allocationSplitError}` : 'Calculating with the authoritative allocation service...'}
+                      </div>
+                    )}
 
                     <div className="sandbox-group">
                       <div className="sandbox-label-row">
@@ -390,8 +430,8 @@ const GenieChat = ({ profile, onNavigate }) => {
                         <div className="vis-bar-track"><div className="vis-bar-fill fill-equity" style={{ width: `${targetEquity}%` }} /></div>
                       </div>
                       <div className="vis-bar-row">
-                        <span className="vis-bar-label">Debt ({100 - targetEquity}%)</span>
-                        <div className="vis-bar-track"><div className="vis-bar-fill fill-debt" style={{ width: `${100 - targetEquity}%` }} /></div>
+                        <span className="vis-bar-label">Debt ({allocationSplit ? `${allocationSplit.debtPct}%` : '—'})</span>
+                        <div className="vis-bar-track"><div className="vis-bar-fill fill-debt" style={{ width: `${allocationSplit?.debtPct ?? 0}%` }} /></div>
                       </div>
                     </div>
 
@@ -400,17 +440,17 @@ const GenieChat = ({ profile, onNavigate }) => {
                       <div className="inflow-title">Directed Monthly Allocation Plan:</div>
                       <div className="inflow-rows">
                         <div className="inflow-row">
-                           <span className="inflow-label">Goes into <JargonTooltip term="Equity">stocks</JargonTooltip>:</span>
-                          <span className="inflow-val text-sky">₹{Math.round(rebalanceMonthlySIP * targetEquity / 100).toLocaleString('en-IN')}</span>
+                          <span className="inflow-label">Goes into <JargonTooltip term="Equity">stocks</JargonTooltip>:</span>
+                          <span className="inflow-val text-sky">{formatFullINR(allocationSplit?.equityAmount)}</span>
                         </div>
                         <div className="inflow-row">
                           <span className="inflow-label">Goes into <JargonTooltip term="Debt Fund">safer funds</JargonTooltip>:</span>
-                          <span className="inflow-val text-purple">₹{Math.round(rebalanceMonthlySIP * (100 - targetEquity) / 100).toLocaleString('en-IN')}</span>
+                          <span className="inflow-val text-purple">{formatFullINR(allocationSplit?.debtAmount)}</span>
                         </div>
                       </div>
                       <div className="inflow-insight">
                         <ChevronRight size={14} className="insight-icon" style={{ flexShrink: 0, marginTop: 2 }} />
-                        <span>Tip: Putting ₹{Math.round(rebalanceMonthlySIP * (100 - targetEquity) / 100).toLocaleString('en-IN')} in safer funds helps protect your money. As your stocks grow, this balance keeps things steady — no extra charges or tax surprises.</span>
+                        <span>This view only splits the amount you entered. Product suitability, returns, taxes, fees, and rebalancing trades are intentionally not inferred here.</span>
                       </div>
                     </div>
                   </div>
@@ -418,15 +458,17 @@ const GenieChat = ({ profile, onNavigate }) => {
 
                 {activeWorkspace === 'sip-planner' && (() => {
                   const stdVal = {
-                    terminalValue: sipProjection?.flatFinal ?? 0,
-                    totalInvested: sipProjection?.flatInvested ?? 0,
+                    terminalValue: sipProjection?.flatFinal ?? null,
+                    totalInvested: sipProjection?.flatInvested ?? null,
                   };
                   const stepUpVal = {
-                    terminalValue: sipProjection?.stepUpFinal ?? 0,
-                    totalInvested: sipProjection?.stepUpInvested ?? 0,
+                    terminalValue: sipProjection?.stepUpFinal ?? null,
+                    totalInvested: sipProjection?.stepUpInvested ?? null,
                   };
-                  const diff = sipProjection?.additionalCorpus ?? 0;
-                  const pct = Math.round(sipProjection?.additionalPercent ?? 0);
+                  const diff = sipProjection?.additionalCorpus ?? null;
+                  const pct = Number.isFinite(Number(sipProjection?.additionalPercent))
+                    ? Math.round(Number(sipProjection.additionalPercent))
+                    : null;
 
                   return (
                     <div className="workspace-sandbox">
@@ -486,7 +528,7 @@ const GenieChat = ({ profile, onNavigate }) => {
                             <div className="comp-bar-fill-track">
                               <div className="comp-bar-fill bg-grey" style={{ width: '50%' }} />
                             </div>
-                            <span className="comp-val">₹{(stdVal.terminalValue / 100000).toFixed(1)}L</span>
+                            <span className="comp-val">{formatLakhs(stdVal.terminalValue)}</span>
                           </div>
                         </div>
 
@@ -494,9 +536,9 @@ const GenieChat = ({ profile, onNavigate }) => {
                           <div className="comp-bar-label-col">Step-Up</div>
                           <div className="comp-bar-val-col">
                             <div className="comp-bar-fill-track">
-                              <div className="comp-bar-fill bg-gradient-purple" style={{ width: `${Math.min(100, 50 * (1 + pct / 100))}%` }} />
+                              <div className="comp-bar-fill bg-gradient-purple" style={{ width: `${pct === null ? 0 : Math.min(100, 50 * (1 + pct / 100))}%` }} />
                             </div>
-                            <span className="comp-val text-purple font-bold">₹{(stepUpVal.terminalValue / 100000).toFixed(1)}L</span>
+                            <span className="comp-val text-purple font-bold">{formatLakhs(stepUpVal.terminalValue)}</span>
                           </div>
                         </div>
                       </div>
@@ -506,12 +548,12 @@ const GenieChat = ({ profile, onNavigate }) => {
                         <div className="boost-header">
                           <TrendingUp size={20} className="text-green" />
                           <div>
-                            <div className="boost-title">Your Extra Earnings: +{pct}% more!</div>
-                            <div className="boost-val">You could earn ₹{(diff / 100000).toFixed(1)}L extra</div>
+                            <div className="boost-title">Your Extra Projected Corpus: {pct === null ? '—' : `+${pct}%`}</div>
+                            <div className="boost-val">Projected difference: {formatLakhs(diff)}</div>
                           </div>
                         </div>
                         <div className="boost-details">
-                          You'd invest ₹{(stepUpVal.totalInvested / 100000).toFixed(1)}L total (instead of ₹{(stdVal.totalInvested / 100000).toFixed(1)}L without yearly increase). By adding just {sipStepUpPercent}% more each year, your money grows an extra ₹{diff.toLocaleString('en-IN')} — that's the power of small, steady increases!
+                          You'd invest {formatLakhs(stepUpVal.totalInvested)} total (instead of {formatLakhs(stdVal.totalInvested)} without yearly increase). With the explicit {sipStepUpPercent}% annual increase, the server projects an additional {formatFullINR(diff)} before tax and costs.
                         </div>
                       </div>
                     </div>

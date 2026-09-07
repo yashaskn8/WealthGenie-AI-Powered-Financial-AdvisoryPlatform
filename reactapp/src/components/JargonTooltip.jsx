@@ -129,7 +129,7 @@ export const JARGON = {
   },
   'Sovereign Guarantee': {
     short: 'Government-backed safety',
-    plain: 'The Government of India guarantees your money. Even if a bank fails, the government will pay you back. This is the safest possible guarantee — zero risk of losing money.',
+    plain: 'A sovereign guarantee is a Government of India obligation for the specific covered instrument. It does not remove inflation, liquidity, reinvestment, or market-price risk.',
   },
 
   // Fund Types
@@ -157,7 +157,7 @@ export const JARGON = {
   // Government Schemes
   'PPF': {
     short: 'Public Provident Fund',
-    plain: 'A 15-year government savings scheme with 7.1% tax-free returns. Completely safe (sovereign guarantee) and your earnings are never taxed. Best for risk-averse long-term savers.',
+    plain: 'A long-term government savings scheme whose administered interest rate and tax treatment are governed by current rules. It has a 15-year term and restricted liquidity.',
   },
   'NPS': {
     short: 'National Pension System',
@@ -169,7 +169,7 @@ export const JARGON = {
   },
   'SCSS': {
     short: 'Senior Citizens Savings Scheme',
-    plain: 'A government savings scheme exclusively for people aged 60+, offering 8.2% interest with quarterly payouts. Government guaranteed and very safe.',
+    plain: 'A government-backed savings scheme for eligible senior citizens with quarterly interest payments. The administered rate and eligibility rules can change.',
   },
 
   // Miscellaneous

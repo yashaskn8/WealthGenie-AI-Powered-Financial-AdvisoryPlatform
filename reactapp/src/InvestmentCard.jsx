@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ChevronDown, ChevronUp, ShieldAlert, ShieldCheck, Landmark } from 'lucide-react';
-import { formatINR } from './recommendationEngine';
+import { formatINR } from './utils/indianNumberFormat';
 import { TRUST_BADGES } from './investmentDatabase';
 import JargonTooltip from './components/JargonTooltip';
 
@@ -28,14 +28,14 @@ const RiskPill = ({ level }) => {
       case "Medium": return "risk-medium";
       case "High": return "risk-high";
       case "Very High": return "risk-very-high";
-      default: return "risk-medium";
+      default: return "";
     }
   };
 
   return (
     <div className={`risk-pill ${getRiskClass(level)}`}>
       <div className="risk-dot"></div>
-      {level} Risk
+      {level ? `${level} Risk` : 'Risk unavailable'}
     </div>
   );
 };
@@ -56,7 +56,7 @@ const InvestmentCard = ({ investment, horizon, onLearnMore }) => {
 
       <div className="card-metrics">
         <div className="metric-block">
-          <span className="metric-label"><JargonTooltip term="Expected Return">Expected Return</JargonTooltip></span>
+          <span className="metric-label"><JargonTooltip term="Expected Return">Pre-tax Nominal Range</JargonTooltip></span>
           <span className="metric-val">{expected_return_min}% – {expected_return_max}%</span>
         </div>
         <div className="metric-block">

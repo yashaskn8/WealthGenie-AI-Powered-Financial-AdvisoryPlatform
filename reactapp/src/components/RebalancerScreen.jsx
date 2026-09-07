@@ -14,19 +14,20 @@ const RISK_COLORS = {
 };
 
 const getRiskLabelString = (inv) => {
-  if (!inv) return 'Medium';
+  if (!inv) return 'Unavailable';
   if (inv.riskLabel) return inv.riskLabel;
   if (inv.risk_level) return inv.risk_level;
   if (typeof inv.risk === 'string') return inv.risk;
   const numToLabel = { 1: 'Very Low', 2: 'Low', 3: 'Medium', 4: 'High', 5: 'Very High' };
-  return numToLabel[inv.risk] || 'Medium';
+  return numToLabel[inv.risk] || 'Unavailable';
 };
 
 const AnimatedNumber = ({ value, duration = 800 }) => {
   const [displayValue, setDisplayValue] = useState(0);
+  const hasValue = Number.isFinite(Number(value));
 
   useEffect(() => {
-    const end = parseInt(value) || 0;
+    const end = hasValue ? parseInt(value) : 0;
     const startTime = performance.now();
     const startVal = 0;
 
@@ -46,20 +47,22 @@ const AnimatedNumber = ({ value, duration = 800 }) => {
 
     const raf = requestAnimationFrame(animate);
     return () => cancelAnimationFrame(raf);
-  }, [value, duration]);
+  }, [duration, hasValue, value]);
 
-  return <>{displayValue}</>;
+  return <>{hasValue ? displayValue : '—'}</>;
 };
 
 const AnimatedCurrency = ({ value, duration = 800 }) => {
   const [displayValue, setDisplayValue] = useState(0);
+  const hasValue = Number.isFinite(Number(value));
 
   useEffect(() => {
-    let start = displayValue;
-    const end = parseInt(value) || 0;
+    const start = 0;
+    const end = hasValue ? parseInt(value) : 0;
     if (start === end) return;
 
     const startTime = performance.now();
+    let raf;
 
     const animate = (currentTime) => {
       const elapsedTime = currentTime - startTime;
@@ -70,20 +73,20 @@ const AnimatedCurrency = ({ value, duration = 800 }) => {
         const easeProgress = progress * (2 - progress);
         const currentVal = Math.round(start + (end - start) * easeProgress);
         setDisplayValue(currentVal);
-        requestAnimationFrame(animate);
+        raf = requestAnimationFrame(animate);
       }
     };
 
-    requestAnimationFrame(animate);
-  }, [value, duration, displayValue]);
+    raf = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(raf);
+  }, [value, duration, hasValue]);
 
-  return <>{formatINR(displayValue)}</>;
+  return <>{hasValue ? formatINR(displayValue) : '—'}</>;
 };
 
 
 /**
- * Build allocation percentages from recommendation list.
- * Normalizes so sum === 100.
+ * Build display allocation percentages from the validated recommendation list.
  */
 const buildAllocations = (recs) => {
   const allocs = {};
@@ -110,9 +113,11 @@ const toBackendAllocations = allocations => {
 };
 
 const RebalancerScreen = ({ profile, recommendations, onSave }) => {
-  const totalSavings = Number(profile?.monthly_savings) || 0;
-  const horizon = Number(profile?.investment_horizon_years) || 0;
-  const projectionDisplayYear = Math.min(10, horizon);
+  const totalSavingsCandidate = Number(profile?.monthly_savings);
+  const totalSavings = Number.isFinite(totalSavingsCandidate) && totalSavingsCandidate > 0 ? totalSavingsCandidate : null;
+  const horizonCandidate = Number(profile?.investment_horizon_years);
+  const horizon = Number.isInteger(horizonCandidate) && horizonCandidate > 0 ? horizonCandidate : null;
+  const projectionDisplayYear = horizon === null ? null : Math.min(10, horizon);
   const recs = useMemo(() => recommendations || [], [recommendations]);
 
   const [allocations, setAllocations] = useState(() => buildAllocations(recs));
@@ -202,17 +207,17 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
   const projectionResults = useMemo(() => {
     const point = projectionData?.performance_data?.find(item => item.year === projectionDisplayYear);
     return {
-      wealth10y: point?.average ?? 0,
-      totalInvested10y: point?.invested ?? 0,
-      estReturns: point?.gains ?? 0,
-      wealthMultiple: point?.wealth_multiple ?? null,
+      wealth10y: Number.isFinite(Number(point?.average)) ? Number(point.average) : null,
+      totalInvested10y: Number.isFinite(Number(point?.invested)) ? Number(point.invested) : null,
+      estReturns: Number.isFinite(Number(point?.gains)) ? Number(point.gains) : null,
+      wealthMultiple: Number.isFinite(Number(point?.wealth_multiple)) ? Number(point.wealth_multiple) : null,
     };
   }, [projectionData, projectionDisplayYear]);
 
   const thermometerRisk = useMemo(() => {
     const avgRisk = projectionData?.portfolio_risk_score;
     if (!Number.isFinite(avgRisk)) {
-      return { avgRisk: null, positionPct: 50, label: 'Unavailable', color: '#64748b', desc: 'Waiting for the authoritative portfolio analysis.' };
+      return { avgRisk: null, positionPct: 0, label: 'Unavailable', color: '#64748b', desc: 'Waiting for the authoritative portfolio analysis.' };
     }
     const positionPct = ((avgRisk - 1) / 4) * 100;
 
@@ -246,22 +251,29 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
 
   const scenarioResults = useMemo(() => {
     return {
-      p10: mcData?.percentile_summary?.p10 ?? 0,
-      p50: mcData?.percentile_summary?.p50 ?? 0,
-      p90: mcData?.percentile_summary?.p90 ?? 0,
+      p10: Number.isFinite(Number(mcData?.percentile_summary?.p10)) ? Number(mcData.percentile_summary.p10) : null,
+      p50: Number.isFinite(Number(mcData?.percentile_summary?.p50)) ? Number(mcData.percentile_summary.p50) : null,
+      p90: Number.isFinite(Number(mcData?.percentile_summary?.p90)) ? Number(mcData.percentile_summary.p90) : null,
     };
   }, [mcData]);
 
   const showEmergencyWarning = projectionData?.liquidity_warning === true;
 
-  const summaryAllocation = projectionData?.asset_class_allocation || { equity: 0, etf: 0, debt: 0 };
+  const summaryAllocation = projectionData?.asset_class_allocation || {};
+  const monthlyInstrumentAllocations = projectionData?.monthly_instrument_allocations || {};
 
   const whyMixReasons = useMemo(() => {
     const goals = profile?.investment_goals || [];
     return [
-      `This mix was checked against your ${profile?.risk_tolerance} Financial Profile suitability boundary.`,
-      `The projection uses your declared monthly investment capacity of ${formatINR(totalSavings)}.`,
-      `The calculation is limited to your ${horizon}-year profile horizon${goals.length ? ` and ${goals.join(', ')} goal${goals.length > 1 ? 's' : ''}` : ''}.`,
+      profile?.risk_tolerance
+        ? `This mix was checked against your ${profile.risk_tolerance} Financial Profile suitability boundary.`
+        : 'Financial Profile suitability is unavailable.',
+      totalSavings === null
+        ? 'Declared monthly investment capacity is unavailable.'
+        : `The projection uses your declared monthly investment capacity of ${formatINR(totalSavings)}.`,
+      horizon === null
+        ? 'Financial Profile investment horizon is unavailable.'
+        : `The calculation is limited to your ${horizon}-year profile horizon${goals.length ? ` and ${goals.join(', ')} goal${goals.length > 1 ? 's' : ''}` : ''}.`,
       `Backend suitability result: ${projectionData?.final_suitability_risk || 'awaiting analysis'}.`,
     ];
   }, [profile, totalSavings, horizon, projectionData]);
@@ -309,10 +321,10 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
       .filter(year => year >= 1 && year <= horizon);
     const defaultMilestones = defaultYears.map(year => ({
       year,
-      amount: valueAt(year) ?? 0,
+      amount: valueAt(year),
       label: year === projectionDisplayYear ? 'Current projection' : `Projected value at year ${year}`,
       highlight: year === projectionDisplayYear,
-    }));
+    })).filter(milestone => Number.isFinite(Number(milestone.amount)));
 
     // If we have real goals, merge with defaults to fill gaps
     if (milestones.length > 0) {
@@ -330,12 +342,16 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
     return defaultMilestones;
   }, [projectionData, userGoals, horizon, projectionDisplayYear]);
 
-  const score = projectionData?.allocation_match_pct ?? 0;
-  const riskScore = projectionData?.risk_match_pct ?? 0;
-  const goalScore = projectionData?.goal_horizon_match_pct ?? 0;
-  const affordabilityScore = projectionData?.affordability_match_pct ?? 0;
-  const recommendationMatch = projectionData?.recommendation_match_pct ?? 0;
-  const matchColor = recommendationMatch >= 90 ? '#10b981' : recommendationMatch >= 75 ? '#f59e0b' : '#ef4444';
+  const readScore = (value) => {
+    const scoreValue = Number(value);
+    return Number.isFinite(scoreValue) && scoreValue >= 0 && scoreValue <= 100 ? scoreValue : null;
+  };
+  const score = readScore(projectionData?.allocation_match_pct);
+  const riskScore = readScore(projectionData?.risk_match_pct);
+  const goalScore = readScore(projectionData?.goal_horizon_match_pct);
+  const affordabilityScore = readScore(projectionData?.affordability_match_pct);
+  const recommendationMatch = readScore(projectionData?.recommendation_match_pct);
+  const matchColor = recommendationMatch === null ? '#64748b' : recommendationMatch >= 90 ? '#10b981' : recommendationMatch >= 75 ? '#f59e0b' : '#ef4444';
 
   /**
    * Slider change handler - redistributes remaining % proportionally
@@ -394,7 +410,11 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
       const result = await api.optimisePortfolio(profileId, assets, strategyByPreset[presetName]);
       const next = {};
       recs.forEach(inv => {
-        next[inv.id] = Number(result.weights?.[localToBackendInstrument(inv.id)] || 0) * 100;
+        const weight = Number(result.weights?.[localToBackendInstrument(inv.id)]);
+        if (!Number.isFinite(weight) || weight < 0 || weight > 1) {
+          throw new Error(`Optimizer returned an invalid weight for ${inv.name}`);
+        }
+        next[inv.id] = weight * 100;
       });
       setAllocations(next);
       setPreset(presetName);
@@ -406,16 +426,20 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
   }, [profile?.profileId, recs]);
 
   const handleSave = () => {
-    let assignedWeight = 0;
+    const percentages = recs.map(inv => Number(allocations[inv.id]));
+    if (percentages.some(pct => !Number.isFinite(pct) || pct < 0 || pct > 100)) {
+      setProjectionError('Every allocation must be a valid percentage from 0 to 100.');
+      return;
+    }
+    const totalPercentage = percentages.reduce((sum, pct) => sum + pct, 0);
+    if (Math.abs(totalPercentage - 100) > 0.01) {
+      setProjectionError(`Allocations must total exactly 100%; current total is ${totalPercentage.toFixed(2)}%.`);
+      return;
+    }
     const updated = recs.map((inv, index) => {
-      const pct = allocations[inv.id] || 0;
-      const allocationWeight = index === recs.length - 1
-        ? Number((1 - assignedWeight).toFixed(4))
-        : Number((pct / 100).toFixed(4));
-      assignedWeight = Number((assignedWeight + allocationWeight).toFixed(4));
+      const allocationWeight = Number((percentages[index] / 100).toFixed(6));
       return {
         ...inv,
-        monthly_allocation: Number(((pct / 100) * totalSavings).toFixed(2)),
         allocationWeight,
         allocation_pct: Number((allocationWeight * 100).toFixed(2)),
       };
@@ -467,7 +491,7 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
               </div>
               <div>
                 <h2 className="ai-recs-title">AI Recommended Mix</h2>
-                <p className="ai-recs-subtitle">Optimised for compounding growth</p>
+                <p className="ai-recs-subtitle">Server-evaluated portfolio proposal</p>
               </div>
             </div>
             <span className="ai-recs-badge">Target Match</span>
@@ -596,11 +620,12 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                 {recs.map(inv => {
-                  const pct = allocations[inv.id] || 0;
-                  const amt = Math.round((pct / 100) * totalSavings / 100) * 100;
-                  if (amt <= 0) return null;
-                  const riskLabel = inv.risk_level || inv.riskLabel || 'Medium';
-                  const color = RISK_COLORS[riskLabel] || '#0ea5e9';
+                  const pct = Number(allocations[inv.id]) || 0;
+                  const amountCandidate = Number(monthlyInstrumentAllocations[localToBackendInstrument(inv.id)]);
+                  const amt = Number.isFinite(amountCandidate) ? amountCandidate : null;
+                  if (pct <= 0) return null;
+                  const riskLabel = getRiskLabelString(inv);
+                  const color = RISK_COLORS[riskLabel] || '#64748b';
                   return (
                      <div key={inv.id} style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '0.9rem' }}>
                        <div style={{ width: '80px', height: '6px', borderRadius: '3px', background: 'rgba(255,255,255,0.05)', overflow: 'hidden', flexShrink: 0 }}>
@@ -619,10 +644,11 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
 
             <div className="rebal-sliders" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
               {recs.map(inv => {
-                const pct = allocations[inv.id] || 0;
-                const amt = Math.round((pct / 100) * totalSavings / 100) * 100;
-                const riskLabel = inv.risk_level || inv.riskLabel || 'Medium';
-                const color = RISK_COLORS[riskLabel] || '#0ea5e9';
+                const pct = Number(allocations[inv.id]) || 0;
+                const amountCandidate = Number(monthlyInstrumentAllocations[localToBackendInstrument(inv.id)]);
+                const amt = Number.isFinite(amountCandidate) ? amountCandidate : null;
+                const riskLabel = getRiskLabelString(inv);
+                const color = RISK_COLORS[riskLabel] || '#64748b';
                 const isAllocated = pct > 0;
 
                 return (
@@ -654,7 +680,7 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
                       {pct.toFixed(0)}%
                     </span>
                     <span className={`slider-amount-value ${isAllocated ? 'allocated-label' : 'unallocated-label'}`} style={{ textAlign: 'right', fontWeight: 700, fontSize: '0.9rem', color: isAllocated ? '#f8fafc' : '#475569' }}>
-                      {isAllocated ? `${formatINR(amt)}` : '₹0'}
+                      {isAllocated ? formatINR(amt) : '₹0'}
                     </span>
                   </div>
                 );
@@ -715,7 +741,7 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
                   {weightedReturnRate === null ? '—' : weightedReturnRate.toFixed(1)}
                   <span className="insight-suffix">%</span>
                 </div>
-                <div className="insight-label">Expected Return</div>
+                <div className="insight-label">Nominal Return Assumption</div>
               </div>
               <div className="journey-insight-stat">
                 <div className="insight-value">
@@ -746,56 +772,56 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
                 className="match-badge-premium" 
                 style={{ color: matchColor, background: `${matchColor}12`, borderColor: `${matchColor}25` }}
               >
-                <span className="match-badge-value">{recommendationMatch}%</span>
+                <span className="match-badge-value">{recommendationMatch === null ? '—' : `${recommendationMatch}%`}</span>
                 <span className="match-badge-label">
-                  {recommendationMatch >= 90 ? 'Perfect' : recommendationMatch >= 75 ? 'Good' : recommendationMatch >= 50 ? 'Fair' : 'Poor'}
+                  {recommendationMatch === null ? 'Unavailable' : recommendationMatch >= 90 ? 'Perfect' : recommendationMatch >= 75 ? 'Good' : recommendationMatch >= 50 ? 'Fair' : 'Poor'}
                 </span>
               </div>
             </div>
 
             <div className="match-metrics-grid">
               <div className="match-metric-tile">
-                <div className="match-metric-icon-wrap" style={{ '--icon-color': score >= 80 ? '#10b981' : '#f59e0b' }}>
+                <div className="match-metric-icon-wrap" style={{ '--icon-color': score === null ? '#64748b' : score >= 80 ? '#10b981' : '#f59e0b' }}>
                   <PieChart size={16} />
                 </div>
                 <div className="match-metric-details">
                   <span className="match-metric-label">Asset Allocation</span>
-                  <span className="match-metric-value">{score}% Match</span>
+                  <span className="match-metric-value">{score === null ? 'Unavailable' : `${score}% Match`}</span>
                 </div>
-                <div className="match-metric-status" style={{ color: score >= 80 ? '#10b981' : '#f59e0b' }}>✓</div>
+                <div className="match-metric-status" style={{ color: score === null ? '#64748b' : score >= 80 ? '#10b981' : '#f59e0b' }}>{score === null ? '—' : '✓'}</div>
               </div>
 
               <div className="match-metric-tile">
-                <div className="match-metric-icon-wrap" style={{ '--icon-color': riskScore >= 80 ? '#10b981' : '#f59e0b' }}>
+                <div className="match-metric-icon-wrap" style={{ '--icon-color': riskScore === null ? '#64748b' : riskScore >= 80 ? '#10b981' : '#f59e0b' }}>
                   <Shield size={16} />
                 </div>
                 <div className="match-metric-details">
                   <span className="match-metric-label">Risk Profile</span>
                   <span className="match-metric-value">{profile?.risk_tolerance || 'Unavailable'}</span>
                 </div>
-                <div className="match-metric-status" style={{ color: riskScore >= 80 ? '#10b981' : '#f59e0b' }}>✓</div>
+                <div className="match-metric-status" style={{ color: riskScore === null ? '#64748b' : riskScore >= 80 ? '#10b981' : '#f59e0b' }}>{riskScore === null ? '—' : '✓'}</div>
               </div>
 
               <div className="match-metric-tile">
-                <div className="match-metric-icon-wrap" style={{ '--icon-color': goalScore >= 80 ? '#10b981' : '#f59e0b' }}>
+                <div className="match-metric-icon-wrap" style={{ '--icon-color': goalScore === null ? '#64748b' : goalScore >= 80 ? '#10b981' : '#f59e0b' }}>
                   <Calendar size={16} />
                 </div>
                 <div className="match-metric-details">
                   <span className="match-metric-label">Goal Horizon</span>
-                  <span className="match-metric-value">{horizon} Years</span>
+                  <span className="match-metric-value">{horizon === null ? 'Unavailable' : `${horizon} Years`}</span>
                 </div>
-                <div className="match-metric-status" style={{ color: goalScore >= 80 ? '#10b981' : '#f59e0b' }}>✓</div>
+                <div className="match-metric-status" style={{ color: goalScore === null ? '#64748b' : goalScore >= 80 ? '#10b981' : '#f59e0b' }}>{goalScore === null ? '—' : '✓'}</div>
               </div>
 
               <div className="match-metric-tile">
-                <div className="match-metric-icon-wrap" style={{ '--icon-color': affordabilityScore >= 80 ? '#10b981' : '#f59e0b' }}>
+                <div className="match-metric-icon-wrap" style={{ '--icon-color': affordabilityScore === null ? '#64748b' : affordabilityScore >= 80 ? '#10b981' : '#f59e0b' }}>
                   <Wallet size={16} />
                 </div>
                 <div className="match-metric-details">
                   <span className="match-metric-label">Monthly SIP</span>
                   <span className="match-metric-value">{formatINR(totalSavings)}</span>
                 </div>
-                <div className="match-metric-status" style={{ color: affordabilityScore >= 80 ? '#10b981' : '#f59e0b' }}>✓</div>
+                <div className="match-metric-status" style={{ color: affordabilityScore === null ? '#64748b' : affordabilityScore >= 80 ? '#10b981' : '#f59e0b' }}>{affordabilityScore === null ? '—' : '✓'}</div>
               </div>
             </div>
           </motion.div>
@@ -863,13 +889,15 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
               {/* Thermometer track */}
               <div className="thermometer-track" />
               {/* Indicator dot */}
-              <div 
-                className="thermometer-indicator"
-                style={{
-                  '--risk-color': thermometerRisk.color,
-                  left: `${thermometerRisk.positionPct}%`
-                }}
-              />
+              {thermometerRisk.avgRisk !== null && (
+                <div
+                  className="thermometer-indicator"
+                  style={{
+                    '--risk-color': thermometerRisk.color,
+                    left: `${thermometerRisk.positionPct}%`
+                  }}
+                />
+              )}
             </div>
 
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: '#64748b', fontWeight: 600 }}>
@@ -1050,7 +1078,7 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
                   {loadingProjection ? (
                     <span style={{ fontSize: '1rem', color: '#64748b' }}>Calculating...</span>
                   ) : (
-                    <>₹{(projectionResults.wealth10y / 100000).toFixed(2)} L</>
+                    <>{Number.isFinite(projectionResults.wealth10y) ? formatINR(projectionResults.wealth10y) : '—'}</>
                   )}
                 </div>
               </div>
@@ -1059,7 +1087,7 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
               <div className="summary-stat-card">
                 <div className="summary-stat-label">Recommendation Match</div>
                 <div className="summary-stat-value value-green" style={{ color: matchColor }}>
-                  <AnimatedNumber value={recommendationMatch} />%
+                  {recommendationMatch === null ? '—' : <><AnimatedNumber value={recommendationMatch} />%</>}
                 </div>
               </div>
 

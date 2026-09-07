@@ -64,7 +64,7 @@ const AllocationPlanner = ({ profile, recommendations = [], recommendationMeta }
         monthlyAmount,
         nominalRate,
         cat: item.cat || item.category || item.assetClass || 'Other',
-        riskLabel: item.riskLabel || item.riskLevel || 'Medium',
+        riskLabel: item.riskLabel || item.riskLevel || 'Unavailable',
         gradId: grad.id,
         themeColor: grad.primary,
         glowColor: grad.glow,

@@ -161,15 +161,19 @@ const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRec
       expected_return_max: investment.expected_return_max ?? investment.returnRange?.max ?? investment.nominalReturn,
       category: investment.category || investment.cat,
       risk_level: investment.risk_level || investment.riskLabel,
-      lock_in_years: investment.lock_in_years ?? investment.lockIn ?? 0,
-      tax_benefit: investment.tax_benefit ?? false,
+      lock_in_years: investment.lock_in_years ?? investment.lockIn ?? null,
+      tax_benefit: investment.tax_benefit ?? null,
       tax_section: investment.tax_section || 'N/A',
-      tax_free_interest: investment.tax_free_interest ?? false,
-      liquidity: investment.liquidity || 'Medium',
+      tax_free_interest: investment.tax_free_interest ?? null,
+      liquidity: investment.liquidity || 'Unavailable',
       description: investment.description || investment.desc,
       name: investment.name || investment.abbr,
     };
   }, [investment]);
+  const returnMin = Number(inv.expected_return_min);
+  const returnMax = Number(inv.expected_return_max);
+  const hasReturnRange = Number.isFinite(returnMin) && Number.isFinite(returnMax);
+  const riskLevel = typeof inv.risk_level === 'string' ? inv.risk_level : '';
 
   React.useEffect(() => {
     if (!isOpen || !investment) return undefined;
@@ -188,7 +192,7 @@ const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRec
       ).then(result => {
         if (!cancelled) setProjection(result);
       }).catch(error => {
-        if (!cancelled && error.name !== 'AbortError') {
+        if (!cancelled && error?.code !== 'REQUEST_ABORTED') {
           setProjection(null);
           setProjectionError(error.message);
         }
@@ -345,23 +349,25 @@ const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRec
           <div className="ddm-quick-metrics">
             <div className="metric-item">
               <span className="metric-label"><JargonTooltip term="Risk Profile">Risk Profile</JargonTooltip></span>
-              <span className="metric-value" style={{ color: inv.risk_level.includes('High') ? '#f43f5e' : inv.risk_level.includes('Medium') ? '#f59e0b' : '#22c55e' }}>
-                {inv.risk_level}
+              <span className="metric-value" style={{ color: !riskLevel ? '#64748b' : riskLevel.includes('High') ? '#f43f5e' : riskLevel.includes('Medium') ? '#f59e0b' : '#22c55e' }}>
+                {riskLevel || 'Unavailable'}
               </span>
             </div>
             <div className="metric-item">
-              <span className="metric-label"><JargonTooltip term="Return Potential">Return Potential</JargonTooltip></span>
+              <span className="metric-label"><JargonTooltip term="Return Potential">Pre-tax Nominal Range</JargonTooltip></span>
               <span className="metric-value" style={{ color: '#22c55e' }}>
-                {parseFloat(inv.expected_return_min).toFixed(1).replace(/\.0$/, '')}% – {parseFloat(inv.expected_return_max).toFixed(1).replace(/\.0$/, '')}%
+                {hasReturnRange
+                  ? `${returnMin.toFixed(1).replace(/\.0$/, '')}% – ${returnMax.toFixed(1).replace(/\.0$/, '')}%`
+                  : 'Unavailable'}
               </span>
             </div>
             <div className="metric-item">
               <span className="metric-label"><JargonTooltip term="Lock-in Period">Lock-in Period</JargonTooltip></span>
-              <span className="metric-value">{inv.lock_in_years > 0 ? `${inv.lock_in_years} Years` : 'None'}</span>
+              <span className="metric-value">{inv.lock_in_years === null ? 'Unavailable' : inv.lock_in_years > 0 ? `${inv.lock_in_years} Years` : 'None'}</span>
             </div>
             <div className="metric-item">
               <span className="metric-label"><JargonTooltip term="Tax Benefit">Tax Benefit</JargonTooltip></span>
-              <span className="metric-value">{inv.tax_benefit ? `Section ${inv.tax_section}` : 'None'}</span>
+              <span className="metric-value">{inv.tax_benefit === null ? 'Unavailable' : inv.tax_benefit ? `Section ${inv.tax_section}` : 'None'}</span>
             </div>
           </div>
 
@@ -382,7 +388,14 @@ const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRec
           {activeTab === 'Tax' && <TaxTab inv={inv} calcAmount={calcAmount} calcYears={calcYears} userProfile={userProfile} />}
           {activeTab === 'History' && <HistoryTab inv={inv} historicalData={historicalData} benchmarkRate={benchmarkRate} inflationRate={inflationRate} projectionError={projectionError} />}
           {activeTab === 'Why Invest' && <WhyInvestTab {...calcProps} setActiveTab={setActiveTab} setInflationRate={setInflationRate} setBenchmarkRate={setBenchmarkRate} />}
-          {activeTab === 'Stress Test' && <StressTestTab inv={inv} stressTestAmount={stressTestAmount} setStressTestAmount={setStressTestAmount} />}
+          {activeTab === 'Stress Test' && (
+            <StressTestTab
+              inv={inv}
+              profileId={userProfile?.profileId}
+              stressTestAmount={stressTestAmount}
+              setStressTestAmount={setStressTestAmount}
+            />
+          )}
         </div>
       </div>
     </div>

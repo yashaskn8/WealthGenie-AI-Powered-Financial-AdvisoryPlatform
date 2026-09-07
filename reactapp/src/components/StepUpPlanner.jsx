@@ -76,12 +76,14 @@ const StepUpPlanner = ({ profile }) => {
     };
   }, [safeBaseSIP, safeReturnRate, safeYears, safeStepUpPercent]);
 
-  const flatFinal = projection?.flatFinal ?? 0;
-  const stepUpFinal = projection?.stepUpFinal ?? 0;
-  const flatInvested = projection?.flatInvested ?? 0;
-  const stepUpInvested = projection?.stepUpInvested ?? 0;
-  const additionalCorpus = projection?.additionalCorpus ?? 0;
-  const additionalPercent = Math.round(projection?.additionalPercent ?? 0);
+  const flatFinal = projection?.flatFinal ?? null;
+  const stepUpFinal = projection?.stepUpFinal ?? null;
+  const flatInvested = projection?.flatInvested ?? null;
+  const stepUpInvested = projection?.stepUpInvested ?? null;
+  const additionalCorpus = projection?.additionalCorpus ?? null;
+  const additionalPercent = Number.isFinite(Number(projection?.additionalPercent))
+    ? Math.round(Number(projection.additionalPercent))
+    : null;
   const chartData = projection?.chartData ?? [];
 
   return (
@@ -105,7 +107,7 @@ const StepUpPlanner = ({ profile }) => {
           Grow Your Monthly Savings <span className="title-gradient">(Step-Up SIP)</span>
         </h1>
         <p className="sup-page-subtitle">
-          Increase your savings slightly each year to build massive long-term wealth effortlessly.
+          Explore how an explicit annual increase changes a long-term SIP projection.
         </p>
       </motion.div>
 
@@ -122,7 +124,7 @@ const StepUpPlanner = ({ profile }) => {
         <div className="onboard-text">
           <h4>How Step-Up SIP Multiplies Your Wealth</h4>
           <p>
-            A <strong>Step-Up SIP</strong> increases your monthly savings automatically by a small percentage (e.g., 10%) each year as your salary increases. This small annual adjustment compounds exponentially!
+            A <strong>Step-Up SIP</strong> models a monthly contribution that you choose to increase each year. The calculation does not assume that your salary or savings capacity will rise.
           </p>
         </div>
       </motion.div>
@@ -306,15 +308,15 @@ const StepUpPlanner = ({ profile }) => {
           </div>
         </div>
 
-        {/* Card 4: Expected CAGR */}
+        {/* Card 4: Explicit return assumption */}
         <div className="sup-control-card card-purple">
           <div className="sup-card-header">
             <div className="sup-icon-box box-purple">
               <Target size={18} />
             </div>
             <div>
-              <h3 className="sup-card-title">Expected Growth Rate (CAGR)</h3>
-              <p className="sup-card-desc">Estimated average yearly return</p>
+              <h3 className="sup-card-title">Assumed Growth Rate (CAGR)</h3>
+              <p className="sup-card-desc">Your pre-tax yearly return input</p>
             </div>
           </div>
           
@@ -397,7 +399,7 @@ const StepUpPlanner = ({ profile }) => {
           </div>
           <span className="result-label">Extra Wealth Gained</span>
           <span className="result-value text-green">+ {formatCompactINR(additionalCorpus)}</span>
-          <span className="result-sub text-green-bold">{additionalPercent}% more total wealth!</span>
+          <span className="result-sub text-green-bold">{additionalPercent === null ? 'Projection unavailable' : `${additionalPercent}% more projected corpus`}</span>
         </motion.div>
       </div>
 

@@ -13,6 +13,11 @@ const STATUS_CONFIG = {
   off_track: { color: '#f43f5e', bg: 'rgba(244, 63, 94, 0.14)',   label: 'OFF TRACK', icon: AlertTriangle, glow: 'rgba(244, 63, 94, 0.4)' },
 };
 
+const UNKNOWN_STATUS_CONFIG = {
+  color: '#64748b', bg: 'rgba(100, 116, 139, 0.14)', label: 'UNAVAILABLE',
+  icon: Clock, glow: 'rgba(100, 116, 139, 0.25)',
+};
+
 const PRIORITY_ORDER = { Critical: 0, High: 1, Medium: 2, Low: 3 };
 
 const formatINR = (value) => {
@@ -38,7 +43,9 @@ const GoalPlanner = ({ profile }) => {
       setGoals(res.goals || []);
       setSimulatedSips(Object.fromEntries((res.goals || []).map(goal => [
         goal._id || goal.goalId,
-        goal.simulated_monthly_contribution ?? Math.min(goal.recommended_sip, Number(profile?.monthly_savings)),
+        Number.isFinite(Number(goal.simulated_monthly_contribution))
+          ? Number(goal.simulated_monthly_contribution)
+          : null,
       ])));
       if (res.goals && res.goals.length > 0) {
         const first = res.goals[0];
@@ -47,7 +54,7 @@ const GoalPlanner = ({ profile }) => {
     } catch (err) {
       console.error('Failed to fetch goals:', err);
     }
-  }, [profile?.monthly_savings]);
+  }, []);
 
   useEffect(() => {
     fetchGoals();
@@ -56,16 +63,21 @@ const GoalPlanner = ({ profile }) => {
   // Sort goals: Critical first, then by probability (lowest first = most urgent)
   const sortedGoals = useMemo(() => {
     return [...goals].sort((a, b) => {
-      const pa = PRIORITY_ORDER[a.priority] ?? 2;
-      const pb = PRIORITY_ORDER[b.priority] ?? 2;
+      const pa = PRIORITY_ORDER[a.priority] ?? Number.MAX_SAFE_INTEGER;
+      const pb = PRIORITY_ORDER[b.priority] ?? Number.MAX_SAFE_INTEGER;
       if (pa !== pb) return pa - pb;
-      return (a.probability_of_success || 0) - (b.probability_of_success || 0);
+      const probabilityA = Number(a.probability_of_success);
+      const probabilityB = Number(b.probability_of_success);
+      if (!Number.isFinite(probabilityA)) return Number.isFinite(probabilityB) ? 1 : 0;
+      if (!Number.isFinite(probabilityB)) return -1;
+      return probabilityA - probabilityB;
     });
   }, [goals]);
 
   const getLiveProbability = (goal) => {
     const id = goal._id || goal.goalId;
-    return goalSimulations[id]?.probability_of_success ?? goal.probability_of_success ?? 0;
+    const value = Number(goalSimulations[id]?.probability_of_success ?? goal.probability_of_success);
+    return Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
   };
 
   const getSimulatedChartData = (goal) => {
@@ -77,8 +89,8 @@ const GoalPlanner = ({ profile }) => {
   const selectedSip = selectedGoalId ? simulatedSips[selectedGoalId] : null;
   useEffect(() => {
     if (!selectedGoalId || !Number.isFinite(selectedSip) || selectedSip <= 0) return undefined;
-    const persistedContribution = selectedGoal.simulated_monthly_contribution
-      ?? Math.min(selectedGoal.recommended_sip, Number(profile?.monthly_savings));
+    const persistedContribution = Number(selectedGoal.simulated_monthly_contribution);
+    if (!Number.isFinite(persistedContribution)) return undefined;
     if (selectedSip === persistedContribution) {
       setGoalSimulations(prev => {
         if (!prev[selectedGoalId]) return prev;
@@ -99,7 +111,7 @@ const GoalPlanner = ({ profile }) => {
           if (!cancelled) setGoalSimulations(prev => ({ ...prev, [selectedGoalId]: result }));
         })
         .catch(error => {
-          if (!cancelled && error.name !== 'AbortError') setSimulationError(error.message);
+          if (!cancelled && error.code !== 'REQUEST_ABORTED') setSimulationError(error.message);
         })
         .finally(() => {
           if (!cancelled) setSimulationLoading(false);
@@ -110,7 +122,7 @@ const GoalPlanner = ({ profile }) => {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [selectedGoal, selectedGoalId, selectedSip, profile?.monthly_savings]);
+  }, [selectedGoal, selectedGoalId, selectedSip]);
 
   const handleSubmitGoal = async (goalData) => {
     setLoading(true);
@@ -123,7 +135,9 @@ const GoalPlanner = ({ profile }) => {
         const gid = res.goal._id || res.goal.goalId;
         setSimulatedSips(prev => ({
           ...prev,
-          [gid]: res.goal.simulated_monthly_contribution ?? Math.min(res.goal.recommended_sip, Number(profile?.monthly_savings)),
+          [gid]: Number.isFinite(Number(res.goal.simulated_monthly_contribution))
+            ? Number(res.goal.simulated_monthly_contribution)
+            : null,
         }));
         setShowForm(false);
       } else if (!res.success) {
@@ -190,9 +204,18 @@ const GoalPlanner = ({ profile }) => {
   };
 
   // Summary statistics
-  const totalTarget = goals.reduce((s, g) => s + (g.target_amount || 0), 0);
-  const totalSip = goals.reduce((s, g) => s + (g.recommended_sip || 0), 0);
-  const avgProb = goals.length > 0 ? goals.reduce((s, g) => s + (g.probability_of_success || 0), 0) / goals.length : 0;
+  const targetValues = goals.map(goal => Number(goal.target_amount));
+  const sipValues = goals.map(goal => Number(goal.recommended_sip));
+  const probabilityValues = goals.map(goal => Number(goal.probability_of_success));
+  const totalTarget = targetValues.every(value => Number.isFinite(value) && value >= 0)
+    ? targetValues.reduce((sum, value) => sum + value, 0)
+    : null;
+  const totalSip = sipValues.every(value => Number.isFinite(value) && value >= 0)
+    ? sipValues.reduce((sum, value) => sum + value, 0)
+    : null;
+  const avgProb = goals.length > 0 && probabilityValues.every(value => Number.isFinite(value) && value >= 0 && value <= 1)
+    ? probabilityValues.reduce((sum, value) => sum + value, 0) / probabilityValues.length
+    : null;
 
   return (
     <motion.div 
@@ -291,7 +314,7 @@ const GoalPlanner = ({ profile }) => {
             </div>
             <div>
               <div style={{ fontSize: '0.68rem', color: '#64748b', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.8px' }}>AGGREGATE TARGET</div>
-              <div style={{ fontSize: '1.25rem', fontWeight: 900, color: '#f1f5f9', marginTop: 2 }}>{formatINR(totalTarget)}</div>
+              <div style={{ fontSize: '1.25rem', fontWeight: 900, color: '#f1f5f9', marginTop: 2 }}>{Number.isFinite(totalTarget) ? formatINR(totalTarget) : '—'}</div>
             </div>
           </motion.div>
 
@@ -309,7 +332,7 @@ const GoalPlanner = ({ profile }) => {
             </div>
             <div>
               <div style={{ fontSize: '0.68rem', color: '#64748b', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.8px' }}>REQUIRED MONTHLY SIP</div>
-              <div style={{ fontSize: '1.25rem', fontWeight: 900, color: '#10b981', marginTop: 2 }}>{formatINR(totalSip)}/mo</div>
+              <div style={{ fontSize: '1.25rem', fontWeight: 900, color: '#10b981', marginTop: 2 }}>{Number.isFinite(totalSip) ? `${formatINR(totalSip)}/mo` : '—'}</div>
             </div>
           </motion.div>
 
@@ -327,7 +350,7 @@ const GoalPlanner = ({ profile }) => {
             </div>
             <div>
               <div style={{ fontSize: '0.68rem', color: '#64748b', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.8px' }}>PORTFOLIO SUCCESS PROBABILITY</div>
-              <div style={{ fontSize: '1.25rem', fontWeight: 900, color: avgProb >= 0.65 ? '#10b981' : '#f59e0b', marginTop: 2 }}>{Math.round(avgProb * 100)}%</div>
+              <div style={{ fontSize: '1.25rem', fontWeight: 900, color: avgProb === null ? '#64748b' : avgProb >= 0.65 ? '#10b981' : '#f59e0b', marginTop: 2 }}>{avgProb === null ? '—' : `${Math.round(avgProb * 100)}%`}</div>
             </div>
           </motion.div>
         </motion.div>
@@ -465,20 +488,24 @@ const GoalPlanner = ({ profile }) => {
 
           <AnimatePresence>
             {sortedGoals.map((goal, index) => {
-              const cfg = STATUS_CONFIG[goal.status] || STATUS_CONFIG.on_track;
+              const cfg = STATUS_CONFIG[goal.status] || UNKNOWN_STATUS_CONFIG;
               const StatusIcon = cfg.icon;
               const isSelected = selectedGoal?._id === goal._id || selectedGoal?.goalId === goal.goalId;
               const prob = getLiveProbability(goal);
-              const probPct = Math.round(prob * 100);
-              const probColor = probPct >= 75 ? '#10b981' : probPct >= 50 ? '#f59e0b' : '#f43f5e';
+              const hasProbability = Number.isFinite(prob);
+              const probPct = hasProbability ? Math.round(prob * 100) : null;
+              const probColor = !hasProbability ? '#64748b' : probPct >= 75 ? '#10b981' : probPct >= 50 ? '#f59e0b' : '#f43f5e';
               
               // Clamp funded savings to target amount for display so huge test values don't break UI
-              const rawSavings = goal.current_savings || 0;
-              const fundedSavings = Math.min(goal.target_amount || rawSavings, rawSavings);
-              const savingsProgress = goal.target_amount && goal.target_amount > 0
-                ? Math.min(100, Math.round((fundedSavings / goal.target_amount) * 100))
-                : 0;
-              const yearsLeft = goal.years_remaining || ((new Date(goal.target_date) - new Date()) / (365.25 * 24 * 60 * 60 * 1000)).toFixed(1);
+              const rawSavings = Number(goal.current_savings);
+              const targetAmount = Number(goal.target_amount);
+              const hasFundingData = Number.isFinite(rawSavings) && rawSavings >= 0
+                && Number.isFinite(targetAmount) && targetAmount > 0;
+              const fundedSavings = hasFundingData ? Math.min(targetAmount, rawSavings) : null;
+              const savingsProgress = hasFundingData
+                ? Math.min(100, Math.round((fundedSavings / targetAmount) * 100))
+                : null;
+              const yearsLeft = Number.isFinite(Number(goal.years_remaining)) ? Number(goal.years_remaining) : null;
 
               return (
                 <motion.div
@@ -533,7 +560,7 @@ const GoalPlanner = ({ profile }) => {
                         </span>
                         <span style={{ opacity: 0.3 }}>|</span>
                         <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                          <Clock size={12} /> {Number(yearsLeft) > 0 ? `${Number(yearsLeft).toFixed(1)} yrs` : 'Matured'}
+                          <Clock size={12} /> {yearsLeft === null ? 'Unavailable' : yearsLeft > 0 ? `${yearsLeft.toFixed(1)} yrs` : 'Matured'}
                         </span>
                         <span style={{ opacity: 0.3 }}>|</span>
                         <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -569,11 +596,11 @@ const GoalPlanner = ({ profile }) => {
                       {/* Funded meter */}
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#64748b', marginBottom: 4 }}>
                         <span>Funded Capital: <strong style={{ color: '#38bdf8' }}>{formatINR(fundedSavings)}</strong></span>
-                        <span style={{ fontWeight: 700, color: '#94a3b8' }}>{savingsProgress}%</span>
+                        <span style={{ fontWeight: 700, color: '#94a3b8' }}>{savingsProgress === null ? 'Unavailable' : `${savingsProgress}%`}</span>
                       </div>
                       <div style={{ height: 5, background: 'rgba(255,255,255,0.05)', borderRadius: 3, overflow: 'hidden', marginBottom: 10 }}>
                         <div style={{
-                          height: '100%', width: `${savingsProgress}%`,
+                          height: '100%', width: `${savingsProgress ?? 0}%`,
                           background: 'linear-gradient(90deg, #0284c7, #38bdf8)', borderRadius: 3,
                           boxShadow: '0 0 8px rgba(56, 189, 248, 0.4)'
                         }} />
@@ -582,12 +609,12 @@ const GoalPlanner = ({ profile }) => {
                       {/* Quant Forecast meter */}
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#64748b', marginBottom: 4 }}>
                         <span>Quant Success Forecast</span>
-                        <span style={{ fontWeight: 700, color: probColor }}>{probPct}%</span>
+                        <span style={{ fontWeight: 700, color: probColor }}>{hasProbability ? `${probPct}%` : 'Unavailable'}</span>
                       </div>
                       <div style={{ height: 6, background: 'rgba(255,255,255,0.05)', borderRadius: 3, overflow: 'hidden' }}>
                         <motion.div
                           initial={{ width: 0 }}
-                          animate={{ width: `${Math.min(100, probPct)}%` }}
+                          animate={{ width: `${hasProbability ? Math.min(100, probPct) : 0}%` }}
                           transition={{ duration: 0.9, ease: 'easeOut', delay: index * 0.08 }}
                           style={{
                             height: '100%',
@@ -607,7 +634,7 @@ const GoalPlanner = ({ profile }) => {
                       boxShadow: `0 0 16px ${probColor}25`
                     }}>
                       <span style={{ fontSize: '1rem', fontWeight: 900, color: probColor, letterSpacing: '-0.02em' }}>
-                        {probPct}%
+                        {hasProbability ? `${probPct}%` : '—'}
                       </span>
                     </div>
                   </div>

@@ -11,20 +11,31 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 import { TRUST_BADGES, investmentDatabase } from '../../investmentDatabase';
 import JargonTooltip from '../JargonTooltip';
 
+const formatCatalogRate = value => {
+  const rate = Number(value);
+  return Number.isFinite(rate) ? `${rate}% p.a.` : 'Unavailable';
+};
+
+const formatCatalogHorizon = horizon => (
+  Number.isFinite(Number(horizon?.min)) && Number.isFinite(Number(horizon?.max))
+    ? `${horizon.min}–${horizon.max} years`
+    : 'Unavailable'
+);
+
 const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
   // ─── Category-Specific Parameters ───
   const categoryParams = (() => {
     const cat = (inv.category || '').toLowerCase();
     const id = (inv.id || '');
-    const horizon = inv.idealHorizon || inv.dynamicData?.idealHorizon || { min: 3, max: 10 };
+    const horizon = inv.idealHorizon || inv.dynamicData?.idealHorizon || null;
     const expRatio = inv.expenseRatio ?? inv.dynamicData?.expenseRatio;
-    const liqType = inv.dynamicData?.liquidity?.type || 'T+2';
+    const liqType = inv.dynamicData?.liquidity?.type || 'Unavailable';
 
     if (cat.includes('etf')) {
       return [
         { label: 'Expense Ratio', value: expRatio != null ? `${(expRatio * 100).toFixed(2)}%` : '—' },
-        { label: 'Risk Category', value: inv.riskLabel || inv.risk_level || 'Medium' },
-        { label: 'Ideal Horizon', value: `${horizon.min}–${horizon.max} years` },
+        { label: 'Risk Category', value: inv.riskLabel || inv.risk_level || 'Unavailable' },
+        { label: 'Ideal Horizon', value: formatCatalogHorizon(horizon) },
         { label: 'Settlement', value: liqType },
         { label: 'Exchange', value: 'NSE & BSE' },
         { label: 'Demat Required', value: 'Yes' },
@@ -33,8 +44,8 @@ const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
     if (cat.includes('mutual') || cat.includes('hybrid')) {
       return [
         { label: 'Expense Ratio', value: expRatio != null ? `${(expRatio * 100).toFixed(2)}%` : '—' },
-        { label: 'Risk Category', value: inv.riskLabel || inv.risk_level || 'Medium' },
-        { label: 'Ideal Horizon', value: `${horizon.min}–${horizon.max} years` },
+        { label: 'Risk Category', value: inv.riskLabel || inv.risk_level || 'Unavailable' },
+        { label: 'Ideal Horizon', value: formatCatalogHorizon(horizon) },
         { label: 'Settlement', value: liqType },
         { label: 'SIP Available', value: 'Yes' },
         { label: 'Demat Required', value: 'No (Direct MF allowed)' },
@@ -42,26 +53,26 @@ const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
     }
     if (cat.includes('bond') || cat.includes('debenture')) {
       return [
-        { label: 'Coupon / Interest', value: inv.rate ? `${inv.rate}% p.a.` : `${inv.expectedReturn}% p.a.` },
+        { label: 'Coupon / Interest', value: formatCatalogRate(inv.rate ?? inv.expectedReturn) },
         { label: 'Credit Quality', value: inv.trustBadge?.body || inv.staticData?.trustBadge?.body || 'Rated' },
-        { label: 'Ideal Horizon', value: `${horizon.min}–${horizon.max} years` },
+        { label: 'Ideal Horizon', value: formatCatalogHorizon(horizon) },
         { label: 'Settlement', value: liqType },
         { label: 'Demat Required', value: 'Yes' },
       ];
     }
     if (cat.includes('government') || inv.assetClass === 'Sovereign') {
       return [
-        { label: 'Interest Rate', value: `${inv.expectedReturn || inv.rate || '—'}% p.a.` },
+        { label: 'Interest Rate', value: formatCatalogRate(inv.expectedReturn ?? inv.rate) },
         { label: 'Lock-in Period', value: inv.lock_in_years > 0 ? `${inv.lock_in_years} years` : 'None' },
         { label: 'Sovereign Guarantee', value: 'Yes — Govt. of India' },
         { label: 'Tax Section', value: inv.taxation?.section || inv.staticData?.taxation?.section || '—' },
-        { label: 'Max Investment', value: inv.maxAnnualInvestment ? `₹${(inv.maxAnnualInvestment / 100000).toFixed(1)}L / year` : 'No cap' },
+        { label: 'Max Investment', value: inv.maxAnnualInvestment ? `₹${(inv.maxAnnualInvestment / 100000).toFixed(1)}L / year` : 'Unavailable' },
       ];
     }
     if (cat.includes('reit') || cat.includes('invit')) {
       return [
-        { label: 'Dividend Yield', value: `${inv.expectedReturn || inv.rate || '—'}% p.a.` },
-        { label: 'Risk Category', value: inv.riskLabel || inv.risk_level || 'Medium' },
+        { label: 'Dividend Yield', value: formatCatalogRate(inv.expectedReturn ?? inv.rate) },
+        { label: 'Risk Category', value: inv.riskLabel || inv.risk_level || 'Unavailable' },
         { label: 'Distribution', value: '90%+ net cash flow (SEBI mandated)' },
         { label: 'Settlement', value: liqType },
         { label: 'Exchange', value: 'NSE & BSE' },
@@ -72,25 +83,25 @@ const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
       return [
         { label: 'Asset Type', value: 'Gold / Precious Metal' },
         { label: 'Interest', value: id === 'sgb' ? '2.5% p.a. on issue price' : 'N/A (capital appreciation)' },
-        { label: 'Ideal Horizon', value: `${horizon.min}–${horizon.max} years` },
+        { label: 'Ideal Horizon', value: formatCatalogHorizon(horizon) },
         { label: 'Settlement', value: liqType },
         { label: 'Inflation Hedge', value: 'Yes — historically correlated' },
       ];
     }
     if (cat.includes('deposit') || id.endsWith('_fd')) {
       return [
-        { label: 'Interest Rate', value: `${inv.expectedReturn || inv.rate || '—'}% p.a.` },
+        { label: 'Interest Rate', value: formatCatalogRate(inv.expectedReturn ?? inv.rate) },
         { label: 'DICGC Insurance', value: 'Up to ₹5 Lakhs' },
-        { label: 'Ideal Tenure', value: `${horizon.min}–${horizon.max} years` },
+        { label: 'Ideal Tenure', value: formatCatalogHorizon(horizon) },
         { label: 'Premature Withdrawal', value: 'Allowed (with penalty)' },
         { label: 'Compounding', value: 'Quarterly' },
       ];
     }
     // Fallback for Direct Equity, Insurance, Retirement, Other
     return [
-      { label: 'Expected Return', value: `${inv.expectedReturn || inv.rate || '—'}% p.a.` },
-      { label: 'Risk Category', value: inv.riskLabel || inv.risk_level || 'Medium' },
-      { label: 'Ideal Horizon', value: `${horizon.min}–${horizon.max} years` },
+      { label: 'Catalog Return Assumption', value: formatCatalogRate(inv.expectedReturn ?? inv.rate) },
+      { label: 'Risk Category', value: inv.riskLabel || inv.risk_level || 'Unavailable' },
+      { label: 'Ideal Horizon', value: formatCatalogHorizon(horizon) },
       { label: 'Settlement', value: liqType },
     ];
   })();
@@ -172,10 +183,10 @@ const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
               </div>
               <p className="ddm-trust-desc">{trustInfo.desc}</p>
               <div className="ddm-trust-footer">
-                <span className="ddm-trust-chip"><Lock size={11} /> 256-bit Encrypted</span>
-                <span className="ddm-trust-chip"><ShieldCheck size={11} /> Audited & Compliant</span>
-                {isSovereign && <span className="ddm-trust-chip"><Landmark size={11} /> Zero Default Risk</span>}
-                {isInsured && <span className="ddm-trust-chip"><Shield size={11} /> DICGC Protected</span>}
+                <span className="ddm-trust-chip"><Lock size={11} /> Catalog disclosure</span>
+                <span className="ddm-trust-chip"><ShieldCheck size={11} /> Verify current terms</span>
+                {isSovereign && <span className="ddm-trust-chip"><Landmark size={11} /> Sovereign backing disclosed</span>}
+                {isInsured && <span className="ddm-trust-chip"><Shield size={11} /> Insurance terms disclosed</span>}
               </div>
             </div>
           </>
@@ -185,7 +196,7 @@ const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
       {/* People Also Consider (Alternatives) */}
       {alternativeInstruments.length > 0 && (
         <>
-          <div className="ddm-section-header">People Also Consider</div>
+          <div className="ddm-section-header">Related Catalog Entries (Not Recommendations)</div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '10px', marginBottom: '24px' }}>
             {alternativeInstruments.map(alt => (
               <button
@@ -210,8 +221,8 @@ const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
                 </div>
                 <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '6px' }}>{alt.category}</div>
                 <div style={{ display: 'flex', gap: '12px', fontSize: '0.75rem' }}>
-                  <span style={{ color: '#22c55e' }}>{alt.expectedReturn?.toFixed?.(1) || alt.rate || '—'}% p.a.</span>
-                  <span style={{ color: alt.riskLabel?.includes?.('High') ? '#f43f5e' : '#94a3b8' }}>{alt.riskLabel || 'Medium'}</span>
+                  <span style={{ color: '#22c55e' }}>{formatCatalogRate(alt.expectedReturn ?? alt.rate)}</span>
+                  <span style={{ color: alt.riskLabel?.includes?.('High') ? '#f43f5e' : '#94a3b8' }}>{alt.riskLabel || 'Unavailable'}</span>
                 </div>
               </button>
             ))}

@@ -31,15 +31,17 @@ function getDisplayDefaults(goal) {
     themeColorRGB: catalog?.themeColorRGB || hexToRgb(color),
     description: `Custom goal ending ${new Date(goal.target_date).toLocaleDateString('en-IN')}`,
     tip: '',
-    priority: goal.priority || 'Medium',
+    priority: goal.priority || 'Unspecified',
   };
 }
 
 function formatShort(val) {
-  if (val >= 10000000) return `₹${(val / 10000000).toFixed(2)} Cr`;
-  if (val >= 100000) return `₹${(val / 100000).toFixed(1)}L`;
-  if (val >= 1000) return `₹${(val / 1000).toFixed(0)}K`;
-  return `₹${val}`;
+  if (!Number.isFinite(Number(val))) return '—';
+  const numericValue = Number(val);
+  if (numericValue >= 10000000) return `₹${(numericValue / 10000000).toFixed(2)} Cr`;
+  if (numericValue >= 100000) return `₹${(numericValue / 100000).toFixed(1)}L`;
+  if (numericValue >= 1000) return `₹${(numericValue / 1000).toFixed(0)}K`;
+  return `₹${numericValue}`;
 }
 
 const PRIORITY_CONFIG = {
@@ -88,35 +90,45 @@ const GoalCard = ({
 
   const actualTarget = Number(target) || 0;
   const actualSaved = Number(currentSaved) || 0;
-  const projectedValue = Number(goalObj?.monte_carlo_summary?.p50) || 0;
+  const projectedCandidate = Number(goalObj?.monte_carlo_summary?.p50);
+  const hasProjection = Number.isFinite(projectedCandidate) && projectedCandidate >= 0;
+  const projectedValue = hasProjection ? projectedCandidate : null;
 
   // MC projections target the inflation-adjusted amount, so compare against that
-  const comparisonTarget = Number(goalObj?.inflation_adjusted_target) || actualTarget;
+  const comparisonTargetCandidate = Number(goalObj?.inflation_adjusted_target);
+  const hasComparisonTarget = Number.isFinite(comparisonTargetCandidate) && comparisonTargetCandidate > 0;
+  const comparisonTarget = hasComparisonTarget ? comparisonTargetCandidate : null;
 
   const progressPercent = Math.min((actualSaved / (actualTarget || 1)) * 100, 100);
-  const projectedPercent = Math.min((projectedValue / (comparisonTarget || 1)) * 100, 100);
+  const projectedPercent = hasProjection && hasComparisonTarget
+    ? Math.min((projectedValue / comparisonTarget) * 100, 100)
+    : 0;
 
   const isFullyFunded = goalObj?.status === 'on_track';
-  const gap = Number(goalObj?.gap_amount) || 0;
-  const gapPositive = !isFullyFunded && gap > 0;
+  const gapCandidate = Number(goalObj?.gap_amount);
+  const hasGap = Number.isFinite(gapCandidate) && gapCandidate >= 0;
+  const gap = hasGap ? gapCandidate : null;
+  const gapPositive = !isFullyFunded && hasGap && gap > 0;
 
-  const completionPct = Math.min(Math.round((projectedValue / (comparisonTarget || 1)) * 100), 999);
+  const completionPct = hasProjection && hasComparisonTarget
+    ? Math.min(Math.round((projectedValue / comparisonTarget) * 100), 999)
+    : null;
 
   let status, statusClass, StatusIcon;
   if (goalObj?.status === 'on_track') {
     status = 'On Track (Highly Likely)'; statusClass = 'status--ontrack'; StatusIcon = CheckCircle;
   } else if (isDbGoal) {
-    if (goalObj.status === 'on_track') {
-      status = 'On Track (Highly Likely)'; statusClass = 'status--ontrack'; StatusIcon = CheckCircle;
-    } else if (goalObj.status === 'at_risk') {
+    if (goalObj.status === 'at_risk') {
       status = 'Slightly Behind (Needs Boost)'; statusClass = 'status--almost'; StatusIcon = TrendingUp;
-    } else {
+    } else if (goalObj.status === 'off_track') {
       status = 'Off Track (Action Required)'; statusClass = 'status--behind'; StatusIcon = AlertTriangle;
+    } else {
+      status = 'Projection Unavailable'; statusClass = 'status--behind'; StatusIcon = Clock;
     }
   } else { status = 'Awaiting Backend Plan'; statusClass = 'status--behind'; StatusIcon = AlertTriangle; }
 
   const IconComponent = defaults.icon || Target;
-  const priority = isDbGoal ? goalObj.priority || 'Medium' : defaults.priority || 'Medium';
+  const priority = isDbGoal ? goalObj.priority || 'Unspecified' : defaults.priority || 'Unspecified';
 
   const hasChanged = Number(target) !== Number(initialTarget) || Number(currentSaved) !== Number(initialSaved);
 
@@ -304,7 +316,7 @@ const GoalCard = ({
           </div>
           <div className="legend-item">
             <span className="legend-dot" style={{ background: defaults.themeColor || '#6366f1', opacity: 0.5 }}></span>
-            Projected <span className="legend-pct">({completionPct}% of Target)</span>
+            Projected <span className="legend-pct">({completionPct === null ? 'Unavailable' : `${completionPct}% of Target`})</span>
           </div>
         </div>
       </div>
@@ -313,31 +325,31 @@ const GoalCard = ({
       <div className="goal-card-footer">
         <div className="goal-metric">
           <span className="goal-metric-label"><IndianRupee size={12} /> Target Monthly SIP</span>
-          <span className="goal-metric-value">{formatINR(monthlyAllocation)}</span>
+          <span className="goal-metric-value">{Number.isFinite(monthlyAllocation) ? formatINR(monthlyAllocation) : '—'}</span>
           <span className="goal-metric-sub">
-            {totalSavings > 0 
+            {Number.isFinite(monthlyAllocation) && totalSavings > 0
               ? monthlyAllocation <= totalSavings 
                 ? `${Math.round((monthlyAllocation / totalSavings) * 100)}% of your monthly savings`
                 : `Target SIP (${formatShort(monthlyAllocation)})`
-              : '--'}
+              : 'Awaiting backend calculation'}
           </span>
         </div>
         <div className="goal-metric">
           <span className="goal-metric-label"><Clock size={12} /> Time Remaining</span>
-          <span className="goal-metric-value">{horizon}y</span>
+          <span className="goal-metric-value">{Number.isFinite(horizon) ? `${horizon}y` : '—'}</span>
           <span className="goal-metric-sub">Backend Monte Carlo horizon</span>
         </div>
         <div className="goal-metric">
-          <span className="goal-metric-label"><TrendingUp size={12} /> Expected Future Value</span>
+          <span className="goal-metric-label"><TrendingUp size={12} /> Projected Median Value</span>
           <span className="goal-metric-value" style={{ color: defaults.themeColor || '#6366f1' }}>{formatShort(projectedValue)}</span>
-          <span className="goal-metric-sub">{isFullyFunded ? 'Goal Fully Covered!' : `${completionPct}% of Target`}</span>
+          <span className="goal-metric-sub">{isFullyFunded ? 'Goal Fully Covered!' : completionPct === null ? 'Awaiting projection' : `${completionPct}% of Target`}</span>
         </div>
         <div className="goal-metric">
           <span className="goal-metric-label">{isFullyFunded ? 'Fund Status' : 'Still Need (Gap)'}</span>
           <span className="goal-metric-value" style={{ color: isFullyFunded ? '#10b981' : '#f43f5e' }}>
             {isFullyFunded ? '₹0 Gap' : formatShort(gap)}
           </span>
-          <span className="goal-metric-sub">{isFullyFunded ? 'Fully on track to target' : 'Save more to reach target'}</span>
+          <span className="goal-metric-sub">{isFullyFunded ? 'Fully on track to target' : hasGap ? 'Save more to reach target' : 'Awaiting backend calculation'}</span>
         </div>
       </div>
 
@@ -451,35 +463,53 @@ const GoalTracker = ({ profile, onNavigate }) => {
   const goalAllocations = useMemo(() => {
     const allocs = {};
 
-    mappedGoals.forEach(g => { allocs[g.name] = Number(g.obj?.recommended_sip) || 0; });
+    mappedGoals.forEach(g => {
+      const value = Number(g.obj?.recommended_sip);
+      allocs[g.name] = Number.isFinite(value) && value >= 0 ? value : null;
+    });
     return allocs;
   }, [mappedGoals]);
 
   // Combined calculations for the HUD
   const totalTarget = useMemo(() => {
-    return dbGoals.reduce((sum, g) => sum + (Number(g.target_amount) || 0), 0);
+    const values = dbGoals.map(goal => Number(goal.target_amount));
+    return values.every(value => Number.isFinite(value) && value > 0)
+      ? values.reduce((sum, value) => sum + value, 0)
+      : null;
   }, [dbGoals]);
 
   const totalCurrent = useMemo(() => {
-    return dbGoals.reduce((sum, g) => sum + (Number(g.current_savings) || 0), 0);
+    const values = dbGoals.map(goal => Number(goal.current_savings));
+    return values.every(value => Number.isFinite(value) && value >= 0)
+      ? values.reduce((sum, value) => sum + value, 0)
+      : null;
   }, [dbGoals]);
 
   const totalProjected = useMemo(() => {
-    return mappedGoals.reduce((sum, g) => {
-      return sum + (Number(g.obj?.monte_carlo_summary?.p50) || 0);
-    }, 0);
+    const values = mappedGoals.map(g => Number(g.obj?.monte_carlo_summary?.p50));
+    return values.every(value => Number.isFinite(value) && value >= 0)
+      ? values.reduce((sum, value) => sum + value, 0)
+      : null;
   }, [mappedGoals]);
 
   const totalMonthlySIP = useMemo(() => {
-    return dbGoals.reduce((sum, g) => sum + (Number(g.recommended_sip) || 0), 0);
+    const values = dbGoals.map(g => Number(g.recommended_sip));
+    return values.every(value => Number.isFinite(value) && value >= 0)
+      ? values.reduce((sum, value) => sum + value, 0)
+      : null;
   }, [dbGoals]);
 
   // MC projections target inflation-adjusted amounts, so use those for health calculation
   const totalInflationAdjustedTarget = useMemo(() => {
-    return dbGoals.reduce((sum, g) => sum + (Number(g.inflation_adjusted_target || g.target_amount) || 0), 0);
+    const values = dbGoals.map(g => Number(g.inflation_adjusted_target));
+    return values.every(value => Number.isFinite(value) && value > 0)
+      ? values.reduce((sum, value) => sum + value, 0)
+      : null;
   }, [dbGoals]);
 
-  const overallHealth = totalInflationAdjustedTarget > 0 ? Math.min(Math.round((totalProjected / totalInflationAdjustedTarget) * 100), 100) : 0;
+  const overallHealth = Number.isFinite(totalProjected) && Number.isFinite(totalInflationAdjustedTarget) && totalInflationAdjustedTarget > 0
+    ? Math.min(Math.round((totalProjected / totalInflationAdjustedTarget) * 100), 100)
+    : null;
 
   if (loading) {
     return (
@@ -515,7 +545,7 @@ const GoalTracker = ({ profile, onNavigate }) => {
         </div>
         <h1 className="gt-page-title">My Financial Goals</h1>
         <p className="gt-page-subtitle">
-          Plan custom goals separately from your Financial Profile using your ₹{(Number(profile?.monthly_savings) || 0).toLocaleString('en-IN')}/mo savings capacity
+          Plan custom goals separately from your Financial Profile using {Number.isFinite(totalSavings) ? `₹${totalSavings.toLocaleString('en-IN')}/mo` : 'your declared'} savings capacity
         </p>
         <div className="gt-header-divider" />
       </motion.div>
@@ -644,9 +674,9 @@ const GoalTracker = ({ profile, onNavigate }) => {
         <div className="goal-overview-divider"></div>
         
         <div className="goal-overview-stat">
-          <span className="goal-overview-label">Expected Growth</span>
+          <span className="goal-overview-label">Projected Median Value</span>
           <span className="goal-overview-value">{formatShort(totalProjected)}</span>
-          <span className="goal-overview-sub">Monthly Savings Needed: {showDbGoals ? `₹${Math.round(totalMonthlySIP).toLocaleString('en-IN')}/mo` : `₹${Math.round(totalSavings).toLocaleString('en-IN')}/mo`}</span>
+          <span className="goal-overview-sub">Monthly Savings Needed: {showDbGoals ? (Number.isFinite(totalMonthlySIP) ? `₹${Math.round(totalMonthlySIP).toLocaleString('en-IN')}/mo` : 'Awaiting calculation') : (Number.isFinite(totalSavings) ? `₹${Math.round(totalSavings).toLocaleString('en-IN')}/mo` : 'Unavailable')}</span>
         </div>
         
         <div className="goal-overview-divider"></div>
@@ -654,17 +684,17 @@ const GoalTracker = ({ profile, onNavigate }) => {
         <div className="goal-overview-stat">
           <span className="goal-overview-label">Overall Progress</span>
           <span className="goal-overview-value health-value" style={{
-            color: overallHealth >= 80 ? '#10b981' : overallHealth >= 50 ? '#f59e0b' : '#ef4444',
-            textShadow: `0 0 20px ${overallHealth >= 80 ? 'rgba(16,185,129,0.4)' : overallHealth >= 50 ? 'rgba(245,158,11,0.4)' : 'rgba(239,68,68,0.4)'}`
+            color: overallHealth === null ? '#64748b' : overallHealth >= 80 ? '#10b981' : overallHealth >= 50 ? '#f59e0b' : '#ef4444',
+            textShadow: overallHealth === null ? 'none' : `0 0 20px ${overallHealth >= 80 ? 'rgba(16,185,129,0.4)' : overallHealth >= 50 ? 'rgba(245,158,11,0.4)' : 'rgba(239,68,68,0.4)'}`
           }}>
-            {overallHealth}%
+            {overallHealth === null ? '—' : `${overallHealth}%`}
           </span>
           <span className="goal-overview-sub" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
             <span className="health-dot" style={{ 
-              backgroundColor: overallHealth >= 80 ? '#10b981' : overallHealth >= 50 ? '#f59e0b' : '#ef4444',
-              boxShadow: `0 0 10px ${overallHealth >= 80 ? '#10b981' : overallHealth >= 50 ? '#f59e0b' : '#ef4444'}`
+              backgroundColor: overallHealth === null ? '#64748b' : overallHealth >= 80 ? '#10b981' : overallHealth >= 50 ? '#f59e0b' : '#ef4444',
+              boxShadow: overallHealth === null ? 'none' : `0 0 10px ${overallHealth >= 80 ? '#10b981' : overallHealth >= 50 ? '#f59e0b' : '#ef4444'}`
             }} />
-            {overallHealth >= 80 ? 'On Track' : overallHealth >= 50 ? 'Could Use a Boost' : 'Needs Attention'}
+            {overallHealth === null ? 'Awaiting Projection' : overallHealth >= 80 ? 'On Track' : overallHealth >= 50 ? 'Could Use a Boost' : 'Needs Attention'}
           </span>
         </div>
       </motion.div>
@@ -681,7 +711,7 @@ const GoalTracker = ({ profile, onNavigate }) => {
               goalObj={g.obj}
               onSaveUpdates={handleGoalCardUpdate}
               onDeleteGoal={handleDeleteGoal}
-              monthlyAllocation={goalAllocations[g.name] || 0}
+              monthlyAllocation={goalAllocations[g.name]}
               horizon={g.horizon}
               totalSavings={totalSavings}
             />

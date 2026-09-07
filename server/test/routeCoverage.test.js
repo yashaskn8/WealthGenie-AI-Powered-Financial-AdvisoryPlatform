@@ -55,6 +55,8 @@ test('protected route files enforce JWT before service/database work', async () 
       ['profile', 'POST', '/api/profile/build', canonicalProfilePayload()],
       ['recommend', 'POST', '/api/recommend', { profileId: '65b000000000000000000001' }],
       ['projection', 'POST', '/api/projection', { profileId: '65b000000000000000000001', monthly_investment: 10000 }],
+      ['stress test', 'POST', '/api/projection/stress-test', { profileId: '65b000000000000000000001', instrumentId: 'ETF', principal: 100000 }],
+      ['allocation split', 'POST', '/api/projection/allocation-split', { monthlyInvestment: 10000, equityPct: 60 }],
       ['montecarlo', 'POST', '/api/montecarlo/montecarlo', { instrument: 'ETF', monthly_investment: 10000, years: 5 }],
       ['goals', 'GET', '/api/goals', null],
       ['market refresh', 'POST', '/api/market/refresh', {}],

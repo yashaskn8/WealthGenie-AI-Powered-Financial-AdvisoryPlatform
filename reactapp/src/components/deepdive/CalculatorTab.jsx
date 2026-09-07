@@ -22,16 +22,18 @@ const CalculatorTab = ({
   projectionError,
   projectionLoading,
 }) => {
-  const maturityValue = projection?.investmentMaturity ?? 0;
-  const totalInvested = projection?.totalInvested ?? 0;
-  const estimatedReturns = projection?.estimatedReturns ?? 0;
-  const realMaturityValue = projection?.investmentReal ?? 0;
+  const maturityValue = projection?.investmentMaturity ?? null;
+  const totalInvested = projection?.totalInvested ?? null;
+  const estimatedReturns = projection?.estimatedReturns ?? null;
+  const realMaturityValue = projection?.investmentReal ?? null;
+  const hasProjection = [maturityValue, totalInvested, estimatedReturns, realMaturityValue]
+    .every(value => Number.isFinite(Number(value)));
   const taxRule = { label: 'Open Post-Tax Analysis to supply income and tax regime', color: '#94a3b8' };
 
   // Growth metrics — derived only from values returned by the projection API.
-  const growthMultiplier = totalInvested > 0 ? (maturityValue / totalInvested).toFixed(2) : '0.00';
-  const totalReturnPct = totalInvested > 0 ? ((estimatedReturns / totalInvested) * 100).toFixed(1) : '0.0';
-  const inflationDrag = maturityValue - realMaturityValue;
+  const growthMultiplier = hasProjection && totalInvested > 0 ? (maturityValue / totalInvested).toFixed(2) : null;
+  const totalReturnPct = hasProjection && totalInvested > 0 ? ((estimatedReturns / totalInvested) * 100).toFixed(1) : null;
+  const inflationDrag = hasProjection ? maturityValue - realMaturityValue : null;
 
   const yearlyBreakdown = useMemo(() => (projection?.yearlyBreakdown || []).map(row => ({
     year: row.year,
@@ -79,7 +81,7 @@ const CalculatorTab = ({
         boxShadow: '0 8px 24px -8px rgba(56,189,248,0.1)'
       }}>
         <Info size={18} style={{ flexShrink: 0, color: '#7dd3fc' }} />
-        <span>Sliders are auto-calibrated to <strong style={{ color: '#f8fafc', fontWeight: 800 }}>{inv.name}'s</strong> realistic parameters. Expected Return: <strong style={{ color: '#38bdf8' }}>{calcBounds.returnMin}%–{calcBounds.returnMax}%</strong> | Tenure: <strong style={{ color: '#38bdf8' }}>{calcBounds.yearMin}–{calcBounds.yearMax} yrs</strong></span>
+        <span>Sliders use the catalog range for <strong style={{ color: '#f8fafc', fontWeight: 800 }}>{inv.name}</strong>. Assumed Return: <strong style={{ color: '#38bdf8' }}>{calcBounds.returnMin}%–{calcBounds.returnMax}%</strong> | Tenure: <strong style={{ color: '#38bdf8' }}>{calcBounds.yearMin}–{calcBounds.yearMax} yrs</strong></span>
       </div>
 
       {(projectionLoading || projectionError) && (
@@ -133,7 +135,7 @@ const CalculatorTab = ({
           </div>
           <div className="calc-field">
             <div className="calc-label-row">
-              <label className="metric-label">Expected Annual Return</label>
+              <label className="metric-label">Assumed Annual Return</label>
               <span className="calc-value-display">{calcReturn}%</span>
             </div>
             <input
@@ -147,7 +149,7 @@ const CalculatorTab = ({
             />
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.6rem', color: '#475569', marginTop: 4 }}>
               <span>{calcBounds.returnMin}%</span>
-              <span style={{ color: '#64748b', fontWeight: 600 }}>Avg: {((inv.expected_return_min + inv.expected_return_max) / 2).toFixed(1)}%</span>
+              <span style={{ color: '#64748b', fontWeight: 600 }}>Selected assumption: {calcReturn}%</span>
               <span>{calcBounds.returnMax}%</span>
             </div>
           </div>
@@ -238,10 +240,10 @@ const CalculatorTab = ({
               letterSpacing: '-0.03em',
               lineHeight: 1,
             }}>
-              {growthMultiplier}×
+              {growthMultiplier === null ? '—' : `${growthMultiplier}×`}
             </div>
             <div style={{ fontSize: '0.65rem', color: '#94a3b8', marginTop: 6, fontWeight: 600 }}>
-              Total Return: <span style={{ color: '#22c55e', fontWeight: 800 }}>+{totalReturnPct}%</span>
+              Total Return: <span style={{ color: '#22c55e', fontWeight: 800 }}>{totalReturnPct === null ? '—' : `+${totalReturnPct}%`}</span>
             </div>
           </div>
 
@@ -282,7 +284,7 @@ const CalculatorTab = ({
                 <TrendingUp size={11} style={{ color: '#f97316' }} /> Today's Value ({inflationRate}% inflation)
               </span>
               <span className="sidebar-value" style={{ color: '#fb923c', whiteSpace: 'nowrap', fontSize: '1.1rem' }}>{formatINR(realMaturityValue)}</span>
-              {inflationDrag > 0 && (
+              {inflationDrag !== null && inflationDrag > 0 && (
                 <span style={{ fontSize: '0.6rem', color: '#f97316', fontWeight: 700, marginTop: 2 }}>
                   Inflation Drag: -{formatINR(Math.round(inflationDrag))}
                 </span>
@@ -292,25 +294,7 @@ const CalculatorTab = ({
 
           {/* Goal-Mapping Milestones */}
           {realMaturityValue > 0 && (() => {
-            const goals = [
-              { min: 20000,     icon: '🎧', label: 'Premium wireless earbuds', amount: '~₹20K' },
-              { min: 50000,     icon: '📱', label: 'iPhone SE / Samsung S24 FE', amount: '~₹50K' },
-              { min: 85000,     icon: '🛵', label: 'Honda Activa 6G (on-road)', amount: '~₹85K' },
-              { min: 135000,    icon: '📱', label: 'iPhone 16 Pro', amount: '~₹1.35L' },
-              { min: 250000,    icon: '✈️', label: 'Thailand/Bali trip for 2', amount: '~₹2.5L' },
-              { min: 500000,    icon: '💻', label: 'MacBook Pro M4', amount: '~₹5L' },
-              { min: 900000,    icon: '🚗', label: 'Maruti Brezza (on-road)', amount: '~₹9L' },
-              { min: 1200000,   icon: '🎓', label: '4-yr engineering (state college)', amount: '~₹12L' },
-              { min: 1800000,   icon: '🚙', label: 'Hyundai Creta (on-road)', amount: '~₹18L' },
-              { min: 2500000,   icon: '💍', label: 'Middle-class Indian wedding', amount: '~₹25L' },
-              { min: 4000000,   icon: '📚', label: 'MBA from IIM (2-yr total)', amount: '~₹40L' },
-              { min: 6000000,   icon: '🚘', label: 'Fortuner / XUV700 (top-end)', amount: '~₹60L' },
-              { min: 8000000,   icon: '🏠', label: '2BHK in Bangalore/Pune', amount: '~₹80L' },
-              { min: 12000000,  icon: '🏢', label: '3BHK in Mumbai suburb', amount: '~₹1.2Cr' },
-              { min: 25000000,  icon: '🏙️', label: '3BHK premium metro flat', amount: '~₹2.5Cr' },
-              { min: 50000000,  icon: '🏝️', label: 'Financial independence (25× rule)', amount: '~₹5Cr' },
-              { min: 100000000, icon: '🌴', label: 'Early retirement corpus', amount: '~₹10Cr' },
-            ];
+            const goals = projection?.illustrativePurchasePowerMilestones || [];
             const matched = goals.filter(g => realMaturityValue >= g.min);
             const topGoals = matched.slice(-3).reverse();
             if (topGoals.length === 0) return null;
@@ -327,7 +311,7 @@ const CalculatorTab = ({
                   </div>
                 ))}
                 <div style={{ fontSize: '0.6rem', color: '#475569', marginTop: 8, fontStyle: 'italic', lineHeight: 1.4 }}>
-                  * Compared using the explicit inflation-adjusted value ({inflationRate}%)
+                  * Curated illustrations, not live price quotes; compared using the explicit inflation-adjusted value ({inflationRate}%).
                 </div>
               </div>
             );
@@ -337,7 +321,9 @@ const CalculatorTab = ({
           <div className="goal-export-section">
             <button
               className="goal-export-btn goal-export-btn--pdf"
+              disabled={!hasProjection}
               onClick={() => {
+                if (!hasProjection) return;
                 const report = `
 <!DOCTYPE html>
 <html><head><meta charset="UTF-8"><title>WealthGenie – ${inv.name} Goal Report</title>
@@ -369,7 +355,7 @@ const CalculatorTab = ({
 <div class="multiplier">${growthMultiplier}× Growth · +${totalReturnPct}% Total Return</div>
 <div class="grid">
   <div class="card"><div class="label">Monthly SIP</div><div class="value cyan">₹${calcAmount.toLocaleString('en-IN')}</div></div>
-  <div class="card"><div class="label">Expected Return</div><div class="value cyan">${calcReturn}% p.a.</div></div>
+  <div class="card"><div class="label">Assumed Return</div><div class="value cyan">${calcReturn}% p.a.</div></div>
   <div class="card"><div class="label">Total Principal</div><div class="value">${formatINR(totalInvested)}</div></div>
   <div class="card"><div class="label">Compounding Yield</div><div class="value green">+${formatINR(estimatedReturns)}</div></div>
   <div class="card"><div class="label">Gross Maturity Value</div><div class="value cyan" style="font-size:1.6rem">${formatINR(maturityValue)}</div></div>
@@ -393,9 +379,11 @@ const CalculatorTab = ({
             </button>
             <button
               className="goal-export-btn goal-export-btn--copy"
+              disabled={!hasProjection}
               onClick={(e) => {
+                if (!hasProjection) return;
                 const btn = e.currentTarget;
-                const summary = `WealthGenie – ${inv.name} Goal Report\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n• Monthly SIP: ₹${calcAmount.toLocaleString('en-IN')}\n• Expected Return: ${calcReturn}% p.a.\n• Time Horizon: ${calcYears} years\n• Growth Multiplier: ${growthMultiplier}×\n\n• Total Invested: ${formatINR(totalInvested)}\n• Maturity Value: ${formatINR(maturityValue)}\n• After Tax: Requires explicit tax context in Post-Tax Analysis\n• Today's Value (${inflationRate}% inflation): ${formatINR(realMaturityValue)}\n\n* Past performance is not indicative of future results.\nGenerated by WealthGenie • ${new Date().toLocaleDateString('en-IN')}`;
+                const summary = `WealthGenie – ${inv.name} Goal Report\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n• Monthly SIP: ₹${calcAmount.toLocaleString('en-IN')}\n• Assumed Return: ${calcReturn}% p.a.\n• Time Horizon: ${calcYears} years\n• Growth Multiplier: ${growthMultiplier}×\n\n• Total Invested: ${formatINR(totalInvested)}\n• Maturity Value: ${formatINR(maturityValue)}\n• After Tax: Requires explicit tax context in Post-Tax Analysis\n• Today's Value (${inflationRate}% inflation): ${formatINR(realMaturityValue)}\n\n* Past performance is not indicative of future results.\nGenerated by WealthGenie • ${new Date().toLocaleDateString('en-IN')}`;
                 navigator.clipboard.writeText(summary).then(() => {
                   btn.textContent = '✓ Copied!';
                   btn.style.borderColor = '#22c55e';

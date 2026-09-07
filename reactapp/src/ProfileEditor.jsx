@@ -99,7 +99,14 @@ const ProfileEditor = ({ userProfile, onProfileUpdate }) => {
     if (field.type === 'currency') return val === '' || val === null ? 'Not provided' : `₹${Number(val).toLocaleString('en-IN')}`;
     if (field.type === 'goals') return Array.isArray(val) && val.length ? val.join(', ') : 'Not provided';
     if (field.type === 'slider') return val === '' || val === null ? 'Not provided' : `${val}${field.suffix || ''}`;
-    if (field.type === 'lump-sum') return val === true ? `Yes — ₹${Number(draft.lump_sum_amount || 0).toLocaleString('en-IN')}` : val === false ? 'No' : 'Not provided';
+    if (field.type === 'lump-sum') {
+      if (val === false) return 'No';
+      if (val !== true) return 'Not provided';
+      const amount = Number(draft.lump_sum_amount);
+      return Number.isFinite(amount) && amount > 0
+        ? `Yes — ₹${amount.toLocaleString('en-IN')}`
+        : 'Yes — amount required';
+    }
     return val === '' || val === null ? 'Not provided' : val;
   };
 
@@ -314,15 +321,15 @@ const ProfileEditor = ({ userProfile, onProfileUpdate }) => {
         transition={{ delay: 0.2, duration: 0.5 }}
       >
         <div className="profile-summary-item">
-          <div className="summary-number" style={{ color: '#f43f5e' }}>₹{Number(draft.monthly_take_home || 0).toLocaleString('en-IN')}</div>
+          <div className="summary-number" style={{ color: '#f43f5e' }}>{Number(draft.monthly_take_home) > 0 ? `₹${Number(draft.monthly_take_home).toLocaleString('en-IN')}` : '—'}</div>
           <div className="summary-label">Monthly Take-Home</div>
         </div>
         <div className="profile-summary-item">
-          <div className="summary-number" style={{ color: '#34d399' }}>{savingsRate}%</div>
+          <div className="summary-number" style={{ color: '#34d399' }}>{Number(draft.monthly_take_home) > 0 ? `${savingsRate}%` : '—'}</div>
           <div className="summary-label">Savings Rate</div>
         </div>
         <div className="profile-summary-item">
-          <div className="summary-number" style={{ color: '#38bdf8' }}>₹{Number(draft.monthly_savings).toLocaleString('en-IN')}</div>
+          <div className="summary-number" style={{ color: '#38bdf8' }}>{Number(draft.monthly_savings) > 0 ? `₹${Number(draft.monthly_savings).toLocaleString('en-IN')}` : '—'}</div>
           <div className="summary-label">Monthly SIP Budget</div>
         </div>
         <div className="profile-summary-item">

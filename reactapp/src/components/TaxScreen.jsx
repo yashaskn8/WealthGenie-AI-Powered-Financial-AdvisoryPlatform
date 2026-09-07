@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import { motion, AnimatePresence } from 'framer-motion';
-import { formatINR } from '../utils/indianNumberFormat';
+import { formatINR, formatPercent } from '../utils/indianNumberFormat';
 import { ShieldCheck, Calculator, Wallet, Receipt, Percent, PiggyBank, TrendingDown, Info, Sparkles, IndianRupee, HelpCircle, Layers, ArrowUpRight, CheckCircle2, Heart, ToggleLeft, ToggleRight, Landmark, Coins } from 'lucide-react';
 import JargonTooltip from './JargonTooltip';
 import api from '../services/api';
@@ -74,8 +74,8 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
   const section80CCDLimit = serverTaxData?.deduction_limits?.section80CCD1B ?? null;
   const self80DLimit = serverTaxData?.deduction_limits?.section80DSelf ?? null;
   const parents80DLimit = serverTaxData?.deduction_limits?.section80DParents ?? null;
-  const remaining80C = serverTaxData?.remaining_deductions?.section80C ?? 0;
-  const remaining80CCD = serverTaxData?.remaining_deductions?.section80CCD1B ?? 0;
+  const remaining80C = serverTaxData?.remaining_deductions?.section80C ?? null;
+  const remaining80CCD = serverTaxData?.remaining_deductions?.section80CCD1B ?? null;
 
   const taxSavingRecs = useMemo(() => {
     return recommendations
@@ -95,27 +95,29 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
   // Authoritative financial values always come from the backend.
   const totalTax = serverTaxData
     ? (regime === 'new' ? serverTaxData.new_regime.tax : serverTaxData.old_regime.tax)
-    : 0;
+    : null;
 
   const taxableIncome = serverTaxData
     ? (regime === 'new' ? serverTaxData.new_regime.taxable_income : serverTaxData.old_regime.taxable_income)
-    : 0;
+    : null;
 
   const effectiveRate = serverTaxData
     ? (regime === 'new' ? serverTaxData.new_regime.effective_rate : serverTaxData.old_regime.effective_rate)
-    : 0;
+    : null;
 
   const standardDeduction = serverTaxData
     ? (regime === 'new' ? serverTaxData.new_regime.standard_deduction : serverTaxData.old_regime.standard_deduction)
-    : 0;
+    : null;
 
-  const potentialSaving = regime === 'old' ? (serverTaxData?.potential_tax_saving ?? 0) : 0;
+  const potentialSaving = serverTaxData
+    ? (regime === 'old' ? serverTaxData.potential_tax_saving : 0)
+    : null;
 
   const betterRegime = serverTaxData
     ? (serverTaxData.saving === 0 ? 'Either' : (serverTaxData.recommended_regime === 'new' ? 'New' : 'Old'))
     : 'Unavailable';
 
-  const betterRegimeSavings = serverTaxData ? serverTaxData.saving : 0;
+  const betterRegimeSavings = serverTaxData?.saving ?? null;
 
   // Breakdown lists for slabs tables
   const newRegimeSlabs = serverTaxData?.new_regime?.slab_breakdown ?? [];
@@ -127,8 +129,8 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
   const crossoverBreakpoint = serverTaxData?.crossover_breakpoint ?? null;
   const currentDeductions = (Number(existing80C) || 0) + (Number(existing80CCD) || 0);
 
-  const taxOldVal = serverTaxData ? serverTaxData.old_regime.tax : 0;
-  const taxNewVal = serverTaxData ? serverTaxData.new_regime.tax : 0;
+  const taxOldVal = serverTaxData?.old_regime?.tax ?? null;
+  const taxNewVal = serverTaxData?.new_regime?.tax ?? null;
 
   const regimeChartData = [
     { label: 'Old Regime', value: taxOldVal, fill: 'url(#colorOld)' },
@@ -137,7 +139,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
 
   const optimizationChartData = [
     { label: 'Current Tax', value: totalTax, fill: 'url(#colorCurrent)' },
-    { label: 'After Optimization', value: serverTaxData?.optimized_old_regime_tax ?? 0, fill: 'url(#colorOpt)' },
+    { label: 'After Optimization', value: serverTaxData?.optimized_old_regime_tax ?? null, fill: 'url(#colorOpt)' },
   ];
 
   return (
@@ -200,6 +202,8 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
               <span>Select your income source below to run an explicit, server-verified tax comparison.</span>
             ) : apiError ? (
               <span>Authoritative tax results are unavailable. No local fallback calculation is being shown.</span>
+            ) : !serverTaxData ? (
+              <span>The authoritative tax service is calculating your comparison.</span>
             ) : betterRegime !== 'Either' ? (
               <span>You'll pay less tax with the <strong>{betterRegime} Regime</strong> - saving <strong>{formatINR(betterRegimeSavings)}</strong> compared to the other option!</span>
             ) : (
@@ -557,7 +561,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
         <div className="tax-summary-card">
           <div className="tax-sum-icon"><Percent size={20} /></div>
           <span className="tax-sum-label">Average Tax Rate</span>
-          <span className="tax-sum-value">{effectiveRate}%</span>
+          <span className="tax-sum-value">{formatPercent(effectiveRate)}</span>
         </div>
         <div className="tax-summary-card">
           <div className="tax-sum-icon"><PiggyBank size={20} /></div>
@@ -703,7 +707,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                   <div>
                     <div className="tax-insight-title">Monthly Tax from Salary</div>
                     <div className="tax-insight-desc">
-                      About {formatINR(Math.round(totalTax / 12))}/month will be deducted from your salary as <JargonTooltip term="TDS">TDS</JargonTooltip>.
+                      About {formatINR(totalTax === null ? null : Math.round(totalTax / 12))}/month will be deducted from your salary as <JargonTooltip term="TDS">TDS</JargonTooltip>.
                     </div>
                   </div>
                 </div>
@@ -713,7 +717,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                   <div>
                     <div className="tax-insight-title">What You Take Home</div>
                     <div className="tax-insight-desc">
-                      About {formatINR(Math.round((annualIncome - totalTax) / 12))}/month in your bank account after tax.
+                      About {formatINR(totalTax === null ? null : Math.round((annualIncome - totalTax) / 12))}/month in your bank account after tax.
                     </div>
                   </div>
                 </div>
@@ -828,20 +832,20 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
           <div className="tax-limit-card">
             <div className="tax-limit-header"><JargonTooltip term="Section 80C">Tax-Saving Investments (80C)</JargonTooltip> - How Much You've Used</div>
             <div className="tax-limit-bar-track">
-              <div className="tax-limit-bar-fill" style={{ width: `${section80CLimit ? ((section80CLimit - remaining80C) / section80CLimit) * 100 : 0}%` }} />
+              <div className="tax-limit-bar-fill" style={{ width: `${section80CLimit && remaining80C !== null ? ((section80CLimit - remaining80C) / section80CLimit) * 100 : 0}%` }} />
             </div>
             <div className="tax-limit-info">
-              Deductions Claimed: {formatINR(section80CLimit ? section80CLimit - remaining80C : 0)} / {formatINR(section80CLimit)}
+              Deductions Claimed: {formatINR(section80CLimit && remaining80C !== null ? section80CLimit - remaining80C : null)} / {formatINR(section80CLimit)}
               <span>Remaining: {formatINR(remaining80C)}</span>
             </div>
           </div>
           <div className="tax-limit-card">
             <div className="tax-limit-header"><JargonTooltip term="Section 80CCD(1B)">Pension (NPS) Deduction</JargonTooltip> - How Much You've Used</div>
             <div className="tax-limit-bar-track">
-              <div className="tax-limit-bar-fill tax-limit-bar-fill--purple" style={{ width: `${section80CCDLimit ? ((section80CCDLimit - remaining80CCD) / section80CCDLimit) * 100 : 0}%` }} />
+              <div className="tax-limit-bar-fill tax-limit-bar-fill--purple" style={{ width: `${section80CCDLimit && remaining80CCD !== null ? ((section80CCDLimit - remaining80CCD) / section80CCDLimit) * 100 : 0}%` }} />
             </div>
             <div className="tax-limit-info">
-              Deductions Claimed: {formatINR(section80CCDLimit ? section80CCDLimit - remaining80CCD : 0)} / {formatINR(section80CCDLimit)}
+              Deductions Claimed: {formatINR(section80CCDLimit && remaining80CCD !== null ? section80CCDLimit - remaining80CCD : null)} / {formatINR(section80CCDLimit)}
               <span>Remaining: {formatINR(remaining80CCD)}</span>
             </div>
           </div>
@@ -902,7 +906,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                       <span className="tax-rec-stat-value">{formatINR(rec.suggestedAmount)}</span>
                     </div>
                     <div className="tax-rec-stat">
-                      <span className="tax-rec-stat-label">Expected Return</span>
+                      <span className="tax-rec-stat-label">Pre-tax Nominal Assumption</span>
                       <span className="tax-rec-stat-value text-green">
                         {Number(rec.expected_return_min).toFixed(1)}% pre-tax nominal
                       </span>

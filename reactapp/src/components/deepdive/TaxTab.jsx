@@ -147,7 +147,7 @@ const InteractiveTaxSimulator = ({ inv, calcAmount, calcYears, userProfile }) =>
       ).then(response => {
         if (!cancelled) setResult(response);
       }).catch(requestError => {
-        if (!cancelled && requestError?.name !== 'AbortError') {
+        if (!cancelled && requestError?.code !== 'REQUEST_ABORTED') {
           setResult(null);
           setError(requestError?.message || 'Tax what-if calculation failed.');
         }
@@ -175,7 +175,7 @@ const InteractiveTaxSimulator = ({ inv, calcAmount, calcYears, userProfile }) =>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <Zap size={20} color="#a855f7" />
           <h4 style={{ margin: 0, color: '#f8fafc', fontSize: '1rem', fontWeight: 800 }}>
-            Interactive Post-Tax Net Yield Simulator (₹1,00,000 Invested)
+            Interactive Post-Tax Net Yield Simulator
           </h4>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>

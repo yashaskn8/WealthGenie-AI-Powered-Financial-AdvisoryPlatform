@@ -1,15 +1,16 @@
 import { Router } from 'express';
 import { verifyJWT } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
-import { customPortfolioProjectionSchema, historicalXirrSchema, personalizedProjectionSchema, projectionComparisonSchema, stepUpProjectionSchema, validateStrict } from '../validation/financialSchemas.js';
+import { allocationSplitSchema, customPortfolioProjectionSchema, historicalXirrSchema, personalizedProjectionSchema, projectionComparisonSchema, stepUpProjectionSchema, stressScenarioSchema, validateStrict } from '../validation/financialSchemas.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
-import { generatePortfolioProjection, generateProjectionComparison, generateProjections, sipFV, stepUpSipFV } from '../services/projectionEngine.js';
+import { generateAllocationSplit, generatePortfolioProjection, generateProjectionComparison, generateProjections, sipFV, stepUpSipFV } from '../services/projectionEngine.js';
 import { computeXIRR, computeSIPXIRR } from '../services/xirrCalculator.js';
 import { getNominalRate, INSTRUMENT_PARAMS } from '../services/instrumentConstants.js';
-import { buildRecommendationProfile, buildProfileGroundedSimulation } from '../services/recommendationProfile.js';
+import { buildRecommendationProfile, buildProfileGroundedSimulation, buildRecommendationProfileHash } from '../services/recommendationProfile.js';
 import { assertPortfolioSuitable, resolveConcentrationCap } from '../services/RecommendationPipeline.js';
 import { resolveAssetKey } from '../services/portfolioEngine.js';
+import { buildStressScenarioReport } from '../services/stressScenarioEngine.js';
 
 const router = Router();
 
@@ -34,6 +35,51 @@ function assertCustomConcentration(allocations) {
     }
   }
 }
+
+router.post('/stress-test', verifyJWT, validateStrict(stressScenarioSchema), asyncHandler(async (req, res) => {
+  const { profileId, instrumentId, principal } = req.body;
+  const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
+  if (!stored) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
+
+  const recommendation = await Recommendation.findOne({ profileId, userId: req.user.userId })
+    .sort({ generatedAt: -1 })
+    .lean();
+  if (!recommendation?.instruments?.length) {
+    throw createError(
+      409,
+      'Stress test requires an authoritative recommendation.',
+      'Generate your recommendation before running a stress test.',
+      { code: 'RECOMMENDATION_REQUIRED' },
+    );
+  }
+
+  const profile = buildRecommendationProfile(stored);
+  const expectedProfileHash = buildRecommendationProfileHash(profile, { modelVersion: recommendation.modelVersion });
+  if (recommendation.profileInputHash !== expectedProfileHash) {
+    throw createError(
+      409,
+      'Authoritative recommendation is stale for the current profile.',
+      'Refresh your recommendation before running a stress test.',
+      { code: 'RECOMMENDATION_STALE' },
+    );
+  }
+
+  const instrument = recommendation.instruments.find(entry => entry.id === instrumentId);
+  if (!instrument) {
+    throw createError(
+      400,
+      `Instrument ${instrumentId} is outside the authoritative recommendation.`,
+      'Stress tests are available only for instruments in your current recommendation.',
+      { code: 'INSTRUMENT_NOT_RECOMMENDED' },
+    );
+  }
+
+  res.json({
+    ...buildStressScenarioReport({ instrument, principal }),
+    profile_id: profileId,
+    recommendation_generated_at: recommendation.generatedAt,
+  });
+}));
 
 router.post('/custom-portfolio', verifyJWT, validateStrict(customPortfolioProjectionSchema), asyncHandler(async (req, res) => {
   const { profileId, allocations, years } = req.body;
@@ -109,6 +155,8 @@ router.post('/custom-portfolio', verifyJWT, validateStrict(customPortfolioProjec
     affordability_match_pct: 100,
     liquidity_warning: safeWeight < 0.15,
     asset_class_allocation: Object.fromEntries(Object.entries(assetClassAllocation).map(([key, value]) => [key, Math.round(value)])),
+    allocation_percentages: Object.fromEntries(Object.entries(allocations).map(([key, weight]) => [key, Number((weight * 100).toFixed(4))])),
+    monthly_instrument_allocations: Object.fromEntries(Object.entries(allocations).map(([key, weight]) => [key, Number((profile.monthlySavings * weight).toFixed(2))])),
     final_suitability_risk: suitability.finalRisk,
     suitability_reason_codes: suitability.reasonCodes,
   });
@@ -116,6 +164,10 @@ router.post('/custom-portfolio', verifyJWT, validateStrict(customPortfolioProjec
 
 router.post('/compare', verifyJWT, validateStrict(projectionComparisonSchema), asyncHandler(async (req, res) => {
   res.json(generateProjectionComparison(req.body));
+}));
+
+router.post('/allocation-split', verifyJWT, validateStrict(allocationSplitSchema), asyncHandler(async (req, res) => {
+  res.json(generateAllocationSplit(req.body));
 }));
 
 router.post('/step-up', verifyJWT, validateStrict(stepUpProjectionSchema), asyncHandler(async (req, res) => {

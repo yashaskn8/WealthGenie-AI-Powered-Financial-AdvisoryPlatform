@@ -27,7 +27,17 @@ const RISK_LABEL_TO_LEVEL = {
   'Very Low': 15, 'Low': 30, 'Low-Medium': 40, 'Medium-Low': 45, 'Medium': 60, 'High': 80, 'Very High': 95
 };
 
+const getRiskPercent = (riskLevel) => {
+  const value = RISK_LABEL_TO_LEVEL[riskLevel];
+  return Number.isFinite(value) ? value : null;
+};
+
 const Sparkline = ({ color, category, riskLevel, rate, invId }) => {
+  const numericRate = Number(rate);
+  const riskPercent = getRiskPercent(riskLevel);
+  if (!Number.isFinite(numericRate) || riskPercent === null) {
+    return <span style={{ width: 80, color: '#64748b', textAlign: 'center' }} title="Illustrative risk glyph unavailable">—</span>;
+  }
   const seedStr = invId || 'default';
   let seed = 0;
   for (let i = 0; i < seedStr.length; i++) {
@@ -39,9 +49,9 @@ const Sparkline = ({ color, category, riskLevel, rate, invId }) => {
   };
 
   const isDebt = category === 'Debt' || category === 'Government';
-  const volMulti = (RISK_LABEL_TO_LEVEL[riskLevel] || 50) / 100;
+  const volMulti = riskPercent / 100;
   
-  const clampedRate = Math.max(5, Math.min(16, rate || 8));
+  const clampedRate = Math.max(5, Math.min(16, numericRate));
   const finalY = 18 - ((clampedRate - 5) / 11) * 16;
   
   const pointsCount = isDebt ? 6 : 14; 
@@ -77,7 +87,7 @@ const Sparkline = ({ color, category, riskLevel, rate, invId }) => {
   }
 
   return (
-    <svg className="sparkline-container" viewBox="0 0 100 20" style={{ width: '80px', height: '24px', flexShrink: 0, overflow: 'visible', filter: `drop-shadow(0 2px 4px ${color}40)` }}>
+    <svg role="img" aria-label="Illustrative risk pattern, not a price history or forecast" className="sparkline-container" viewBox="0 0 100 20" style={{ width: '80px', height: '24px', flexShrink: 0, overflow: 'visible', filter: `drop-shadow(0 2px 4px ${color}40)` }}>
       {!isDebt && <path d={`${path} L 100 20 L 0 20 Z`} fill={`${color}15`} />}
       <path d={path} fill="none" stroke={color} strokeWidth={isDebt ? "2" : "1.5"} strokeLinecap="round" strokeLinejoin="round" />
       <circle cx="100" cy={finalY} r="2.5" fill={color} />
@@ -86,9 +96,9 @@ const Sparkline = ({ color, category, riskLevel, rate, invId }) => {
 };
 
 const RiskLiquidityVisual = ({ risk, liquidity }) => {
-  const percent = RISK_LABEL_TO_LEVEL[risk] || 50;
-  const color = percent <= 30 ? '#34d399' : percent <= 60 ? '#fbbf24' : '#ef4444';
-  const liqCount = liquidity === 'High' ? 5 : liquidity === 'Medium' ? 3 : 1;
+  const percent = getRiskPercent(risk);
+  const color = percent === null ? '#64748b' : percent <= 30 ? '#34d399' : percent <= 60 ? '#fbbf24' : '#ef4444';
+  const liqCount = liquidity === 'High' ? 5 : liquidity === 'Medium' ? 3 : liquidity === 'Low' ? 1 : 0;
 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
@@ -119,6 +129,7 @@ const RiskLiquidityVisual = ({ risk, liquidity }) => {
 };
 
 const getLiquidityLevel = (lockIn) => {
+  if (!Number.isFinite(lockIn) || lockIn < 0) return 'Unknown';
   if (lockIn === 0) return 'High';
   if (lockIn <= 5) return 'Medium';
   return 'Low';
@@ -140,14 +151,16 @@ const ComparisonDetailPanel = ({ selectedInvestments, onBack }) => {
 
   const metrics = [
     { key: 'matchScore', label: 'Match Score', fmt: v => v === null ? 'Not assessed' : `${v}%`, icon: <Sparkles size={14}/>, higher: true },
-    { key: 'rate', label: 'Return Rate', fmt: v => `${v}%`, icon: <TrendingUp size={14}/>, higher: true },
+    { key: 'rate', label: 'Return Rate', fmt: v => Number.isFinite(v) ? `${v}%` : 'Unavailable', icon: <TrendingUp size={14}/>, higher: true },
     { key: 'riskLabel', label: 'Risk Level', fmt: v => v, icon: <Shield size={14}/> },
-    { key: 'lockIn', label: 'Lock-in (yrs)', fmt: v => v === 0 ? 'None' : `${v} yrs`, icon: <Lock size={14}/>, higher: false },
+    { key: 'lockIn', label: 'Lock-in (yrs)', fmt: v => v === 0 ? 'None' : Number.isFinite(v) ? `${v} yrs` : 'Unavailable', icon: <Lock size={14}/>, higher: false },
     { key: 'taxType', label: 'Tax Treatment', fmt: v => v?.toUpperCase() || 'Slab', icon: <Zap size={14}/> },
-    { key: 'minMonthlyInvestment', label: 'Min Investment', fmt: v => formatINR(v || 0), icon: <BarChart3 size={14}/>, higher: false },
+    { key: 'minMonthlyInvestment', label: 'Min Investment', fmt: v => formatINR(v), icon: <BarChart3 size={14}/>, higher: false },
   ];
-  const bestRate = Math.max(...selectedInvestments.map(i => i.rate || 0));
-  const bestLock = Math.min(...selectedInvestments.map(i => i.lockIn ?? i.lock_in_years ?? 99));
+  const finiteRates = selectedInvestments.map(instrument => Number(instrument.rate)).filter(Number.isFinite);
+  const finiteLockIns = selectedInvestments.map(instrument => Number(instrument.lockIn ?? instrument.lock_in_years)).filter(Number.isFinite);
+  const bestRate = finiteRates.length ? Math.max(...finiteRates) : null;
+  const bestLock = finiteLockIns.length ? Math.min(...finiteLockIns) : null;
 
   const assessedScores = itemsWithScores.map(i => i.matchScore).filter(Number.isFinite);
   const bestMatch = assessedScores.length ? Math.max(...assessedScores) : null;
@@ -179,8 +192,8 @@ const ComparisonDetailPanel = ({ selectedInvestments, onBack }) => {
             </div>
             {itemsWithScores.map(inv => {
               const val = inv[m.key];
-              const isBest = m.key === 'rate' ? (inv.rate === bestRate) 
-                : m.key === 'lockIn' ? ((inv.lockIn ?? inv.lock_in_years ?? 99) === bestLock)
+              const isBest = m.key === 'rate' ? (bestRate !== null && inv.rate === bestRate)
+                : m.key === 'lockIn' ? (bestLock !== null && (inv.lockIn ?? inv.lock_in_years) === bestLock)
                 : m.key === 'matchScore' ? (bestMatch !== null && inv.matchScore === bestMatch)
                 : false;
               return (
@@ -218,33 +231,25 @@ const categoryInfo = [
     key: 'Equity',
     title: 'Equity (Shares)',
     desc: 'Buy tiny pieces of companies. High growth, but values fluctuate.',
-    growth: 'High (12.5% - 23%)',
-    risk: 'High',
-    lockIn: 'None (except ELSS: 3 yrs)',
     color: '#f43f5e'
   },
   {
     key: 'Debt',
     title: 'Debt (Savings & Bonds)',
     desc: 'Lend money for stable interest. Safe and steady income.',
-    growth: 'Moderate (6.5% - 8.2%)',
-    risk: 'Low',
-    lockIn: 'Varies (0 - 15 yrs)',
     color: '#2dd4bf'
   },
   {
     key: 'Gold/Alternatives',
     title: 'Gold & Alternatives',
     desc: 'Tangible assets & balanced funds to shield from inflation.',
-    growth: 'Moderate-High (13% - 14%)',
-    risk: 'Medium',
-    lockIn: 'Varies (0 - 8 yrs)',
     color: '#fbbf24'
   }
 ];
 
 const getRiskColor = (riskLabel) => {
-  const percent = RISK_LABEL_TO_LEVEL[riskLabel] || 50;
+  const percent = getRiskPercent(riskLabel);
+  if (percent === null) return '#64748b';
   return percent <= 30 ? '#2dd4bf' : percent <= 60 ? '#fbbf24' : '#f43f5e';
 };
 
@@ -263,9 +268,11 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
     const backendRecommendations = new Map(recommendations.map(item => [item.id, item]));
     const scoredList = allInvestments.map(inv => {
       const backendItem = backendRecommendations.get(inv.id);
-      const lockIn = inv.lock_in_years !== undefined ? inv.lock_in_years : (inv.lockIn !== undefined ? inv.lockIn : 0);
-      const riskLbl = backendItem?.riskLabel || inv.riskLabel || inv.risk_level || 'Medium';
-      const rate = backendItem?.nominalReturn ?? inv.rate ?? inv.expected_return_max ?? 0;
+      const lockInCandidate = Number(inv.lock_in_years ?? inv.lockIn);
+      const lockIn = Number.isFinite(lockInCandidate) && lockInCandidate >= 0 ? lockInCandidate : null;
+      const riskLbl = backendItem?.riskLabel ?? inv.riskLabel ?? inv.risk_level ?? null;
+      const rateCandidate = Number(backendItem?.nominalReturn ?? inv.rate ?? inv.expected_return_max);
+      const rate = Number.isFinite(rateCandidate) ? rateCandidate : null;
       return {
         ...inv,
         ...(backendItem || {}),
@@ -296,11 +303,11 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
       }
       const hasTax = inv.taxType === "eee" || inv.taxType === "elss" || inv.taxType === "nps" || inv.tax_benefit;
       if (filterTax && !hasTax) return false;
-      const minInv = inv.minMonthlyInvestment || inv.min_investment_inr || 0;
-      if (minInv > minInvRange) return false;
+      const minInv = Number(inv.minMonthlyInvestment ?? inv.min_investment_inr);
+      if (!Number.isFinite(minInv) || minInv > minInvRange) return false;
       
-      const riskPct = RISK_LABEL_TO_LEVEL[inv.riskLbl] || 50;
-      if (riskPct > riskRange) return false;
+      const riskPct = getRiskPercent(inv.riskLbl);
+      if (riskPct === null || riskPct > riskRange) return false;
       return true;
     });
 
@@ -311,11 +318,40 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
         if (b.matchScore === null) return -1;
         return b.matchScore - a.matchScore;
       }
-      if (sortBy === 'rate') return b.rate - a.rate;
+      if (sortBy === 'rate') {
+        if (a.rate === null) return b.rate === null ? 0 : 1;
+        if (b.rate === null) return -1;
+        return b.rate - a.rate;
+      }
       if (sortBy === 'name') return (a.abbr || a.name).localeCompare(b.abbr || b.name);
       return 0;
     });
   }, [allInvestments, recommendations, filterCategory, filterTax, minInvRange, riskRange, sortBy]);
+
+  const categorySummaries = useMemo(() => categoryInfo.map((metadata) => {
+    const categoryItems = allInvestments.filter((instrument) => {
+      const category = instrument.cat || instrument.category;
+      if (metadata.key === 'Debt') return category === 'Debt' || category === 'Government';
+      if (metadata.key === 'Gold/Alternatives') return category === 'Commodity' || category === 'Alternative' || category === 'Equity-Debt';
+      return category === metadata.key;
+    });
+    const rates = categoryItems
+      .map(instrument => Number(instrument.rate ?? instrument.expectedReturn))
+      .filter(Number.isFinite);
+    const riskLabels = [...new Set(categoryItems.map(instrument => instrument.riskLabel).filter(label => getRiskPercent(label) !== null))]
+      .sort((a, b) => getRiskPercent(a) - getRiskPercent(b));
+    const lockIns = categoryItems.map(instrument => Number(instrument.lockIn)).filter(value => Number.isFinite(value) && value >= 0);
+    const growth = rates.length
+      ? `${Math.min(...rates).toFixed(1)}% – ${Math.max(...rates).toFixed(1)}% catalog range`
+      : 'Unavailable';
+    const risk = riskLabels.length
+      ? riskLabels.length === 1 ? riskLabels[0] : `${riskLabels[0]} – ${riskLabels.at(-1)}`
+      : 'Unavailable';
+    const lockIn = lockIns.length
+      ? `${Math.min(...lockIns)} – ${Math.max(...lockIns)} years`
+      : 'Unavailable';
+    return { ...metadata, growth, risk, lockIn };
+  }), [allInvestments]);
 
   if (!isOpen) return null;
 
@@ -420,7 +456,7 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
                 }}
               >
                 <option value="matchScore">Suitability Match</option>
-                <option value="rate">Expected Return</option>
+                <option value="rate">Nominal Assumption</option>
                 <option value="name">Alphabetical Name</option>
               </select>
             </div>
@@ -430,7 +466,7 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
         {/* Category overview cards layout (simplified mode only) */}
         {!showDetailedComparison && (
           <div className="category-cards-container">
-            {categoryInfo.map(cat => {
+            {categorySummaries.map(cat => {
               const isActive = filterCategory === cat.key;
               return (
                 <div 
@@ -507,7 +543,7 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
                 <tr>
                   <th>INVESTMENT NAME</th>
                   <th>AI SUITABILITY</th>
-                  <th>EXPECTED return</th>
+                  <th>PRE-TAX NOMINAL</th>
                   <th>RISK & LIQUIDITY</th>
                   <th>LOCK-IN <span style={{fontSize: '0.6rem'}}>(YRS)</span></th>
                   <th>TAX TREATMENT</th>
@@ -523,20 +559,14 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
                   const liquidity = getLiquidityLevel(lockIn);
                   const hasTax = inv.taxType === "eee" || inv.taxType === "elss" || inv.taxType === "nps" || inv.tax_benefit;
                   const taxLabel = inv.taxType ? inv.taxType.toUpperCase() : (inv.tax_section || 'None');
-                  const minInv = inv.minMonthlyInvestment || inv.min_investment_inr || 0;
+                  const minInvCandidate = Number(inv.minMonthlyInvestment ?? inv.min_investment_inr);
+                  const minInv = Number.isFinite(minInvCandidate) ? minInvCandidate : null;
                   const rate = inv.rate;
                   const invId = inv.id;
                   const isSelected = selectedIds.includes(invId);
                   const matchScore = inv.matchScore;
 
-                  let defaultTaxText = 'Slab';
-                  if (cat === 'Equity') {
-                    defaultTaxText = 'STCG / LTCG';
-                  } else if (cat === 'Equity-Debt') {
-                    defaultTaxText = 'Equity Tax / Slab';
-                  } else if (cat === 'Commodity') {
-                    defaultTaxText = 'LTCG / Slab';
-                  }
+                  const defaultTaxText = inv.taxType?.toUpperCase() || inv.tax_section || 'Not specified';
 
                   const matchColor = matchScore >= 85 ? '#10b981' : matchScore >= 60 ? '#38bdf8' : '#64748b';
                   const matchBg = matchScore >= 85 ? 'rgba(16,185,129,0.12)' : matchScore >= 60 ? 'rgba(56,189,248,0.12)' : 'rgba(100,116,139,0.12)';
@@ -579,7 +609,7 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
                       </td>
                       <td>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <span style={{ fontWeight: 700, minWidth: '45px' }}>{rate}%</span>
+                          <span style={{ fontWeight: 700, minWidth: '45px' }}>{Number.isFinite(rate) ? `${rate}%` : '—'}</span>
                           <Sparkline 
                             color={CATEGORY_COLORS[cat] || '#888'} 
                             category={cat}
@@ -594,8 +624,8 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
                       </td>
                       <td>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                           <span style={{ fontWeight: 600 }}>{lockIn || 'None'}</span>
-                           {lockIn ? <Lock size={12} color="#f43f5e" /> : <Unlock size={12} color="#64748b" />}
+                           <span style={{ fontWeight: 600 }}>{lockIn === 0 ? 'None' : Number.isFinite(lockIn) ? `${lockIn} yrs` : 'Unavailable'}</span>
+                           {lockIn === 0 ? <Unlock size={12} color="#64748b" /> : Number.isFinite(lockIn) ? <Lock size={12} color="#f43f5e" /> : null}
                         </div>
                       </td>
                       <td>
@@ -668,7 +698,7 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
                     <div className="simple-card-metrics">
                       <div className="simple-card-metric">
                         <span className="metric-label">Expected Growth</span>
-                        <span className="metric-value highlight">{rate}%</span>
+                        <span className="metric-value highlight">{Number.isFinite(rate) ? `${rate}%` : '—'}</span>
                       </div>
                       <div className="simple-card-metric">
                         <span className="metric-label">Risk Level</span>
@@ -676,7 +706,7 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
                       </div>
                       <div className="simple-card-metric">
                         <span className="metric-label">Lock-in</span>
-                        <span className="metric-value">{lockIn ? `${lockIn} Years` : 'None'}</span>
+                        <span className="metric-value">{lockIn === 0 ? 'None' : Number.isFinite(lockIn) ? `${lockIn} Years` : 'Unavailable'}</span>
                       </div>
                     </div>
 

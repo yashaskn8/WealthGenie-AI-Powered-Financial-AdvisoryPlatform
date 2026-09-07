@@ -8,7 +8,18 @@ import SebiDisclaimer from '../SebiDisclaimer';
 import WhereToInvestTab from '../deepdive/WhereToInvestTab';
 
 vi.mock('../../services/api', () => ({
-  rankInvestmentCandidates: vi.fn(async () => ({ products: [{ id: 'provider-1', name: 'Server Provider' }] })),
+  rankInvestmentCandidates: vi.fn(async () => ({
+    products: Array.from({ length: 5 }, (_, index) => ({
+      id: `provider-${index + 1}`,
+      name: `Server Provider ${index + 1}`,
+      provider: 'Verified catalog',
+      nominalReturn: 10 - index,
+      riskLevel: 'High',
+      rank: index + 1,
+    })),
+  })),
+  getCurrentMacroRegime: vi.fn(async () => ({ regime: 'neutral', label: 'Neutral' })),
+  simulateMacroRegimeAdjustment: vi.fn(async () => ({ allocation_adjustments: [] })),
 }));
 
 describe('SebiDisclaimer Component', () => {
@@ -24,6 +35,7 @@ describe('SebiDisclaimer Component', () => {
     render(<WhereToInvestTab inv={mockInv} userProfile={{ profileId: '64b000000000000000000001' }} />);
     const matches = screen.getAllByText(/Not SEBI-registered investment advice/i);
     expect(matches.length).toBeGreaterThan(0);
-    expect(await screen.findByText(/Server-verified provider options/i)).toBeTruthy();
+    expect(await screen.findByText(/Execution Pathway & Top 5 Recommendations/i)).toBeTruthy();
+    expect(await screen.findByText('Server Provider 5')).toBeTruthy();
   });
 });

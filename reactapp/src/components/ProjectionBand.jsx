@@ -20,12 +20,12 @@ const CustomTooltip = ({ active, payload }) => {
       backdropFilter: 'blur(16px)'
     }}>
       <div style={{ fontWeight: 800, marginBottom: 8, color: '#38bdf8', letterSpacing: '0.5px', textTransform: 'uppercase', fontSize: '0.72rem' }}>
-        Year {d.year} Quant Forecast
+        Simulation Year {d.year}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '6px 16px' }}>
         <span style={{ color: '#94a3b8' }}>90th %ile (Bull):</span><span style={{ fontWeight: 700, color: '#10b981' }}>{formatINR(d.p90)}</span>
         <span style={{ color: '#94a3b8' }}>75th %ile:</span><span style={{ fontWeight: 600, color: '#38bdf8' }}>{formatINR(d.p75)}</span>
-        <span style={{ color: '#38bdf8', fontWeight: 800 }}>Median (Expected):</span><span style={{ fontWeight: 900, color: '#38bdf8' }}>{formatINR(d.p50)}</span>
+        <span style={{ color: '#38bdf8', fontWeight: 800 }}>Median Scenario:</span><span style={{ fontWeight: 900, color: '#38bdf8' }}>{formatINR(d.p50)}</span>
         <span style={{ color: '#94a3b8' }}>25th %ile:</span><span style={{ fontWeight: 600, color: '#cbd5e1' }}>{formatINR(d.p25)}</span>
         <span style={{ color: '#94a3b8' }}>10th %ile (Bear):</span><span style={{ fontWeight: 600, color: '#f43f5e' }}>{formatINR(d.p10)}</span>
       </div>
@@ -35,6 +35,7 @@ const CustomTooltip = ({ active, payload }) => {
 
 const ProjectionBand = ({ chartData, targetAmount, goalProbability, instrumentName, simulationsRun }) => {
   const [visible, setVisible] = useState(false);
+  const hasSimulationCount = Number.isInteger(simulationsRun) && simulationsRun > 0;
 
   useEffect(() => {
     const timer = setTimeout(() => setVisible(true), 100);
@@ -63,7 +64,7 @@ const ProjectionBand = ({ chartData, targetAmount, goalProbability, instrumentNa
             Monte Carlo Wealth Growth Simulation {instrumentName ? `— ${instrumentName}` : ''}
           </h4>
           <p style={{ fontSize: '0.73rem', color: '#64748b', margin: '4px 0 0 0', fontWeight: 500 }}>
-            {(simulationsRun || 5000).toLocaleString()} Stochastic Paths • Shaded bands denote 10th–90th confidence intervals
+            {hasSimulationCount ? `${simulationsRun.toLocaleString()} Stochastic Paths` : 'Server Monte Carlo result'} • Shaded bands denote 10th–90th simulation intervals
           </p>
         </div>
         {goalProbability !== null && goalProbability !== undefined && (
@@ -134,7 +135,7 @@ const ProjectionBand = ({ chartData, targetAmount, goalProbability, instrumentNa
       {/* Cyber Legend */}
       <div style={{ display: 'flex', gap: 22, marginTop: 14, fontSize: '0.72rem', color: '#64748b', flexWrap: 'wrap', fontWeight: 600 }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ width: 18, height: 3, background: '#38bdf8', borderRadius: 2, boxShadow: '0 0 8px #38bdf8' }} /> Expected Median (50th %ile)
+          <span style={{ width: 18, height: 3, background: '#38bdf8', borderRadius: 2, boxShadow: '0 0 8px #38bdf8' }} /> Median Scenario (50th %ile)
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={{ width: 14, height: 8, background: 'rgba(139, 92, 246, 0.4)', borderRadius: 2, border: '1px solid rgba(139, 92, 246, 0.6)' }} /> 25th–75th %ile Likely Band
@@ -153,4 +154,3 @@ const ProjectionBand = ({ chartData, targetAmount, goalProbability, instrumentNa
 };
 
 export default ProjectionBand;
-

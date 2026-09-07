@@ -386,6 +386,13 @@ export async function calculateStepUpProjection(monthlyInvestment, annualReturnR
   }, options);
 }
 
+export async function calculateAllocationSplit(monthlyInvestment, equityPct, options = {}) {
+  return request('POST', '/projection/allocation-split', {
+    monthlyInvestment,
+    equityPct,
+  }, options);
+}
+
 export async function compareInvestmentProjection(monthlyInvestment, annualReturnRate, benchmarkRate, inflationRate, years, options = {}) {
   return request('POST', '/projection/compare', {
     monthlyInvestment,
@@ -398,6 +405,14 @@ export async function compareInvestmentProjection(monthlyInvestment, annualRetur
 
 export async function getCustomPortfolioProjection(profileId, allocations, years, options = {}) {
   return request('POST', '/projection/custom-portfolio', { profileId, allocations, years }, options);
+}
+
+export async function runInstrumentStressTest(profileId, instrumentId, principal, options = {}) {
+  return request('POST', '/projection/stress-test', {
+    profileId,
+    instrumentId,
+    principal,
+  }, options);
 }
 
 // ─── MONTE CARLO ─────────────────────────────────────────
@@ -491,6 +506,14 @@ export async function compareTax(income, deductions = {}) {
   return request('GET', `/tax/compare?${params.toString()}`);
 }
 
+export async function getCurrentMacroRegime(options = {}) {
+  return request('GET', '/regime/current', null, options);
+}
+
+export async function simulateMacroRegimeAdjustment(baseWeights, regimeKey, options = {}) {
+  return request('POST', '/regime/adjust', { baseWeights, regimeKey }, options);
+}
+
 export async function rebalancePortfolio(profileId, currentAllocation, targetAllocation, threshold, partialRatio, holdingMonths) {
   return request('POST', '/portfolio/rebalance', {
     profileId,
@@ -542,12 +565,12 @@ const api = {
   setAuthToken, getAuthToken, clearAuthToken, clearUserSession,
   subscribeAuth, getAuthSnapshot,
   setUserInfo, getUserInfo,
-  buildProfile, getCurrentProfile, getFinancialHealthScore, updateProfile, getRecommendations, getInstruments, rankInvestmentCandidates, getProjections, calculateStepUpProjection, compareInvestmentProjection, getCustomPortfolioProjection,
+  buildProfile, getCurrentProfile, getFinancialHealthScore, updateProfile, getRecommendations, getInstruments, rankInvestmentCandidates, getProjections, calculateStepUpProjection, calculateAllocationSplit, compareInvestmentProjection, getCustomPortfolioProjection, runInstrumentStressTest,
   runMonteCarlo, runPortfolioMonteCarlo, createGoal, getGoals, updateGoal, simulateGoal, deleteGoal, healthCheck,
   getMarketRates, refreshMarketRates,
   sendChatMessage, getChatHistory, clearChatSession, rebalancePortfolio,
   updateRecommendationWeights, optimisePortfolio,
-  computeTax, compareTax, computePostTaxReturn, computePostTaxReturnBatch,
+  computeTax, compareTax, getCurrentMacroRegime, simulateMacroRegimeAdjustment, computePostTaxReturn, computePostTaxReturnBatch,
 };
 
 export default api;

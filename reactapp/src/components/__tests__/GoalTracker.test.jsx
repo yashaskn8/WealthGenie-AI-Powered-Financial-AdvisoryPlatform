@@ -58,7 +58,7 @@ describe('GoalTracker custom-goal boundary', () => {
     expect(screen.getByText('Welcome to your Goals Dashboard')).toBeTruthy();
     expect(screen.getByText("What You're Saving For")).toBeTruthy();
     expect(screen.getByText('Already Saved')).toBeTruthy();
-    expect(screen.getByText('Expected Growth')).toBeTruthy();
+    expect(screen.getByText('Projected Median Value')).toBeTruthy();
     expect(screen.getByText('Overall Progress')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: /create custom goal/i }));

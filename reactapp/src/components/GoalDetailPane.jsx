@@ -22,6 +22,8 @@ const PRIORITY_CONFIG = {
 };
 
 const formatINR = (value) => {
+  if (!Number.isFinite(Number(value))) return '—';
+  value = Number(value);
   if (value >= 10000000) return `₹${(value / 10000000).toFixed(2)} Cr`;
   if (value >= 100000) return `₹${(value / 100000).toFixed(1)} L`;
   return `₹${Math.round(value).toLocaleString('en-IN')}`;
@@ -29,12 +31,13 @@ const formatINR = (value) => {
 
 /* ─── Futuristic Cyber Arc Gauge ─────────────────────── */
 const ProbabilityGauge = ({ probability }) => {
-  const pct = Math.round(probability * 100);
+  const hasProbability = Number.isFinite(probability) && probability >= 0 && probability <= 1;
+  const pct = hasProbability ? Math.round(probability * 100) : null;
   const radius = 54;
   const circumference = 2 * Math.PI * radius;
-  const dashOffset = circumference * (1 - probability);
-  const color = pct >= 75 ? '#10b981' : pct >= 50 ? '#f59e0b' : '#f43f5e';
-  const glowColor = pct >= 75 ? 'rgba(16,185,129,0.5)' : pct >= 50 ? 'rgba(245,158,11,0.5)' : 'rgba(244,63,94,0.5)';
+  const dashOffset = circumference * (1 - (hasProbability ? probability : 0));
+  const color = !hasProbability ? '#64748b' : pct >= 75 ? '#10b981' : pct >= 50 ? '#f59e0b' : '#f43f5e';
+  const glowColor = !hasProbability ? 'rgba(100,116,139,0.3)' : pct >= 75 ? 'rgba(16,185,129,0.5)' : pct >= 50 ? 'rgba(245,158,11,0.5)' : 'rgba(244,63,94,0.5)';
 
   return (
     <div style={{ position: 'relative', width: 140, height: 140, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -85,13 +88,13 @@ const ProbabilityGauge = ({ probability }) => {
             letterSpacing: '-0.02em', textShadow: `0 0 15px ${glowColor}`
           }}
         >
-          {pct}%
+          {hasProbability ? `${pct}%` : '—'}
         </motion.span>
         <span style={{
           fontSize: '0.58rem', color: '#94a3b8', textTransform: 'uppercase',
           letterSpacing: '1.2px', fontWeight: 800, marginTop: 4, display: 'flex', alignItems: 'center', gap: 3
         }}>
-          <Activity size={10} color={color} /> SUCCESS
+          <Activity size={10} color={color} /> {hasProbability ? 'SUCCESS' : 'UNAVAILABLE'}
         </span>
       </div>
     </div>
@@ -156,8 +159,8 @@ export const GoalDetailPane = ({
   useEffect(() => {
     if (selectedGoal) {
       const resetState = () => {
-        setEditTarget(selectedGoal.target_amount || '');
-        setEditSavings(selectedGoal.current_savings || '');
+        setEditTarget(selectedGoal.target_amount ?? '');
+        setEditSavings(selectedGoal.current_savings ?? '');
         setIsEditingSettings(false);
       };
       resetState();
@@ -185,12 +188,26 @@ export const GoalDetailPane = ({
   };
 
   const goalId = selectedGoal?._id || selectedGoal?.goalId;
-  const currentSip = simulatedSips[goalId] ?? selectedGoal?.simulated_monthly_contribution ?? 0;
+  const currentSipCandidate = Number(simulatedSips[goalId] ?? selectedGoal?.simulated_monthly_contribution);
+  const currentSip = Number.isFinite(currentSipCandidate) && currentSipCandidate >= 0 ? currentSipCandidate : null;
   const liveProbability = getLiveProbability(selectedGoal);
-  const sliderMax = Math.max(0, monthlySavingsCapacity);
-  const sliderMin = Math.min(sliderMax, Math.max(0, Math.round(selectedGoal.recommended_sip * 0.2 / 500) * 500));
-  const sliderStep = selectedGoal.recommended_sip < 2000 ? 250 : 500;
-  const probPct = Math.round(liveProbability * 100);
+  const recommendedSipCandidate = Number(selectedGoal.recommended_sip);
+  const recommendedSip = Number.isFinite(recommendedSipCandidate) && recommendedSipCandidate >= 0 ? recommendedSipCandidate : null;
+  const capacityCandidate = Number(monthlySavingsCapacity);
+  const sliderMax = Number.isFinite(capacityCandidate) && capacityCandidate > 0 ? capacityCandidate : 0;
+  const hasSimulationInput = currentSip !== null && recommendedSip !== null && sliderMax > 0;
+  const sliderMin = hasSimulationInput
+    ? Math.min(sliderMax, Math.max(0, Math.round(recommendedSip * 0.2 / 500) * 500))
+    : 0;
+  const sliderStep = recommendedSip !== null && recommendedSip < 2000 ? 250 : 500;
+  const hasProbability = Number.isFinite(liveProbability) && liveProbability >= 0 && liveProbability <= 1;
+  const probPct = hasProbability ? Math.round(liveProbability * 100) : null;
+  const simulationsRunCandidate = Number(simulationResult?.monte_carlo_summary?.simulations_run ?? selectedGoal.monte_carlo_summary?.simulations_run);
+  const simulationsRun = Number.isInteger(simulationsRunCandidate) && simulationsRunCandidate > 0 ? simulationsRunCandidate : null;
+  const inflationAssumption = Number(selectedGoal.inflation_assumption);
+  const inflationLabel = Number.isFinite(inflationAssumption)
+    ? `${(inflationAssumption * 100).toFixed(1).replace(/\.0$/, '')}%`
+    : 'server-specified';
 
   return (
     <AnimatePresence mode="wait">
@@ -286,7 +303,7 @@ export const GoalDetailPane = ({
                   fontSize: '0.7rem', color: '#94a3b8', fontWeight: 700
                 }}>
                   <Clock size={11} color="#38bdf8" />
-                  <span>{selectedGoal.years_remaining ? `${selectedGoal.years_remaining} Yrs Horizon` : 'Active'}</span>
+                  <span>{Number.isFinite(Number(selectedGoal.years_remaining)) ? `${Number(selectedGoal.years_remaining)} Yrs Horizon` : 'Horizon unavailable'}</span>
                 </div>
 
                 <div style={{
@@ -295,7 +312,7 @@ export const GoalDetailPane = ({
                   fontSize: '0.7rem', color: '#10b981', fontWeight: 800
                 }}>
                   <Activity size={11} color="#10b981" />
-                  <span>5,000 SIMS RUN</span>
+                  <span>{simulationsRun ? `${simulationsRun.toLocaleString()} SIMS RUN` : 'SIMULATION COUNT UNAVAILABLE'}</span>
                 </div>
               </div>
             </div>
@@ -323,7 +340,7 @@ export const GoalDetailPane = ({
             <>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, position: 'relative', zIndex: 1 }}>
                 <MetricCard label="Target Goal" value={formatINR(selectedGoal.target_amount)} icon={<Target size={18} />} accentColor="#38bdf8" />
-                <MetricCard label="Recommended SIP" value={`${formatINR(selectedGoal.recommended_sip)}/mo`} icon={<TrendingUp size={18} />} accentColor="#10b981" />
+                <MetricCard label="Recommended SIP" value={recommendedSip === null ? '—' : `${formatINR(recommendedSip)}/mo`} icon={<TrendingUp size={18} />} accentColor="#10b981" />
                 <MetricCard label="Target Deadline" value={new Date(selectedGoal.target_date).toLocaleDateString('en-IN', { year: 'numeric', month: 'short' })} icon={<Calendar size={18} />} accentColor="#8b5cf6" />
                 <MetricCard label="Allocated Instrument" value={(selectedGoal.recommended_instrument || '').replace('_', ' ')} icon={<DollarSign size={18} />} accentColor="#f59e0b" />
               </div>
@@ -336,7 +353,7 @@ export const GoalDetailPane = ({
                   boxShadow: 'inset 0 1px 1px rgba(255,255,255,0.05)'
                 }}>
                   <Info size={14} color="#8b5cf6" style={{ flexShrink: 0 }} />
-                  <span>Inflation-Adjusted Target: <strong style={{ color: '#fff' }}>{formatINR(selectedGoal.inflation_adjusted_target)}</strong> (5% annual inflation projection over {selectedGoal.years_remaining || '–'} yrs).</span>
+                  <span>Inflation-Adjusted Target: <strong style={{ color: '#fff' }}>{formatINR(selectedGoal.inflation_adjusted_target)}</strong> ({inflationLabel} annual inflation assumption over {Number.isFinite(Number(selectedGoal.years_remaining)) ? selectedGoal.years_remaining : '–'} yrs).</span>
                 </div>
               )}
             </>
@@ -464,7 +481,8 @@ export const GoalDetailPane = ({
             <input 
               type="range" 
               min={sliderMin} max={sliderMax} step={sliderStep}
-              value={currentSip}
+              value={currentSip ?? 0}
+              disabled={!hasSimulationInput}
               onChange={(e) => onChangeSimulatedSip(Number(e.target.value))}
               style={{
                 width: '100%', cursor: 'pointer', accentColor: '#38bdf8',
@@ -474,13 +492,13 @@ export const GoalDetailPane = ({
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#475569', marginTop: 4, marginBottom: 14 }}>
             <span>MIN: {formatINR(sliderMin)}</span>
-            <span style={{ color: '#38bdf8', fontWeight: 700 }}>RECOMMENDED: {formatINR(selectedGoal.recommended_sip)}</span>
+            <span style={{ color: '#38bdf8', fontWeight: 700 }}>RECOMMENDED: {formatINR(recommendedSip)}</span>
             <span>MAX: {formatINR(sliderMax)}</span>
           </div>
 
           {(simulationLoading || simulationError) && (
             <div role={simulationError ? 'alert' : 'status'} style={{ color: simulationError ? '#fda4af' : '#7dd3fc', fontSize: '0.7rem', marginBottom: 12 }}>
-              {simulationError ? `Simulation unavailable: ${simulationError}. The persisted goal result remains displayed.` : 'Running 5,000 backend Monte Carlo paths…'}
+              {simulationError ? `Simulation unavailable: ${simulationError}. The persisted goal result remains displayed.` : `Running ${simulationsRun ? simulationsRun.toLocaleString() : 'backend'} Monte Carlo paths…`}
             </div>
           )}
 
@@ -490,21 +508,24 @@ export const GoalDetailPane = ({
               QUICK PRESETS:
             </span>
             {[
-              { label: 'Reset', val: selectedGoal.simulated_monthly_contribution ?? Math.min(selectedGoal.recommended_sip, sliderMax) },
-              { label: '+25%', val: Math.min(sliderMax, Math.round(selectedGoal.recommended_sip * 1.25 / 250) * 250) },
-              { label: '+50%', val: Math.min(sliderMax, Math.round(selectedGoal.recommended_sip * 1.5 / 250) * 250) },
-              { label: '2x Double', val: Math.min(sliderMax, selectedGoal.recommended_sip * 2) },
+              { label: 'Reset', val: hasSimulationInput ? Number(selectedGoal.simulated_monthly_contribution) : null },
+              { label: '+25%', val: hasSimulationInput ? Math.min(sliderMax, Math.round(recommendedSip * 1.25 / 250) * 250) : null },
+              { label: '+50%', val: hasSimulationInput ? Math.min(sliderMax, Math.round(recommendedSip * 1.5 / 250) * 250) : null },
+              { label: '2x Double', val: hasSimulationInput ? Math.min(sliderMax, recommendedSip * 2) : null },
             ].map(preset => (
               <motion.button
                 key={preset.label}
                 whileHover={{ scale: 1.05, y: -1 }}
                 whileTap={{ scale: 0.95 }}
-                onClick={() => onChangeSimulatedSip(preset.val)}
+                disabled={!Number.isFinite(preset.val)}
+                onClick={() => {
+                  if (Number.isFinite(preset.val)) onChangeSimulatedSip(preset.val);
+                }}
                 style={{
-                  background: currentSip === preset.val ? 'rgba(56, 189, 248, 0.2)' : 'rgba(15, 23, 42, 0.6)',
-                  border: `1px solid ${currentSip === preset.val ? '#38bdf8' : 'rgba(255, 255, 255, 0.08)'}`,
-                  borderRadius: 8, padding: '4px 10px', color: currentSip === preset.val ? '#38bdf8' : '#94a3b8',
-                  fontSize: '0.7rem', fontWeight: 700, cursor: 'pointer', transition: 'all 0.2s'
+                  background: hasSimulationInput && currentSip === preset.val ? 'rgba(56, 189, 248, 0.2)' : 'rgba(15, 23, 42, 0.6)',
+                  border: `1px solid ${hasSimulationInput && currentSip === preset.val ? '#38bdf8' : 'rgba(255, 255, 255, 0.08)'}`,
+                  borderRadius: 8, padding: '4px 10px', color: hasSimulationInput && currentSip === preset.val ? '#38bdf8' : '#94a3b8',
+                  fontSize: '0.7rem', fontWeight: 700, cursor: hasSimulationInput ? 'pointer' : 'not-allowed', transition: 'all 0.2s'
                 }}
               >
                 {preset.label}
@@ -522,26 +543,28 @@ export const GoalDetailPane = ({
                 animate={{ scale: 1 }}
                 style={{
                   fontSize: '1rem', fontWeight: 900,
-                  color: probPct >= 75 ? '#10b981' : probPct >= 50 ? '#f59e0b' : '#f43f5e',
-                  textShadow: `0 0 10px ${probPct >= 75 ? 'rgba(16,185,129,0.5)' : 'rgba(244,63,94,0.5)'}`
+                  color: !hasProbability ? '#64748b' : probPct >= 75 ? '#10b981' : probPct >= 50 ? '#f59e0b' : '#f43f5e',
+                  textShadow: hasProbability ? `0 0 10px ${probPct >= 75 ? 'rgba(16,185,129,0.5)' : 'rgba(244,63,94,0.5)'}` : 'none'
                 }}
               >
-                {probPct}%
+                {hasProbability ? `${probPct}%` : 'Unavailable'}
               </motion.span>
             </div>
             <div style={{ height: 10, background: 'rgba(255,255,255,0.05)', borderRadius: 5, overflow: 'hidden' }}>
               <motion.div
                 initial={{ width: 0 }}
-                animate={{ width: `${Math.min(100, probPct)}%` }}
+                animate={{ width: `${hasProbability ? Math.min(100, probPct) : 0}%` }}
                 transition={{ duration: 0.6, ease: 'easeOut' }}
                 style={{
                   height: '100%', borderRadius: 5,
-                  background: probPct >= 75
+                  background: !hasProbability
+                    ? '#64748b'
+                    : probPct >= 75
                     ? 'linear-gradient(90deg, #059669, #10b981)'
                     : probPct >= 50
                       ? 'linear-gradient(90deg, #d97706, #f59e0b)'
                       : 'linear-gradient(90deg, #dc2626, #f43f5e)',
-                  boxShadow: `0 0 16px ${probPct >= 75 ? 'rgba(16,185,129,0.6)' : 'rgba(244,63,94,0.6)'}`,
+                  boxShadow: hasProbability ? `0 0 16px ${probPct >= 75 ? 'rgba(16,185,129,0.6)' : 'rgba(244,63,94,0.6)'}` : 'none',
                 }}
               />
             </div>
@@ -602,7 +625,7 @@ export const GoalDetailPane = ({
               }}
             >
               <Zap size={18} color="#38bdf8" />
-              {showMonteCarlo ? 'Hide Quantum Simulation' : 'Execute Monte Carlo Growth Engine (5,000 Iterations)'}
+              {showMonteCarlo ? 'Hide Monte Carlo Simulation' : `View Monte Carlo Growth Engine${simulationsRun ? ` (${simulationsRun.toLocaleString()} Iterations)` : ''}`}
               <ChevronRight size={18} style={{ transform: showMonteCarlo ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }} />
             </motion.button>
 
@@ -620,7 +643,7 @@ export const GoalDetailPane = ({
                     targetAmount={selectedGoal.inflation_adjusted_target}
                     goalProbability={liveProbability}
                     instrumentName={(selectedGoal.recommended_instrument || '').replace('_', ' ')}
-                    simulationsRun={simulationResult?.monte_carlo_summary?.simulations_run ?? selectedGoal.monte_carlo_summary?.simulations_run}
+                    simulationsRun={simulationsRun}
                   />
                 </motion.div>
               )}

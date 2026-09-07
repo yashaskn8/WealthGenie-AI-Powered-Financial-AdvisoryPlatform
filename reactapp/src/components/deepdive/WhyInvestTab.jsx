@@ -19,12 +19,12 @@ const WhyInvestTab = ({
   projectionLoading,
   setActiveTab,
 }) => {
-  const savingsMaturity = projection?.benchmarkMaturity ?? 0;
-  const savingsReal = projection?.benchmarkReal ?? 0;
-  const investMaturity = projection?.investmentMaturity ?? 0;
-  const investReal = projection?.investmentReal ?? 0;
-  const opportunityCost = projection?.opportunityCost ?? 0;
-  const purchasingPowerLost = projection?.purchasingPowerLost ?? 0;
+  const savingsMaturity = projection?.benchmarkMaturity ?? null;
+  const savingsReal = projection?.benchmarkReal ?? null;
+  const investMaturity = projection?.investmentMaturity ?? null;
+  const investReal = projection?.investmentReal ?? null;
+  const opportunityCost = projection?.opportunityCost ?? null;
+  const purchasingPowerLost = projection?.purchasingPowerLost ?? null;
   const inflationHalfLifeYears = projection?.inflationHalfLifeYears;
   const erosionData = (projection?.yearlyBreakdown || []).slice(0, 10).map(row => ({
     year: row.year,
@@ -35,13 +35,13 @@ const WhyInvestTab = ({
 
   return (
     <div className="tab-fade-in">
-      <div className="ddm-section-header">The Cost of Doing Nothing</div>
+      <div className="ddm-section-header">Investment and Savings Benchmark Comparison</div>
 
       {/* Hero Warning Banner */}
       <div className="why-invest-hero">
         <div className="why-invest-hero-icon"><TrendingDown size={24} /></div>
         <div>
-          <div className="why-invest-hero-title">Inflation is silently eating your savings</div>
+          <div className="why-invest-hero-title">Compare purchasing power under explicit assumptions</div>
           <div className="why-invest-hero-subtitle">
             At {inflationRate}% inflation, money's purchasing power halves in about {inflationHalfLifeYears ?? '—'} years.
             At the selected {benchmarkRate}% benchmark, the backend-calculated real annual rate is {projection?.benchmarkRealAnnualRate ?? '—'}%.
@@ -74,7 +74,7 @@ const WhyInvestTab = ({
               <TrendingDown size={18} />
             </div>
             <div>
-              <div className="why-invest-card-title">Savings Account</div>
+              <div className="why-invest-card-title">Savings Benchmark</div>
               <div className="why-invest-card-rate">{benchmarkRate}% p.a.</div>
             </div>
           </div>
@@ -89,7 +89,7 @@ const WhyInvestTab = ({
             </div>
             <div className="why-invest-verdict why-invest-verdict--loss">
               <TrendingDown size={14} />
-              <span>{purchasingPowerLost >= 0 ? 'You lose' : 'You gain'} <strong>{formatINR(Math.abs(purchasingPowerLost))}</strong> in purchasing power</span>
+              <span>{purchasingPowerLost === null ? 'Comparison unavailable' : <>{purchasingPowerLost >= 0 ? 'Lower by' : 'Higher by'} <strong>{formatINR(Math.abs(purchasingPowerLost))}</strong> in purchasing power</>}</span>
             </div>
           </div>
         </div>
@@ -115,7 +115,7 @@ const WhyInvestTab = ({
             </div>
             <div className="why-invest-verdict why-invest-verdict--gain">
               <TrendingUp size={14} />
-              <span>{opportunityCost >= 0 ? 'You grow' : 'The benchmark leads'} by <strong>{formatINR(Math.abs(opportunityCost))}</strong> in real value</span>
+              <span>{opportunityCost === null ? 'Comparison unavailable' : <>{opportunityCost >= 0 ? 'Investment case leads' : 'Benchmark leads'} by <strong>{formatINR(Math.abs(opportunityCost))}</strong> in real value</>}</span>
             </div>
           </div>
         </div>
@@ -123,10 +123,10 @@ const WhyInvestTab = ({
 
       {/* Opportunity Cost Highlight */}
       <div className="why-invest-opportunity">
-        <div className="why-invest-opportunity-label">Opportunity Cost of Not Investing</div>
+        <div className="why-invest-opportunity-label">Real-Value Difference</div>
         <div className="why-invest-opportunity-value">{formatINR(opportunityCost)}</div>
         <div className="why-invest-opportunity-sub">
-          This is the real money you leave on the table by choosing a savings account over {inv.name} for {calcYears} years
+          Server-calculated difference between the two explicit return assumptions over {calcYears} years
         </div>
       </div>
 
@@ -162,7 +162,7 @@ const WhyInvestTab = ({
       {/* Bottom CTA */}
       <div className="why-invest-cta">
         <div className="why-invest-cta-text">
-          <strong>The best time to invest was yesterday.</strong> The second best time is today.
+          <strong>Review the assumptions before deciding.</strong> This comparison is not a recommendation or guarantee.
         </div>
         <button
           className="why-invest-cta-btn"
