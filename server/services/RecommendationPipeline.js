@@ -453,7 +453,11 @@ export function rankWhereToInvestBackend(profileInput, options = {}) {
       || providerCatalog.some(product => !product || requiredProviderFields.some(
         field => typeof product[field] !== 'string' || !product[field].trim(),
       ))
-      || new Set(providerCatalog.map(product => product.name)).size !== providerCatalog.length) {
+      || new Set(providerCatalog.map(product => (
+        [product.name, product.provider, product.platform]
+          .map(value => value.trim().toLowerCase())
+          .join('::')
+      ))).size !== providerCatalog.length) {
     excluded.push({ id: catalog.id, name: catalog.name, reasonCode: 'PROVIDER_CATALOG_NOT_ESTABLISHED' });
     const empty = [];
     Object.defineProperty(empty, 'metadata', { value: { excluded, riskReconciliation }, enumerable: false });

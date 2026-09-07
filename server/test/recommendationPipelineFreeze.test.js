@@ -13,6 +13,8 @@ import {
   resolveBackendType,
   runPipeline,
 } from '../services/RecommendationPipeline.js';
+import { investmentDatabase } from '../data/investmentDatabase.js';
+import whereToInvestCatalog from '../data/whereToInvestCatalog.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 test('instrument mapping and risk classification return explicit unknown states', () => {
@@ -141,6 +143,38 @@ test('WTI owns its provider universe and order and inherits the authoritative pa
   );
   assert.equal(excessiveRisk.length, 0);
   assert.equal(excessiveRisk.metadata.excluded[0].reasonCode, 'RISK_EXCEEDS_FINAL_SUITABILITY');
+});
+
+test('WTI catalog covers every parent instrument with exactly five complete, distinct placements', () => {
+  const instrumentIds = investmentDatabase.map(instrument => instrument.id);
+  assert.equal(instrumentIds.length, 155);
+  assert.deepEqual(Object.keys(whereToInvestCatalog).sort(), [...instrumentIds].sort());
+
+  for (const instrumentId of instrumentIds) {
+    const entry = whereToInvestCatalog[instrumentId];
+    assert.equal(typeof entry.title, 'string', `${instrumentId} must have a title`);
+    assert.equal(typeof entry.note, 'string', `${instrumentId} must have a note`);
+    assert.equal(typeof entry.howToStart, 'string', `${instrumentId} must explain how to start`);
+    assert.equal(entry.products.length, 5, `${instrumentId} must expose exactly five providers`);
+    for (const product of entry.products) {
+      for (const field of ['name', 'provider', 'highlight', 'platform', 'minInvestment']) {
+        assert.equal(
+          typeof product[field] === 'string' && product[field].trim().length > 0,
+          true,
+          `${instrumentId} provider ${field} must be a non-empty string`,
+        );
+      }
+    }
+    assert.equal(
+      new Set(entry.products.map(product => (
+        [product.name, product.provider, product.platform]
+          .map(value => value.trim().toLowerCase())
+          .join('::')
+      ))).size,
+      5,
+      `${instrumentId} must expose five distinct product/provider/platform placements`,
+    );
+  }
 });
 
 test('ML confidence normalization rejects non-finite and out-of-range values', () => {

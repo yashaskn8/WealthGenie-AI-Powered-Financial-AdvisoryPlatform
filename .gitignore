@@ -14,6 +14,14 @@ dist-ssr
 data/
 data
 
+# Runtime-generated data stays ignored, but the server-owned recommendation
+# catalogs are application source and must be present in clean checkouts/images.
+!server/data/
+server/data/*
+!server/data/investmentDatabase.js
+!server/data/investment_master.json
+!server/data/whereToInvestCatalog.js
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
