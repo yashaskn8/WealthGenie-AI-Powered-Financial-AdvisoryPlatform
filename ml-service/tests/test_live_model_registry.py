@@ -116,7 +116,8 @@ def test_live_register_new_version_and_rollback(client):
     """
     # 1. Get initial active version
     initial_active_res = client.get("/model/registry/active?architecture=RandomForest")
-    v1_id = initial_active_res.json()["active_model"]["version_id"]
+    v1 = initial_active_res.json()["active_model"]
+    v1_id = v1["version_id"]
 
     # 2. Create a temporary model artifact copy as v2
     base_rf_path = Path(initial_active_res.json()["active_model"]["artifact_path"])
@@ -129,12 +130,12 @@ def test_live_register_new_version_and_rollback(client):
         reg_payload = {
             "model_architecture": "RandomForest",
             "artifact_path": str(v2_artifact_path),
-            "training_data_hash": "synth_hash_v2",
-            "hyperparameters": {"n_estimators": 150, "max_depth": 14},
+            "training_data_hash": v1["training_data_hash"],
+            "hyperparameters": v1["hyperparameters"],
+            "reference_distributions": v1["reference_distributions"],
             "metrics": {
-                "rule_approximation_fidelity": 0.9620,
-                "balanced_accuracy": 0.99,
-                "macro_f1": 0.99,
+                name: v1["metrics"][name]
+                for name in ("rule_approximation_fidelity", "balanced_accuracy", "macro_f1")
             },
             "notes": "v2 release candidate",
             "set_active": False,

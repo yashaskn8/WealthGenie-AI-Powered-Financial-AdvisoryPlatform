@@ -33,6 +33,7 @@ describe('frontend financial authority boundary', () => {
   it('uses Express for personalized product suitability and ordering', () => {
     const whereToInvest = source('components/deepdive/WhereToInvestTab.jsx');
     expect(whereToInvest).toContain('api.rankInvestmentCandidates');
+    expect(whereToInvest).not.toContain('WHERE_TO_INVEST');
     expect(whereToInvest).not.toContain('rankWhereToInvest(');
     expect(whereToInvest).not.toContain('shouldRecommendETF(');
     expect(whereToInvest).toContain('No provider ranking is shown.');

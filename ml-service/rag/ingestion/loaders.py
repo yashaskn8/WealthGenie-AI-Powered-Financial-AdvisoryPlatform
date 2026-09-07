@@ -7,7 +7,7 @@ import csv
 import hashlib
 import re
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Optional
 
 from rag.schema import Document, DocumentMetadata
 

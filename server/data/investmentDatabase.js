@@ -87,7 +87,8 @@ masterCatalog.instruments.forEach(inst => {
   }
 });
 
-// Map frontend category to legacy type for backward compatibility
+// Public-instrument compatibility type. Personalized recommendation code uses
+// the separate, fail-closed recommendationType below.
 const LEGACY_TYPE_MAP = {
   'Government':           'Government',
   'Gold':                 'Gold',
@@ -112,6 +113,45 @@ const SPECIFIC_ID_TYPE_MAP = {
   'g_sec': 'RBI_Bond',
 };
 
+const EXACT_RECOMMENDATION_TYPES = Object.freeze({
+  ppf: 'PPF',
+  scss: 'SCSS',
+  sukanya: 'SSY',
+  rbi_bonds: 'RBI_Bond',
+  rbi_retail_direct_gilt: 'RBI_Bond',
+  g_sec: 'G-Sec',
+  sgb: 'SGB',
+  arbitrage_mf: 'Arbitrage_MF',
+});
+
+export function recommendationTypeForCatalogInstrument(instrument) {
+  const exact = EXACT_RECOMMENDATION_TYPES[instrument?.id];
+  if (exact) return exact;
+  const id = String(instrument?.id || '');
+  const category = instrument?.category;
+  const assetClass = instrument?.assetClass;
+  if (category === 'Bank Deposits') return 'FD';
+  if (category === 'Debt Mutual Funds') {
+    return ['liquid_mf', 'overnight_mf', 'money_market_mf'].includes(id) ? 'Liquid_MF' : 'Debt_MF';
+  }
+  if (category === 'Equity Mutual Funds') {
+    if (id === 'elss' || id.endsWith('_elss')) return 'ELSS';
+    if (id.includes('smallcap')) return 'Smallcap_MF';
+    if (id.includes('midcap')) return 'Midcap_MF';
+    if (id.includes('hybrid') || id === 'multi_asset_allocation_mf' || id === 'equity_savings_mf') return 'Hybrid_MF';
+    if (id.includes('index') || id === 'value_factor_mf') return 'Index_MF';
+    return 'Equity_MF';
+  }
+  if (category === 'ETFs') {
+    if (id === 'liquid_etf') return 'Liquid_MF';
+    if (assetClass === 'Gold') return 'Gold';
+    return 'ETF';
+  }
+  if (category === 'Gold') return 'Gold';
+  if (category === 'Retirement' && (id === 'nps' || id === 'nps_tier_2')) return 'NPS';
+  return null;
+}
+
 // Map masterCatalog instruments to the old flat structure for backward compatibility
 export const investmentDatabase = masterCatalog.instruments.map(inst => {
   const legacyType = SPECIFIC_ID_TYPE_MAP[inst.id] || (
@@ -123,6 +163,7 @@ export const investmentDatabase = masterCatalog.instruments.map(inst => {
   return {
     id: inst.id,
     type: legacyType,
+    recommendationType: recommendationTypeForCatalogInstrument(inst),
     slug: inst.slug,
     name: inst.name,
     abbr: inst.abbr,

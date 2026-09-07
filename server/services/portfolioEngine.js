@@ -358,10 +358,54 @@ export function optimisePortfolio(assetKeys, postTaxReturns, strategy) {
                 sharpe: _round4(sharpe),
             };
         }
+        case 'max_return': {
+            const highestIndex = postTaxReturns.reduce(
+                (best, value, index, values) => value > values[best] ? index : best,
+                0,
+            );
+            const weights = Object.fromEntries(assetKeys.map((key, index) => [key, index === highestIndex ? 1 : 0]));
+            const metrics = evaluatePortfolio(assetKeys, postTaxReturns, weights);
+            return { strategy, weights, ...metrics };
+        }
         default:
             throw new Error(`Unknown optimisation strategy "${strategy}". ` +
-                `Valid values: min_variance, max_sharpe, risk_parity`);
+                `Valid values: min_variance, max_sharpe, risk_parity, max_return`);
     }
+}
+
+/** Recomputes every reported metric from the final, user-visible weights. */
+export function evaluatePortfolio(assetKeys, nominalReturns, weights) {
+    if (!Array.isArray(assetKeys) || assetKeys.length === 0 || new Set(assetKeys).size !== assetKeys.length) {
+        throw new TypeError('assetKeys must be a non-empty unique array');
+    }
+    if (!Array.isArray(nominalReturns) || nominalReturns.length !== assetKeys.length
+        || nominalReturns.some(value => !Number.isFinite(value))) {
+        throw new TypeError('A finite nominal return is required for every asset');
+    }
+    if (!weights || typeof weights !== 'object' || Array.isArray(weights)) {
+        throw new TypeError('weights must be an explicit asset-weight map');
+    }
+    const vector = assetKeys.map(key => weights[key]);
+    if (vector.some(value => !Number.isFinite(value) || value < 0 || value > 1)) {
+        throw new TypeError('Every final portfolio weight must be a number from 0 to 1');
+    }
+    const total = vector.reduce((sum, value) => sum + value, 0);
+    if (Math.abs(total - 1) > 0.001) throw new RangeError('Final portfolio weights must total 1');
+    const { matrix: covariance } = buildCovarianceMatrix(assetKeys);
+    const volatility = portfolioVol(covariance, vector);
+    const expectedReturn = portfolioReturn(vector, nominalReturns);
+    const sharpe = volatility > 1e-12 ? (expectedReturn - RISK_FREE_RATE) / volatility : 0;
+    const covarianceTimesWeights = matvec(covariance, vector);
+    const riskContributions = Object.fromEntries(assetKeys.map((key, index) => [
+        key,
+        _round6(volatility > 1e-12 ? vector[index] * covarianceTimesWeights[index] / volatility : 0),
+    ]));
+    return {
+        expectedReturn: _round6(expectedReturn),
+        volatility: _round6(volatility),
+        sharpe: _round4(sharpe),
+        riskContributions,
+    };
 }
 function _weightsToMap(keys, w) {
     const n = keys.length;

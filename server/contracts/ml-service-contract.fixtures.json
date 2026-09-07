@@ -18,8 +18,8 @@
   "prediction_response": {
     "primary": "ETF",
     "secondary": "Debt_MF",
-    "tertiary": "SGB",
-    "confidence_scores": { "ETF": 0.71, "Debt_MF": 0.19, "SGB": 0.1 },
+    "tertiary": "ELSS",
+    "confidence_scores": { "Equity_MF": 0.0, "ELSS": 0.1, "ETF": 0.71, "Debt_MF": 0.19, "FD": 0.0, "RBI_Bond": 0.0 },
     "decision_path": ["final_suitability_risk=Moderate", "risk_capacity_score=55"],
     "feature_schema_version": "recommendation-features-4.0.0",
     "model_used": "RandomForest",

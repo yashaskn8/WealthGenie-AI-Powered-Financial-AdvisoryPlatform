@@ -110,11 +110,13 @@ class SentenceTransformerEmbeddingProvider(BaseEmbeddingProvider):
         self.cache = EmbeddingCache() if enable_cache else None
 
         self._model = self._load_shared_model()
-        dimension_getter = getattr(
-            self._model,
-            "get_sentence_embedding_dimension",
-            lambda: 384,
-        )
+        dimension_getter = getattr(self._model, "get_embedding_dimension", None)
+        if not callable(dimension_getter):
+            dimension_getter = getattr(
+                self._model,
+                "get_sentence_embedding_dimension",
+                lambda: 384,
+            )
         dim = dimension_getter()
         self._dim: int = int(dim) if dim is not None else 384
 

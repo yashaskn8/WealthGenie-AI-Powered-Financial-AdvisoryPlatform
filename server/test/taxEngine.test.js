@@ -10,6 +10,8 @@ import {
   isFYVerified,
   compareTaxRegimes,
   getEffectiveMarginalRate,
+  buildTaxSlabBreakdown,
+  analyzeTaxOptimization,
 } from '../services/taxEngine.js';
 
 test('new regime Section 87A rebate zeros tax at the FY2025-26 threshold', () => {
@@ -39,14 +41,17 @@ test('old regime applies granular Section 80D self and parent caps', () => {
   assert.equal(result.oldRegimeDeductions, 75_000);
 });
 
-test('tax slabs are selected by fiscal-year key with current FY fallback', () => {
+test('tax slabs are selected by fiscal-year key and unknown years fail closed', () => {
   const current = getTaxSlabsForFY(CURRENT_FY);
   const next = getTaxSlabsForFY('FY2026-27');
-  const fallback = getTaxSlabsForFY('UNKNOWN-FY');
 
   assert.equal(current.new[1].rate, 0.05);
   assert.equal(next.new[1].rate, current.new[1].rate);
-  assert.equal(fallback, current);
+  assert.throws(() => getTaxSlabsForFY('UNKNOWN-FY'), /Verified tax slabs are unavailable/);
+  assert.throws(
+    () => computeTax(1_000_000, 'new', {}, 'salary', 'UNKNOWN-FY'),
+    /Verified tax slabs are unavailable/,
+  );
   assert.equal(getTaxSlab(3_000_000, 'new', {}, 'salary', CURRENT_FY), 0.30);
 });
 
@@ -467,4 +472,29 @@ test('tax helpers reject incomplete or invalid contexts', () => {
   assert.ok(pensionTax.taxAmount <= bizTax.taxAmount);
 });
 
+test('server owns slab presentation rows and exact 80C/NPS optimization', () => {
+  const current = computeTax(2_000_000, 'old', {
+    section80C: 25_000,
+    nps80CCD1B: 10_000,
+    age: 40,
+  }, 'salary');
+  const rows = buildTaxSlabBreakdown(current);
+  assert.ok(rows.some(row => row.rate === 30));
+  assert.deepEqual(rows.at(-1), {
+    label: 'Your Total Tax',
+    rate: '',
+    taxableInSlab: current.taxableIncome,
+    taxInSlab: current.taxAmount,
+    isTotalRow: true,
+  });
 
+  const optimization = analyzeTaxOptimization(2_000_000, {
+    section80C: 25_000,
+    nps80CCD1B: 10_000,
+    age: 40,
+  }, 'salary');
+  assert.deepEqual(optimization.remaining, { section80C: 125_000, section80CCD1B: 40_000 });
+  assert.equal(optimization.deductionLimits.section80DParents, null);
+  assert.equal(optimization.potentialSaving, current.taxAmount - optimization.optimizedOld.taxAmount);
+  assert.ok(optimization.optimizedOld.taxAmount <= current.taxAmount);
+});

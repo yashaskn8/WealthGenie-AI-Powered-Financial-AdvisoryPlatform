@@ -3,7 +3,6 @@ WealthGenie Production Open-Weight LLM Platform - Evaluation Test Suite (Phase 3
 Tests perplexity, BLEU, ROUGE, BERTScore, grounding faithfulness, dataset evaluation, and provider comparison.
 """
 
-import pytest
 from llm.evaluation.evaluator import LLMEvaluator
 from llm.evaluation.metrics import (
     compute_perplexity,

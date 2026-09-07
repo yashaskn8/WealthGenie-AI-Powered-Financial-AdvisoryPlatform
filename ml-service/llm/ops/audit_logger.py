@@ -3,9 +3,7 @@ WealthGenie Open-Weight LLM Platform - Audit Logger
 Provides structured audit trail for all LLM generation, tool, and RAG operations.
 """
 
-import json
 import logging
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, List

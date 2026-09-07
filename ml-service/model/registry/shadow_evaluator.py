@@ -13,7 +13,7 @@ import collections
 import logging
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 
@@ -123,7 +123,6 @@ class ShadowEvaluator:
             class_agreements: Dict[str, Dict[str, int]] = {}
             for rec in self.history:
                 act = rec["active_primary"]
-                shd = rec["shadow_primary"]
                 if act not in class_agreements:
                     class_agreements[act] = {"match": 0, "mismatch": 0}
                 if rec["agrees"]:

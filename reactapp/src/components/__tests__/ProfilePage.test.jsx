@@ -1,6 +1,6 @@
 import React from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ProfilePage from '../ProfilePage.jsx';
 import * as api from '../../services/api.js';
 
@@ -24,14 +24,46 @@ describe('ProfilePage backend version contract', () => {
     api.setUserInfo({ id: 'user-1' });
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('keeps the complete create form inside an accessible scrolling region', async () => {
+    vi.spyOn(api, 'getCurrentProfile').mockRejectedValue({ status: 404 });
+
+    render(
+      <ProfilePage>
+        <ProfileProbe />
+      </ProfilePage>
+    );
+
+    const scrollRegion = await screen.findByRole('region', { name: 'Financial profile form' });
+    const formCard = screen.getByTestId('profile-form-card');
+    const saveButton = screen.getByTestId('profile-save');
+
+    expect(scrollRegion.tabIndex).toBe(0);
+    expect(scrollRegion.className).toContain('profile-content');
+    expect(formCard.className).toContain('profile-form-card');
+    expect(formCard.contains(saveButton)).toBe(true);
+  });
+
   it('restores the latest backend version in memory without browser persistence', async () => {
     vi.spyOn(api, 'getCurrentProfile').mockResolvedValue({
       profileId: '64b000000000000000000001',
       version: 2,
       age: 32,
-      monthly_income: 65000,
+      monthly_take_home: 65000,
       monthly_savings: 12000,
-      investment_goals: [],
+      risk_tolerance: 'Moderate',
+      sold_property_proceeds: 0,
+      has_lump_sum: false,
+      lump_sum_amount: 0,
+      liquid_savings: 100000,
+      emi_burden_pct: 5,
+      financial_dependents: 0,
+      emergency_fund_months: 6,
+      investment_goals: ['Wealth Growth'],
+      investment_horizon_years: 10,
     });
 
     render(

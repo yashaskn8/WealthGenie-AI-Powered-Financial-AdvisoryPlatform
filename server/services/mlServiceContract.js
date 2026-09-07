@@ -5,11 +5,11 @@ const RISK_CATEGORIES = new Set([
 ]);
 const RISK_TOLERANCES = new Set(['Conservative', 'Moderate', 'Aggressive']);
 const INVESTMENT_GOALS = new Set(['Retirement', 'Wealth Growth', 'Tax Saving', 'Emergency Fund']);
+const ML_TARGET_CLASSES = new Set(['Equity_MF', 'ELSS', 'ETF', 'Debt_MF', 'FD', 'RBI_Bond']);
 const FEATURE_SCHEMA_VERSION = 'recommendation-features-4.0.0';
 
 function finiteNumber(value) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 function nonEmptyString(value) {
@@ -68,10 +68,18 @@ export function buildPredictionRequest(profileData) {
 export function normalizePredictionResponse(value) {
   if (!value || typeof value !== 'object') return null;
   if (![value.primary, value.secondary, value.tertiary].every(nonEmptyString)) return null;
+  const rankedClasses = [value.primary, value.secondary, value.tertiary];
+  if (new Set(rankedClasses).size !== rankedClasses.length
+    || rankedClasses.some(label => !ML_TARGET_CLASSES.has(label))) return null;
   if (!value.confidence_scores || typeof value.confidence_scores !== 'object' || Array.isArray(value.confidence_scores)) return null;
-  if (!Object.values(value.confidence_scores).every(score => Number.isFinite(Number(score)))) return null;
+  if (Object.keys(value.confidence_scores).length !== ML_TARGET_CLASSES.size
+    || Object.keys(value.confidence_scores).some(label => !ML_TARGET_CLASSES.has(label))) return null;
+  if (!Object.values(value.confidence_scores).every(score => (
+    typeof score === 'number' && Number.isFinite(score) && score >= 0 && score <= 1
+  ))) return null;
   if (!Array.isArray(value.decision_path) || !value.decision_path.every(nonEmptyString)) return null;
   if (!nonEmptyString(value.model_version)) return null;
+  if (!nonEmptyString(value.dataset_version)) return null;
   if (value.feature_schema_version !== FEATURE_SCHEMA_VERSION) return null;
   if (value.explanation !== null && value.explanation !== undefined && typeof value.explanation !== 'object') return null;
 
@@ -80,11 +88,12 @@ export function normalizePredictionResponse(value) {
     secondary: value.secondary,
     tertiary: value.tertiary,
     confidence_scores: Object.fromEntries(
-      Object.entries(value.confidence_scores).map(([key, score]) => [key, Number(score)]),
+      Object.entries(value.confidence_scores),
     ),
     decision_path: [...value.decision_path],
     explanation: value.explanation ?? null,
     model_version: value.model_version,
+    dataset_version: value.dataset_version,
     feature_schema_version: value.feature_schema_version,
     cited_chunk_ids: Array.isArray(value.cited_chunk_ids) ? [...value.cited_chunk_ids] : [],
     fallback: value.fallback === true,

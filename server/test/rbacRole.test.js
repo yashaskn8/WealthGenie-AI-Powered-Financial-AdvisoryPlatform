@@ -204,8 +204,8 @@ test('PROOF 5: mlClient and ragClient propagate X-Verified-User-Role downstream 
     }
     return { status: 200, data: {
       primary: 'ETF', secondary: 'Debt_MF', tertiary: 'ELSS',
-      confidence_scores: { ETF: 0.7 }, decision_path: ['risk=Moderate'],
-      model_version: '4.0.0', feature_schema_version: 'recommendation-features-4.0.0',
+      confidence_scores: { Equity_MF: 0.05, ELSS: 0.05, ETF: 0.7, Debt_MF: 0.1, FD: 0.05, RBI_Bond: 0.05 }, decision_path: ['risk=Moderate'],
+      model_version: '4.0.0', dataset_version: '4.0.0', feature_schema_version: 'recommendation-features-4.0.0',
     } };
   };
 

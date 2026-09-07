@@ -24,7 +24,6 @@ import pytest
 from unittest.mock import patch
 from rag.security.prompt_sanitizer import (
     PromptSanitizer,
-    SecurityViolationError,
     SemanticGuardInitializationError,
     SemanticInjectionGuard,
 )

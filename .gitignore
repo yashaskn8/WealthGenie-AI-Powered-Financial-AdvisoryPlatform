@@ -51,6 +51,8 @@ __pycache__
 .venv
 venv
 .pytest_cache
+.ruff_cache
+ml-service/.live-runtime/
 *.db
 *.db-wal
 *.db-shm

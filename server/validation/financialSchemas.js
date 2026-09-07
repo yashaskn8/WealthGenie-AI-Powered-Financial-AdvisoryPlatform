@@ -21,21 +21,25 @@ export const recommendationWeightsSchema = Joi.object({
 }).unknown(false);
 
 export const financialProfileSchema = Joi.object({
-  monthly_take_home: Joi.number().min(1000).max(100000000).required(),
-  monthly_savings: Joi.number().min(500).max(100000000).required(),
+  monthly_take_home: Joi.number().greater(0).max(100000000).required(),
+  monthly_savings: Joi.number().greater(0).max(100000000).required(),
   age: Joi.number().integer().min(18).max(80).required(),
   risk_tolerance: Joi.string().valid('Conservative', 'Moderate', 'Aggressive').required(),
-  sold_property_proceeds: Joi.number().min(0).max(10000000000).required(),
-  has_lump_sum: Joi.boolean().required(),
+  sold_property_proceeds: Joi.number().min(0).max(10000000000).allow(null).optional(),
+  has_lump_sum: Joi.boolean().allow(null).optional(),
   lump_sum_amount: Joi.when('has_lump_sum', {
     is: true,
     then: Joi.number().greater(0).max(10000000000).required(),
-    otherwise: Joi.number().valid(0).required(),
+    otherwise: Joi.when('has_lump_sum', {
+      is: false,
+      then: Joi.number().valid(0).required(),
+      otherwise: Joi.valid(null).optional(),
+    }),
   }),
-  liquid_savings: Joi.number().min(0).max(1000000000).required(),
-  emi_burden_pct: Joi.number().min(0).max(100).required(),
-  financial_dependents: Joi.number().integer().min(0).max(15).required(),
-  emergency_fund_months: Joi.number().min(0).max(120).required(),
+  liquid_savings: Joi.number().min(0).max(1000000000).allow(null).optional(),
+  emi_burden_pct: Joi.number().min(0).max(100).allow(null).optional(),
+  financial_dependents: Joi.number().integer().min(0).max(15).allow(null).optional(),
+  emergency_fund_months: Joi.number().min(0).max(120).allow(null).optional(),
   investment_goals: Joi.array()
     .items(Joi.string().valid(...investmentGoals))
     .min(1).max(investmentGoals.length).unique().required(),
@@ -55,37 +59,82 @@ export const financialProfileUpdateSchema = financialProfileSchema.keys({
 export const rankWtiProfileSchema = Joi.object({
   profileId: objectId.required(),
   parentInstrumentId: Joi.string().trim().max(50).required(),
-  candidates: Joi.array().items(Joi.object({
-    id: Joi.string().trim().max(100).optional(),
-    name: Joi.string().trim().max(100).required(),
-    highlight: Joi.string().max(200).optional(),
-    badge: Joi.string().max(100).optional(),
-    provider: Joi.string().max(100).optional(),
-    platform: Joi.string().max(100).optional(),
-    minInvestment: Joi.string().max(50).optional(),
-    tenure: Joi.string().max(50).optional(),
-  }).unknown(false)).min(1).max(50).required(),
 }).unknown(false);
 
 export const personalizedProjectionSchema = Joi.object({
   profileId: objectId.required(),
   instruments: Joi.array().items(Joi.string().trim().max(50)).min(1).max(10).required(),
-  monthly_investment: Joi.number().min(500).max(10000000).required(),
+  monthly_investment: Joi.number().greater(0).max(10000000).required(),
   years: Joi.array().items(Joi.number().integer().min(1).max(30)).min(1).max(10).unique().required(),
+}).unknown(false);
+
+export const stepUpProjectionSchema = Joi.object({
+  monthlyInvestment: Joi.number().greater(0).max(10000000).required(),
+  annualReturnRate: Joi.number().greater(-1).max(1).required(),
+  years: Joi.number().integer().min(1).max(50).required(),
+  annualStepUpRate: Joi.number().min(0).max(1).required(),
+}).unknown(false);
+
+export const projectionComparisonSchema = Joi.object({
+  monthlyInvestment: Joi.number().greater(0).max(10000000).required(),
+  annualReturnRate: Joi.number().greater(-1).max(1).required(),
+  benchmarkRate: Joi.number().greater(-1).max(1).required(),
+  inflationRate: Joi.number().min(0).max(1).required(),
+  years: Joi.number().integer().min(1).max(50).required(),
+}).unknown(false);
+
+const portfolioWeights = Joi.object().pattern(
+  Joi.string().trim().min(1).max(50),
+  Joi.number().min(0).max(1),
+).min(1).max(30).required().custom((value, helpers) => {
+  const total = Object.values(value).reduce((sum, weight) => sum + weight, 0);
+  return Math.abs(total - 1) <= 0.0001
+    ? value
+    : helpers.message({ custom: 'Portfolio allocations must sum to exactly 1' });
+});
+
+export const customPortfolioProjectionSchema = Joi.object({
+  profileId: objectId.required(),
+  allocations: portfolioWeights,
+  years: Joi.number().integer().min(1).max(30).required(),
+}).unknown(false);
+
+export const portfolioMonteCarloSchema = Joi.object({
+  profileId: objectId.required(),
+  allocations: portfolioWeights,
+  years: Joi.number().integer().min(1).max(30).required(),
+  target_amount: Joi.number().min(1000).max(10000000000).optional(),
 }).unknown(false);
 
 export const personalizedMonteCarloSchema = Joi.object({
   profileId: objectId.required(),
   instrument: Joi.string().trim().max(50).required(),
-  monthly_investment: Joi.number().min(500).max(10000000).required(),
+  monthly_investment: Joi.number().greater(0).max(10000000).required(),
   years: Joi.number().integer().min(1).max(30).required(),
   target_amount: Joi.number().min(1000).max(10000000000).optional(),
 }).unknown(false);
 
+const datedCashflowSchema = Joi.object({
+  amount: Joi.number().required(),
+  date: Joi.date().iso().required(),
+}).unknown(false);
+
+export const historicalXirrSchema = Joi.alternatives().try(
+  Joi.object({
+    cashflows: Joi.array().items(datedCashflowSchema).min(2).max(1000).required(),
+    guess: Joi.number().greater(-1).max(10).optional(),
+  }).unknown(false),
+  Joi.object({
+    monthlySIP: Joi.number().greater(0).max(100000000).required(),
+    months: Joi.number().integer().min(1).max(1200).required(),
+    currentValue: Joi.number().greater(0).max(10000000000).required(),
+  }).unknown(false),
+);
+
 export const personalizedOptimiseSchema = Joi.object({
   profileId: objectId.required(),
   assets: Joi.array().items(Joi.string().trim().max(50)).min(2).max(20).unique().required(),
-  strategy: Joi.string().valid('min_variance', 'max_sharpe', 'risk_parity').required(),
+  strategy: Joi.string().valid('min_variance', 'max_sharpe', 'risk_parity', 'max_return').required(),
 }).unknown(false);
 
 export const personalizedRebalanceSchema = Joi.object({
@@ -111,6 +160,10 @@ export const customGoalUpdateSchema = Joi.object({
   current_savings: Joi.number().min(0).max(10000000000).optional(),
   priority: Joi.string().valid('Critical', 'High', 'Medium', 'Low').optional(),
 }).min(1).unknown(false);
+
+export const goalSimulationSchema = Joi.object({
+  monthly_contribution: Joi.number().greater(0).max(10000000).required(),
+}).unknown(false);
 
 export function validateStrict(schema) {
   return (req, res, next) => {

@@ -4,7 +4,7 @@ Defines the standard repository contract for vector search storage engines.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Optional
 from rag.schema import TextChunk, RetrievedChunk
 
 

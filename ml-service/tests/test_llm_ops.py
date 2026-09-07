@@ -4,8 +4,6 @@ Tests circuit breaker, audit logger, rate limiter, and health monitor.
 """
 
 import time
-import pytest
-from pathlib import Path
 
 from llm.ops.circuit_breaker import CircuitBreaker, CircuitState
 from llm.ops.audit_logger import AuditLogger, AuditEntry

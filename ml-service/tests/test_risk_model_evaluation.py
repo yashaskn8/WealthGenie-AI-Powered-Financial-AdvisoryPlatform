@@ -2,11 +2,13 @@
 Phase 4 Rigor Evaluation & Non-Circularity Verification Test Suite
 """
 
+import json
+from pathlib import Path
+
 import pytest
 from model.evaluation.rigor_evaluator import (
     audit_feature_overlap,
     audit_formula_logic_overlap,
-    construct_independent_cfp_benchmark_targets,
     run_full_rigor_audit,
 )
 
@@ -19,6 +21,18 @@ def test_feature_overlap_audit():
     assert audit["forbidden_feature_overlap_percentage"] == 0.0
     assert audit["forbidden_feature_overlap"] == []
     assert audit["finding"] == "PASS"
+
+
+def test_tracked_model_metadata_uses_holdout_metrics_and_exact_age_lineage():
+    metadata_path = Path(__file__).parents[1] / "model" / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["dataset_lineage"]["age_range"] == [18.0, 80.0]
+    assert metadata["evaluation_split"] == {
+        "method": "stratified_holdout",
+        "test_fraction": 0.20,
+        "random_seed": 42,
+        "evaluated_samples": 400,
+    }
 
 
 def test_policy_fidelity_is_not_misrepresented_as_outcome_accuracy():
@@ -59,4 +73,3 @@ def test_rigor_evaluation_reproducibility():
     # Assert noise degrades fidelity monotonically
     assert noise["noise_std_5pct_accuracy"] >= noise["noise_std_10pct_accuracy"]
     assert noise["noise_std_10pct_accuracy"] >= noise["noise_std_20pct_accuracy"]
-

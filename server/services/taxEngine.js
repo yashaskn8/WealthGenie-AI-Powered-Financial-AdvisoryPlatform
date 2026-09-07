@@ -31,6 +31,15 @@ const STANDARD_OLD_SLABS = defineSlabs([
     { min: 1000000, max: Infinity, rate: 0.30 },
 ]);
 
+export const TAX_DEDUCTION_LIMITS = Object.freeze({
+    section80C: 150000,
+    section80CCD1B: 50000,
+    section80DSelf: 25000,
+    section80DSelfSenior: 50000,
+    section80DParents: 25000,
+    section80DParentsSenior: 50000,
+});
+
 export const TAX_SLABS_BY_FY = Object.freeze({
     'FY2025-26': Object.freeze({
         verified: true, // Confirmed against Finance Act 2023 / Union Budget 2024.
@@ -45,7 +54,11 @@ export const TAX_SLABS_BY_FY = Object.freeze({
     }),
 });
 export function getTaxSlabsForFY(fiscalYear = CURRENT_FY) {
-    return TAX_SLABS_BY_FY[fiscalYear] || TAX_SLABS_BY_FY[CURRENT_FY];
+    const slabs = TAX_SLABS_BY_FY[fiscalYear];
+    if (!slabs || slabs.verified !== true) {
+        throw new RangeError(`Verified tax slabs are unavailable for ${fiscalYear}`);
+    }
+    return slabs;
 }
 /**
  * Check whether the tax slabs for a given fiscal year have been verified
@@ -313,6 +326,130 @@ export function compareTaxRegimes(annualIncome, deductions = {}, incomeSource, f
     const oldRegime = computeTax(annualIncome, 'old', deductions, incomeSource, fiscalYear);
     const recommended = newRegime.taxAmount <= oldRegime.taxAmount ? 'new' : 'old';
     return { newRegime, oldRegime, recommended };
+}
+
+function formatSlabLabel(slab) {
+    const formatLakhs = value => {
+        const lakhs = value / 100000;
+        return Number.isInteger(lakhs) ? `${lakhs}L` : `${lakhs.toFixed(1)}L`;
+    };
+    if (!Number.isFinite(slab.max)) return `Above ₹${formatLakhs(slab.min)}`;
+    return `₹${formatLakhs(slab.min)} - ₹${formatLakhs(slab.max)}`;
+}
+
+/**
+ * Presentation-ready slab rows derived from the same verified policy table and
+ * computed liability used by computeTax. This prevents the browser from
+ * maintaining a second, potentially stale tax engine.
+ */
+export function buildTaxSlabBreakdown(computation, fiscalYear = CURRENT_FY) {
+    if (!computation || !Number.isFinite(computation.taxableIncome)) {
+        throw new TypeError('A completed tax computation is required');
+    }
+    const slabs = getRegimeSlabs(computation.regime, fiscalYear);
+    const rows = [];
+    let baseTax = 0;
+
+    for (const slab of slabs) {
+        if (computation.taxableIncome <= slab.min) break;
+        const taxableInSlab = Math.max(0, Math.min(computation.taxableIncome, slab.max) - slab.min);
+        if (taxableInSlab <= 0) continue;
+        const taxInSlab = Math.round(taxableInSlab * slab.rate);
+        baseTax += taxInSlab;
+        rows.push({
+            label: formatSlabLabel(slab),
+            rate: slab.rate * 100,
+            taxableInSlab: Math.round(taxableInSlab),
+            taxInSlab,
+        });
+    }
+
+    if (computation.rebateApplied && baseTax > 0) {
+        rows.push({
+            label: 'Government Tax Rebate (Section 87A)',
+            rate: '',
+            taxableInSlab: 0,
+            taxInSlab: -baseTax,
+            isRebateRow: true,
+        });
+    }
+
+    rows.push({
+        label: 'Your Total Tax',
+        rate: '',
+        taxableInSlab: Math.round(computation.taxableIncome),
+        taxInSlab: computation.taxAmount,
+        isTotalRow: true,
+    });
+    return rows;
+}
+
+/**
+ * Computes the old-regime outcome after filling only the remaining 80C and
+ * 80CCD(1B) room. No product or suitability recommendation is made here.
+ */
+export function analyzeTaxOptimization(annualIncome, deductions = {}, incomeSource, fiscalYear = CURRENT_FY) {
+    validateTaxContext(annualIncome, 'old', incomeSource);
+    const section80C = Math.min(Number(deductions.section80C) || 0, TAX_DEDUCTION_LIMITS.section80C);
+    const nps80CCD1B = Math.min(Number(deductions.nps80CCD1B ?? deductions.section80CCD) || 0, TAX_DEDUCTION_LIMITS.section80CCD1B);
+    const age = Number.isInteger(deductions.age) ? deductions.age : null;
+    const parentsSeniorKnown = typeof deductions.parents_senior === 'boolean';
+    const parentsSenior = deductions.parents_senior === true;
+    const deductionLimits = {
+        section80C: TAX_DEDUCTION_LIMITS.section80C,
+        section80CCD1B: TAX_DEDUCTION_LIMITS.section80CCD1B,
+        section80DSelf: age !== null && age >= 60
+            ? TAX_DEDUCTION_LIMITS.section80DSelfSenior
+            : TAX_DEDUCTION_LIMITS.section80DSelf,
+        section80DParents: parentsSeniorKnown
+            ? (parentsSenior
+                ? TAX_DEDUCTION_LIMITS.section80DParentsSenior
+                : TAX_DEDUCTION_LIMITS.section80DParents)
+            : null,
+    };
+    const remaining = {
+        section80C: Math.max(0, deductionLimits.section80C - section80C),
+        section80CCD1B: Math.max(0, deductionLimits.section80CCD1B - nps80CCD1B),
+    };
+    const currentOld = computeTax(annualIncome, 'old', deductions, incomeSource, fiscalYear);
+    const optimizedDeductions = {
+        ...deductions,
+        section80C: deductionLimits.section80C,
+        nps80CCD1B: deductionLimits.section80CCD1B,
+    };
+    const optimizedOld = computeTax(annualIncome, 'old', optimizedDeductions, incomeSource, fiscalYear);
+    const newRegime = computeTax(annualIncome, 'new', deductions, incomeSource, fiscalYear);
+
+    let crossoverBreakpoint = null;
+    const currentRelevantDeductions = section80C + nps80CCD1B;
+    const availableAdditional = remaining.section80C + remaining.section80CCD1B;
+    if (currentOld.taxAmount <= newRegime.taxAmount) {
+        crossoverBreakpoint = currentRelevantDeductions;
+    } else if (optimizedOld.taxAmount <= newRegime.taxAmount && availableAdditional > 0) {
+        let low = 0;
+        let high = availableAdditional;
+        while (low < high) {
+            const additional = Math.floor((low + high) / 2);
+            const add80C = Math.min(remaining.section80C, additional);
+            const addNps = Math.min(remaining.section80CCD1B, Math.max(0, additional - add80C));
+            const candidate = computeTax(annualIncome, 'old', {
+                ...deductions,
+                section80C: section80C + add80C,
+                nps80CCD1B: nps80CCD1B + addNps,
+            }, incomeSource, fiscalYear);
+            if (candidate.taxAmount <= newRegime.taxAmount) high = additional;
+            else low = additional + 1;
+        }
+        crossoverBreakpoint = currentRelevantDeductions + low;
+    }
+
+    return {
+        deductionLimits,
+        remaining,
+        optimizedOld,
+        potentialSaving: Math.max(0, currentOld.taxAmount - optimizedOld.taxAmount),
+        crossoverBreakpoint,
+    };
 }
 /**
  * Get the effective marginal tax rate (slab + surcharge + cess) for a given income level.

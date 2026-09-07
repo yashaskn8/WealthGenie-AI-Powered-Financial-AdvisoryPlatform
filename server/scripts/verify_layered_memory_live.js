@@ -31,18 +31,23 @@ async function runLiveLayeredMemoryVerification() {
 
   // Step 0: Create financial profile for this fresh test user
   console.log(`\n[${new Date().toISOString()}] Step 0: Creating Profile for userId ${userId}...`);
-  await client.post('/api/profile/build', {
+  const profileRes = await client.post('/api/profile/build', {
     age: 34,
-    monthly_income: 180000,
+    monthly_take_home: 180000,
     monthly_savings: 60000,
-    liquid_savings: 500000,
-    existing_debt: 15,
-    dependents: 2,
-    emergency_fund_months: 6,
-    investment_horizon: 15,
     risk_tolerance: 'Moderate',
-    goal_type: 'wealth-building',
+    sold_property_proceeds: 0,
+    has_lump_sum: false,
+    lump_sum_amount: 0,
+    liquid_savings: 500000,
+    emi_burden_pct: 15,
+    financial_dependents: 2,
+    emergency_fund_months: 6,
+    investment_goals: ['Wealth Growth'],
+    investment_horizon_years: 15,
   });
+  const profileId = profileRes.data.profileId;
+  assert.ok(profileId, 'Profile must be created');
 
   // Step 1: Seed financial goal via live API (persisted in MongoDB and loaded by LayeredMemoryManager)
   console.log(`\n[${new Date().toISOString()}] Step 1: Seeding Goal into Layered Memory via live API...`);
@@ -52,6 +57,7 @@ async function runLiveLayeredMemoryVerification() {
       target_amount: 3200000,
       target_date: '2028-11-01T00:00:00.000Z',
       current_savings: 500000,
+      profileId,
       priority: 'High',
     });
     console.log(`- Goal 'Electric SUV Luxury Vehicle' (₹32L, 2028) created in DB.`);

@@ -3,13 +3,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runMonteCarloWithGoal, getInstrumentVolatility } from '../services/monteCarloEngine.js';
 import { buildCovarianceMatrix, portfolioReturn, portfolioVol } from '../services/portfolioEngine.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 test('Blended Portfolio Monte Carlo: diversification reduces portfolio volatility and improves goal probability', () => {
   // Setup sample instruments matching a moderate recommendation portfolio
   const instruments = [
-    { name: 'Public Provident Fund (PPF)', type: 'PPF', allocationWeight: 0.50, nominalReturn: 7.1 },
-    { name: 'Nifty 50 Index Fund', type: 'Equity_MF', allocationWeight: 0.25, nominalReturn: 14.5 },
-    { name: 'Invesco QQQ Trust ETF', type: 'ETF', allocationWeight: 0.25, nominalReturn: 12.5 },
+    { name: 'Public Provident Fund (PPF)', type: 'PPF', allocationWeight: 0.50, nominalReturn: 7.1, returnBasis: 'PRE_TAX_NOMINAL', postTaxReturn: null },
+    { name: 'Nifty 50 Index Fund', type: 'Equity_MF', allocationWeight: 0.25, nominalReturn: 14.5, returnBasis: 'PRE_TAX_NOMINAL', postTaxReturn: null },
+    { name: 'Invesco QQQ Trust ETF', type: 'ETF', allocationWeight: 0.25, nominalReturn: 12.5, returnBasis: 'PRE_TAX_NOMINAL', postTaxReturn: null },
   ];
 
   // 1. Single instrument standalone volatility (Equity_MF)
@@ -70,7 +71,7 @@ test('Stage 5 Optimizer / Goals glue: _getBlendedPortfolioMetrics returns decima
 
   // No fallback return assumption is permitted when an authoritative recommendation is absent.
   await assert.rejects(
-    _getBlendedPortfolioMetrics('507f1f77bcf86cd799439011', null, 'Equity_MF', { instruments: [] }),
+    _getBlendedPortfolioMetrics('507f1f77bcf86cd799439011', null, undefined, { instruments: [] }),
     error => error.code === 'RECOMMENDATION_REQUIRED',
   );
 
@@ -114,16 +115,25 @@ test('Stage 5 Optimizer / Goals glue: _getBlendedPortfolioMetrics returns decima
   // Test 4: Direct test of main blended-weight branch of _getBlendedPortfolioMetrics with multi-instrument recommendation
   const mockRec = {
     instruments: [
-      { name: 'Public Provident Fund', type: 'PPF', allocationWeight: 0.50, nominalReturn: 7.1 },
-      { name: 'Nifty 50 Index Fund', type: 'Equity_MF', allocationWeight: 0.25, nominalReturn: 14.5 },
-      { name: 'Invesco QQQ ETF', type: 'ETF', allocationWeight: 0.25, nominalReturn: 12.5 },
+      { name: 'Public Provident Fund', type: 'PPF', allocationWeight: 0.50, nominalReturn: 7.1, returnBasis: 'PRE_TAX_NOMINAL', postTaxReturn: null },
+      { name: 'Nifty 50 Index Fund', type: 'Equity_MF', allocationWeight: 0.25, nominalReturn: 14.5, returnBasis: 'PRE_TAX_NOMINAL', postTaxReturn: null },
+      { name: 'Invesco QQQ ETF', type: 'ETF', allocationWeight: 0.25, nominalReturn: 12.5, returnBasis: 'PRE_TAX_NOMINAL', postTaxReturn: null },
     ],
   };
 
-  const mockMetrics = await _getBlendedPortfolioMetrics(null, null, 'Equity_MF', mockRec);
+  const mockMetrics = await _getBlendedPortfolioMetrics(null, null, undefined, mockRec);
   assert.ok(mockMetrics.expectedReturn > 0 && mockMetrics.expectedReturn < 1.0,
     `Main path blended expectedReturn (${mockMetrics.expectedReturn}) must be on DECIMAL scale (< 1.0, e.g. 0.103)`);
   assert.equal(mockMetrics.expectedReturn, 0.103);
   assert.ok(mockMetrics.volatility > 0 && mockMetrics.volatility < 0.10,
     `Main path blended volatility (${mockMetrics.volatility}) must be on DECIMAL scale and diversified (< 0.10)`);
+
+  await assert.rejects(
+    _getBlendedPortfolioMetrics(null, null, canonicalProfile(), {
+      ...mockRec,
+      modelVersion: 'model-4.0.0',
+      profileInputHash: '0'.repeat(64),
+    }),
+    error => error.code === 'RECOMMENDATION_STALE',
+  );
 });

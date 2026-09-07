@@ -8,12 +8,15 @@ import {
 } from '../validation/financialSchemas.js';
 import {
   buildRecommendationProfile,
+  buildRecommendationProfileHash,
   toProfileApiResponse,
   toProfilePersistence,
 } from '../services/recommendationProfile.js';
 import { assessSuitabilityRisk } from '../services/riskProfiler.js';
 import FinancialProfile from '../models/FinancialProfile.js';
-import { delCache, redisClient, redisAvailable } from '../config/redis.js';
+import Recommendation from '../models/Recommendation.js';
+import { calculateFinancialHealthScore } from '../services/financialHealthEngine.js';
+import { redisClient, redisAvailable } from '../config/redis.js';
 import { idempotency } from '../middleware/idempotency.js';
 
 const router = Router();
@@ -31,15 +34,6 @@ async function checkProfileRateLimit(userId) {
   }
 }
 
-async function invalidateProfileCaches(userId, profileId) {
-  try {
-    await delCache(`chat:sysprompt_v4:${userId}:${profileId}`);
-    await delCache(`recommend:${userId}:${profileId}`);
-  } catch (error) {
-    console.warn('[Profile] Cache invalidation failed (non-critical):', error.message);
-  }
-}
-
 export function formatProfileResponse(profile) {
   const p = profile?.toObject ? profile.toObject() : profile;
   const canonical = buildRecommendationProfile(p);
@@ -49,6 +43,7 @@ export function formatProfileResponse(profile) {
     version: p.version ?? 1,
     risk_capacity_score: suitability.capacityScore,
     risk_capacity_level: suitability.capacityLevel,
+    final_suitability_risk: suitability.finalRisk,
     final_suitability_level: suitability.finalLevel,
     suitability_reason_codes: suitability.reasonCodes,
   };
@@ -62,6 +57,21 @@ router.get('/current', verifyJWT, asyncHandler(async (req, res) => {
     throw createError(404, 'Financial profile not found', 'Financial profile not found.');
   }
   res.json(formatProfileResponse(profile));
+}));
+
+router.get('/:profileId/health-score', verifyJWT, asyncHandler(async (req, res) => {
+  const profile = await FinancialProfile.findOne({ _id: req.params.profileId, userId: req.user.userId }).lean();
+  if (!profile) throw createError(404, 'Profile not found or access denied', 'Financial profile not found.');
+  const recommendation = await Recommendation.findOne({ profileId: profile._id, userId: req.user.userId })
+    .sort({ generatedAt: -1 })
+    .lean();
+  if (recommendation) {
+    const expectedHash = buildRecommendationProfileHash(profile, { modelVersion: recommendation.modelVersion });
+    if (recommendation.profileInputHash !== expectedHash) {
+      throw createError(409, 'Recommendation was generated from an older profile state.', 'Regenerate recommendations before calculating financial health.');
+    }
+  }
+  res.json(calculateFinancialHealthScore(profile, recommendation?.instruments || []));
 }));
 
 router.post(
@@ -81,7 +91,6 @@ router.post(
       ...toProfilePersistence(canonical, suitability),
     });
 
-    await invalidateProfileCaches(req.user.userId, profile._id);
     res.status(201).json(formatProfileResponse(profile));
   }),
 );
@@ -117,7 +126,6 @@ router.put(
       return sendError(req, res, 409, 'Version conflict', 'PROFILE_VERSION_CONFLICT');
     }
 
-    await invalidateProfileCaches(req.user.userId, updated._id);
     res.json(formatProfileResponse(updated));
   }),
 );

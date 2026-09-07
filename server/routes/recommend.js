@@ -12,7 +12,7 @@ import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import AuditRecord from '../models/AuditRecord.js';
 import logger from '../utils/logger.js';
-import { getMLPrediction } from '../services/mlClient.js';
+import { getIncompleteProfileFallback, getMLPrediction } from '../services/mlClient.js';
 import { generateAdvisory } from '../services/geminiService.js';
 import {
   runPipeline,
@@ -23,6 +23,8 @@ import {
   buildRecommendationProfile,
   buildRecommendationProfileHash,
   buildMlProfileInput,
+  getMissingMlProfileFields,
+  getUnknownOptionalProfileFields,
   buildLlmFinancialContext,
   deriveRecommendationMetrics,
   RECOMMENDATION_POLICY_VERSION,
@@ -34,10 +36,14 @@ import { persistAdvisoryAtomically } from '../services/advisoryPersistence.js';
 import { setCache, delCache } from '../config/redis.js';
 import { RISK_FREE_RATE, DISCLAIMER } from '../services/instrumentConstants.js';
 import { verifyAuditChain } from '../services/auditChain.js';
+import { generatePortfolioProjection } from '../services/projectionEngine.js';
 
 const router = Router();
 
-export function buildRecommendationCacheKey(userId, profileId, profile, modelVersion = 'unversioned-model') {
+export function buildRecommendationCacheKey(userId, profileId, profile, modelVersion) {
+  if (typeof modelVersion !== 'string' || !modelVersion.trim()) {
+    throw new TypeError('A model version is required for recommendation cache keys');
+  }
   return `recommendation:${userId}:${profileId}:${buildRecommendationProfileHash(profile, { modelVersion })}`;
 }
 
@@ -68,6 +74,31 @@ function canonicalAuditInputs(profile, suitability, modelVersion) {
   };
 }
 
+function buildPortfolioExpectedReturn(instruments) {
+  return Number(instruments.reduce(
+    (sum, instrument) => sum + Number(instrument.nominalReturn) * Number(instrument.allocationWeight),
+    0,
+  ).toFixed(2));
+}
+
+function buildAssetClassAllocation(instruments) {
+  return Object.fromEntries(Object.entries(instruments.reduce((totals, instrument) => {
+    const assetClass = instrument.assetClass || 'Other';
+    totals[assetClass] = (totals[assetClass] || 0) + (Number(instrument.allocationWeight) * 100);
+    return totals;
+  }, {})).map(([assetClass, percentage]) => [assetClass, Number(percentage.toFixed(2))]));
+}
+
+function buildDashboardProjection(profile, instruments) {
+  const metrics = deriveRecommendationMetrics(profile);
+  return generatePortfolioProjection({
+    monthlyContribution: profile.monthlySavings,
+    initialLumpSum: metrics.deployableLumpSum ?? 0,
+    horizonYears: profile.investmentHorizonYears,
+    instruments,
+  });
+}
+
 router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHandler(async (req, res) => {
   const { profileId } = req.body;
   const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
@@ -87,17 +118,28 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
   }
 
   try {
-    const mlInput = buildMlProfileInput(profile, suitability);
-    const mlResult = await getMLPrediction(mlInput, req.correlationId, req.user.userId, req.user.role);
+    const missingMlProfileFields = getMissingMlProfileFields(profile);
+    const unknownOptionalProfileFields = getUnknownOptionalProfileFields(profile);
+    const mlResult = missingMlProfileFields.length > 0
+      ? getIncompleteProfileFallback(profile, suitability)
+      : await getMLPrediction(
+        buildMlProfileInput(profile, suitability),
+        req.correlationId,
+        req.user.userId,
+        req.user.role,
+      );
+    const modelVersion = mlResult.model_version;
+    if (typeof modelVersion !== 'string' || !modelVersion.trim()) {
+      throw createError(502, 'ML result did not include a model version', 'Recommendation model metadata is unavailable.');
+    }
     const { instruments, confidenceScores, riskReconciliation, computedWeights } = runPipeline(profile, mlResult);
     if (!instruments.length) {
       throw createError(422, 'No instruments passed the suitability boundary', 'No suitable instruments were found for this profile.');
     }
 
-    const portfolioExpectedReturn = Number(instruments.reduce(
-      (sum, instrument) => sum + instrument.nominalReturn * instrument.allocationWeight,
-      0,
-    ).toFixed(2));
+    const portfolioExpectedReturn = buildPortfolioExpectedReturn(instruments);
+    const assetClassAllocation = buildAssetClassAllocation(instruments);
+    const dashboardProjection = buildDashboardProjection(profile, instruments);
     const advisory = await generateAdvisory({
       profile: buildLlmFinancialContext(profile, suitability),
       instruments: instruments.map(instrument => ({
@@ -108,11 +150,12 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
         allocationWeight: instrument.allocationWeight,
       })),
       shapExplanation: mlResult.explanation || null,
+      modelVersion,
+      policyVersion: RECOMMENDATION_POLICY_VERSION,
     });
 
     const recommendationId = new mongoose.Types.ObjectId();
     const auditId = new mongoose.Types.ObjectId();
-    const modelVersion = mlResult.model_version || (mlResult.fallback ? 'rule-fallback-4.0.0' : 'unknown-model');
     const inputs = canonicalAuditInputs(profile, suitability, modelVersion);
     const inputHash = buildRecommendationProfileHash(profile, { modelVersion });
     const correlationId = req.correlationId || req.traceId || crypto.randomUUID();
@@ -126,6 +169,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       confidenceScores,
       mlFallback: Boolean(mlResult.fallback),
       modelVersion,
+      profileInputHash: inputHash,
     };
     const auditRecordData = {
       _id: auditId,
@@ -165,6 +209,8 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       recommendation_policy_version: RECOMMENDATION_POLICY_VERSION,
       financial_profile_schema_version: FINANCIAL_PROFILE_SCHEMA_VERSION,
       portfolio_expected_return: portfolioExpectedReturn,
+      asset_class_allocation: assetClassAllocation,
+      dashboard_projection: dashboardProjection,
       return_basis: 'PRE_TAX_NOMINAL',
       risk_free_rate: Number((RISK_FREE_RATE * 100).toFixed(2)),
       disclaimer: DISCLAIMER,
@@ -174,6 +220,8 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       reconciliation_note: riskReconciliation.reconciliation_note,
       advisory_note: riskReconciliation.advisory_note,
       suitability_reason_codes: riskReconciliation.reason_codes,
+      optional_profile_fields_unknown: unknownOptionalProfileFields,
+      ml_input_fields_unknown: missingMlProfileFields,
       excluded_due_to_eligibility: riskReconciliation.excluded_due_to_eligibility,
       computed_weights: computedWeights,
     };
@@ -232,6 +280,10 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
   const profile = buildRecommendationProfile(stored);
   const recommendation = await Recommendation.findOne({ profileId, userId: req.user.userId }).sort({ generatedAt: -1 });
   if (!recommendation) throw createError(404, 'No recommendation found to update', 'No recommendation found.');
+  const expectedProfileHash = buildRecommendationProfileHash(profile, { modelVersion: recommendation.modelVersion });
+  if (recommendation.profileInputHash !== expectedProfileHash) {
+    throw createError(409, 'Recommendation was generated from an older profile state.', 'Regenerate recommendations before changing weights.');
+  }
 
   const instrumentIds = recommendation.instruments.map(instrument => String(instrument.id));
   const suppliedIds = Object.keys(weights);
@@ -258,7 +310,17 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
   });
   await recommendation.save();
   await delCache(buildRecommendationCacheKey(req.user.userId, stored._id, profile, recommendation.modelVersion));
-  res.json({ status: 'success', message: 'Recommendation weights updated.', instruments: recommendation.instruments });
+  const updatedInstruments = recommendation.instruments.map(instrument => (
+    instrument.toObject ? instrument.toObject() : instrument
+  ));
+  res.json({
+    status: 'success',
+    message: 'Recommendation weights updated.',
+    instruments: updatedInstruments,
+    portfolio_expected_return: buildPortfolioExpectedReturn(updatedInstruments),
+    asset_class_allocation: buildAssetClassAllocation(updatedInstruments),
+    dashboard_projection: buildDashboardProjection(profile, updatedInstruments),
+  });
 }));
 
 export default router;

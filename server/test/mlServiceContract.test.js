@@ -24,14 +24,17 @@ test('Node prediction payload is exactly accepted by the Pydantic consumer fixtu
   assert.deepEqual(request, fixtures.prediction_request);
   assert.equal('annual_income' in request, false);
   assert.equal('existing_debt_emi_ratio_pct' in request, false, 'do not send fields FastAPI silently ignores');
+  assert.equal(buildPredictionRequest({ ...fixtures.prediction_request, liquid_savings: null }), null);
+  assert.equal(buildPredictionRequest({ ...fixtures.prediction_request, monthly_savings: '20000' }), null);
 });
 
 test('Node normalizes complete prediction responses and marks service results non-fallback', () => {
   const result = normalizePredictionResponse(fixtures.prediction_response);
   assert.equal(result.primary, 'ETF');
   assert.equal(result.secondary, 'Debt_MF');
-  assert.equal(result.tertiary, 'SGB');
+  assert.equal(result.tertiary, 'ELSS');
   assert.equal(result.model_version, '4.0.0');
+  assert.equal(result.dataset_version, '4.0.0');
   assert.equal(result.fallback, false);
   assert.equal(result.explanation.predicted_class, 'ETF');
 });
@@ -39,7 +42,12 @@ test('Node normalizes complete prediction responses and marks service results no
 test('Node rejects incomplete or type-drifted prediction responses safely', () => {
   assert.equal(normalizePredictionResponse({ ...fixtures.prediction_response, tertiary: null }), null);
   assert.equal(normalizePredictionResponse({ ...fixtures.prediction_response, model_version: null }), null);
+  assert.equal(normalizePredictionResponse({ ...fixtures.prediction_response, dataset_version: null }), null);
+  assert.equal(normalizePredictionResponse({ ...fixtures.prediction_response, tertiary: 'SGB' }), null);
+  assert.equal(normalizePredictionResponse({ ...fixtures.prediction_response, confidence_scores: { ...fixtures.prediction_response.confidence_scores, SGB: 0 } }), null);
   assert.equal(normalizePredictionResponse({ ...fixtures.prediction_response, confidence_scores: { ETF: 'unknown' } }), null);
+  assert.equal(normalizePredictionResponse({ ...fixtures.prediction_response, confidence_scores: { ETF: 2 } }), null);
+  assert.equal(normalizePredictionResponse({ ...fixtures.prediction_response, confidence_scores: { ETF: null } }), null);
 });
 
 test('RAG request carries query only in the body and identity in verified headers', () => {

@@ -9,8 +9,6 @@ Known limitation: Each replica loads the full embedding set into RAM on startup.
 For very large corpora this will not scale well memory-wise per replica.
 """
 
-import hashlib
-import json
 import logging
 from typing import Dict, List, Any, Optional
 import numpy as np

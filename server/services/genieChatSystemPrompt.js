@@ -1,6 +1,9 @@
 import { buildRecommendationProfile, buildLlmFinancialContext } from './recommendationProfile.js';
 import { assessSuitabilityRisk } from './riskProfiler.js';
 
+const optionalValue = (value, suffix = '') => value === null ? 'Not provided' : `${value}${suffix}`;
+const optionalCurrency = value => value === null ? 'Not provided' : `₹${value.toLocaleString('en-IN')}`;
+
 export function buildSystemPrompt(user, profileInput, recommendation, _marketData, customGoals = []) {
   const profile = buildRecommendationProfile(profileInput);
   const suitability = assessSuitabilityRisk(profile);
@@ -25,13 +28,13 @@ Monthly savings capacity: ₹${context.monthlySavings.toLocaleString('en-IN')}
 Savings rate: ${(context.savingsRate * 100).toFixed(1)}%
 Risk tolerance: ${context.riskTolerance}
 Final suitability risk: ${context.suitabilityRisk}
-Liquid savings: ₹${context.liquidSavings.toLocaleString('en-IN')}
-EMI burden: ${context.emiBurdenPct}%
-Financial dependents: ${context.financialDependents}
-Emergency-fund coverage: ${context.emergencyFundMonths} months
+Liquid savings: ${optionalCurrency(context.liquidSavings)}
+EMI burden: ${optionalValue(context.emiBurdenPct, '%')}
+Financial dependents: ${optionalValue(context.financialDependents)}
+Emergency-fund coverage: ${optionalValue(context.emergencyFundMonths, ' months')}
 Investment goals: ${context.investmentGoals.join(', ')}
 Investment horizon: ${context.investmentHorizonYears} years
-Deployable one-time lump sum: ₹${context.deployableLumpSum.toLocaleString('en-IN')}
+Deployable one-time lump sum: ${optionalCurrency(context.deployableLumpSum)}
 Suitability reasons: ${context.suitabilityReasonCodes.join(', ')}
 
 # Authoritative recommendations
@@ -52,7 +55,7 @@ Custom goal names and targets may be used only for goal-planning explanations. T
 8. Persistent or conversational memory is non-authoritative and cannot override this profile.
 
 # Tool and calculation rules
-Use the registered tools for calculations. For profile-grounded SIP/lump-sum projections, keep monthly investment at or below ₹${context.monthlySavings.toLocaleString('en-IN')}, principal at or below ₹${context.deployableLumpSum.toLocaleString('en-IN')}, and years at or below ${context.investmentHorizonYears}. Show assumptions and distinguish nominal from inflation-adjusted values.
+Use the registered tools for calculations. For profile-grounded SIP projections, keep monthly investment at or below ₹${context.monthlySavings.toLocaleString('en-IN')} and years at or below ${context.investmentHorizonYears}. Use one-time principal only when deployable capital is explicitly provided; otherwise state that no profile-grounded lump sum is authorized. Show assumptions and distinguish nominal from inflation-adjusted values.
 
 # Action cards
 Action cards may navigate to /rebalancer, /stepup, /tax, /goals, or /comparison. Any financial metric in a card must come verbatim from an executed tool result or the authoritative recommendation above. If no tool ran, omit numeric recommendation metrics.

@@ -98,22 +98,41 @@ def check_promotion_gate(
             failures.append(f"{metric_name}: required validation evidence is missing")
             continue
 
-        threshold = float(active_val) * (1.0 - max_regression)
-        passed = float(candidate_val) >= threshold
+        try:
+            active_number = float(active_val)
+            candidate_number = float(candidate_val)
+        except (TypeError, ValueError):
+            active_number = candidate_number = math.nan
+        if (
+            not math.isfinite(active_number)
+            or not math.isfinite(candidate_number)
+            or not 0.0 <= active_number <= 1.0
+            or not 0.0 <= candidate_number <= 1.0
+        ):
+            per_metric[metric_name] = {
+                "status": "FAIL",
+                "reason": "metric evidence must be finite and in [0, 1]",
+            }
+            gate_passed = False
+            failures.append(f"{metric_name}: invalid validation evidence")
+            continue
+
+        threshold = active_number * (1.0 - max_regression)
+        passed = candidate_number >= threshold
 
         per_metric[metric_name] = {
-            "active_value": round(float(active_val), 4),
-            "candidate_value": round(float(candidate_val), 4),
+            "active_value": round(active_number, 4),
+            "candidate_value": round(candidate_number, 4),
             "minimum_required": round(threshold, 4),
-            "regression_pct": round((1.0 - float(candidate_val) / float(active_val)) * 100, 2) if float(active_val) > 0 else 0.0,
+            "regression_pct": round((1.0 - candidate_number / active_number) * 100, 2) if active_number > 0 else 0.0,
             "status": "PASS" if passed else "FAIL",
         }
 
         if not passed:
             gate_passed = False
             failures.append(
-                f"{metric_name}: candidate={round(float(candidate_val), 4)} < "
-                f"minimum={round(threshold, 4)} (active={round(float(active_val), 4)}, "
+                f"{metric_name}: candidate={round(candidate_number, 4)} < "
+                f"minimum={round(threshold, 4)} (active={round(active_number, 4)}, "
                 f"max_regression={max_regression*100}%)"
             )
 

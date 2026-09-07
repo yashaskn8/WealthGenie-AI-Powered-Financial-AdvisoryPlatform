@@ -274,14 +274,14 @@ def main():
     print(f"Questions evaluated:  {report['corpus_info']['questions_evaluated']}")
     print(f"Chunks in store:      {report['corpus_info']['total_chunks_in_store']}")
     print(f"Source hit rate:       {prov['source_hit_rate']:.1%} ({prov['source_hit_count']}/{prov['total_questions']})")
-    print(f"")
+    print("")
     print("Aggregate Retrieval Metrics (mean):")
     for key, vals in agg.items():
         print(f"  {key:25s}: {vals['mean']:.4f}  (min={vals['min']:.4f}, max={vals['max']:.4f})")
-    print(f"")
+    print("")
     print("Latency:")
     print(f"  Mean:  {lat['mean_ms']:.1f}ms | P50: {lat['p50_ms']:.1f}ms | P90: {lat['p90_ms']:.1f}ms | P99: {lat['p99_ms']:.1f}ms")
-    print(f"")
+    print("")
     print("Category Breakdowns:")
     for cat, summary in report["category_breakdowns"].items():
         print(f"  {cat}: {summary['question_count']} questions, source_hit_rate={summary['source_hit_rate']:.1%}")

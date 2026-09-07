@@ -4,7 +4,6 @@ Provides built-in financial calculation tools (SIP, CAGR, Tax) with structured e
 """
 
 import math
-import json
 import logging
 from datetime import datetime
 from typing import Dict, Any, List, Optional
@@ -55,8 +54,43 @@ CURRENT_FY = _get_current_fiscal_year()
 
 
 def _get_regime_slabs(regime: str, fiscal_year: str = CURRENT_FY):
-    entry = TAX_SLABS_BY_FY.get(fiscal_year) or TAX_SLABS_BY_FY[CURRENT_FY]
+    entry = TAX_SLABS_BY_FY.get(fiscal_year)
+    if entry is None or entry.get("verified") is not True:
+        raise ValueError(f"Tax slabs for {fiscal_year} are not verified")
     return entry["old"] if regime == "old" else entry["new"]
+
+
+def _first_present(mapping: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in mapping:
+            return mapping[key]
+    return None
+
+
+def _non_negative_number(value: Any, name: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a non-negative finite number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a non-negative finite number") from exc
+    if not math.isfinite(number) or number < 0:
+        raise ValueError(f"{name} must be a non-negative finite number")
+    return number
+
+
+def _deduction_number(deductions: Dict[str, Any], name: str, *aliases: str) -> float:
+    value = _first_present(deductions, name, *aliases)
+    return 0.0 if value is None else _non_negative_number(value, name)
+
+
+def _explicit_boolean(deductions: Dict[str, Any], name: str, *aliases: str) -> Optional[bool]:
+    value = _first_present(deductions, name, *aliases)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be an explicit boolean")
+    return value
 
 
 def _calculate_from_slabs(taxable_income: float, slabs) -> float:
@@ -72,15 +106,23 @@ def _calculate_from_slabs(taxable_income: float, slabs) -> float:
 
 def _calculate_taxable_income(
     annual_income: float,
-    regime: str = "new",
+    regime: str,
     deductions: Optional[Dict[str, Any]] = None,
-    income_source: str = "salary",
+    income_source: str = "",
 ) -> Dict[str, Any]:
     """
     Compute allowed deductions and taxable income.
     Mirrors server/services/taxEngine.js calculateTaxableIncome() L145-197.
     """
-    deductions = deductions or {}
+    annual_income = _non_negative_number(annual_income, "annual_income")
+    if regime not in ("new", "old"):
+        raise ValueError("regime must be explicitly provided as 'new' or 'old'")
+    if income_source not in ("salary", "pension", "family_pension", "business", "other"):
+        raise ValueError("income_source must be explicitly provided")
+    if deductions is None:
+        deductions = {}
+    if not isinstance(deductions, dict):
+        raise ValueError("deductions must be an object")
 
     # Standard deduction
     standard_deduction: float = 0.0
@@ -90,43 +132,68 @@ def _calculate_taxable_income(
         standard_deduction = min(float(annual_income) / 3.0, 15_000.0)
 
     # Section 80CCD(2) — Employer NPS Contribution (available under BOTH regimes)
-    basic_salary: float = float(deductions.get("basic_salary") or deductions.get("basicSalary") or annual_income * 0.5)
-    is_govt_employee: bool = bool(deductions.get("is_govt_employee") or deductions.get("isGovtEmployee"))
-    nps_80ccd2_limit_pct: float = 0.14 if is_govt_employee else 0.10
-    max_80ccd2: float = basic_salary * nps_80ccd2_limit_pct
-    nps_80ccd2: float = min(float(deductions.get("nps_80ccd2") or deductions.get("nps80CCD2") or 0.0), max_80ccd2)
+    requested_nps_80ccd2 = _deduction_number(deductions, "nps_80ccd2", "nps80CCD2")
+    nps_80ccd2 = 0.0
+    if requested_nps_80ccd2 > 0:
+        basic_salary_raw = _first_present(deductions, "basic_salary", "basicSalary")
+        if basic_salary_raw is None:
+            raise ValueError("basic_salary and is_govt_employee are required for an nps_80ccd2 claim")
+        basic_salary = _non_negative_number(basic_salary_raw, "basic_salary")
+        is_govt_employee = _explicit_boolean(deductions, "is_govt_employee", "isGovtEmployee")
+        if is_govt_employee is None:
+            raise ValueError("basic_salary and is_govt_employee are required for an nps_80ccd2 claim")
+        nps_80ccd2_limit_pct = 0.14 if is_govt_employee else 0.10
+        nps_80ccd2 = min(requested_nps_80ccd2, basic_salary * nps_80ccd2_limit_pct)
 
     # Old-regime-only deductions
-    section_80c: float = min(float(deductions.get("section_80c") or deductions.get("section80C") or 0.0), 150_000.0)
+    section_80c: float = min(_deduction_number(deductions, "section_80c", "section80C"), 150_000.0)
     nps_80ccd1b: float = min(
-        float(deductions.get("nps_80ccd1b") or deductions.get("nps80CCD1B") or
-            deductions.get("section_80ccd") or deductions.get("section80CCD") or 0.0), 50_000.0)
+        _deduction_number(
+            deductions, "nps_80ccd1b", "nps80CCD1B", "section_80ccd", "section80CCD"
+        ),
+        50_000.0,
+    )
 
     # Section 80D — Granular self vs parents
-    age: int = int(deductions.get("age") or 30)
-    self_senior: bool = age >= 60 or bool(deductions.get("self_senior"))
-    parents_senior: bool = bool(deductions.get("parents_senior"))
+    section_80d = _deduction_number(deductions, "section_80d", "section80D")
+    section_80d_self = _deduction_number(deductions, "section_80d_self", "section80D_self")
+    section_80d_parents = _deduction_number(deductions, "section_80d_parents", "section80D_parents")
+    savings_interest = _deduction_number(deductions, "savings_interest", "savingsInterest")
+    section_80tta = _deduction_number(deductions, "section_80tta", "section80TTA")
+    section_80ttb = _deduction_number(deductions, "section_80ttb", "section80TTB")
+    age_dependent_facts = section_80d + section_80d_self + section_80d_parents + savings_interest + section_80tta + section_80ttb
+    age_raw = deductions.get("age")
+    if age_dependent_facts > 0 and age_raw is None:
+        raise ValueError("age is required for age-dependent deductions")
+    age = 0 if age_raw is None else int(_non_negative_number(age_raw, "age"))
+    if age_raw is not None and float(age) != float(age_raw):
+        raise ValueError("age must be an integer")
+    if age > 120:
+        raise ValueError("age must not exceed 120")
+    self_senior_fact = _explicit_boolean(deductions, "self_senior")
+    parents_senior_fact = _explicit_boolean(deductions, "parents_senior", "parentsSenior")
+    if section_80d_parents > 0 and parents_senior_fact is None:
+        raise ValueError("parents_senior is required for a parents Section 80D deduction")
+    self_senior: bool = age >= 60 or self_senior_fact is True
+    parents_senior: bool = parents_senior_fact is True
     max_80d_self: float = 50_000.0 if self_senior else 25_000.0
     max_80d_parents: float = 50_000.0 if parents_senior else 25_000.0
 
     if "section80D_self" in deductions or "section_80d_self" in deductions or \
        "section80D_parents" in deductions or "section_80d_parents" in deductions:
         allowed_80d_self: float = min(
-            float(deductions.get("section_80d_self") or deductions.get("section80D_self") or 0), max_80d_self)
+            section_80d_self, max_80d_self)
         allowed_80d_parents: float = min(
-            float(deductions.get("section_80d_parents") or deductions.get("section80D_parents") or 0), max_80d_parents)
+            section_80d_parents, max_80d_parents)
         allowed_80d: float = allowed_80d_self + allowed_80d_parents
     else:
-        allowed_80d: float = min(float(deductions.get("section_80d") or deductions.get("section80D") or 0), 100_000)
+        allowed_80d: float = min(section_80d, 100_000)
 
-    hra: float = float(deductions.get("hra") or 0)
-    home_loan_interest: float = min(float(deductions.get("home_loan_interest") or deductions.get("homeLoanInterest") or 0), 200_000)
-    section_80eea: float = min(float(deductions.get("section_80eea") or deductions.get("section80EEA") or 0), 150_000)
-    other_deductions: float = float(deductions.get("other") or 0)
+    hra: float = _deduction_number(deductions, "hra")
+    home_loan_interest: float = min(_deduction_number(deductions, "home_loan_interest", "homeLoanInterest"), 200_000)
+    section_80eea: float = min(_deduction_number(deductions, "section_80eea", "section80EEA"), 150_000)
+    other_deductions: float = _deduction_number(deductions, "other")
 
-    savings_interest: float = float(deductions.get("savings_interest") or deductions.get("savingsInterest") or 0)
-    section_80tta: float = float(deductions.get("section_80tta") or deductions.get("section80TTA") or 0)
-    section_80ttb: float = float(deductions.get("section_80ttb") or deductions.get("section80TTB") or 0)
     if savings_interest > 0:
         if age >= 60:
             section_80ttb = max(section_80ttb, savings_interest)
@@ -227,6 +294,12 @@ class ToolCallingEngine:
     @staticmethod
     def calculate_sip(monthly_investment: float, rate_pct: float, years: int) -> Dict[str, Any]:
         """Calculates Systematic Investment Plan (SIP) future wealth accumulation."""
+        monthly_investment = _non_negative_number(monthly_investment, "monthly_investment")
+        rate_pct = _non_negative_number(rate_pct, "rate_pct")
+        if monthly_investment <= 0 or rate_pct <= 0:
+            raise ValueError("monthly_investment and rate_pct must be positive")
+        if isinstance(years, bool) or not isinstance(years, int) or years < 1 or years > 50:
+            raise ValueError("years must be an integer from 1 to 50")
         i = (rate_pct / 100.0) / 12.0
         n = years * 12
         future_value = monthly_investment * (((1 + i) ** n - 1) / i) * (1 + i)
@@ -239,28 +312,34 @@ class ToolCallingEngine:
             "total_invested": round(total_invested, 2),
             "estimated_future_value": round(future_value, 2),
             "wealth_gained": round(wealth_gained, 2),
+            "classification": "NON_RECOMMENDATION_WHAT_IF",
+            "return_basis": "USER_SUPPLIED_NOMINAL_ASSUMPTION",
         }
 
     @staticmethod
     def calculate_cagr(initial_value: float, final_value: float, years: float) -> Dict[str, Any]:
         """Calculates Compound Annual Growth Rate (CAGR)."""
-        if initial_value <= 0 or years <= 0:
-            raise ValueError("initial_value and years must be positive.")
+        initial_value = _non_negative_number(initial_value, "initial_value")
+        final_value = _non_negative_number(final_value, "final_value")
+        years = _non_negative_number(years, "years")
+        if initial_value <= 0 or final_value <= 0 or years <= 0:
+            raise ValueError("initial_value, final_value, and years must be positive")
         cagr = ((final_value / initial_value) ** (1.0 / years) - 1.0) * 100.0
         return {
             "initial_value": initial_value,
             "final_value": final_value,
             "years": years,
             "cagr_percent": round(cagr, 2),
+            "classification": "HISTORICAL_RETURN_CALCULATION",
         }
 
     @staticmethod
     def calculate_tax_rebate(
-        taxable_income: float = 0.0,
-        regime: str = "new",
+        taxable_income: Optional[float] = None,
+        regime: Optional[str] = None,
         annual_income: Optional[float] = None,
         deductions: Optional[Dict[str, Any]] = None,
-        income_source: str = "salary",
+        income_source: Optional[str] = None,
         fiscal_year: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -280,21 +359,24 @@ class ToolCallingEngine:
         - income_source: 'salary', 'pension', 'family_pension', or 'other'.
         - fiscal_year: e.g. 'FY2025-26'. Defaults to current FY.
         """
-        regime_clean = regime.lower() if regime else "new"
-        if regime_clean not in ("new", "old"):
-            regime_clean = "new"
+        if regime not in ("new", "old"):
+            raise ValueError("regime must be explicitly provided as 'new' or 'old'")
+        regime_clean = regime
         fy = fiscal_year or CURRENT_FY
+        _get_regime_slabs(regime_clean, fy)
+
+        if (annual_income is None) == (taxable_income is None):
+            raise ValueError("provide exactly one of annual_income or taxable_income")
 
         # Determine taxable income
-        safe_annual: float = annual_income if annual_income is not None else 0.0
+        safe_annual = 0.0
         standard_deduction = 0.0
         old_regime_deductions = 0.0
         nps_80ccd2_applied = 0.0
 
-        if annual_income is not None and annual_income > 0:
+        if annual_income is not None:
             # Compute taxable income from gross using canonical deduction logic
-            if not math.isfinite(annual_income) or annual_income < 0:
-                safe_annual = 0.0
+            safe_annual = _non_negative_number(annual_income, "annual_income")
             ti_result = _calculate_taxable_income(
                 safe_annual, regime_clean, deductions, income_source
             )
@@ -303,8 +385,11 @@ class ToolCallingEngine:
             old_regime_deductions = ti_result["old_regime_deductions"]
             nps_80ccd2_applied = ti_result["nps_80ccd2"]
         else:
-            # Use raw taxable_income directly (LLM already computed net)
-            effective_taxable = max(0.0, taxable_income)
+            if deductions:
+                raise ValueError("deductions cannot be applied to an already-taxable income")
+            if income_source is not None:
+                raise ValueError("income_source is only valid with annual_income")
+            effective_taxable = _non_negative_number(taxable_income, "taxable_income")
             safe_annual = effective_taxable  # For effective rate computation
 
         slabs = _get_regime_slabs(regime_clean, fy)
@@ -362,6 +447,7 @@ class ToolCallingEngine:
             "old_regime_deductions": old_regime_deductions,
             "nps_80ccd2": nps_80ccd2_applied,
             "fiscal_year": fy,
+            "classification": "SEPARATE_TAX_WHAT_IF",
         }
 
     def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> ToolCallResult:
@@ -391,20 +477,21 @@ class ToolCallingEngine:
         return [
             {
                 "name": "calculate_sip",
-                "description": "Calculates future SIP wealth accumulation",
+                "description": "Non-recommendation SIP projection using explicit user-supplied assumptions",
                 "parameters": ["monthly_investment", "rate_pct", "years"],
             },
             {
                 "name": "calculate_cagr",
-                "description": "Calculates compound annual growth rate",
+                "description": "Historical-return calculation from explicit values",
                 "parameters": ["initial_value", "final_value", "years"],
             },
             {
                 "name": "calculate_tax_rebate",
                 "description": (
                     "Computes full Indian income tax liability including Section 87A rebate, "
-                    "surcharge with marginal relief, and 4% cess. Accepts either raw "
-                    "taxable_income or annual_income with optional deductions dict."
+                    "surcharge with marginal relief, and 4% cess as a separate tax what-if. "
+                    "Requires exactly one of taxable_income or annual_income; gross-income "
+                    "calculations also require explicit income_source and dependent facts."
                 ),
                 "parameters": [
                     "taxable_income", "regime", "annual_income",

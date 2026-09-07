@@ -13,7 +13,6 @@ Outputs:
 """
 
 import sys
-import os
 import json
 import time
 from pathlib import Path
@@ -35,7 +34,6 @@ import numpy as np  # type: ignore[import-not-found]
 from llm.providers.huggingface_provider import HuggingFaceLLMProvider
 from llm.schema import LLMGenerateRequest
 from llm.evaluation.metrics import (
-    compute_perplexity,
     compute_bleu,
     compute_rouge,
     compute_lexical_overlap_score,

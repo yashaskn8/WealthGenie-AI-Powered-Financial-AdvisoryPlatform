@@ -30,6 +30,23 @@ export const NEVER_INFER_FROM = Object.freeze([
   'goal_type', 'investableAmount', 'oneTimeInvestableAmount',
 ]);
 
+export const LEGACY_FIELDS_TO_UNSET = Object.freeze([
+  'monthlyIncome', 'monthly_income', 'savings', 'monthly_savings',
+  'risk_tolerance', 'soldPropertyAmount', 'sold_property_proceeds', 'sold_property_amount',
+  'has_lump_sum', 'lump_sum_amount', 'liquid_savings', 'emi_burden_pct',
+  'existing_debt_emi_ratio_pct', 'financial_dependents', 'dependents',
+  'emergency_fund_months', 'investment_goals', 'goals', 'investmentHorizon',
+  'investment_horizon', 'investment_horizon_years',
+  'income', 'annualIncome', 'annual_income', 'totalCTC', 'total_ctc',
+  'basicComponent', 'basic_component', 'existingDebt', 'existing_debt',
+  'investableAmount', 'oneTimeInvestableAmount',
+  'taxRegime', 'tax_regime', 'taxSlabDecimal', 'effectiveTaxRatePercent',
+  'section80C', 'section_80c', 'section80CCD1B', 'section_80ccd1b',
+  'section80D_self', 'section80D_parents', 'parentsSenior', 'parents_senior',
+  'hra', 'homeLoanInterest', 'home_loan_interest', 'section80EEA', 'incomeSource', 'income_source',
+  'goal_type', 'goalType', 'customGoalName', 'lastGoalCreatedAt', 'currentPortfolio',
+]);
+
 function firstDefined(record, keys) {
   for (const key of keys) {
     if (Object.prototype.hasOwnProperty.call(record, key)
@@ -55,12 +72,17 @@ export function planFinancialProfileMigration(record) {
   try {
     const profile = buildRecommendationProfile(candidate);
     const suitability = assessSuitabilityRisk(profile);
+    const fieldsToUnset = LEGACY_FIELDS_TO_UNSET.filter(field => (
+      Object.prototype.hasOwnProperty.call(record, field)
+    ));
     return {
       status: record.recommendationProfileVersion === FINANCIAL_PROFILE_SCHEMA_VERSION
+          && fieldsToUnset.length === 0
         ? 'already_current'
         : 'ready',
       profileId: String(record._id),
       set: toProfilePersistence(profile, suitability),
+      unset: Object.fromEntries(fieldsToUnset.map(field => [field, ''])),
       ignoredNonEquivalentFields: NEVER_INFER_FROM.filter(field => (
         Object.prototype.hasOwnProperty.call(record, field)
       )),
@@ -110,9 +132,11 @@ async function main() {
       }
       report.ready += 1;
       if (apply) {
+        const update = { $set: plan.set };
+        if (Object.keys(plan.unset).length > 0) update.$unset = plan.unset;
         await FinancialProfile.collection.updateOne(
           { _id: record._id },
-          { $set: plan.set },
+          update,
         );
         report.updated += 1;
       }

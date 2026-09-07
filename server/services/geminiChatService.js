@@ -123,7 +123,16 @@ export async function processChat({ userId, user, message, sessionId }) {
     PrometheusMetrics.inc('prompt_injection_attempts_total');
   }
 
-  const recommendation = await Recommendation.findOne({ userId, profileId: storedProfile._id }).sort({ generatedAt: -1 }).lean();
+  let recommendation = await Recommendation.findOne({ userId, profileId: storedProfile._id }).sort({ generatedAt: -1 }).lean();
+  if (recommendation) {
+    if (typeof recommendation.modelVersion !== 'string' || !recommendation.modelVersion.trim()
+        || typeof recommendation.profileInputHash !== 'string') {
+      recommendation = null;
+    } else {
+      const expectedProfileHash = buildRecommendationProfileHash(profile, { modelVersion: recommendation.modelVersion });
+      if (recommendation.profileInputHash !== expectedProfileHash) recommendation = null;
+    }
+  }
   const goals = await Goal.find({ userId }).sort({ createdAt: -1 }).lean();
 
   const fullUser = await User.findById(userId).lean() || { name: user.email, email: user.email };

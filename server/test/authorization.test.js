@@ -27,6 +27,7 @@ import Goal from '../models/Goal.js';
 import Recommendation from '../models/Recommendation.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { canonicalProfile, canonicalProfilePayload } from './helpers/canonicalProfile.js';
+import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
 
 const testSecret = ['test', 'auth', 'jwt', 'key'].join('-');
 process.env.JWT_SECRET = process.env.JWT_SECRET || testSecret;
@@ -77,8 +78,20 @@ test.before(async () => {
   recommendationA = await Recommendation.create({
     userId: userAId,
     profileId: profileA._id,
-    instruments: [{ type: 'Equity_MF', name: 'Nifty 50 Index', effectiveYield: 12.0, allocationWeight: 1.0 }],
+    instruments: [{
+      id: 'index_mf', type: 'Equity_MF', name: 'Nifty 50 Index', assetClass: 'Equity',
+      nominalReturn: 12, effectiveYield: 12, postTaxReturn: null, returnBasis: 'PRE_TAX_NOMINAL',
+      expenseRatio: 0.003, riskLevel: 'Medium', riskScore: 3, lockIn: 0,
+      tags: ['Wealth Growth'], score: 80, scoreFactors: {
+        expectedReturn: 60, riskFit: 100, liquidity: 80, goalFit: 100,
+        horizonFit: 100, cost: 100, mlConfidence: 0,
+      },
+      allocation_pct: 100, allocationWeight: 1,
+    }],
     advisoryText: 'User A Advisory',
+    mlFallback: true,
+    modelVersion: 'test-rule-fallback-4.0.0',
+    profileInputHash: buildRecommendationProfileHash(profileA.toObject(), { modelVersion: 'test-rule-fallback-4.0.0' }),
   });
 });
 
@@ -187,6 +200,44 @@ test('Authorization: User B cannot UPDATE User A recommendation weights', async 
       `Expected 403 or 404, got ${res.status}`
     );
   });
+});
+
+test('Suitability: manual weights cannot add an unapproved instrument', async () => {
+  const app = buildTestApp();
+  await withServer(app, async (baseUrl) => {
+    const res = await rawRequest(`${baseUrl}/api/recommend/weights`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${tokenA}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        profileId: profileA._id.toString(),
+        weights: { index_mf: 0.8, smallcap_mf: 0.2 },
+      }),
+    });
+    assert.equal(res.status, 400);
+  });
+});
+
+test('Suitability: manual weights reject a recommendation bound to an older profile state', async () => {
+  const validHash = recommendationA.profileInputHash;
+  recommendationA.profileInputHash = buildRecommendationProfileHash(
+    { ...profileA.toObject(), age: profileA.age + 1 },
+    { modelVersion: recommendationA.modelVersion },
+  );
+  await recommendationA.save();
+  try {
+    const app = buildTestApp();
+    await withServer(app, async (baseUrl) => {
+      const res = await rawRequest(`${baseUrl}/api/recommend/weights`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${tokenA}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ profileId: profileA._id.toString(), weights: { index_mf: 1 } }),
+      });
+      assert.equal(res.status, 409);
+    });
+  } finally {
+    recommendationA.profileInputHash = validHash;
+    await recommendationA.save();
+  }
 });
 
 test('Authorization: User B cannot RUN PROJECTION on User A profile (POST /api/projection)', async () => {

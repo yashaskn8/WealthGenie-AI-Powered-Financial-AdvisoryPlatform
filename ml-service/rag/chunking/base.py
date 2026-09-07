@@ -5,7 +5,7 @@ Defines standard contract for chunking strategies (FixedSize, Recursive, Semanti
 
 from abc import ABC, abstractmethod
 from typing import List
-from rag.schema import Document, TextChunk, ChunkMetadata
+from rag.schema import Document, TextChunk
 
 
 class BaseChunker(ABC):

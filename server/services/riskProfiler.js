@@ -1,7 +1,7 @@
 import { buildRecommendationProfile, deriveRecommendationMetrics } from './recommendationProfile.js';
 
 export const RISK_CAPACITY_POLICY = Object.freeze({
-  version: 'risk-capacity-2.0.0',
+  version: 'risk-capacity-2.1.0',
   lowSavingsRate: 0.10,
   strongSavingsRate: 0.30,
   highEmiBurdenPct: 40,
@@ -47,31 +47,51 @@ export function calculateRiskCapacity(profileInput) {
   const ageComponent = clamp((70 - profile.age) / 52, 0, 1) * 25;
   const horizonComponent = clamp(profile.investmentHorizonYears / 30, 0, 1) * 25;
   const savingsComponent = clamp(metrics.savingsRate / p.strongSavingsRate, 0, 1) * 20;
-  const emergencyComponent = clamp(profile.emergencyFundMonths / p.strongEmergencyCoverageMonths, 0, 1) * 15;
-  const liquidityMonths = profile.liquidSavings / profile.monthlyTakeHome;
-  const liquidityComponent = clamp(liquidityMonths / p.strongEmergencyCoverageMonths, 0, 1) * 10;
-  const emiPenalty = clamp((profile.emiBurdenPct - 20) / 80, 0, 1) * 15;
-  const dependentsPenalty = Math.min(10, profile.financialDependents * 2.5);
+  const emergencyKnown = profile.emergencyFundMonths !== null;
+  const liquidityKnown = profile.liquidSavings !== null;
+  const emiKnown = profile.emiBurdenPct !== null;
+  const dependentsKnown = profile.financialDependents !== null;
+  const missingCapacityFacts = [
+    ['LIQUID_SAVINGS', liquidityKnown],
+    ['EMI_BURDEN_PCT', emiKnown],
+    ['FINANCIAL_DEPENDENTS', dependentsKnown],
+    ['EMERGENCY_FUND_MONTHS', emergencyKnown],
+  ].filter(([, known]) => !known).map(([name]) => name);
 
-  const capacityScore = Math.round(clamp(
-    ageComponent + horizonComponent + savingsComponent + emergencyComponent + liquidityComponent
-      - emiPenalty - dependentsPenalty,
+  const emergencyComponent = emergencyKnown
+    ? clamp(profile.emergencyFundMonths / p.strongEmergencyCoverageMonths, 0, 1) * 15
+    : null;
+  const liquidityMonths = liquidityKnown ? profile.liquidSavings / profile.monthlyTakeHome : null;
+  const liquidityComponent = liquidityKnown
+    ? clamp(liquidityMonths / p.strongEmergencyCoverageMonths, 0, 1) * 10
+    : null;
+  const emiPenalty = emiKnown ? clamp((profile.emiBurdenPct - 20) / 80, 0, 1) * 15 : null;
+  const dependentsPenalty = dependentsKnown ? Math.min(10, profile.financialDependents * 2.5) : null;
+
+  const establishedScore = Math.round(clamp(
+    ageComponent + horizonComponent + savingsComponent + (emergencyComponent ?? 0) + (liquidityComponent ?? 0)
+      - (emiPenalty ?? 0) - (dependentsPenalty ?? 0),
     0,
     100,
   ));
+  // Missing capacity facts must never increase suitability. Cap incomplete
+  // profiles at the most conservative capacity band and disclose why.
+  const capacityScore = missingCapacityFacts.length > 0 ? Math.min(establishedScore, 19) : establishedScore;
   const capacityLevel = scoreToLevel(capacityScore);
 
   const reasonCodes = [];
+  if (missingCapacityFacts.length > 0) reasonCodes.push('INCOMPLETE_CAPACITY_PROFILE');
+  reasonCodes.push(...missingCapacityFacts.map(name => `CAPACITY_FACT_UNKNOWN_${name}`));
   if (metrics.savingsRate < p.lowSavingsRate) reasonCodes.push('LOW_SAVINGS_RATE');
   if (metrics.savingsRate >= p.strongSavingsRate) reasonCodes.push('HIGH_SAVINGS_RATE');
-  if (profile.emiBurdenPct >= p.criticalEmiBurdenPct) reasonCodes.push('CRITICAL_EMI_BURDEN');
-  else if (profile.emiBurdenPct >= p.highEmiBurdenPct) reasonCodes.push('HIGH_EMI_BURDEN');
-  if (profile.emergencyFundMonths < p.lowEmergencyCoverageMonths) reasonCodes.push('LOW_EMERGENCY_COVERAGE');
-  else if (profile.emergencyFundMonths >= p.strongEmergencyCoverageMonths) reasonCodes.push('STRONG_EMERGENCY_COVERAGE');
-  if (profile.financialDependents >= p.multipleDependents) reasonCodes.push('MULTIPLE_FINANCIAL_DEPENDENTS');
+  if (emiKnown && profile.emiBurdenPct >= p.criticalEmiBurdenPct) reasonCodes.push('CRITICAL_EMI_BURDEN');
+  else if (emiKnown && profile.emiBurdenPct >= p.highEmiBurdenPct) reasonCodes.push('HIGH_EMI_BURDEN');
+  if (emergencyKnown && profile.emergencyFundMonths < p.lowEmergencyCoverageMonths) reasonCodes.push('LOW_EMERGENCY_COVERAGE');
+  else if (emergencyKnown && profile.emergencyFundMonths >= p.strongEmergencyCoverageMonths) reasonCodes.push('STRONG_EMERGENCY_COVERAGE');
+  if (dependentsKnown && profile.financialDependents >= p.multipleDependents) reasonCodes.push('MULTIPLE_FINANCIAL_DEPENDENTS');
   if (profile.investmentHorizonYears <= p.shortHorizonYears) reasonCodes.push('SHORT_INVESTMENT_HORIZON');
   if (profile.age >= p.nearRetirementAge) reasonCodes.push('NEAR_RETIREMENT_AGE');
-  if (liquidityMonths >= p.strongEmergencyCoverageMonths) reasonCodes.push('HIGH_LIQUIDITY_BUFFER');
+  if (liquidityKnown && liquidityMonths >= p.strongEmergencyCoverageMonths) reasonCodes.push('HIGH_LIQUIDITY_BUFFER');
 
   return Object.freeze({
     capacityScore,
@@ -86,6 +106,7 @@ export function calculateRiskCapacity(profileInput) {
       liquidityBuffer: liquidityComponent,
       emiPenalty,
       dependentsPenalty,
+      missingCapacityFacts: Object.freeze(missingCapacityFacts),
     }),
   });
 }
@@ -118,10 +139,9 @@ export function getRiskProfile(profileInput) {
   }
   const suitability = assessSuitabilityRisk(profileInput);
   return {
-    category: suitability.capacityRisk,
-    riskScore: suitability.capacityScore,
+    category: suitability.finalRisk,
+    riskScore: suitability.finalLevel,
     description: `Risk capacity is ${suitability.capacityRisk}; final suitability is ${suitability.finalRisk}.`,
-    recommendedEquityAllocation: [20, 30, 50, 65, 80][suitability.finalLevel - 1],
     ...suitability,
   };
 }

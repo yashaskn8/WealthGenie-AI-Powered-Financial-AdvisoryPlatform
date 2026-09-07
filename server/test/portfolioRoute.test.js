@@ -19,7 +19,11 @@ test('portfolio optimise route responds for all frontend-exposed strategies', as
     lean: async () => ({
       _id: profileId,
       userId,
-      ...canonicalProfile({ investmentHorizonYears: 15 }),
+      ...canonicalProfile({
+        age: 25, monthlyTakeHome: 400000, monthlySavings: 120000,
+        liquidSavings: 1000000, emergencyFundMonths: 12,
+        riskTolerance: 'Aggressive', investmentHorizonYears: 20,
+      }),
     }),
   };
 

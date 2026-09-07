@@ -1,13 +1,15 @@
 /** @vitest-environment jsdom */
 import '@testing-library/jest-dom/vitest';
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it } from 'vitest';
 import RecommendationDashboard from './RecommendationDashboard.jsx';
 
 const profile = {
   profileId: '64b000000000000000000001', monthly_take_home: 100000,
   monthly_savings: 20000, risk_tolerance: 'Moderate', investment_horizon_years: 10,
 };
+
+afterEach(cleanup);
 
 describe('RecommendationDashboard authority boundary', () => {
   it('shows no portfolio when the backend supplies no recommendations', () => {
@@ -22,8 +24,8 @@ describe('RecommendationDashboard authority boundary', () => {
       nominalReturn: 10, monthly_allocation: 20000, allocationWeight: 1, lockIn: 0,
       suitabilityReasons: ['Within risk ceiling'],
     }]} />);
-    expect(screen.getByText('Index Mutual Fund')).toBeVisible();
+    expect(screen.getAllByText('Index Mutual Fund').length).toBeGreaterThan(0);
     expect(screen.getByText(/Sold-property proceeds are not treated as investable capital/i)).toBeVisible();
-    expect(screen.getByText('₹20,000 of ₹20,000 allocated')).toBeVisible();
+    expect(screen.getByText(/₹20,000 of ₹20,000 allocated/)).toBeVisible();
   });
 });

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   EMPTY_FINANCIAL_PROFILE,
   INVESTMENT_GOALS,
@@ -7,30 +7,37 @@ import {
   validateFinancialProfile,
 } from '../utils/financialProfile';
 
-const fieldStyle = {
-  display: 'grid', gap: 6, color: '#cbd5e1', fontSize: '0.84rem', fontWeight: 600,
-};
-const inputStyle = {
-  width: '100%', boxSizing: 'border-box', padding: '11px 12px', borderRadius: 10,
-  border: '1px solid rgba(148,163,184,.28)', background: 'rgba(15,23,42,.72)',
-  color: '#f8fafc', font: 'inherit', outline: 'none',
-};
+const integerFields = new Set(['age', 'financial_dependents', 'investment_horizon_years']);
 
-const numericFields = [
-  ['monthly_take_home', 'Monthly take-home (₹)', 1000, 100000000, 'Net amount received each month. Do not enter CTC or gross salary.'],
-  ['monthly_savings', 'Monthly savings capacity (₹)', 500, 100000000, 'Maximum recurring amount available for investing.'],
-  ['age', 'Age', 18, 80, 'Whole years.'],
-  ['sold_property_proceeds', 'Sold-property proceeds (₹)', 0, 10000000000, 'Context only. This is never added to deployable capital.'],
-  ['liquid_savings', 'Liquid savings (₹)', 0, 1000000000, 'Cash and immediately accessible savings.'],
-  ['emi_burden_pct', 'EMI burden (% of take-home)', 0, 100, 'All monthly EMIs as a percentage of take-home.'],
-  ['financial_dependents', 'Financial dependents', 0, 15, 'People financially dependent on this income.'],
-  ['emergency_fund_months', 'Emergency-fund coverage (months)', 0, 120, 'Actual months covered; no assumed value is inserted.'],
-  ['investment_horizon_years', 'Investment horizon (years)', 1, 30, 'Maximum horizon for personalized projections.'],
-];
+function NumericInput({ field, value, onChange, min, max, placeholder, prefix = false, testId }) {
+  const input = (
+    <input
+      data-testid={testId || `profile-input-${field}`}
+      type="number"
+      min={min}
+      max={max}
+      step={integerFields.has(field) ? 1 : 'any'}
+      placeholder={placeholder}
+      value={value ?? ''}
+      onChange={event => onChange(field, event.target.value)}
+    />
+  );
+  return prefix ? <div className="pf-input-prefix"><span className="prefix-symbol">₹</span>{input}</div> : input;
+}
 
-export default function FinancialProfileForm({ initialProfile, onSubmit, submitLabel = 'Save Financial Profile', busy = false }) {
+export default function FinancialProfileForm({
+  initialProfile,
+  onSubmit,
+  onDraftChange,
+  submitLabel = 'Save Financial Profile',
+  busy = false,
+}) {
   const [draft, setDraft] = useState(() => normalizeFinancialProfile(initialProfile || EMPTY_FINANCIAL_PROFILE));
   const [errors, setErrors] = useState([]);
+
+  useEffect(() => {
+    onDraftChange?.(draft);
+  }, [draft, onDraftChange]);
 
   const setField = (key, value) => setDraft(previous => ({ ...previous, [key]: value }));
   const toggleGoal = goal => setDraft(previous => ({
@@ -52,83 +59,128 @@ export default function FinancialProfileForm({ initialProfile, onSubmit, submitL
   };
 
   return (
-    <form onSubmit={submit} noValidate style={{ display: 'grid', gap: 18 }}>
+    <form id="profile-form" onSubmit={submit} noValidate>
       {errors.length > 0 && (
-        <div role="alert" style={{ padding: 12, borderRadius: 10, border: '1px solid #fb7185', color: '#fecdd3', background: 'rgba(190,24,93,.12)' }}>
+        <div role="alert" className="profile-validation-alert">
           {errors.map(error => <div key={error}>{error}</div>)}
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(230px,1fr))', gap: 14 }}>
-        {numericFields.map(([key, label, min, max, help]) => (
-          <label key={key} style={fieldStyle}>
-            <span>{label}</span>
-            <input
-              data-testid={`profile-input-${key}`}
-              style={inputStyle}
-              type="number"
-              min={min}
-              max={max}
-              step={['age', 'financial_dependents', 'investment_horizon_years'].includes(key) ? 1 : 'any'}
-              value={draft[key]}
-              onChange={event => setField(key, event.target.value)}
-            />
-            <small style={{ color: '#64748b', fontWeight: 400 }}>{help}</small>
-          </label>
-        ))}
+      <div className="pf-grid-2">
+        <div className="pf-field">
+          <label>Monthly Take-Home (₹) <span className="required-mark">Required</span></label>
+          <NumericInput field="monthly_take_home" value={draft.monthly_take_home} onChange={setField} min="0.01" max="100000000" placeholder="65000" prefix />
+          <small className="pf-help">Net monthly amount—never CTC or gross salary.</small>
+        </div>
+        <div className="pf-field">
+          <label>Monthly Savings Capacity (₹) <span className="required-mark">Required</span></label>
+          <NumericInput field="monthly_savings" value={draft.monthly_savings} onChange={setField} min="0.01" max="100000000" placeholder="12000" prefix />
+          <small className="pf-help">Maximum recurring amount available to invest.</small>
+        </div>
       </div>
 
-      <fieldset style={{ border: '1px solid rgba(148,163,184,.2)', borderRadius: 12, padding: 14 }}>
-        <legend style={{ color: '#cbd5e1', padding: '0 6px' }}>Risk tolerance</legend>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 9 }}>
-          {RISK_TOLERANCES.map(risk => (
-            <button key={risk} type="button" onClick={() => setField('risk_tolerance', risk)}
-              aria-pressed={draft.risk_tolerance === risk}
-              style={{ ...inputStyle, width: 'auto', cursor: 'pointer', borderColor: draft.risk_tolerance === risk ? '#38bdf8' : inputStyle.border.split(' ').at(-1), color: draft.risk_tolerance === risk ? '#38bdf8' : '#cbd5e1' }}>
-              {risk}
-            </button>
-          ))}
+      <div className="pf-grid-2">
+        <div className="pf-field">
+          <label>Age <span className="required-mark">Required</span></label>
+          <NumericInput field="age" value={draft.age} onChange={setField} min="18" max="80" placeholder="32" />
         </div>
-      </fieldset>
+        <div className="pf-field">
+          <label>Risk Tolerance <span className="required-mark">Required</span></label>
+          <div className="risk-toggle-group">
+            {RISK_TOLERANCES.map(level => (
+              <button key={level} type="button" className={`risk-toggle-btn ${draft.risk_tolerance === level ? 'active' : ''}`}
+                aria-pressed={draft.risk_tolerance === level} onClick={() => setField('risk_tolerance', level)}>
+                {level}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
 
-      <fieldset style={{ border: '1px solid rgba(148,163,184,.2)', borderRadius: 12, padding: 14 }}>
-        <legend style={{ color: '#cbd5e1', padding: '0 6px' }}>Investment goals</legend>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 9 }}>
+      <div className="pf-grid-2">
+        <div className="pf-field">
+          <label>Sold Property Proceeds (₹) <span className="optional-mark">Optional</span></label>
+          <NumericInput field="sold_property_proceeds" value={draft.sold_property_proceeds} onChange={setField} min="0" max="10000000000" placeholder="Leave blank" prefix />
+          <small className="pf-help">Context only—never added to deployable capital.</small>
+        </div>
+        <div className="pf-field">
+          <label>Has Lump Sum to Invest? <span className="optional-mark">Optional</span></label>
+          <div className="risk-toggle-group">
+            {[[false, 'No'], [true, 'Yes'], [null, 'Skip']].map(([value, label]) => (
+              <button key={label} data-testid={`profile-lump-sum-${label.toLowerCase()}`} type="button"
+                className={`risk-toggle-btn ${draft.has_lump_sum === value ? 'active' : ''}`}
+                aria-pressed={draft.has_lump_sum === value}
+                onClick={() => setDraft(previous => ({
+                  ...previous,
+                  has_lump_sum: value,
+                  lump_sum_amount: value === true ? '' : value === false ? '0' : null,
+                }))}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="pf-grid-2">
+        <div className="pf-field">
+          <label>Liquid Savings (₹) <span className="optional-mark">Optional</span></label>
+          <NumericInput field="liquid_savings" value={draft.liquid_savings} onChange={setField} min="0" max="1000000000" placeholder="Leave blank" prefix />
+        </div>
+        <div className="pf-field">
+          <label>EMI Burden (% of Take-Home) <span className="optional-mark">Optional</span></label>
+          <NumericInput field="emi_burden_pct" value={draft.emi_burden_pct} onChange={setField} min="0" max="100" placeholder="Leave blank" />
+        </div>
+      </div>
+
+      <div className="pf-grid-2">
+        <div className="pf-field">
+          <label>Financial Dependents <span className="optional-mark">Optional</span></label>
+          <NumericInput field="financial_dependents" value={draft.financial_dependents} onChange={setField} min="0" max="15" placeholder="Leave blank" />
+        </div>
+        <div className="pf-field">
+          <label>Emergency Fund (Months) <span className="optional-mark">Optional</span></label>
+          <NumericInput field="emergency_fund_months" value={draft.emergency_fund_months} onChange={setField} min="0" max="120" placeholder="Leave blank" />
+        </div>
+      </div>
+
+      {draft.has_lump_sum === true && (
+        <div className="pf-field pf-field-full">
+          <label>Deployable Lump Sum Amount (₹) <span className="required-mark">Required when Yes</span></label>
+          <NumericInput field="lump_sum_amount" testId="profile-input-lump_sum_amount" value={draft.lump_sum_amount} onChange={setField} min="1" max="10000000000" placeholder="200000" prefix />
+        </div>
+      )}
+
+      <div className="pf-field pf-field-full">
+        <label>Investment Goals <span className="required-mark">Required</span></label>
+        <div className="goal-checkbox-group">
           {INVESTMENT_GOALS.map(goal => (
-            <button key={goal} type="button" onClick={() => toggleGoal(goal)}
-              aria-pressed={draft.investment_goals.includes(goal)}
-              style={{ ...inputStyle, width: 'auto', cursor: 'pointer', borderColor: draft.investment_goals.includes(goal) ? '#a78bfa' : inputStyle.border.split(' ').at(-1), color: draft.investment_goals.includes(goal) ? '#c4b5fd' : '#cbd5e1' }}>
-              {goal}
-            </button>
+            <label key={goal} className="goal-checkbox">
+              <input type="checkbox" checked={draft.investment_goals.includes(goal)} onChange={() => toggleGoal(goal)} />
+              <span className="goal-checkmark" />
+              <span className="goal-label-text">{goal}</span>
+            </label>
           ))}
         </div>
-      </fieldset>
+      </div>
 
-      <fieldset style={{ border: '1px solid rgba(148,163,184,.2)', borderRadius: 12, padding: 14, display: 'grid', gap: 12 }}>
-        <legend style={{ color: '#cbd5e1', padding: '0 6px' }}>One-time capital</legend>
-        <label style={{ ...fieldStyle, display: 'flex', alignItems: 'center', flexDirection: 'row' }}>
-          <input type="checkbox" checked={draft.has_lump_sum} onChange={event => {
-            setDraft(previous => ({
-              ...previous,
-              has_lump_sum: event.target.checked,
-              lump_sum_amount: event.target.checked ? '' : '0',
-            }));
-          }} />
-          I have a separate lump sum available to invest
-        </label>
-        {draft.has_lump_sum && (
-          <label style={fieldStyle}>
-            <span>Deployable lump sum amount (₹)</span>
-            <input data-testid="profile-input-lump_sum_amount" style={inputStyle} type="number" min="1" max="10000000000"
-              value={draft.lump_sum_amount} onChange={event => setField('lump_sum_amount', event.target.value)} />
-          </label>
-        )}
-      </fieldset>
+      <div className="pf-field pf-field-full">
+        <label>Investment Horizon <span className="required-mark">Required</span></label>
+        <div className="horizon-slider-container">
+          <input data-testid="profile-input-investment_horizon_years" type="range" min="1" max="30"
+            value={draft.investment_horizon_years || 1}
+            onChange={event => setField('investment_horizon_years', event.target.value)}
+            className="horizon-slider"
+            style={{ '--slider-pct': `${((Number(draft.investment_horizon_years || 1) - 1) / 29) * 100}%` }} />
+          <div className="horizon-labels"><span>1</span><span className="horizon-value">{draft.investment_horizon_years || '—'} Years</span><span>30</span></div>
+        </div>
+      </div>
 
-      <button data-testid="profile-save" disabled={busy} type="submit" className="hud-profile-btn"
-        style={{ width: '100%', padding: 13, cursor: busy ? 'wait' : 'pointer' }}>
-        {busy ? 'Saving…' : submitLabel}
-      </button>
+      <div className="profile-submit-row">
+        <button data-testid="profile-save" disabled={busy} type="submit" className="btn-save-continue">
+          {busy ? 'Saving…' : submitLabel}
+        </button>
+      </div>
     </form>
   );
 }

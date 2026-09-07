@@ -13,6 +13,7 @@ RISK_LEVELS = {
 }
 PREFERENCE_CEILINGS = {"Conservative": 1, "Moderate": 3, "Aggressive": 5}
 SUPPORTED_GOALS = {"Retirement", "Wealth Growth", "Tax Saving", "Emergency Fund"}
+MODEL_TARGET_CLASSES = {"Equity_MF", "ELSS", "ETF", "Debt_MF", "FD", "RBI_Bond"}
 
 
 class PredictRequest(BaseModel):
@@ -22,8 +23,8 @@ class PredictRequest(BaseModel):
 
     feature_schema_version: Literal[FEATURE_SCHEMA_VERSION]
     age: int = Field(..., ge=18, le=80)
-    monthly_take_home: float = Field(..., ge=1_000, le=100_000_000)
-    monthly_savings: float = Field(..., ge=500, le=100_000_000)
+    monthly_take_home: float = Field(..., gt=0, le=100_000_000)
+    monthly_savings: float = Field(..., gt=0, le=100_000_000)
     liquid_savings: float = Field(..., ge=0, le=1_000_000_000)
     emi_burden_pct: float = Field(..., ge=0, le=100)
     financial_dependents: int = Field(..., ge=0, le=15)
@@ -87,6 +88,22 @@ class PredictResponse(BaseModel):
     dataset_version: str
     git_commit_hash: Optional[str] = None
     explanation: Optional[Explanation] = None
+
+    @model_validator(mode="after")
+    def validate_model_output_contract(self):
+        ranked = [self.primary, self.secondary, self.tertiary]
+        if len(set(ranked)) != 3 or not set(ranked).issubset(MODEL_TARGET_CLASSES):
+            raise ValueError("ranked predictions must be three distinct declared model classes")
+        if set(self.confidence_scores) != MODEL_TARGET_CLASSES:
+            raise ValueError("confidence_scores must contain exactly the declared model classes")
+        values = list(self.confidence_scores.values())
+        if any(not 0 <= score <= 1 for score in values):
+            raise ValueError("confidence_scores values must be between 0 and 1")
+        if abs(sum(values) - 1.0) > 0.01:
+            raise ValueError("confidence_scores must sum to 1")
+        if not self.model_version.strip() or not self.dataset_version.strip():
+            raise ValueError("model and dataset versions must be non-empty")
+        return self
 
 
 class HealthResponse(BaseModel):

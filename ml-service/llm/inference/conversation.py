@@ -3,7 +3,7 @@ WealthGenie Open-Weight LLM Platform - Conversation History Manager
 Manages multi-turn conversation memory, system prompt persistence, and sliding context window truncation.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, List
 from pydantic import BaseModel, Field
 from llm.schema import ChatMessage
 

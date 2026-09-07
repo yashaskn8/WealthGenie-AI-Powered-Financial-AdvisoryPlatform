@@ -112,6 +112,79 @@ export function stepUpSipFV(monthlyInvestment, annualRate, years, annualStepUpRa
 }
 
 /**
+ * Build an explicit, non-recommendation SIP comparison for calculator UI.
+ * All economic assumptions are supplied by the caller and echoed in the
+ * response; the function never infers a tax profile or a preferred product.
+ */
+export function generateProjectionComparison({
+  monthlyInvestment,
+  annualReturnRate,
+  benchmarkRate,
+  inflationRate,
+  years,
+}) {
+  if (!Number.isFinite(monthlyInvestment) || monthlyInvestment <= 0) {
+    throw new TypeError('monthlyInvestment must be an explicit positive number');
+  }
+  for (const [name, rate] of Object.entries({ annualReturnRate, benchmarkRate })) {
+    if (!Number.isFinite(rate) || rate <= -1 || rate > 1) {
+      throw new RangeError(`${name} must be an explicit decimal greater than -1 and at most 1`);
+    }
+  }
+  if (!Number.isFinite(inflationRate) || inflationRate < 0 || inflationRate > 1) {
+    throw new RangeError('inflationRate must be an explicit decimal from 0 to 1');
+  }
+  if (!Number.isInteger(years) || years < 1 || years > 50) {
+    throw new TypeError('years must be an explicit integer from 1 to 50');
+  }
+
+  const yearlyBreakdown = [];
+  const normalizedChart = [];
+  for (let year = 1; year <= years; year += 1) {
+    const inflationFactor = Math.pow(1 + inflationRate, year);
+    const invested = monthlyInvestment * 12 * year;
+    const investmentNominal = sipFV(monthlyInvestment, annualReturnRate, year);
+    const benchmarkNominal = sipFV(monthlyInvestment, benchmarkRate, year);
+    yearlyBreakdown.push({
+      year,
+      invested: Math.round(invested),
+      investmentNominal: Math.round(investmentNominal),
+      investmentReal: Math.round(investmentNominal / inflationFactor),
+      benchmarkNominal: Math.round(benchmarkNominal),
+      benchmarkReal: Math.round(benchmarkNominal / inflationFactor),
+      gains: Math.round(investmentNominal - invested),
+    });
+    normalizedChart.push({
+      year: `Year ${year}`,
+      investment: Math.round(lumpSumFV(100, annualReturnRate, year)),
+      benchmark: Math.round(lumpSumFV(100, benchmarkRate, year)),
+      inflation: Math.round(lumpSumFV(100, inflationRate, year)),
+    });
+  }
+
+  const final = yearlyBreakdown.at(-1);
+  return Object.freeze({
+    calculation_classification: 'NON_RECOMMENDATION_PROJECTION_COMPARISON',
+    return_basis: 'PRE_TAX_NOMINAL_WITH_EXPLICIT_INFLATION_VIEW',
+    assumptions: Object.freeze({ monthlyInvestment, annualReturnRate, benchmarkRate, inflationRate, years }),
+    totalInvested: final.invested,
+    investmentMaturity: final.investmentNominal,
+    investmentReal: final.investmentReal,
+    benchmarkMaturity: final.benchmarkNominal,
+    benchmarkReal: final.benchmarkReal,
+    estimatedReturns: final.gains,
+    opportunityCost: final.investmentReal - final.benchmarkReal,
+    purchasingPowerLost: final.invested - final.benchmarkReal,
+    benchmarkRealAnnualRate: Number((realReturn(benchmarkRate, inflationRate) * 100).toFixed(2)),
+    inflationHalfLifeYears: inflationRate > 0
+      ? Number((Math.log(2) / Math.log(1 + inflationRate)).toFixed(1))
+      : null,
+    yearlyBreakdown: Object.freeze(yearlyBreakdown),
+    normalizedChart: Object.freeze(normalizedChart),
+  });
+}
+
+/**
  * Reverse SIP — compute the monthly SIP required to accumulate a target FV.
  * P = FV / [((1 + r)^n - 1) / r × (1 + r)]
  *
@@ -309,6 +382,145 @@ export function generateProjections(
     inflationRate,
     annualStepUpRate,
   };
+}
+
+/**
+ * Generate the projection for an already-authorized recommendation portfolio.
+ * Instrument selection, return assumptions, and weights must be supplied by the
+ * recommendation pipeline. This function does not rank, filter, or default them.
+ *
+ * @param {{
+ *   monthlyContribution: number,
+ *   initialLumpSum: number,
+ *   horizonYears: number,
+ *   instruments: Array<{id: string, nominalReturn: number, allocationWeight: number}>
+ * }} input
+ * @returns {{
+ *   return_basis: string,
+ *   horizon_years: number,
+ *   monthly_contribution: number,
+ *   initial_lump_sum: number,
+ *   annual_step_up_rate: number,
+ *   total_invested: number,
+ *   total_projected: number,
+ *   performance_data: Array<{year: number, average: number, invested: number}>,
+ *   monthly_timeline: Array<{month: number, value: number, invested: number}>,
+ *   instrument_monthly_allocations: Record<string, number>,
+ *   instrument_projected_values: Record<string, number>
+ * }}
+ */
+export function generatePortfolioProjection({
+  monthlyContribution,
+  initialLumpSum,
+  horizonYears,
+  instruments,
+}) {
+  if (!Number.isFinite(monthlyContribution) || monthlyContribution <= 0) {
+    throw new TypeError('monthlyContribution must be an explicit positive number');
+  }
+  if (!Number.isFinite(initialLumpSum) || initialLumpSum < 0) {
+    throw new TypeError('initialLumpSum must be an explicit non-negative number');
+  }
+  if (!Number.isInteger(horizonYears) || horizonYears < 1 || horizonYears > 30) {
+    throw new TypeError('horizonYears must be an explicit integer from 1 to 30');
+  }
+  if (!Array.isArray(instruments) || instruments.length === 0) {
+    throw new TypeError('instruments must be a non-empty recommendation portfolio');
+  }
+
+  let weightTotal = 0;
+  const authorized = instruments.map(instrument => {
+    const id = String(instrument?.id || '').trim();
+    const nominalReturn = Number(instrument?.nominalReturn);
+    const allocationWeight = Number(instrument?.allocationWeight);
+    if (!id) throw new TypeError('every projection instrument must have an id');
+    if (!Number.isFinite(nominalReturn) || nominalReturn <= -100 || nominalReturn > 100) {
+      throw new RangeError(`nominalReturn for ${id} must be greater than -100 and at most 100`);
+    }
+    if (!Number.isFinite(allocationWeight) || allocationWeight <= 0 || allocationWeight > 1) {
+      throw new RangeError(`allocationWeight for ${id} must be greater than 0 and at most 1`);
+    }
+    weightTotal += allocationWeight;
+    return {
+      id,
+      annualRate: nominalReturn / 100,
+      allocationWeight,
+      monthlyContribution: monthlyContribution * allocationWeight,
+      initialLumpSum: initialLumpSum * allocationWeight,
+    };
+  });
+  if (Math.abs(weightTotal - 1) > 0.0001) {
+    throw new RangeError(`projection allocation weights must total 1; received ${weightTotal}`);
+  }
+
+  const valueAtYears = (instrument, years) => (
+    sipFV(instrument.monthlyContribution, instrument.annualRate, years)
+      + lumpSumFV(instrument.initialLumpSum, instrument.annualRate, years)
+  );
+  const portfolioValueAtYears = years => authorized.reduce(
+    (sum, instrument) => sum + valueAtYears(instrument, years),
+    0,
+  );
+
+  const performanceData = [{
+    year: 0,
+    average: Math.round(initialLumpSum),
+    invested: Math.round(initialLumpSum),
+    gains: 0,
+    wealth_multiple: initialLumpSum > 0 ? 1 : null,
+  }];
+  for (let year = 1; year <= horizonYears; year += 1) {
+    const average = Math.round(portfolioValueAtYears(year));
+    const invested = Math.round(initialLumpSum + (monthlyContribution * 12 * year));
+    performanceData.push({
+      year,
+      average,
+      invested,
+      gains: Math.max(0, average - invested),
+      wealth_multiple: Number((average / invested).toFixed(2)),
+    });
+  }
+
+  const totalMonths = horizonYears * 12;
+  const monthStep = Math.max(1, Math.ceil(totalMonths / 30));
+  const months = [];
+  for (let month = 0; month <= totalMonths; month += monthStep) months.push(month);
+  if (months[months.length - 1] !== totalMonths) months.push(totalMonths);
+  const monthlyTimeline = months.map(month => ({
+    month,
+    value: month === 0 ? Math.round(initialLumpSum) : Math.round(portfolioValueAtYears(month / 12)),
+    invested: Math.round(initialLumpSum + (monthlyContribution * month)),
+  }));
+
+  const instrumentProjectedValues = Object.fromEntries(authorized.map(instrument => [
+    instrument.id,
+    Math.round(valueAtYears(instrument, horizonYears)),
+  ]));
+  let assignedMonthly = 0;
+  const instrumentMonthlyAllocations = Object.fromEntries(authorized.map((instrument, index) => {
+    const amount = index === authorized.length - 1
+      ? Number((monthlyContribution - assignedMonthly).toFixed(2))
+      : Number((monthlyContribution * instrument.allocationWeight).toFixed(2));
+    assignedMonthly = Number((assignedMonthly + amount).toFixed(2));
+    return [instrument.id, amount];
+  }));
+  const totalProjected = Math.round(portfolioValueAtYears(horizonYears));
+  const totalInvested = Math.round(initialLumpSum + (monthlyContribution * 12 * horizonYears));
+
+  return Object.freeze({
+    return_basis: 'PRE_TAX_NOMINAL',
+    horizon_years: horizonYears,
+    monthly_contribution: monthlyContribution,
+    initial_lump_sum: initialLumpSum,
+    annual_step_up_rate: 0,
+    total_invested: totalInvested,
+    total_projected: totalProjected,
+    wealth_multiple: Number((totalProjected / totalInvested).toFixed(2)),
+    performance_data: Object.freeze(performanceData),
+    monthly_timeline: Object.freeze(monthlyTimeline),
+    instrument_monthly_allocations: Object.freeze(instrumentMonthlyAllocations),
+    instrument_projected_values: Object.freeze(instrumentProjectedValues),
+  });
 }
 
 /**

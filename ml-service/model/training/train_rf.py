@@ -6,7 +6,6 @@ model.pkl / label_encoder.pkl artifacts are absent on fresh clones or fresh cont
 
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Tuple
@@ -14,6 +13,7 @@ from typing import Dict, Any, Tuple
 import joblib
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import balanced_accuracy_score, f1_score
@@ -49,7 +49,15 @@ def train_random_forest_model(
     le = LabelEncoder()
     y = le.fit_transform(y_labels)
 
-    logger.info("Fitting RandomForestClassifier pipeline...")
+    x_train, x_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=0.20,
+        random_state=seed,
+        stratify=y,
+    )
+
+    logger.info("Fitting RandomForestClassifier pipeline with a stratified held-out evaluation split...")
     pipeline = Pipeline([
         ("scaler", StandardScaler()),
         ("clf", RandomForestClassifier(
@@ -60,14 +68,16 @@ def train_random_forest_model(
             class_weight="balanced",
         )),
     ])
-    pipeline.fit(X, y)
+    pipeline.fit(x_train, y_train)
 
-    # Compute training accuracy
-    preds = pipeline.predict(X)
-    train_acc = float(np.mean(preds == y))
-    balanced_accuracy = float(balanced_accuracy_score(y, preds))
-    macro_f1 = float(f1_score(y, preds, average="macro"))
-    logger.info(f"RandomForest v4 training complete. Suitability-policy fidelity: {train_acc:.4f}")
+    # Metrics are computed only on the untouched holdout. Refit on all
+    # reproducible synthetic data after measurement for the deployable artifact.
+    holdout_preds = pipeline.predict(x_test)
+    holdout_accuracy = float(np.mean(holdout_preds == y_test))
+    balanced_accuracy = float(balanced_accuracy_score(y_test, holdout_preds))
+    macro_f1 = float(f1_score(y_test, holdout_preds, average="macro"))
+    logger.info(f"RandomForest v4 held-out suitability-policy fidelity: {holdout_accuracy:.4f}")
+    pipeline.fit(X, y)
 
     # Ensure target directories exist
     model_dir = Path(model_dir)
@@ -96,10 +106,16 @@ def train_random_forest_model(
         "policy_config_version": "suitability-freeze-1.0.0",
         "dataset_timestamp": datetime.now(timezone.utc).isoformat(),
         "trained_at": datetime.now(timezone.utc).isoformat(),
-        "test_accuracy": round(train_acc, 4),
-        "rule_approximation_fidelity": round(train_acc, 4),
+        "test_accuracy": round(holdout_accuracy, 4),
+        "rule_approximation_fidelity": round(holdout_accuracy, 4),
         "balanced_accuracy": round(balanced_accuracy, 4),
         "macro_f1": round(macro_f1, 4),
+        "evaluation_split": {
+            "method": "stratified_holdout",
+            "test_fraction": 0.20,
+            "random_seed": seed,
+            "evaluated_samples": int(len(y_test)),
+        },
         "training_methodology": "deterministic synthetic approximation of the frozen suitability policy",
         "metric_interpretation": "policy-approximation fidelity, not investment outcome accuracy",
     }

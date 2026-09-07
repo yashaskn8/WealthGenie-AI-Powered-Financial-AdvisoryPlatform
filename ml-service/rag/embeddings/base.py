@@ -5,7 +5,6 @@ Defines standard contract for generating text vector embeddings.
 
 from abc import ABC, abstractmethod
 from typing import List
-import numpy as np
 
 
 class BaseEmbeddingProvider(ABC):

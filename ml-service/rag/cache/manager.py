@@ -4,7 +4,6 @@ Provides embedding, retrieval, and response caching with TTL, invalidation, and 
 """
 
 import hashlib
-import json
 import logging
 import time
 from pathlib import Path

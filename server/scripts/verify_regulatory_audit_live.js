@@ -3,6 +3,7 @@ import axios from 'axios';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import assert from 'node:assert/strict';
+import { RECOMMENDATION_POLICY_VERSION } from '../services/recommendationProfile.js';
 
 const BASE_URL = 'http://127.0.0.1:5000';
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -32,17 +33,20 @@ async function runLiveRegulatoryAuditVerification() {
   console.log(`[${new Date().toISOString()}] Step 1: Building test profile...`);
   const profileRes = await client.post('/api/profile/build', {
     age: 34,
-    monthly_income: 180000,
+    monthly_take_home: 180000,
     monthly_savings: 60000,
-    liquid_savings: 500000,
-    existing_debt: 15,
-    dependents: 2,
-    emergency_fund_months: 6,
-    investment_horizon: 15,
     risk_tolerance: 'Moderate',
-    goal_type: 'wealth-building',
+    sold_property_proceeds: 0,
+    has_lump_sum: false,
+    lump_sum_amount: 0,
+    liquid_savings: 500000,
+    emi_burden_pct: 15,
+    financial_dependents: 2,
+    emergency_fund_months: 6,
+    investment_goals: ['Wealth Growth'],
+    investment_horizon_years: 15,
   });
-  const profileId = profileRes.data.profileId || profileRes.data.profile_id || profileRes.data._id;
+  const profileId = profileRes.data.profileId;
   assert.ok(profileId, 'Profile must be created');
 
   // Step 2: Request recommendation
@@ -56,11 +60,11 @@ async function runLiveRegulatoryAuditVerification() {
   console.log(`Audit ID: ${recommendRes.data.audit_id}`);
   console.log(`Audit Hash: ${recommendRes.data.audit_hash}`);
   console.log(`Model Version: ${recommendRes.data.model_version}`);
-  console.log(`Regulatory Rule Version: ${recommendRes.data.regulatory_rule_version}`);
+  console.log(`Recommendation Policy Version: ${recommendRes.data.recommendation_policy_version}`);
   console.log(`Instruments Count: ${recommendRes.data.instruments?.length}`);
   console.log(`Portfolio Yield: ${recommendRes.data.portfolio_yield}%`);
 
-  assert.equal(recommendRes.data.regulatory_rule_version, 'FY2025-26-v1.0');
+  assert.equal(recommendRes.data.recommendation_policy_version, RECOMMENDATION_POLICY_VERSION);
   assert.ok(recommendRes.data.audit_id, 'audit_id must be present');
   assert.ok(recommendRes.data.audit_hash, 'audit_hash must be present');
 
@@ -83,11 +87,11 @@ async function runLiveRegulatoryAuditVerification() {
   console.log(`Recommendations Count: ${latestRecord.recommendations?.instruments?.length}`);
   console.log(`==================================================================\n`);
 
-  assert.equal(latestRecord.regulatory_rule_version, 'FY2025-26-v1.0');
+  assert.equal(latestRecord.regulatory_rule_version, RECOMMENDATION_POLICY_VERSION);
   assert.ok(latestRecord.version_id, 'version_id must be present');
   assert.ok(latestRecord.input_hash, 'input_hash must be present');
 
-  console.log(`✅ Verified: Regulatory rule version 'FY2025-26-v1.0' is captured in the tamper-evident advisory audit chain.`);
+  console.log(`✅ Verified: Recommendation policy version '${RECOMMENDATION_POLICY_VERSION}' is captured in the tamper-evident advisory audit chain.`);
 }
 
 runLiveRegulatoryAuditVerification().catch(err => {

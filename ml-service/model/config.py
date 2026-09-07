@@ -4,7 +4,7 @@ Centralized hyperparameter and system configuration for PyTorch model training a
 """
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 from pydantic import BaseModel, Field
 import torch
 

@@ -13,8 +13,8 @@ export const EMPTY_FINANCIAL_PROFILE = Object.freeze({
   age: '',
   risk_tolerance: '',
   sold_property_proceeds: '',
-  has_lump_sum: false,
-  lump_sum_amount: '0',
+  has_lump_sum: '',
+  lump_sum_amount: '',
   liquid_savings: '',
   emi_burden_pct: '',
   financial_dependents: '',
@@ -26,7 +26,7 @@ export const EMPTY_FINANCIAL_PROFILE = Object.freeze({
 });
 
 const aliases = Object.freeze({
-  monthly_take_home: ['monthly_take_home', 'monthlyTakeHome', 'monthly_income', 'monthlyIncome', 'income'],
+  monthly_take_home: ['monthly_take_home', 'monthlyTakeHome', 'monthly_income', 'monthlyIncome'],
   monthly_savings: ['monthly_savings', 'monthlySavings', 'savings'],
   age: ['age'],
   risk_tolerance: ['risk_tolerance', 'riskTolerance'],
@@ -43,7 +43,9 @@ const aliases = Object.freeze({
 
 function firstDefined(source, keys) {
   for (const key of keys) {
-    if (source?.[key] !== undefined && source[key] !== null) return source[key];
+    if (source && Object.prototype.hasOwnProperty.call(source, key) && source[key] !== undefined) {
+      return source[key];
+    }
   }
   return undefined;
 }
@@ -66,6 +68,10 @@ function finiteNumber(value) {
   return Number.isFinite(number) ? number : null;
 }
 
+function isBlank(value) {
+  return value === '' || value === null || value === undefined;
+}
+
 export function validateFinancialProfile(source) {
   const profile = normalizeFinancialProfile(source);
   const numbers = Object.fromEntries([
@@ -74,18 +80,24 @@ export function validateFinancialProfile(source) {
     'investment_horizon_years',
   ].map(key => [key, finiteNumber(profile[key])]));
   const errors = [];
-  if (!(numbers.monthly_take_home >= 1000 && numbers.monthly_take_home <= 100000000)) errors.push('Monthly take-home must be between ₹1,000 and ₹10,00,00,000.');
-  if (!(numbers.monthly_savings >= 500 && numbers.monthly_savings < numbers.monthly_take_home)) errors.push('Monthly savings must be at least ₹500 and less than monthly take-home.');
+  if (!(numbers.monthly_take_home > 0 && numbers.monthly_take_home <= 100000000)) errors.push('Monthly take-home must be greater than ₹0 and no more than ₹10,00,00,000.');
+  if (!(numbers.monthly_savings > 0 && numbers.monthly_savings < numbers.monthly_take_home && numbers.monthly_savings <= 100000000)) errors.push('Monthly savings must be greater than ₹0 and less than monthly take-home.');
   if (!Number.isInteger(numbers.age) || numbers.age < 18 || numbers.age > 80) errors.push('Age must be a whole number from 18 to 80.');
   if (!RISK_TOLERANCES.includes(profile.risk_tolerance)) errors.push('Choose a risk tolerance.');
-  if (!(numbers.sold_property_proceeds >= 0 && numbers.sold_property_proceeds <= 10000000000)) errors.push('Sold-property proceeds must be from ₹0 to ₹10,00,00,00,000.');
-  if (typeof profile.has_lump_sum !== 'boolean') errors.push('Declare whether a lump sum is available.');
-  if (profile.has_lump_sum && !(numbers.lump_sum_amount > 0 && numbers.lump_sum_amount <= 10000000000)) errors.push('Enter a positive lump sum amount up to ₹10,00,00,00,000.');
-  if (!profile.has_lump_sum && numbers.lump_sum_amount !== 0) errors.push('Lump sum amount must be 0 when no lump sum is available.');
-  if (!(numbers.liquid_savings >= 0 && numbers.liquid_savings <= 1000000000)) errors.push('Liquid savings must be from ₹0 to ₹1,00,00,00,000.');
-  if (!(numbers.emi_burden_pct >= 0 && numbers.emi_burden_pct <= 100)) errors.push('EMI burden must be from 0% to 100%.');
-  if (!Number.isInteger(numbers.financial_dependents) || numbers.financial_dependents < 0 || numbers.financial_dependents > 15) errors.push('Financial dependents must be a whole number from 0 to 15.');
-  if (!(numbers.emergency_fund_months >= 0 && numbers.emergency_fund_months <= 120)) errors.push('Emergency-fund coverage must be from 0 to 120 months.');
+  if (!isBlank(profile.sold_property_proceeds)
+      && !(numbers.sold_property_proceeds >= 0 && numbers.sold_property_proceeds <= 10000000000)) errors.push('Sold-property proceeds must be from ₹0 to ₹10,00,00,00,000 when provided.');
+  if (!isBlank(profile.has_lump_sum) && typeof profile.has_lump_sum !== 'boolean') errors.push('One-time capital must be Yes, No, or left blank.');
+  if (profile.has_lump_sum === true && !(numbers.lump_sum_amount > 0 && numbers.lump_sum_amount <= 10000000000)) errors.push('Enter a positive lump sum amount up to ₹10,00,00,00,000.');
+  if (profile.has_lump_sum === false && numbers.lump_sum_amount !== 0) errors.push('Lump sum amount must be 0 when no lump sum is available.');
+  if (isBlank(profile.has_lump_sum) && !isBlank(profile.lump_sum_amount)) errors.push('Choose Yes before entering a lump sum amount.');
+  if (!isBlank(profile.liquid_savings)
+      && !(numbers.liquid_savings >= 0 && numbers.liquid_savings <= 1000000000)) errors.push('Liquid savings must be from ₹0 to ₹1,00,00,00,000 when provided.');
+  if (!isBlank(profile.emi_burden_pct)
+      && !(numbers.emi_burden_pct >= 0 && numbers.emi_burden_pct <= 100)) errors.push('EMI burden must be from 0% to 100% when provided.');
+  if (!isBlank(profile.financial_dependents)
+      && (!Number.isInteger(numbers.financial_dependents) || numbers.financial_dependents < 0 || numbers.financial_dependents > 15)) errors.push('Financial dependents must be a whole number from 0 to 15 when provided.');
+  if (!isBlank(profile.emergency_fund_months)
+      && !(numbers.emergency_fund_months >= 0 && numbers.emergency_fund_months <= 120)) errors.push('Emergency-fund coverage must be from 0 to 120 months when provided.');
   if (!Array.isArray(profile.investment_goals) || profile.investment_goals.length === 0
       || profile.investment_goals.some(goal => !INVESTMENT_GOALS.includes(goal))
       || new Set(profile.investment_goals).size !== profile.investment_goals.length) errors.push('Choose one or more unique supported investment goals.');
@@ -103,8 +115,10 @@ export function toFinancialProfilePayload(source, { requireVersion = false } = {
     age: numbers.age,
     risk_tolerance: profile.risk_tolerance,
     sold_property_proceeds: numbers.sold_property_proceeds,
-    has_lump_sum: profile.has_lump_sum,
-    lump_sum_amount: profile.has_lump_sum ? numbers.lump_sum_amount : 0,
+    has_lump_sum: typeof profile.has_lump_sum === 'boolean' ? profile.has_lump_sum : null,
+    lump_sum_amount: profile.has_lump_sum === true
+      ? numbers.lump_sum_amount
+      : profile.has_lump_sum === false ? 0 : null,
     liquid_savings: numbers.liquid_savings,
     emi_burden_pct: numbers.emi_burden_pct,
     financial_dependents: numbers.financial_dependents,

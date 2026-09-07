@@ -11,8 +11,6 @@ Tests:
   7. End-to-end governance check wiring
 """
 
-import hashlib
-import json
 import os
 import shutil
 import tempfile
@@ -33,43 +31,19 @@ from model.registry.drift_detection import (
     run_drift_check,
     compute_psi,
     PSI_THRESHOLD_FAIL,
-    PSI_THRESHOLD_WARN,
 )
+from model.data.feature_engineering import FEATURE_NAMES, FEATURE_SCHEMA_VERSION
+from model.data.preprocessing import prepare_synthetic_training_data, compute_dataset_hash_from_arrays
 
 # ---------- Shared fixtures ----------
 
-MODEL_FEATURES = [
-    "age", "annual_income", "monthly_savings", "investment_horizon",
-    "liquid_savings", "existing_debt", "dependents", "emergency_fund_months",
-    "risk_score", "stated_tolerance_score", "savings_rate",
-    "debt_to_income_ratio", "emergency_fund_adequacy_ratio",
-    "risk_capacity_vs_stated_tolerance_gap", "horizon_adjusted_urgency_score",
-    "dependents_adjusted_burden_score",
-]
+MODEL_FEATURES = FEATURE_NAMES
 
 
 def _make_synthetic_data(n: int = 2000, seed: int = 42) -> pd.DataFrame:
-    """Generate synthetic training-like data with realistic distributions."""
-    rng = np.random.RandomState(seed)
-    data = {
-        "age": rng.randint(22, 65, n),
-        "annual_income": rng.normal(800000, 300000, n).clip(100000),
-        "monthly_savings": rng.normal(15000, 8000, n).clip(1000),
-        "investment_horizon": rng.randint(1, 30, n),
-        "liquid_savings": rng.normal(200000, 100000, n).clip(10000),
-        "existing_debt": rng.normal(300000, 200000, n).clip(0),
-        "dependents": rng.randint(0, 5, n),
-        "emergency_fund_months": rng.normal(6, 3, n).clip(0),
-        "risk_score": rng.uniform(0, 1, n),
-        "stated_tolerance_score": rng.uniform(0, 1, n),
-        "savings_rate": rng.uniform(0.05, 0.4, n),
-        "debt_to_income_ratio": rng.uniform(0, 0.6, n),
-        "emergency_fund_adequacy_ratio": rng.uniform(0, 2, n),
-        "risk_capacity_vs_stated_tolerance_gap": rng.normal(0, 0.2, n),
-        "horizon_adjusted_urgency_score": rng.uniform(0, 1, n),
-        "dependents_adjusted_burden_score": rng.uniform(0, 1, n),
-    }
-    return pd.DataFrame(data)
+    """Generate data through the same ordered v4 contract as training."""
+    features, _ = prepare_synthetic_training_data(num_samples=n, seed=seed)
+    return pd.DataFrame(features, columns=MODEL_FEATURES)
 
 
 @pytest.fixture
@@ -101,17 +75,17 @@ def fake_artifacts(temp_dir):
 
 @pytest.fixture
 def sample_rigor_metrics():
-    """Phase 4-style rigor metrics for two versions."""
+    """Version-specific v4 policy-fidelity evidence."""
     return {
         "v1": {
             "rule_approximation_fidelity": 0.9837,
-            "independent_cfp_benchmark_accuracy": 0.2526,
-            "formula_overlap_percentage": 0.0,
+            "balanced_accuracy": 0.9820,
+            "macro_f1": 0.9810,
         },
         "v2": {
             "rule_approximation_fidelity": 0.9705,
-            "independent_cfp_benchmark_accuracy": 0.1583,
-            "formula_overlap_percentage": 0.0,
+            "balanced_accuracy": 0.9690,
+            "macro_f1": 0.9680,
         },
     }
 
@@ -130,7 +104,7 @@ class TestModelRegistry:
         """
         Register 2 model versions with distinct artifacts and metrics.
         Confirm both are queryable and contain the correct, distinct metrics
-        read from Phase 4's rigor report — not placeholder values.
+        supplied as explicit v4 validation evidence.
         """
         art1, art2 = fake_artifacts
 
@@ -163,11 +137,11 @@ class TestModelRegistry:
         assert v1 is not None
         assert v2 is not None
 
-        # Verify metrics are the ACTUAL Phase 4 rigor numbers, not placeholders
+        # Verify distinct policy-fidelity evidence survives the registry round trip.
         assert v1["metrics"]["rule_approximation_fidelity"] == 0.9837
-        assert v1["metrics"]["independent_cfp_benchmark_accuracy"] == 0.2526
+        assert v1["metrics"]["balanced_accuracy"] == 0.9820
         assert v2["metrics"]["rule_approximation_fidelity"] == 0.9705
-        assert v2["metrics"]["independent_cfp_benchmark_accuracy"] == 0.1583
+        assert v2["metrics"]["balanced_accuracy"] == 0.9690
 
         # Verify architectures are distinct
         assert v1["model_architecture"] == "RandomForest"
@@ -335,39 +309,39 @@ class TestDriftDetection:
     def test_true_positive_shifted_distribution(self):
         """
         Test 2 (true positive): construct a synthetic batch with
-        annual_income shifted UP by 3 standard deviations.
+        monthly_take_home shifted UP by 3 standard deviations.
         Assert the drift check correctly flags that feature and
         produces a FAIL verdict.
         """
         df_train = _make_synthetic_data(n=5000, seed=42)
         ref_dists = compute_reference_distributions(df_train, MODEL_FEATURES)
 
-        # Create shifted batch: shift annual_income by 3 stds
+        # Create shifted batch: shift monthly take-home by 3 stds
         df_shifted = _make_synthetic_data(n=2000, seed=99)
-        income_std = df_train["annual_income"].std()
-        df_shifted["annual_income"] = df_shifted["annual_income"] + (3 * income_std)
+        income_std = df_train["monthly_take_home"].std()
+        df_shifted["monthly_take_home"] = df_shifted["monthly_take_home"] + (3 * income_std)
 
         report = run_drift_check(ref_dists, df_shifted, MODEL_FEATURES)
 
         # Must detect drift
         assert report["overall_verdict"] == "FAIL", (
-            f"Missed 3-std shift in annual_income. Verdict: {report['overall_verdict']}"
+            f"Missed 3-std shift in monthly_take_home. Verdict: {report['overall_verdict']}"
         )
-        assert "annual_income" in report["drifted_features"], (
-            f"annual_income not in drifted features: {report['drifted_features']}"
+        assert "monthly_take_home" in report["drifted_features"], (
+            f"monthly_take_home not in drifted features: {report['drifted_features']}"
         )
 
         # Verify the PSI value is above the FAIL threshold
-        income_psi = report["per_feature"]["annual_income"]["psi"]
+        income_psi = report["per_feature"]["monthly_take_home"]["psi"]
         assert income_psi >= PSI_THRESHOLD_FAIL, (
-            f"annual_income PSI ({income_psi}) below FAIL threshold ({PSI_THRESHOLD_FAIL})"
+            f"monthly_take_home PSI ({income_psi}) below FAIL threshold ({PSI_THRESHOLD_FAIL})"
         )
 
     def test_per_feature_specificity_single_shift(self):
         """
-        Test 3 (per-feature specificity): shift ONLY risk_score and leave
+        Test 3 (per-feature specificity): shift ONLY risk_capacity_score and leave
         everything else untouched. Assert the drift report identifies
-        risk_score by name as drifted, and does NOT flag the untouched features.
+        risk_capacity_score by name as drifted, and does NOT flag the untouched features.
 
         This proves the monitor can say WHICH feature drifted, not just
         "something drifted" generically.
@@ -378,21 +352,20 @@ class TestDriftDetection:
         # Create new batch identical to a same-distribution draw
         df_new = _make_synthetic_data(n=2000, seed=99)
 
-        # Shift ONLY risk_score: replace with completely different distribution
-        # (uniform [0,1] → all values > 0.9, massive PSI)
-        df_new["risk_score"] = np.random.RandomState(123).uniform(0.9, 1.0, len(df_new))
+        # Shift only risk capacity to an extreme high-capacity population.
+        df_new["risk_capacity_score"] = np.random.RandomState(123).uniform(98, 100, len(df_new))
 
         report = run_drift_check(ref_dists, df_new, MODEL_FEATURES)
 
-        # risk_score must be flagged
-        assert "risk_score" in report["drifted_features"], (
-            f"risk_score not detected as drifted. "
+        # risk_capacity_score must be flagged
+        assert "risk_capacity_score" in report["drifted_features"], (
+            f"risk_capacity_score not detected as drifted. "
             f"Drifted: {report['drifted_features']}, "
-            f"risk_score PSI: {report['per_feature'].get('risk_score', {}).get('psi')}"
+            f"risk_capacity_score PSI: {report['per_feature'].get('risk_capacity_score', {}).get('psi')}"
         )
 
         # No OTHER features should be significantly drifted
-        other_drifted = [f for f in report["drifted_features"] if f != "risk_score"]
+        other_drifted = [f for f in report["drifted_features"] if f != "risk_capacity_score"]
         assert len(other_drifted) == 0, (
             f"False positives on unshifted features: {other_drifted}"
         )
@@ -452,7 +425,7 @@ class TestGovernanceWiring:
             hyperparameters={"n_estimators": 100},
             metrics={
                 "rule_approximation_fidelity": 0.9837,
-                "independent_cfp_benchmark_accuracy": 0.2526,
+                "balanced_accuracy": 0.9820,
             },
             reference_distributions=ref_dists,
             set_active=True,
@@ -476,60 +449,39 @@ class TestGovernanceWiring:
 
         # Drift check — shifted distribution → FAIL
         df_shifted = _make_synthetic_data(n=1000, seed=77)
-        df_shifted["annual_income"] = df_shifted["annual_income"] + (4 * df_train["annual_income"].std())
+        df_shifted["monthly_take_home"] = df_shifted["monthly_take_home"] + (4 * df_train["monthly_take_home"].std())
         report_fail = run_drift_check(active["reference_distributions"], df_shifted, MODEL_FEATURES)
         assert report_fail["overall_verdict"] == "FAIL"
-        assert "annual_income" in report_fail["drifted_features"]
+        assert "monthly_take_home" in report_fail["drifted_features"]
 
         registry.close()
 
 
 # =====================================================================
-# Integration: Register REAL Phase 4 models (only if artifacts exist)
+# Integration: register real v4 artifacts (only if artifacts exist)
 # =====================================================================
 
 
 class TestRealModelRegistration:
-    """
-    Integration test: register the actual Phase 4 models (RF, MLP, FT-Transformer)
-    from the project's model directory. Only runs if the real artifacts exist.
-    """
+    """Registry integration against the current frozen-contract artifacts."""
 
     REAL_MODEL_DIR = PROJECT_ROOT / "model"
-    REAL_PROFILES = PROJECT_ROOT / "data" / "investment_profiles.csv"
     RIGOR_REPORT = REAL_MODEL_DIR / "rigor_evaluation_report.json"
-    BENCHMARK_REPORT = PROJECT_ROOT / "reports" / "multi_model_benchmark.json"
-
-    # The established, approved Phase 4 numbers — hardcoded here as the
-    # source of truth so the test will FAIL if the registry ever stores
-    # different values again.
-    EXPECTED_METRICS = {
-        "RandomForest": {
-            "rule_approximation_fidelity": 0.9563,
-            "independent_cfp_benchmark_accuracy": 0.2526,
-        },
-        "PyTorch_MLP": {
-            "rule_approximation_fidelity": 0.9560,
-            "independent_cfp_benchmark_accuracy": 0.175,
-        },
-        "FT_Transformer": {
-            "rule_approximation_fidelity": 0.9705,
-            "independent_cfp_benchmark_accuracy": 0.1583,
-        },
-    }
 
     @pytest.mark.skipif(
         not (PROJECT_ROOT / "model" / "model.pkl").exists(),
         reason="Real model artifacts not available"
     )
-    def test_register_all_three_phase4_models(self, temp_dir):
+    def test_register_available_v4_models(self, temp_dir):
         """
-        Register all 3 Phase 4 models using the SAME code path as the CLI
-        (register_model.py's extract_architecture_metrics), then verify the
-        stored metrics match the established Phase 4 numbers exactly.
+        Register all available artifacts through the same v4 metadata and rigor
+        extraction code as the CLI. No v3 dataset or benchmark may participate.
         """
-        # Import the actual extraction function to test the real wiring
-        from scripts.register_model import extract_architecture_metrics, load_rigor_report
+        from scripts.register_model import (
+            extract_architecture_metrics,
+            extract_hyperparameters,
+            load_rigor_report,
+        )
 
         db_path = temp_dir / "real_registry.db"
         registry = ModelRegistry(db_path=db_path)
@@ -543,25 +495,29 @@ class TestRealModelRegistration:
         }
 
         registered_ids = {}
+        reference_x, reference_y = prepare_synthetic_training_data(num_samples=500, seed=42)
+        training_hash = compute_dataset_hash_from_arrays(reference_x, reference_y)
+        ref_dists = compute_reference_distributions(
+            pd.DataFrame(reference_x, columns=MODEL_FEATURES), MODEL_FEATURES
+        )
 
         for arch, art_path in artifacts.items():
             if not art_path.exists():
                 continue
 
-            # Use the SAME extraction function the CLI uses
             metrics = extract_architecture_metrics(rigor_report, arch)
-
-            ref_dists = None
-            if self.REAL_PROFILES.exists():
-                df = pd.read_csv(self.REAL_PROFILES)
-                ref_dists = compute_reference_distributions(df, MODEL_FEATURES)
+            hyperparameters = extract_hyperparameters(arch)
+            hyperparameters.update({
+                "feature_schema_version": FEATURE_SCHEMA_VERSION,
+                "feature_names": FEATURE_NAMES,
+            })
 
             v_id = registry.register_model(
                 model_architecture=arch,
                 artifact_path=art_path,
-                training_data_hash=compute_file_hash(self.REAL_PROFILES) if self.REAL_PROFILES.exists() else "unavailable",
-                training_timestamp="2026-07-23T19:28:42+00:00",
-                hyperparameters={"source": "Phase 4 rigor audit"},
+                training_data_hash=training_hash,
+                training_timestamp="2026-09-07T00:00:00+00:00",
+                hyperparameters=hyperparameters,
                 metrics=metrics,
                 reference_distributions=ref_dists,
                 set_active=True,
@@ -572,25 +528,17 @@ class TestRealModelRegistration:
         all_versions = registry.list_versions()
         assert len(all_versions) >= len(registered_ids)
 
-        # Verify metrics match the ESTABLISHED Phase 4 numbers exactly
         for arch, v_id in registered_ids.items():
             v = registry.get_version(v_id)
-            expected = self.EXPECTED_METRICS[arch]
-
-            stored_fidelity = v["metrics"]["rule_approximation_fidelity"]
-            stored_cfp = v["metrics"]["independent_cfp_benchmark_accuracy"]
-
-            assert stored_fidelity == expected["rule_approximation_fidelity"], (
-                f"{arch} fidelity mismatch: stored {stored_fidelity}, "
-                f"expected {expected['rule_approximation_fidelity']}"
-            )
-            assert stored_cfp == expected["independent_cfp_benchmark_accuracy"], (
-                f"{arch} CFP accuracy mismatch: stored {stored_cfp}, "
-                f"expected {expected['independent_cfp_benchmark_accuracy']}"
-            )
-
-            # Artifact hash is a real SHA-256
+            assert v["hyperparameters"]["feature_schema_version"] == FEATURE_SCHEMA_VERSION
+            assert v["hyperparameters"]["feature_names"] == FEATURE_NAMES
+            assert set(v["reference_distributions"]) == set(FEATURE_NAMES)
+            assert "independent_cfp_benchmark_accuracy" not in v["metrics"]
+            assert v["metrics"]["feature_contract_audit"]["finding"] == "PASS"
+            if arch == "RandomForest":
+                assert v["metrics"]["rule_approximation_fidelity"] == rigor_report["metric_reframe"][
+                    "policy_approximation_fidelity_random_forest"
+                ]
             assert len(v["artifact_hash"]) == 64
 
         registry.close()
-

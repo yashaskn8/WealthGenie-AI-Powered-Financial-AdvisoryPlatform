@@ -38,17 +38,21 @@ async function runLiveSessionSafetyVerification() {
   console.log(`[${new Date().toISOString()}] Step 1: Initializing test user profile...`);
   const profileRes = await client.post('/api/profile/build', {
     age: 32,
-    monthly_income: 150000,
+    monthly_take_home: 150000,
     monthly_savings: 50000,
-    liquid_savings: 400000,
-    existing_debt: 10,
-    dependents: 1,
-    emergency_fund_months: 6,
-    investment_horizon: 15,
     risk_tolerance: 'Moderate',
-    goal_type: 'wealth-building',
+    sold_property_proceeds: 0,
+    has_lump_sum: false,
+    lump_sum_amount: 0,
+    liquid_savings: 400000,
+    emi_burden_pct: 10,
+    financial_dependents: 1,
+    emergency_fund_months: 6,
+    investment_goals: ['Wealth Growth'],
+    investment_horizon_years: 15,
   });
-  const profileId = profileRes.data.profile?._id || new mongoose.Types.ObjectId();
+  const profileId = profileRes.data.profileId;
+  assert.ok(profileId, 'Profile must be created');
 
   // Step 2: Seed an existing ConversationHistory record with 51,500 cumulative tokens (exceeding the 50,000 cap)
   console.log(`[${new Date().toISOString()}] Step 2: Seeding ConversationHistory with 51,500 cumulative tokens...`);

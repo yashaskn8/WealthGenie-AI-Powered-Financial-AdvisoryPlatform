@@ -25,7 +25,7 @@ class DriftScheduler:
 
     Configuration (via environment variables):
         DRIFT_CHECK_INTERVAL_SECONDS: Seconds between checks (default: 300)
-        DRIFT_CHECK_MIN_SAMPLES: Minimum buffer size to run a check (default: 10)
+        DRIFT_CHECK_MIN_SAMPLES: Minimum buffer size to run a check (default: 200)
     """
 
     REGISTERED_BY_TAG = "drift_scheduler"
@@ -39,8 +39,15 @@ class DriftScheduler:
             os.environ.get("DRIFT_CHECK_INTERVAL_SECONDS", "300")
         )
         self._min_samples: int = int(
-            os.environ.get("DRIFT_CHECK_MIN_SAMPLES", "10")
+            os.environ.get("DRIFT_CHECK_MIN_SAMPLES", "200")
         )
+        if self._interval_seconds <= 0:
+            raise ValueError("DRIFT_CHECK_INTERVAL_SECONDS must be a positive integer")
+        environment = os.environ.get("ENVIRONMENT", "local").strip().lower()
+        if self._min_samples <= 0:
+            raise ValueError("DRIFT_CHECK_MIN_SAMPLES must be a positive integer")
+        if environment == "production" and self._min_samples < 100:
+            raise ValueError("DRIFT_CHECK_MIN_SAMPLES must be at least 100 in production")
 
     def start(self, version_registry: Any) -> None:
         """Start the periodic drift check background task."""
@@ -99,15 +106,30 @@ class DriftScheduler:
                 )
                 continue
 
+            evaluated_frame = inference_buffer.get_dataframe()
+            if evaluated_frame is None or len(evaluated_frame) < self._min_samples:
+                logger.info(
+                    f"[DriftScheduler] Tick #{self._tick_count} SKIPPED — "
+                    "the atomic evaluation snapshot was below the configured minimum"
+                )
+                continue
+            evaluated_sample_count = len(evaluated_frame)
+
             # Run the drift check in a thread to avoid blocking the event loop
             # (PSI computation + retrain are CPU-bound synchronous code)
             try:
-                result = await asyncio.to_thread(self._run_drift_check)
+                result = await asyncio.to_thread(self._run_drift_check, evaluated_frame)
                 status = result.get("status", "UNKNOWN")
                 drift_detected = result.get("drift_detected", False)
                 retrain_triggered = result.get("retrain_triggered", False)
                 verdict = result.get("overall_verdict", "N/A")
                 max_psi = result.get("max_psi", 0.0)
+
+                # Each buffered observation belongs to exactly one scheduled
+                # evaluation window. Discard only the snapshotted prefix so
+                # observations recorded while evaluation was running survive.
+                if status == "COMPLETED":
+                    inference_buffer.discard_oldest(evaluated_sample_count)
 
                 logger.info(
                     f"[DriftScheduler] Tick #{self._tick_count} COMPLETED — "
@@ -129,7 +151,7 @@ class DriftScheduler:
                     exc_info=True,
                 )
 
-    def _run_drift_check(self) -> dict:
+    def _run_drift_check(self, input_df=None) -> dict:
         """
         Synchronous wrapper calling the existing drift check logic.
         Passes registered_by tag so the registry record is provably scheduler-triggered.
@@ -138,7 +160,7 @@ class DriftScheduler:
 
         return check_drift_and_trigger_retrain(
             architecture="RandomForest",
-            input_df=None,  # Uses real inference_buffer
+            input_df=input_df,
             store=self._store,
             force_retrain_on_drift=True,
             registered_by=self.REGISTERED_BY_TAG,

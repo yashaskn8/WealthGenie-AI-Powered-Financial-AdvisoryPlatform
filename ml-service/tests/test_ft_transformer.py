@@ -3,9 +3,7 @@ WealthGenie ML Microservice - FT-Transformer Test Suite
 Tests FeatureTokenizer, FTTransformer forward pass, logits shape, probability distribution, and training pipeline.
 """
 
-import pytest
 import torch
-import numpy as np
 
 from model.architecture.ft_transformer import FTTransformer, FTTransformerConfig, FeatureTokenizer
 from model.training.train_pytorch import train_ft_transformer_model

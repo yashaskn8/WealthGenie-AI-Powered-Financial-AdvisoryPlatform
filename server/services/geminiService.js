@@ -5,22 +5,54 @@ import crypto from 'crypto';
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const MODEL_NAME = 'openai/gpt-oss-120b';
 const GEMINI_CHAT_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent';
+const ADVISORY_PROMPT_VERSION = 'financial-advisory-prompt-4.0.0';
+const ADVISORY_PROFILE_KEYS = Object.freeze([
+  'monthlyTakeHome', 'monthlySavings', 'savingsRate', 'age', 'riskTolerance',
+  'suitabilityRisk', 'liquidSavings', 'emiBurdenPct', 'financialDependents',
+  'emergencyFundMonths', 'investmentGoals', 'investmentHorizonYears',
+  'deployableLumpSum', 'suitabilityReasonCodes', 'taxEligibilityStatus',
+]);
 
-function hashProfile(profile) {
-  return crypto.createHash('md5').update(JSON.stringify(profile)).digest('hex');
+const optionalValue = (value, suffix = '') => value === null ? 'Not provided' : `${value}${suffix}`;
+const optionalCurrency = value => value === null ? 'Not provided' : `₹${value.toLocaleString('en-IN')}`;
+
+function canonicalStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalStringify).join(',')}]`;
+  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalStringify(value[key])}`).join(',')}}`;
+}
+
+function advisoryCacheHash(value) {
+  return crypto.createHash('sha256').update(canonicalStringify(value)).digest('hex');
 }
 
 export async function generateAdvisory(userContext) {
-  const { profile, instruments, shapExplanation } = userContext;
-  const cacheKey = `advisory:${hashProfile(userContext)}`;
-
-  // Check Redis cache (1 hour TTL)
-  const cached = await getCache(cacheKey);
-  if (cached) return cached;
+  const { profile, instruments, shapExplanation, modelVersion, policyVersion } = userContext;
 
   if (!profile || !Number.isFinite(profile.monthlyTakeHome) || !Number.isFinite(profile.monthlySavings)) {
     throw new TypeError('generateAdvisory requires canonical Financial Profile context');
   }
+  const profileKeys = Object.keys(profile).sort();
+  if (profileKeys.length !== ADVISORY_PROFILE_KEYS.length
+      || ADVISORY_PROFILE_KEYS.some(key => !Object.hasOwn(profile, key))) {
+    throw new TypeError('generateAdvisory requires the exact allowlisted LLM Financial Profile context');
+  }
+  if (typeof modelVersion !== 'string' || !modelVersion.trim()
+      || typeof policyVersion !== 'string' || !policyVersion.trim()) {
+    throw new TypeError('generateAdvisory requires explicit model and policy versions');
+  }
+  const cacheKey = `advisory:${advisoryCacheHash({
+    profile,
+    instruments,
+    shapExplanation,
+    modelVersion,
+    policyVersion,
+    promptVersion: ADVISORY_PROMPT_VERSION,
+  })}`;
+
+  // Check Redis cache (1 hour TTL)
+  const cached = await getCache(cacheKey);
+  if (cached) return cached;
   const instrumentList = (instruments || []).map(i => `${i.name} (${i.type}) - nominal expected return: ${i.nominalReturn}% - allocation: ${(i.allocationWeight * 100).toFixed(1)}%`).join('\n  ');
 
   // Build SHAP context block if available
@@ -41,16 +73,17 @@ Investor Financial Profile (the complete and only approved personalization conte
 - Stated risk tolerance: ${profile.riskTolerance}
 - Final suitability risk: ${profile.suitabilityRisk}
 - Investment horizon: ${profile.investmentHorizonYears} years
-- Emergency-fund coverage: ${profile.emergencyFundMonths} months
-- EMI burden: ${profile.emiBurdenPct}%
-- Financial dependents: ${profile.financialDependents}
+- Emergency-fund coverage: ${optionalValue(profile.emergencyFundMonths, ' months')}
+- EMI burden: ${optionalValue(profile.emiBurdenPct, '%')}
+- Financial dependents: ${optionalValue(profile.financialDependents)}
 - Goals: ${profile.investmentGoals.join(', ')}
-- Deployable one-time lump sum: ₹${profile.deployableLumpSum.toLocaleString('en-IN')}
+- Deployable one-time lump sum: ${optionalCurrency(profile.deployableLumpSum)}
 
 Top 3 Recommended Instruments:
   ${instrumentList}
 ${shapContext}
 Instructions:
+Policy version: ${policyVersion}. Model version: ${modelVersion}. Prompt version: ${ADVISORY_PROMPT_VERSION}.
 Paragraph 1: Explain WHY these specific instruments suit this investor's approved profile and final suitability ceiling.
 Paragraph 2: Highlight 2-3 KEY RISKS the investor should be aware of.
 Paragraph 3: Provide ONE specific, actionable next step the investor should take immediately.

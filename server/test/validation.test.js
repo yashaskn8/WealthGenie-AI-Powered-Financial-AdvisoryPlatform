@@ -16,6 +16,7 @@ import goalsRoutes from '../routes/goals.js';
 import { enforceJsonContentType } from '../middleware/contentType.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import { registerSchema } from '../validation/schemas.js';
+import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
 
 process.env.JWT_SECRET = 'validation-test-secret';
 process.env.NODE_ENV = 'test';
@@ -122,17 +123,7 @@ test('Validation: POST request exceeding 100kb payload size limit returns 413', 
     const response = await rawFetch(`${baseUrl}/api/profile/build`, {
       method: 'POST',
       body: JSON.stringify({
-        monthly_income: 80000,
-        age: 30,
-        monthly_savings: 20000,
-        regime: 'new',
-        investment_horizon: 15,
-        liquid_savings: 100000,
-        existing_debt: 0,
-        dependents: 0,
-        emergency_fund_months: 6,
-        risk_tolerance: 'Moderate',
-        goal_type: 'wealth-building',
+        ...canonicalProfilePayload(),
         huge_field: hugeString,
       }),
       headers: {
@@ -148,35 +139,35 @@ test('Validation: POST request exceeding 100kb payload size limit returns 413', 
 
 // ── 3. Parametrized boundary validation ──────────────────────────────
 const boundaryCases = [
-  {
-    name: 'Negative monthly_income',
-    payload: { monthly_income: -5000, age: 30, monthly_savings: 2000, liquid_savings: 0, existing_debt: 0, dependents: 0, emergency_fund_months: 0, risk_tolerance: 'Moderate', goal_type: 'wealth-building' },
-  },
-  {
-    name: 'Income exceeding max constraint (10 Crores)',
-    payload: { monthly_income: 200000000, age: 30, monthly_savings: 2000, liquid_savings: 0, existing_debt: 0, dependents: 0, emergency_fund_months: 0, risk_tolerance: 'Moderate', goal_type: 'wealth-building' },
-  },
-  {
-    name: 'Age below minimum limit (18)',
-    payload: { monthly_income: 50000, age: 16, monthly_savings: 5000, liquid_savings: 0, existing_debt: 0, dependents: 0, emergency_fund_months: 0, risk_tolerance: 'Moderate', goal_type: 'wealth-building' },
-  },
-  {
-    name: 'Age above maximum limit (80)',
-    payload: { monthly_income: 50000, age: 95, monthly_savings: 5000, liquid_savings: 0, existing_debt: 0, dependents: 0, emergency_fund_months: 0, risk_tolerance: 'Moderate', goal_type: 'wealth-building' },
-  },
-  {
-    name: 'Monthly savings greater than monthly income',
-    payload: { monthly_income: 50000, age: 30, monthly_savings: 60000, liquid_savings: 0, existing_debt: 0, dependents: 0, emergency_fund_months: 0, risk_tolerance: 'Moderate', goal_type: 'wealth-building' },
-  },
-  {
-    name: 'Invalid risk_tolerance enum value',
-    payload: { monthly_income: 50000, age: 30, monthly_savings: 10000, liquid_savings: 0, existing_debt: 0, dependents: 0, emergency_fund_months: 0, risk_tolerance: 'SuperAggressive', goal_type: 'wealth-building' },
-  },
-  {
-    name: 'Invalid goal_type enum value',
-    payload: { monthly_income: 50000, age: 30, monthly_savings: 10000, liquid_savings: 0, existing_debt: 0, dependents: 0, emergency_fund_months: 0, risk_tolerance: 'Moderate', goal_type: 'crypto-speculation' },
-  },
-];
+  ['Monthly take-home must be positive', { monthly_take_home: 0 }],
+  ['Monthly take-home above maximum', { monthly_take_home: 100000001 }],
+  ['Monthly savings must be positive', { monthly_savings: 0 }],
+  ['Monthly savings equal to take-home', { monthly_savings: 100000 }],
+  ['Age below minimum', { age: 17 }],
+  ['Age above maximum', { age: 81 }],
+  ['Fractional age', { age: 30.5 }],
+  ['Invalid risk tolerance', { risk_tolerance: 'SuperAggressive' }],
+  ['Negative sold-property proceeds', { sold_property_proceeds: -1 }],
+  ['Non-boolean lump-sum declaration', { has_lump_sum: 'not-a-boolean' }],
+  ['Missing declared lump sum', { has_lump_sum: true, lump_sum_amount: 0 }],
+  ['Nonzero undeclared lump sum', { has_lump_sum: false, lump_sum_amount: 1 }],
+  ['Negative liquid savings', { liquid_savings: -1 }],
+  ['Negative EMI burden', { emi_burden_pct: -1 }],
+  ['EMI burden above 100 percent', { emi_burden_pct: 101 }],
+  ['Negative financial dependents', { financial_dependents: -1 }],
+  ['Fractional financial dependents', { financial_dependents: 1.5 }],
+  ['Too many financial dependents', { financial_dependents: 16 }],
+  ['Negative emergency coverage', { emergency_fund_months: -1 }],
+  ['Emergency coverage above maximum', { emergency_fund_months: 121 }],
+  ['Empty investment goals', { investment_goals: [] }],
+  ['Unsupported investment goal', { investment_goals: ['House Purchase'] }],
+  ['Duplicate investment goals', { investment_goals: ['Retirement', 'Retirement'] }],
+  ['Horizon below minimum', { investment_horizon_years: 0 }],
+  ['Horizon above maximum', { investment_horizon_years: 31 }],
+  ['Fractional horizon', { investment_horizon_years: 10.5 }],
+  ['Retired goal_type field', { goal_type: 'wealth-building' }],
+  ['Ambiguous income field', { monthly_take_home: undefined, income: 100000 }],
+].map(([name, override]) => ({ name, payload: { ...canonicalProfilePayload(), ...override } }));
 
 for (const tc of boundaryCases) {
   test(`Validation boundary: ${tc.name} should fail with 400 Bad Request`, async () => {

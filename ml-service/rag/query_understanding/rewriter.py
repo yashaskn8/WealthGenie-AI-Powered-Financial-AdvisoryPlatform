@@ -3,7 +3,6 @@ WealthGenie RAG Subsystem - Query Rewriter
 Rewrites and expands queries for improved vector search matching.
 """
 
-from typing import List
 
 
 class QueryRewriter:

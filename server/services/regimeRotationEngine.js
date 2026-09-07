@@ -89,15 +89,18 @@ export const MACRO_REGIMES = {
  * Returns default regime or explicit active market state override.
  */
 export function getCurrentRegime(overrideKey = null) {
-  const key = overrideKey || process.env.MACRO_REGIME_OVERRIDE || 'geopolitical_conflict';
-  return MACRO_REGIMES[key] || MACRO_REGIMES.normal;
+  const key = overrideKey || process.env.MACRO_REGIME_OVERRIDE || 'normal';
+  const regime = MACRO_REGIMES[key];
+  if (!regime) throw new TypeError(`Unknown macro regime: ${key}`);
+  return regime;
 }
 
 /**
  * Get tactical tilts for a given regime.
  */
 export function getRegimeTilts(regimeKey) {
-  const regime = MACRO_REGIMES[regimeKey] || MACRO_REGIMES.normal;
+  const regime = MACRO_REGIMES[regimeKey];
+  if (!regime) throw new TypeError(`Unknown macro regime: ${regimeKey}`);
   return {
     regime: regime.key,
     title: regime.title,
@@ -117,9 +120,17 @@ export function getRegimeTilts(regimeKey) {
  * @param {string} regimeKey - Active regime identifier
  * @returns {Object} { adjustedWeights, explanations }
  */
-export function calculateTiltAdjustedAllocation(baseWeights = {}, regimeKey = 'normal') {
-  const regime = MACRO_REGIMES[regimeKey] || MACRO_REGIMES.normal;
-  const tilts = regime.tilts || {};
+export function calculateTiltAdjustedAllocation(baseWeights, regimeKey) {
+  if (!baseWeights || typeof baseWeights !== 'object' || Array.isArray(baseWeights)
+      || Object.keys(baseWeights).length === 0
+      || Object.values(baseWeights).some(weight => typeof weight !== 'number' || !Number.isFinite(weight) || weight < 0 || weight > 1)) {
+    throw new TypeError('baseWeights must be a non-empty map of finite weights from 0 to 1');
+  }
+  const baseTotal = Object.values(baseWeights).reduce((sum, weight) => sum + weight, 0);
+  if (Math.abs(baseTotal - 1) > 0.001) throw new RangeError('baseWeights must sum to 1');
+  const regime = MACRO_REGIMES[regimeKey];
+  if (!regime) throw new TypeError(`Unknown macro regime: ${regimeKey}`);
+  const tilts = regime.tilts;
 
   const adjustedWeights = { ...baseWeights };
   const explanations = [];
@@ -147,6 +158,7 @@ export function calculateTiltAdjustedAllocation(baseWeights = {}, regimeKey = 'n
   }
 
   return {
+    classification: 'NON_RECOMMENDATION_MACRO_WHAT_IF',
     regime: regime.key,
     regimeTitle: regime.title,
     disclaimer: regime.disclaimer,

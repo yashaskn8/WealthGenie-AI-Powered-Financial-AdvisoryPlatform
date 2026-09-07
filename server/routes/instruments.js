@@ -5,6 +5,7 @@ import { rankWtiProfileSchema, validateStrict } from '../validation/financialSch
 import Instrument from '../models/Instrument.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import { getCache, setCache } from '../config/redis.js';
+import { buildRecommendationProfile } from '../services/recommendationProfile.js';
 
 const router = Router();
 
@@ -73,22 +74,23 @@ import { rankWhereToInvestBackend } from '../services/RecommendationPipeline.js'
 
 /**
  * POST /api/instruments/rank-wti [Protected]
- * Dynamically ranks Where To Invest product candidates against user profile & macro regimes.
- * WG-005: Protected with verifyJWT + Joi schema validation.
+ * Returns the server-owned top-five provider catalog after parent-instrument suitability.
  */
 router.post('/rank-wti', verifyJWT, validateStrict(rankWtiProfileSchema), asyncHandler(async (req, res) => {
-  const { profileId, parentInstrumentId, candidates } = req.body;
+  const { profileId, parentInstrumentId } = req.body;
   const profile = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
   if (!profile) {
     return sendError(req, res, 404, 'Profile not found or access denied', 'PROFILE_NOT_FOUND');
   }
-  const ranked = rankWhereToInvestBackend(candidates, profile, { parentInstrumentId });
+  const canonicalProfile = buildRecommendationProfile(profile);
+  const ranked = rankWhereToInvestBackend(canonicalProfile, { parentInstrumentId });
   res.json({
     success: true,
     total: ranked.length,
     products: ranked,
     excluded: ranked.metadata?.excluded || [],
     suitability: ranked.metadata?.riskReconciliation || null,
+    catalog: ranked.metadata?.catalog || null,
   });
 }));
 

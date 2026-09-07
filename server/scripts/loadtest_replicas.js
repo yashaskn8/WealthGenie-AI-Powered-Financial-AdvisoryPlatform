@@ -23,8 +23,13 @@ function createBenchmarkApp() {
   });
 
   app.get('/api/tax/compare', (req, res) => {
-    const income = parseFloat(req.query.income) || 1500000;
-    const comparison = compareTaxRegimes(income, { section80C: 150000, section80D: 50000 });
+    const requestedIncome = Number(req.query.income);
+    const income = Number.isFinite(requestedIncome) && requestedIncome >= 0 ? requestedIncome : 1500000;
+    const comparison = compareTaxRegimes(
+      income,
+      { section80C: 150000, section80D: 50000, age: 35 },
+      'salary',
+    );
     res.json({
       income,
       comparison,
@@ -86,8 +91,13 @@ const app = express();
 app.use(express.json());
 app.get('/health', (req, res) => res.json({ status: 'ok', pid: process.pid }));
 app.get('/api/tax/compare', (req, res) => {
-  const income = parseFloat(req.query.income) || 1500000;
-  const comparison = compareTaxRegimes(income, { section80C: 150000, section80D: 50000 });
+  const requestedIncome = Number(req.query.income);
+  const income = Number.isFinite(requestedIncome) && requestedIncome >= 0 ? requestedIncome : 1500000;
+  const comparison = compareTaxRegimes(
+    income,
+    { section80C: 150000, section80D: 50000, age: 35 },
+    'salary',
+  );
   res.json({ income, comparison, pid: process.pid });
 });
 

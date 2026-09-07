@@ -48,8 +48,8 @@ export const OPTIMISABLE_BACKEND_KEYS = new Set([
 ]);
 
 export function backendToLocalInstrument(type) {
-  if (!type) return '';
-  return BACKEND_TO_LOCAL_MAP[type] || String(type).toLowerCase();
+  if (!type) return null;
+  return BACKEND_TO_LOCAL_MAP[type] || null;
 }
 
 export function localToBackendInstrument(id) {
@@ -67,8 +67,8 @@ export function assertKnownBackendInstrumentTypes(types, context = 'backend inst
   const missing = Array.from(new Set((types || []).filter(Boolean)))
     .filter(type => !BACKEND_TO_LOCAL_MAP[type]);
 
-  if (missing.length > 0 && import.meta.env.DEV) {
-    console.warn(`[InstrumentTypeMap] ${context}: missing local mapping for backend type(s): ${missing.join(', ')}`);
+  if (missing.length > 0) {
+    throw new TypeError(`${context}: unknown backend instrument type(s): ${missing.join(', ')}`);
   }
 
   return missing;

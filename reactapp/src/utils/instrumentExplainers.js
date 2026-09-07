@@ -158,26 +158,3 @@ export function getLockInWarning(instrument, horizonYears) {
   }
   return null;
 }
-
-// Risk-age mismatch detection
-export function detectRiskAgeMismatch(profile) {
-  const risk = (profile?.riskCategory || profile?.risk_tolerance || 'Moderate').toLowerCase();
-  const goals = profile?.investment_goals || [];
-  const horizon = Number(profile?.investment_horizon) || 10;
-  const age = Number(profile?.age) || 30;
-  const isNearRetirement = age >= 55;
-  const isHighRisk = risk.includes('aggressive');
-  const isRetirementGoal = goals.includes('Retirement');
-
-  if (isNearRetirement && isHighRisk && isRetirementGoal) {
-    const maxEquity = Math.max(0, 100 - age);
-    return {
-      flag: true,
-      severity: age >= 60 ? 'warning' : 'info',
-      title: 'Risk level review recommended',
-      message: `At age ${age} with a ${horizon}-year retirement horizon, capital preservation typically becomes the primary objective. High-risk instruments may cause significant portfolio loss in the years immediately before or during retirement.`,
-      recommendation: `Standard financial planning guidance suggests a maximum of ${maxEquity}% equity allocation at age ${age}. Consider adjusting your risk profile to better protect your retirement savings.`,
-    };
-  }
-  return { flag: false };
-}

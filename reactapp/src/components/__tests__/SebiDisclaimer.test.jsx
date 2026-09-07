@@ -8,7 +8,7 @@ import SebiDisclaimer from '../SebiDisclaimer';
 import WhereToInvestTab from '../deepdive/WhereToInvestTab';
 
 vi.mock('../../services/api', () => ({
-  rankInvestmentCandidates: vi.fn(async (_profileId, _parentId, candidates) => ({ products: candidates.slice(0, 5) })),
+  rankInvestmentCandidates: vi.fn(async () => ({ products: [{ id: 'provider-1', name: 'Server Provider' }] })),
 }));
 
 describe('SebiDisclaimer Component', () => {

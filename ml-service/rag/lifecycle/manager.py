@@ -15,9 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Set
 
-from model.config import BASE_DIR
 from rag.config import RAGConfig
-from rag.schema import Document, DocumentMetadata, TextChunk, is_scope_accessible
+from rag.schema import Document, TextChunk, is_scope_accessible
 from rag.vector_store.base import BaseVectorStore
 from rag.vector_store.memory_vector_store import PersistentVectorStore
 

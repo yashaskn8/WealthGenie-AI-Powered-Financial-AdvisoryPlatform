@@ -186,35 +186,37 @@ test('WG-005: POST /api/instruments/rank-wti returns 401 without auth', async ()
   });
 });
 
-test('WG-005: POST /api/instruments/rank-wti returns 400 for invalid payload', async () => {
+test('WG-005: POST /api/instruments/rank-wti rejects a client-supplied product universe', async () => {
   const token = signToken(USER_A_ID);
   await withServer(buildInstrumentApp(), async (baseUrl) => {
-    // candidates array exceeding max 50 items
-    const oversizedCandidates = Array.from({ length: 51 }, (_, i) => ({ name: `item${i}` }));
     const { response, body } = await jsonFetch(`${baseUrl}/api/instruments/rank-wti`, {
       method: 'POST',
-      body: JSON.stringify({ candidates: oversizedCandidates, userProfile: {}, options: {} }),
+      body: JSON.stringify({
+        profileId: new mongoose.Types.ObjectId().toString(),
+        parentInstrumentId: 'index_mf',
+        candidates: [{ name: 'Client-controlled product' }],
+      }),
       headers: { authorization: `Bearer ${token}` },
     });
-    assert.equal(response.status, 400, 'rank-wti must reject oversized candidates array');
+    assert.equal(response.status, 400, 'rank-wti must reject client-controlled candidates');
     assert.ok(body.details || body.error, 'Should return validation error details');
   });
 });
 
-test('WG-005: POST /api/instruments/rank-wti returns 400 for malformed userProfile', async () => {
+test('WG-005: POST /api/instruments/rank-wti rejects legacy inline user profiles', async () => {
   const token = signToken(USER_A_ID);
   await withServer(buildInstrumentApp(), async (baseUrl) => {
     // age outside valid range (18-80)
     const { response, body } = await jsonFetch(`${baseUrl}/api/instruments/rank-wti`, {
       method: 'POST',
       body: JSON.stringify({
-        candidates: [{ name: 'PPF' }],
+        profileId: new mongoose.Types.ObjectId().toString(),
+        parentInstrumentId: 'ppf',
         userProfile: { age: 150, riskCategory: 'InvalidTier', investment_horizon: 999 },
-        options: {},
       }),
       headers: { authorization: `Bearer ${token}` },
     });
-    assert.equal(response.status, 400, 'rank-wti must reject out-of-range userProfile fields');
+    assert.equal(response.status, 400, 'rank-wti must reject inline userProfile fields');
     assert.ok(body.details || body.error, 'Should return validation error details');
   });
 });
@@ -236,14 +238,13 @@ test('WG-005: POST /api/instruments/rank-wti returns 200 for valid authenticated
       body: JSON.stringify({
         profileId: profile._id.toString(),
         parentInstrumentId: 'index_mf',
-        candidates: [{ name: 'Direct Index Plan' }, { name: 'Low-Cost Index Plan' }],
       }),
       headers: { authorization: `Bearer ${token}` },
     });
     assert.equal(response.status, 200, 'rank-wti must succeed with valid auth + valid payload');
     assert.ok(body.success, 'Response should include success flag');
     assert.ok(Array.isArray(body.products), 'Response should include products array');
-      assert.equal(body.total, 2, 'Should return both provider presentation options');
+      assert.ok(body.total > 0, 'Should return the server-owned provider catalog');
   });
 });
 
@@ -349,6 +350,8 @@ test('WG-007: POST /build and PUT /:profileId return identical key sets', async 
       const postKeys = Object.keys(postBody).sort();
       const putKeys = Object.keys(putBody).sort();
       assert.deepEqual(postKeys, putKeys, 'POST and PUT response shapes must match key-for-key');
+      assert.equal(postBody.final_suitability_risk, 'Moderate');
+      assert.ok(postBody.final_suitability_level <= 3, 'final suitability must not exceed Moderate preference');
     });
   } finally {
     await FinancialProfile.deleteMany({ userId: USER_A_ID });

@@ -154,3 +154,5 @@ def test_native_training_uses_validation_data_and_reports_optimizer_steps(monkey
     assert len(captured["trainer_kwargs"]["eval_dataset"]) == 1
     assert captured["model_kwargs"]["trust_remote_code"] is False
     assert captured["model_kwargs"]["use_safetensors"] is True
+    assert captured["model_kwargs"]["dtype"] == "float32"
+    assert "torch_dtype" not in captured["model_kwargs"]

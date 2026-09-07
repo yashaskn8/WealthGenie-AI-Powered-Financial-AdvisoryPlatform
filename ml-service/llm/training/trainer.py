@@ -131,7 +131,7 @@ class LoRATrainingPlatform:
             model_kwargs: Dict[str, Any] = {
                 "trust_remote_code": False,
                 "use_safetensors": True,
-                "torch_dtype": torch.float16 if is_cuda else torch.float32,
+                "dtype": torch.float16 if is_cuda else torch.float32,
             }
             if is_cuda:
                 model_kwargs["device_map"] = "auto"

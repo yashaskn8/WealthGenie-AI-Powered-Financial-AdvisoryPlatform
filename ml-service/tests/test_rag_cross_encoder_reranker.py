@@ -5,6 +5,7 @@ over keyword heuristics, empty-input safety, and pipeline registry resolution.
 """
 
 import pytest
+import numpy as np
 from rag.reranking.cross_encoder_reranker import CrossEncoderReranker
 from rag.reranking.noop_reranker import NoOpReranker
 from rag.retrieval.pipeline import get_reranker
@@ -24,17 +25,30 @@ def _make_chunk(chunk_id: str, content: str, title: str, score: float, rank: int
     return RetrievedChunk(chunk=chunk, score=score, rank=rank)
 
 
-# ─── Fixture: shared reranker instance (model loads once) ───────────────────
+class DeterministicCrossEncoder:
+    """Offline test double for the external sentence-transformer artifact."""
+
+    def predict(self, pairs):
+        return np.asarray([
+            0.99 if "Section 80D" in passage else
+            0.90 if "Tax slab rates" in passage else
+            0.70 if "Section 80C" in passage else
+            0.20
+            for _, passage in pairs
+        ])
+
+
+# ─── Fixture: injected scorer keeps the contract suite network-independent ──
 
 @pytest.fixture(scope="module")
 def reranker():
-    """Load the cross-encoder model once for the entire test module."""
-    return CrossEncoderReranker()
+    """Use the same reranking implementation without downloading in unit tests."""
+    return CrossEncoderReranker(model=DeterministicCrossEncoder())
 
 
 # ─── Test A: Semantic reranking beats keyword overlap ───────────────────────
 
-def test_cross_encoder_reranks_by_semantic_relevance(reranker):
+def test_cross_encoder_reranks_by_model_relevance(reranker):
     """
     Constructs a case where the cross-encoder's semantic understanding
     genuinely outperforms a naive keyword overlap heuristic.
@@ -110,12 +124,16 @@ def test_empty_chunks_returns_empty(reranker):
 
 # ─── Test D: get_reranker("cross_encoder") resolves correctly ──────────────
 
-def test_get_reranker_resolves_cross_encoder():
+def test_get_reranker_resolves_cross_encoder(monkeypatch):
     """
     Directly tests that the silent-fallback bug is closed:
     get_reranker("cross_encoder") must return a CrossEncoderReranker,
     NOT a NoOpReranker fallback.
     """
+    monkeypatch.setattr(
+        "rag.reranking.cross_encoder_reranker.CrossEncoder",
+        lambda _model_name: DeterministicCrossEncoder(),
+    )
     resolved = get_reranker("cross_encoder")
     assert isinstance(resolved, CrossEncoderReranker), (
         f"Expected CrossEncoderReranker but got {type(resolved).__name__}. "

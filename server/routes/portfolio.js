@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { verifyJWT } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
-import { optimisePortfolio, computeRebalance } from '../services/portfolioEngine.js';
+import { optimisePortfolio, computeRebalance, evaluatePortfolio } from '../services/portfolioEngine.js';
 import { INSTRUMENT_PARAMS } from '../services/instrumentConstants.js';
 import {
   assertPortfolioSuitable,
@@ -63,16 +63,15 @@ router.post('/optimise', verifyJWT, validateStrict(personalizedOptimiseSchema), 
     };
   }));
   const weights = Object.fromEntries(capped.map(instrument => [instrument.id, instrument.allocationWeight]));
+  const metrics = evaluatePortfolio(assets, nominalReturns, weights);
 
   res.json({
     strategy: rawResult.strategy,
     weights,
-    expected_return: Object.entries(weights).reduce(
-      (sum, [key, weight]) => sum + INSTRUMENT_PARAMS[key].nominalRate / 100 * weight,
-      0,
-    ),
-    volatility: rawResult.volatility,
-    sharpe_ratio: rawResult.sharpe,
+    expected_return: metrics.expectedReturn,
+    volatility: metrics.volatility,
+    sharpe_ratio: metrics.sharpe,
+    risk_contributions: metrics.riskContributions,
     return_basis: 'PRE_TAX_NOMINAL',
     simulation_classification: 'PROFILE_GROUNDED',
     final_suitability_risk: suitability.finalRisk,
@@ -91,6 +90,10 @@ router.post('/rebalance', verifyJWT, validateStrict(personalizedRebalanceSchema)
   const currentKeys = Object.keys(current_allocation);
   if (currentKeys.some(key => !INSTRUMENT_PARAMS[key])) {
     throw createError(400, 'Current allocation contains an unknown instrument.', 'Unknown instrument.');
+  }
+  const targetKeys = Object.keys(target_allocation);
+  if (targetKeys.some(key => !INSTRUMENT_PARAMS[key])) {
+    throw createError(400, 'Target allocation contains an unknown instrument.', 'Unknown instrument.');
   }
   const targetTotal = Object.values(target_allocation).reduce((sum, value) => sum + Number(value), 0);
   if (Math.abs(targetTotal - 100) > 0.01) {

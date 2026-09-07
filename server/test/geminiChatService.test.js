@@ -184,11 +184,11 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
   it('Phase 6: ExplainabilityEngine produces deterministic non-hallucinated explanations', () => {
     const explanation = ExplainabilityEngine.generateExplanation(
       mockProfile,
-      [{ tool: 'sip_projection' }],
+      [{ tool: 'sip_projection', success: true, result: {} }],
       { verification_status: 'verified' }
     );
 
-    assert.equal(explanation.confidenceScore, 0.98);
+    assert.equal(explanation.arithmeticVerificationStatus, 'verified');
     assert.ok(explanation.financialEnginesUsed.includes('projectionEngine.sipFV'));
     assert.match(explanation.riskDisclosure, /market risks/i);
   });

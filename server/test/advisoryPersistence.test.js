@@ -28,11 +28,22 @@ function makeOperation(claim, suffix = '') {
       _id: recommendationId,
       userId,
       profileId,
-      instruments: [],
+      instruments: [{
+        id: `fixture-${suffix}`, name: 'Fixture Fund', type: 'Equity_MF', assetClass: 'Equity',
+        nominalReturn: 12, effectiveYield: 12, postTaxReturn: null,
+        returnBasis: 'PRE_TAX_NOMINAL', expenseRatio: 0.005,
+        riskLevel: 'Medium', riskScore: 3, lockIn: 0, tags: ['Wealth Growth'],
+        score: 80, scoreFactors: {
+          expectedReturn: 60, riskFit: 100, liquidity: 80, goalFit: 100,
+          horizonFit: 100, cost: 90, mlConfidence: 0,
+        },
+        allocation_pct: 100, allocationWeight: 1,
+      }],
       advisoryText: response.advisory_text,
       confidenceScores: {},
       mlFallback: true,
       modelVersion: 'rule_fallback',
+      profileInputHash: 'a'.repeat(64),
     },
     auditRecord: {
       _id: auditId,
@@ -44,8 +55,12 @@ function makeOperation(claim, suffix = '') {
       version_id: 'rule_fallback',
       regulatory_rule_version: 'FY2025-26-v1.0',
       input_hash: `input-hash-${suffix}`,
-      inputs: { age: 30 },
-      recommendations: { instruments: [] },
+      inputs: {
+        financial_profile_schema_version: 'financial-profile-1.0.0',
+        recommendation_policy_version: 'suitability-freeze-1.0.0',
+        age: 30, monthly_take_home: 100000, monthly_savings: 25000,
+      },
+      recommendations: { instruments: [{ id: `fixture-${suffix}`, allocationWeight: 1 }] },
       cited_rag_chunk_ids: [],
       engine: 'rule_fallback',
       timestamp: new Date(),
@@ -154,4 +169,3 @@ test('same user and key with a different payload is rejected', async () => {
   assert.equal(await Recommendation.countDocuments({ userId }), 1);
   assert.equal(await AuditRecord.countDocuments({ userId }), 1);
 });
-

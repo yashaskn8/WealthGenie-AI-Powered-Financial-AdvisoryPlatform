@@ -45,6 +45,7 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
           regime: 'new',
           incomeSource: 'salary',
           userAge: 30,
+          inflationRate: 0.06,
         }),
       });
 
@@ -60,6 +61,12 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
 
       // Equity_MF: LTCG with exemption
       assert.ok(body.results[2].postTaxReturn > 0);
+      assert.equal(body.calculation_classification, 'SEPARATE_TAX_WHAT_IF');
+      assert.equal(body.assumptions.inflationRate, 0.06);
+      assert.ok(Number.isFinite(body.results[0].nominalFutureValue));
+      assert.ok(Number.isFinite(body.results[0].postTaxFutureValue));
+      assert.ok(Number.isFinite(body.results[0].realFutureValue));
+      assert.ok(Number.isFinite(body.summary.keptPerThousand));
     });
   });
 
@@ -92,6 +99,7 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
           instruments: [{ instrumentType: 'FD', nominalRate: -0.1 }],
           annualIncome: 1000000,
           regime: 'new',
+          inflationRate: 0.06,
         }),
       });
       assert.equal(invalidBatch.response.status, 400);

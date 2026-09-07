@@ -332,6 +332,10 @@ export async function getCurrentProfile(options = {}) {
   return request('GET', '/profile/current', null, { retries: 0, ...options });
 }
 
+export async function getFinancialHealthScore(profileId, options = {}) {
+  return request('GET', `/profile/${profileId}/health-score`, null, options);
+}
+
 export async function updateProfile(profileId, profile, requestOptions = {}) {
   return request(
     'PUT',
@@ -355,21 +359,10 @@ export async function getInstruments(type, sort = 'rate', order = 'desc', limit 
   return request('GET', `/instruments?${params.toString()}`);
 }
 
-export async function rankInvestmentCandidates(profileId, parentInstrumentId, candidates, requestOptions = {}) {
-  const displayCandidates = (candidates || []).map(candidate => ({
-    ...(candidate.id ? { id: candidate.id } : {}),
-    name: candidate.name,
-    ...(candidate.highlight ? { highlight: candidate.highlight } : {}),
-    ...(candidate.badge ? { badge: candidate.badge } : {}),
-    ...(candidate.provider ? { provider: candidate.provider } : {}),
-    ...(candidate.platform ? { platform: candidate.platform } : {}),
-    ...(candidate.minInvestment ? { minInvestment: candidate.minInvestment } : {}),
-    ...(candidate.tenure ? { tenure: candidate.tenure } : {}),
-  }));
+export async function rankInvestmentCandidates(profileId, parentInstrumentId, requestOptions = {}) {
   return request('POST', '/instruments/rank-wti', {
     profileId,
     parentInstrumentId,
-    candidates: displayCandidates,
   }, requestOptions);
 }
 
@@ -382,6 +375,29 @@ export async function getProjections(profileId, instruments, monthlyInvestment, 
   };
   if (years !== undefined) payload.years = years;
   return request('POST', '/projection', payload);
+}
+
+export async function calculateStepUpProjection(monthlyInvestment, annualReturnRate, years, annualStepUpRate, options = {}) {
+  return request('POST', '/projection/step-up', {
+    monthlyInvestment,
+    annualReturnRate,
+    years,
+    annualStepUpRate,
+  }, options);
+}
+
+export async function compareInvestmentProjection(monthlyInvestment, annualReturnRate, benchmarkRate, inflationRate, years, options = {}) {
+  return request('POST', '/projection/compare', {
+    monthlyInvestment,
+    annualReturnRate,
+    benchmarkRate,
+    inflationRate,
+    years,
+  }, options);
+}
+
+export async function getCustomPortfolioProjection(profileId, allocations, years, options = {}) {
+  return request('POST', '/projection/custom-portfolio', { profileId, allocations, years }, options);
 }
 
 // ─── MONTE CARLO ─────────────────────────────────────────
@@ -398,6 +414,14 @@ export async function runMonteCarlo(instrument, monthlyInvestment, years, target
   return request('POST', '/montecarlo/montecarlo', payload);
 }
 
+export async function runPortfolioMonteCarlo(profileId, allocations, years, targetAmount, options = {}) {
+  const payload = { profileId, allocations, years };
+  if (targetAmount !== null && targetAmount !== undefined && targetAmount !== '') {
+    payload.target_amount = targetAmount;
+  }
+  return request('POST', '/montecarlo/portfolio', payload, options);
+}
+
 // ─── GOALS ───────────────────────────────────────────────
 export async function createGoal(goalData) {
   return request('POST', '/goals/create', goalData);
@@ -409,6 +433,10 @@ export async function getGoals() {
 
 export async function updateGoal(goalId, goalData) {
   return request('PATCH', `/goals/${goalId}`, goalData);
+}
+
+export async function simulateGoal(goalId, monthlyContribution, options = {}) {
+  return request('POST', `/goals/${goalId}/simulate`, { monthly_contribution: monthlyContribution }, options);
 }
 
 export async function deleteGoal(goalId) {
@@ -496,15 +524,15 @@ export async function optimisePortfolio(profileId, assets, strategy) {
 }
 
 // ─── POST-TAX RETURN (WG-038: backend single source of truth) ────
-export async function computePostTaxReturn(instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource) {
+export async function computePostTaxReturn(instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource, options = {}) {
   return request('POST', '/tax/post-tax-return', {
     instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource,
-  });
+  }, options);
 }
 
-export async function computePostTaxReturnBatch(instruments, annualIncome, regime, userAge, incomeSource) {
+export async function computePostTaxReturnBatch(instruments, annualIncome, regime, userAge, incomeSource, inflationRate) {
   return request('POST', '/tax/post-tax-return/batch', {
-    instruments, annualIncome, regime, userAge, incomeSource,
+    instruments, annualIncome, regime, userAge, incomeSource, inflationRate,
   });
 }
 
@@ -514,8 +542,8 @@ const api = {
   setAuthToken, getAuthToken, clearAuthToken, clearUserSession,
   subscribeAuth, getAuthSnapshot,
   setUserInfo, getUserInfo,
-  buildProfile, getCurrentProfile, updateProfile, getRecommendations, getInstruments, rankInvestmentCandidates, getProjections,
-  runMonteCarlo, createGoal, getGoals, updateGoal, deleteGoal, healthCheck,
+  buildProfile, getCurrentProfile, getFinancialHealthScore, updateProfile, getRecommendations, getInstruments, rankInvestmentCandidates, getProjections, calculateStepUpProjection, compareInvestmentProjection, getCustomPortfolioProjection,
+  runMonteCarlo, runPortfolioMonteCarlo, createGoal, getGoals, updateGoal, simulateGoal, deleteGoal, healthCheck,
   getMarketRates, refreshMarketRates,
   sendChatMessage, getChatHistory, clearChatSession, rebalancePortfolio,
   updateRecommendationWeights, optimisePortfolio,

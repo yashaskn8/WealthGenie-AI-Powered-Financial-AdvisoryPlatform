@@ -4,7 +4,6 @@ Tests atomic writes, SHA256 checksums, backup snapshots, and corruption recovery
 """
 
 import json
-from pathlib import Path
 from rag.schema import TextChunk, ChunkMetadata
 from rag.vector_store.memory_vector_store import PersistentVectorStore
 

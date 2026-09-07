@@ -40,7 +40,7 @@ export const GoalForm = ({ onSubmitGoal, onCancel, loading }) => {
       goalName: goalName === 'Custom' ? customName : goalName,
       targetAmount: Number(targetAmount),
       targetDate,
-      currentSavings: Number(currentSavings),
+      currentSavings: Number(currentSavings) || 0,
       priority,
     });
   };
@@ -248,7 +248,7 @@ export const GoalForm = ({ onSubmitGoal, onCancel, loading }) => {
                 data-testid="goal-current-savings"
                 type="number" placeholder="e.g. 100000" value={currentSavings}
                 onChange={e => setCurrentSavings(e.target.value)}
-                style={inputStyle} min="0" required
+                style={inputStyle} min="0"
               />
             </div>
             <div>

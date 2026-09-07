@@ -23,9 +23,22 @@ from model.data.preprocessing import (
     prepare_synthetic_training_data,
     regenerate_synthetic_dataset_and_hash,
 )
-from store_factory import get_model_registry
+from model.serving.registry import registry
 
 logger = logging.getLogger(__name__)
+
+
+def _candidate_payload(active, metrics, notes):
+    return {
+        "model_architecture": "RandomForest",
+        "artifact_path": active["artifact_path"],
+        "training_data_hash": active["training_data_hash"],
+        "hyperparameters": active["hyperparameters"],
+        "reference_distributions": active["reference_distributions"],
+        "metrics": metrics,
+        "set_active": False,
+        "notes": notes,
+    }
 
 
 @pytest.fixture
@@ -122,7 +135,7 @@ def test_promotion_gate_rejects_inferior_candidate(client):
     Attempts to register/promote a candidate model with deliberately inferior metrics.
     Confirms the promotion gate rejects the request with HTTP 409 and clear reason.
     """
-    store = get_model_registry()
+    store = registry.get_version_registry()
     active_rf = store.get_active_model("RandomForest")
     assert active_rf is not None
 
@@ -131,20 +144,14 @@ def test_promotion_gate_rejects_inferior_candidate(client):
         "rule_approximation_fidelity": 0.70,
         "balanced_accuracy": 0.65,
         "macro_f1": 0.64,
-        "independent_cfp_benchmark_accuracy": 0.20,
     }
 
     # Register, shadow, and validate before the promotion gate evaluates it.
-    inferior_payload = {
-        "model_architecture": "RandomForest",
-        "artifact_path": active_rf["artifact_path"],  # valid file
-        "training_data_hash": active_rf["training_data_hash"],
-        "hyperparameters": active_rf["hyperparameters"],
-        "reference_distributions": active_rf["reference_distributions"],
-        "metrics": inferior_metrics,
-        "set_active": False,
-        "notes": "Deliberately degraded candidate for promotion gate testing",
-    }
+    inferior_payload = _candidate_payload(
+        active_rf,
+        inferior_metrics,
+        "Deliberately degraded candidate for promotion gate testing",
+    )
 
     reg_res = client.post("/model/registry/register", json=inferior_payload)
     assert reg_res.status_code == 201
@@ -167,28 +174,21 @@ def test_promotion_gate_allows_valid_candidate(client):
     Registers a candidate with equal or superior metrics (is_active: false),
     then promotes it via POST /model/registry/promote. Confirms success and activation.
     """
-    store = get_model_registry()
+    store = registry.get_version_registry()
     active_rf = store.get_active_model("RandomForest")
     assert active_rf is not None
 
-    # Superior metrics (fidelity 0.965 > active ~0.955)
+    # Equal evidence is sufficient and remains valid after baseline retraining.
     valid_metrics = {
-        "rule_approximation_fidelity": 0.965,
-        "balanced_accuracy": 0.880,
-        "macro_f1": 0.885,
-        "independent_cfp_benchmark_accuracy": 0.2526,
+        name: active_rf["metrics"][name]
+        for name in ("rule_approximation_fidelity", "balanced_accuracy", "macro_f1")
     }
 
-    reg_payload = {
-        "model_architecture": "RandomForest",
-        "artifact_path": active_rf["artifact_path"],
-        "training_data_hash": active_rf["training_data_hash"],
-        "hyperparameters": active_rf["hyperparameters"],
-        "reference_distributions": active_rf["reference_distributions"],
-        "metrics": valid_metrics,
-        "set_active": False,
-        "notes": "Genuinely superior candidate for promotion gate test",
-    }
+    reg_payload = _candidate_payload(
+        active_rf,
+        valid_metrics,
+        "Contract-equivalent candidate for promotion gate test",
+    )
 
     reg_res = client.post("/model/registry/register", json=reg_payload)
     assert reg_res.status_code == 201
@@ -215,17 +215,21 @@ def test_shadow_evaluation_mode(client):
     and checks /model/registry/shadow/summary to prove both models executed and
     logged agreement statistics without affecting user responses.
     """
-    store = get_model_registry()
-    versions = store.list_versions("RandomForest")
-    assert len(versions) >= 2
-
-    # Pick an inactive version as shadow candidate
-    inactive_version = next((v for v in versions if v.get("lifecycle_state") == "CANDIDATE"), None)
-    if not inactive_version:
-        inactive_version = versions[-1]
+    store = registry.get_version_registry()
+    active_rf = store.get_active_model("RandomForest")
+    metrics = {
+        name: active_rf["metrics"][name]
+        for name in ("rule_approximation_fidelity", "balanced_accuracy", "macro_f1")
+    }
+    reg_res = client.post(
+        "/model/registry/register",
+        json=_candidate_payload(active_rf, metrics, "Dedicated v4 shadow-evaluation candidate"),
+    )
+    assert reg_res.status_code == 201
+    candidate_id = reg_res.json()["version_id"]
 
     # 1. Configure shadow candidate
-    cfg_res = client.post("/model/registry/shadow/configure", json={"version_id": inactive_version["version_id"]})
+    cfg_res = client.post("/model/registry/shadow/configure", json={"version_id": candidate_id})
     assert cfg_res.status_code == 200
     assert cfg_res.json()["status"] == "configured"
 

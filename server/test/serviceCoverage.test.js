@@ -10,7 +10,7 @@ import { INSTRUMENT_PARAMS, buildRateLookup, getNominalRate, getVolatility, toMo
 import { fetchIndexStatistics, fetchMutualFundNAVs, checkFDRateStaleness } from '../services/marketDataService.js';
 import { checkMLHealth, getMLPrediction, getRuleBasedFallback } from '../services/mlClient.js';
 import { queryRAG } from '../services/ragClient.js';
-import { computeCAGR, generateProjections, lumpSumFV, realReturn, reverseSIPFromFV, sipFV, stepUpSipFV } from '../services/projectionEngine.js';
+import { computeCAGR, generatePortfolioProjection, generateProjectionComparison, generateProjections, lumpSumFV, realReturn, reverseSIPFromFV, sipFV, stepUpSipFV } from '../services/projectionEngine.js';
 import { calculatePostTaxReturn, calculatePostTaxReturnSafe } from '../services/postTaxCalculator.js';
 import { assessSuitabilityRisk, encodeRiskCategory, getRiskProfile } from '../services/riskProfiler.js';
 import { buildLlmFinancialContext, buildMlProfileInput } from '../services/recommendationProfile.js';
@@ -47,7 +47,10 @@ test('geminiService uses Gemini before Groq and falls back deterministically', a
     if (originalGroq === undefined) delete process.env.GROQ_API_KEY; else process.env.GROQ_API_KEY = originalGroq;
   });
 
-  const advisory = await generateAdvisory({ profile: llmProfile({ age: 32, monthlySavings: 20000 }), instruments: [] });
+  const advisory = await generateAdvisory({
+    profile: llmProfile({ age: 32, monthlySavings: 20000 }),
+    instruments: [], modelVersion: 'test-model-4.0.0', policyVersion: 'suitability-freeze-1.0.0',
+  });
   const goalAdvice = await getGoalAdvisory('Suggest one adjustment.', llmProfile({ age: 32, monthlySavings: 20000 }));
 
   assert.equal(advisory.text, 'Gemini response');
@@ -155,8 +158,8 @@ test('mlClient posts to enriched endpoint and falls back on service failure', as
     assert.equal(payload.liquid_savings, 50000);
     return { data: {
       primary: 'ETF', secondary: 'Debt_MF', tertiary: 'ELSS',
-      confidence_scores: { ETF: 0.7 }, decision_path: ['risk = Moderate'],
-      model_version: '4.0.0', feature_schema_version: 'recommendation-features-4.0.0', explanation: null,
+      confidence_scores: { Equity_MF: 0.05, ELSS: 0.05, ETF: 0.7, Debt_MF: 0.1, FD: 0.05, RBI_Bond: 0.05 }, decision_path: ['risk = Moderate'],
+      model_version: '4.0.0', dataset_version: '4.0.0', feature_schema_version: 'recommendation-features-4.0.0', explanation: null,
     } };
   };
   axios.get = async (url, config) => {
@@ -203,6 +206,8 @@ test('mlClient rule fallback produces suitable picks from the v4 feature contrac
   assert.equal(fallback.secondary, 'Hybrid_MF');
   assert.equal(fallback.fallback, true);
   assert.ok(Object.values(fallback.confidence_scores).every(Number.isFinite));
+  assert.deepEqual(Object.keys(fallback.confidence_scores).sort(), [fallback.primary, fallback.secondary, fallback.tertiary].sort());
+  assert.equal(fallback.confidence_scores.FD, undefined, 'unselected instruments must not receive invented fallback confidence');
 });
 
 test('mlClient reads the ML URL and API key at request time', async (t) => {
@@ -214,8 +219,8 @@ test('mlClient reads the ML URL and API key at request time', async (t) => {
     calls.push({ url, headers: config.headers });
     return { data: {
       primary: 'ETF', secondary: 'Debt_MF', tertiary: 'ELSS',
-      confidence_scores: { ETF: 0.7 }, decision_path: ['risk = Moderate'],
-      model_version: '4.0.0', feature_schema_version: 'recommendation-features-4.0.0', explanation: null,
+      confidence_scores: { Equity_MF: 0.05, ELSS: 0.05, ETF: 0.7, Debt_MF: 0.1, FD: 0.05, RBI_Bond: 0.05 }, decision_path: ['risk = Moderate'],
+      model_version: '4.0.0', dataset_version: '4.0.0', feature_schema_version: 'recommendation-features-4.0.0', explanation: null,
     } };
   };
   t.after(() => {
@@ -256,6 +261,60 @@ test('projectionEngine formulas are numerically stable and internally consistent
   assert.ok(computeCAGR(100000, lump, 5) > 0.09);
   assert.ok(realReturn(0.12, 0.06) > 0.05);
   assert.equal(projections.chartData.length, 2);
+
+  const comparison = generateProjectionComparison({
+    monthlyInvestment: 10000,
+    annualReturnRate: 0.12,
+    benchmarkRate: 0.03,
+    inflationRate: 0.06,
+    years: 10,
+  });
+  assert.equal(comparison.yearlyBreakdown.length, 10);
+  assert.equal(comparison.normalizedChart.length, 10);
+  assert.equal(comparison.totalInvested, 1_200_000);
+  assert.ok(comparison.investmentMaturity > comparison.benchmarkMaturity);
+  assert.ok(comparison.investmentReal > comparison.benchmarkReal);
+  assert.equal(comparison.assumptions.inflationRate, 0.06);
+  assert.equal(comparison.return_basis, 'PRE_TAX_NOMINAL_WITH_EXPLICIT_INFLATION_VIEW');
+  assert.throws(() => generateProjectionComparison({
+    monthlyInvestment: 10000,
+    annualReturnRate: 0.12,
+    benchmarkRate: 0.03,
+    inflationRate: 0.06,
+    years: 0,
+  }), /years must be an explicit integer/);
+});
+
+test('dashboard portfolio projection uses exact authorized weights and excludes property context', () => {
+  const projection = generatePortfolioProjection({
+    monthlyContribution: 20_000,
+    initialLumpSum: 100_000,
+    horizonYears: 5,
+    instruments: [
+      { id: 'equity', nominalReturn: 12, allocationWeight: 0.6 },
+      { id: 'debt', nominalReturn: 7, allocationWeight: 0.4 },
+    ],
+  });
+
+  assert.equal(projection.return_basis, 'PRE_TAX_NOMINAL');
+  assert.equal(projection.annual_step_up_rate, 0);
+  assert.equal(projection.initial_lump_sum, 100_000);
+  assert.equal(projection.total_invested, 1_300_000);
+  assert.equal(projection.performance_data[0].average, 100_000);
+  assert.equal(projection.performance_data.at(-1).average, projection.total_projected);
+  assert.equal(projection.monthly_timeline.at(-1).month, 60);
+  assert.deepEqual(projection.instrument_monthly_allocations, { equity: 12_000, debt: 8_000 });
+  assert.equal(
+    Object.values(projection.instrument_projected_values).reduce((sum, value) => sum + value, 0),
+    projection.total_projected,
+  );
+  assert.equal('sold_property_proceeds' in projection, false);
+  assert.throws(() => generatePortfolioProjection({
+    monthlyContribution: 20_000,
+    initialLumpSum: 0,
+    horizonYears: 5,
+    instruments: [{ id: 'equity', nominalReturn: 12, allocationWeight: 0.9 }],
+  }), /weights must total 1/);
 });
 
 test('riskProfiler classifies profiles and encodes categories', () => {
@@ -269,9 +328,17 @@ test('riskProfiler classifies profiles and encodes categories', () => {
     liquidSavings: 10000, emergencyFundMonths: 1, emiBurdenPct: 70,
     financialDependents: 4, riskTolerance: 'Conservative', investmentHorizonYears: 1,
   }));
+  const preferenceCeiling = getRiskProfile(canonicalProfile({
+    age: 25, monthlyTakeHome: 400000, monthlySavings: 120000,
+    liquidSavings: 1000000, emergencyFundMonths: 12,
+    riskTolerance: 'Conservative', investmentHorizonYears: 30,
+  }));
 
   assert.equal(aggressive.category, 'Aggressive');
   assert.equal(conservative.category, 'Conservative');
+  assert.equal(preferenceCeiling.capacityRisk, 'Aggressive');
+  assert.equal(preferenceCeiling.category, 'Conservative');
+  assert.equal(preferenceCeiling.riskScore, preferenceCeiling.finalLevel);
   assert.equal(encodeRiskCategory('Moderate-Aggressive'), 3);
   assert.throws(() => encodeRiskCategory('Unknown'), /Unknown risk category/);
 });
@@ -311,8 +378,8 @@ test('ragClient and mlClient propagate verified X-Verified-User-Id header downst
       mlCapturedHeaders = config?.headers;
       return { data: {
         primary: 'ETF', secondary: 'Debt_MF', tertiary: 'ELSS',
-        confidence_scores: { ETF: 0.7 }, decision_path: ['risk = Moderate'],
-        model_version: '4.0.0', feature_schema_version: 'recommendation-features-4.0.0', explanation: null,
+        confidence_scores: { Equity_MF: 0.05, ELSS: 0.05, ETF: 0.7, Debt_MF: 0.1, FD: 0.05, RBI_Bond: 0.05 }, decision_path: ['risk = Moderate'],
+        model_version: '4.0.0', dataset_version: '4.0.0', feature_schema_version: 'recommendation-features-4.0.0', explanation: null,
       } };
     }
     return { data: {} };

@@ -46,20 +46,42 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     await page.locator('.popup-card button', { hasText: 'OK' }).click();
     await expect(page).toHaveURL(/\/profile$/);
 
-    await page.locator('.pf-field', { hasText: 'Monthly Take-Home' }).locator('input').fill('90000');
-    await page.locator('.pf-field', { hasText: 'Monthly Savings Capacity' }).locator('input').fill('25000');
-    await page.locator('.pf-field', { hasText: 'Age' }).locator('input').fill('34');
-    await page.locator('.pf-field', { hasText: 'Liquid Savings' }).locator('input').fill('300000');
-    await page.locator('.pf-field', { hasText: 'Emergency Fund (Months)' }).locator('input').fill('6');
+    const profileScrollRegion = page.getByTestId('profile-scroll-region');
+    const scrollMetrics = await profileScrollRegion.evaluate(element => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      overflowY: getComputedStyle(element).overflowY,
+    }));
+    expect(scrollMetrics.overflowY).toBe('auto');
+    expect(scrollMetrics.scrollHeight).toBeGreaterThan(scrollMetrics.clientHeight);
+    await profileScrollRegion.evaluate(element => element.scrollTo(0, element.scrollHeight));
+    await expect(page.getByTestId('profile-save')).toBeVisible();
+
+    await page.getByTestId('profile-input-monthly_take_home').fill('90000');
+    await page.getByTestId('profile-input-monthly_savings').fill('25000');
+    await page.getByTestId('profile-input-age').fill('34');
+    await page.getByTestId('profile-input-investment_horizon_years').fill('12');
+    await page.getByRole('button', { name: 'Moderate', exact: true }).click();
+    await page.getByRole('button', { name: 'Wealth Growth', exact: true }).click();
 
     const profileCreatePromise = page.waitForResponse(apiResponse('POST', '/api/profile/build'));
     const recommendationPromise = page.waitForResponse(apiResponse('POST', '/api/recommend'), { timeout: 90_000 });
-    await page.locator('button.btn-save-continue').click();
+    await page.getByTestId('profile-save').click();
 
     const profileCreate = await profileCreatePromise;
     expect(profileCreate.status()).toBe(201);
     const profile = await profileCreate.json();
     expect(profile.profileId).toMatch(/^[0-9a-f]{24}$/i);
+    expect(profile).toMatchObject({
+      sold_property_proceeds: null,
+      has_lump_sum: null,
+      lump_sum_amount: null,
+      liquid_savings: null,
+      emi_burden_pct: null,
+      financial_dependents: null,
+      emergency_fund_months: null,
+      final_suitability_risk: 'Conservative',
+    });
 
     const recommendation = await recommendationPromise;
     expect(recommendation.status()).toBe(200);
@@ -67,21 +89,35 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     expect(String(advisory.recommendationId)).toMatch(/^[0-9a-f]{24}$/i);
     expect(String(advisory.audit_id)).toMatch(/^[0-9a-f]{24}$/i);
     expect(advisory.instruments.length).toBeGreaterThan(0);
+    expect(advisory.ml_fallback).toBe(true);
+    expect(advisory.optional_profile_fields_unknown).toEqual([
+      'soldPropertyProceeds', 'hasLumpSum', 'lumpSumAmount', 'liquidSavings', 'emiBurdenPct',
+      'financialDependents', 'emergencyFundMonths',
+    ]);
+    expect(advisory.ml_input_fields_unknown).toEqual([
+      'hasLumpSum', 'liquidSavings', 'emiBurdenPct', 'financialDependents', 'emergencyFundMonths',
+    ]);
     await expect(page.locator('aside.sidebar')).toBeVisible();
 
     await page.getByTestId('nav-profile').click();
-    await page.getByTestId('profile-edit').click();
     await page.getByTestId('profile-input-monthly_savings').fill('27000');
     const profileUpdatePromise = page.waitForResponse(apiResponse('PUT', `/api/profile/${profile.profileId}`));
+    const refreshedRecommendationPromise = page.waitForResponse(apiResponse('POST', '/api/recommend'), { timeout: 90_000 });
     await page.getByTestId('profile-save').click();
     const profileUpdate = await profileUpdatePromise;
     expect(profileUpdate.status()).toBe(200);
     const updatedProfile = await profileUpdate.json();
     expect(updatedProfile.monthly_savings).toBe(27000);
-    await expect(page.getByText('Profile updated successfully!')).toBeVisible();
+    await expect(page.getByRole('status')).toContainText(
+      'Profile saved. Personalized outputs will refresh.',
+    );
+    const refreshedRecommendation = await refreshedRecommendationPromise;
+    expect(refreshedRecommendation.status()).toBe(200);
+    const refreshedAdvisory = await refreshedRecommendation.json();
+    expect(String(refreshedAdvisory.recommendationId)).toMatch(/^[0-9a-f]{24}$/i);
 
     await page.getByTestId('nav-goal-planner').click();
-    await page.getByRole('button', { name: /Create Target Goal/ }).click();
+    await page.getByRole('button', { name: /Add custom goal/ }).click();
     await expect(page.getByTestId('goal-form')).toBeVisible();
     await page.getByRole('button', { name: /Emergency Fund/ }).click();
     await page.getByTestId('goal-target-amount').fill('600000');
@@ -103,12 +139,16 @@ test.describe('real WealthGenie dependency lifecycle', () => {
       return response.request().method() === 'GET' && url.pathname === '/api/tax/compare';
     });
     await page.getByTestId('nav-tax-optimizer').click();
+    await page.getByLabel('Gross annual taxable income').fill('1080000');
+    await page.getByLabel('Income source').selectOption('salary');
+    await page.getByRole('button', { name: 'Calculate from explicit tax facts' }).click();
     const taxResponse = await taxPromise;
     expect(taxResponse.status()).toBe(200);
     const tax = await taxResponse.json();
     expect(tax.new_regime.tax).toBeGreaterThanOrEqual(0);
     expect(tax.old_regime.tax).toBeGreaterThanOrEqual(0);
-    await expect(page.getByText('Total Income Tax')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Server calculation' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Lower calculated tax' })).toBeVisible();
 
     const cookies = await context.cookies();
     expect(cookies.find(cookie => cookie.name === 'wg_session')).toMatchObject({ httpOnly: true });

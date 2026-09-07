@@ -3,11 +3,15 @@ import { sipFV, lumpSumFV } from './projectionEngine.js';
 import { reverseSIP } from './monteCarloEngine.js';
 import { computeTax } from './taxEngine.js';
 import { computeXIRR } from './xirrCalculator.js';
-import { solveMinVariance, solveMaxSharpe, solveRiskParity, computeRebalance } from './portfolioEngine.js';
+import {
+  solveMinVariance, solveMaxSharpe, solveRiskParity, computeRebalance, evaluatePortfolio,
+} from './portfolioEngine.js';
 import { PrometheusMetrics } from './metricsCollector.js';
 import { INSTRUMENT_PARAMS } from './instrumentConstants.js';
 import { buildRecommendationProfile } from './recommendationProfile.js';
-import { assertPortfolioSuitable, enforceAllocationTargets } from './RecommendationPipeline.js';
+import {
+  assertPortfolioSuitable, enforceAllocationTargets, resolveConcentrationCap,
+} from './RecommendationPipeline.js';
 
 /**
  * WealthGenie Centralized Financial Tool Registry
@@ -34,7 +38,10 @@ function assertProjectionWithinProfile(context, { monthlyInvestment, principal, 
   if (monthlyInvestment !== undefined && monthlyInvestment > profile.monthlySavings) {
     throw new Error(`monthlyInvestment exceeds Financial Profile capacity of ${profile.monthlySavings}`);
   }
-  const deployableLumpSum = profile.hasLumpSum ? profile.lumpSumAmount : 0;
+  if (principal !== undefined && profile.hasLumpSum !== true) {
+    throw new Error('principal requires an explicitly declared deployable lump sum in the Financial Profile');
+  }
+  const deployableLumpSum = profile.hasLumpSum === true ? profile.lumpSumAmount : null;
   if (principal !== undefined && principal > deployableLumpSum) {
     throw new Error(`principal exceeds declared deployable lump sum of ${deployableLumpSum}`);
   }
@@ -48,6 +55,21 @@ function calculationClassification(context) {
   return context?.profile
     ? 'NON_RECOMMENDATION_PROFILE_CONSTRAINED_WHAT_IF'
     : 'NON_RECOMMENDATION_WHAT_IF';
+}
+
+function assertTargetConcentration(targetAllocation) {
+  const grouped = new Map();
+  for (const [key, weight] of Object.entries(targetAllocation)) {
+    const cap = resolveConcentrationCap({ id: key, type: key, name: key });
+    if (cap) grouped.set(cap.key, (grouped.get(cap.key) || 0) + Number(weight));
+  }
+  for (const [key, total] of grouped.entries()) {
+    const sample = Object.keys(targetAllocation).find(id => resolveConcentrationCap({ id, type: id, name: id })?.key === key);
+    const cap = resolveConcentrationCap({ id: sample, type: sample, name: sample });
+    if (cap && total > cap.maxPct + 0.0001) {
+      throw new Error(`${key} allocation exceeds the ${cap.maxPct}% concentration cap`);
+    }
+  }
 }
 
 /**
@@ -321,10 +343,12 @@ class ToolRegistry {
           id: asset, type: asset, name: INSTRUMENT_PARAMS[asset].name,
           score: Number(result.weights[asset]) * 100,
         })));
+        const finalWeights = Object.fromEntries(capped.map(asset => [asset.id, asset.allocationWeight]));
+        const metrics = evaluatePortfolio(assets, nominalReturns, finalWeights);
         return {
           strategy,
-          ...result,
-          weights: Object.fromEntries(capped.map(asset => [asset.id, asset.allocationWeight])),
+          weights: finalWeights,
+          ...metrics,
           classification: calculationClassification(context),
           returnBasis: 'PRE_TAX_NOMINAL',
         };
@@ -346,6 +370,7 @@ class ToolRegistry {
         const profile = canonicalContextProfile(context);
         if (profile) {
           assertPortfolioSuitable(profile, Object.entries(target_allocation).filter(([, value]) => value > 0).map(([key]) => key));
+          assertTargetConcentration(target_allocation);
         }
         const total = Object.values(target_allocation).reduce((sum, weight) => sum + weight, 0);
         if (Math.abs(total - 100) > 0.01) throw new Error('target_allocation must sum to exactly 100');

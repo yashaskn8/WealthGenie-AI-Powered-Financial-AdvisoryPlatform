@@ -13,6 +13,7 @@ import taxRoutes from '../routes/tax.js';
 import chatRoutes from '../routes/chatRoutes.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import { withServer, jsonRequest as jsonFetch } from '../test-utils/httpTestUtils.js';
+import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
 
 process.env.JWT_SECRET = 'route-coverage-test-secret';
 process.env.NODE_ENV = 'test';
@@ -51,7 +52,7 @@ test('auth route rejects invalid register payload before database access', async
 test('protected route files enforce JWT before service/database work', async () => {
   await withServer(buildApp(), async (baseUrl) => {
     const checks = [
-      ['profile', 'POST', '/api/profile/build', { monthly_income: 100000, age: 35, monthly_savings: 20000 }],
+      ['profile', 'POST', '/api/profile/build', canonicalProfilePayload()],
       ['recommend', 'POST', '/api/recommend', { profileId: '65b000000000000000000001' }],
       ['projection', 'POST', '/api/projection', { profileId: '65b000000000000000000001', monthly_investment: 10000 }],
       ['montecarlo', 'POST', '/api/montecarlo/montecarlo', { instrument: 'ETF', monthly_investment: 10000, years: 5 }],
@@ -87,7 +88,12 @@ test('tax route computes and compares regimes without authentication', async () 
 
     assert.equal(compute.response.status, 200);
     assert.ok(Number.isFinite(compute.body.taxAmount));
-    assert.equal(compare.response.status, 200);
-    assert.ok(['new', 'old'].includes(compare.body.recommended_regime));
+      assert.equal(compare.response.status, 200);
+      assert.ok(['new', 'old'].includes(compare.body.recommended_regime));
+      assert.equal(compare.body.calculation_classification, 'SEPARATE_TAX_WHAT_IF');
+      assert.ok(Array.isArray(compare.body.new_regime.slab_breakdown));
+      assert.ok(Array.isArray(compare.body.old_regime.slab_breakdown));
+      assert.equal(compare.body.deduction_limits.section80C, 150000);
+      assert.ok(Number.isFinite(compare.body.optimized_old_regime_tax));
   });
 });

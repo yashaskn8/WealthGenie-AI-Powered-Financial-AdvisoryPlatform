@@ -10,6 +10,8 @@ import {
   buildRecommendationProfile,
   buildRecommendationProfileHash,
   deriveRecommendationMetrics,
+  getMissingMlProfileFields,
+  getUnknownOptionalProfileFields,
   toProfileApiResponse,
   toProfilePersistence,
 } from '../services/recommendationProfile.js';
@@ -17,7 +19,11 @@ import { assessSuitabilityRisk } from '../services/riskProfiler.js';
 import { assertPortfolioSuitable, filterEligible } from '../services/RecommendationPipeline.js';
 import { financialProfileSchema, customGoalSchema } from '../validation/financialSchemas.js';
 import FinancialProfile from '../models/FinancialProfile.js';
-import { planFinancialProfileMigration, NEVER_INFER_FROM } from '../scripts/migrateFinancialProfilesV4.js';
+import {
+  LEGACY_FIELDS_TO_UNSET,
+  NEVER_INFER_FROM,
+  planFinancialProfileMigration,
+} from '../scripts/migrateFinancialProfilesV4.js';
 import { generateProjections, computeCAGR } from '../services/projectionEngine.js';
 import { getInstrumentVolatility, runMonteCarloWithGoal } from '../services/monteCarloEngine.js';
 import { calculatePostTaxReturn } from '../services/postTaxCalculator.js';
@@ -34,21 +40,56 @@ test('the recommendation boundary returns exactly the frozen PICK allowlist', ()
   assert.equal('currentPortfolio' in output, false);
 });
 
-test('missing facts, conflicting aliases, and debt-amount aliases fail closed', () => {
+test('missing core facts and conflicting aliases fail closed while optional facts remain unknown', () => {
   assert.throws(() => buildRecommendationProfile({ monthlyTakeHome: 100000 }), { code: 'RECOMMENDATION_PROFILE_INVALID' });
   assert.throws(() => buildRecommendationProfile({
     ...canonicalProfile(), monthly_take_home: 90000,
   }), /conflicting aliases for monthlyTakeHome/);
   const { emiBurdenPct: _removed, ...withoutRatio } = canonicalProfile();
-  assert.throws(() => buildRecommendationProfile({ ...withoutRatio, existing_debt: 10 }), /emiBurdenPct is required/);
+  const incomplete = buildRecommendationProfile({ ...withoutRatio, existing_debt: 10 });
+  assert.equal(incomplete.emiBurdenPct, null, 'debt amounts must not be guessed as EMI percentages');
+  const suitability = assessSuitabilityRisk(incomplete);
+  assert.equal(suitability.finalLevel, 1);
+  assert.ok(suitability.reasonCodes.includes('CAPACITY_FACT_UNKNOWN_EMI_BURDEN_PCT'));
+  assert.deepEqual(getMissingMlProfileFields(incomplete), ['emiBurdenPct']);
+  assert.deepEqual(getUnknownOptionalProfileFields(incomplete), ['emiBurdenPct']);
+  assert.throws(() => buildMlProfileInput(incomplete, suitability), /ML input unavailable/);
+  const { monthlyTakeHome: _takeHome, ...withoutTakeHome } = canonicalProfile();
+  assert.throws(
+    () => buildRecommendationProfile({ ...withoutTakeHome, income: 100000 }),
+    /monthlyTakeHome is required/,
+    'ambiguous plain income must not be treated as monthly take-home',
+  );
 });
 
 test('transport validation is exact, strict, and equivalent to the boundary', () => {
   const valid = canonicalProfilePayload();
   assert.equal(financialProfileSchema.validate(valid, { abortEarly: false }).error, undefined);
+  assert.equal(financialProfileSchema.validate({
+    ...valid, monthly_take_home: 1, monthly_savings: 0.5,
+  }, { abortEarly: false }).error, undefined);
   assert.ok(financialProfileSchema.validate({ ...valid, annualIncome: 1200000 }).error);
   assert.ok(financialProfileSchema.validate({ ...valid, investment_horizon_years: 31 }).error);
   assert.ok(financialProfileSchema.validate({ ...valid, monthly_savings: valid.monthly_take_home }).error);
+  const coreOnly = {
+    monthly_take_home: 100000,
+    monthly_savings: 20000,
+    age: 35,
+    risk_tolerance: 'Moderate',
+    investment_goals: ['Wealth Growth'],
+    investment_horizon_years: 10,
+  };
+  assert.equal(financialProfileSchema.validate(coreOnly, { abortEarly: false }).error, undefined);
+  assert.equal(financialProfileSchema.validate({
+    ...coreOnly,
+    sold_property_proceeds: null,
+    has_lump_sum: null,
+    lump_sum_amount: null,
+    liquid_savings: null,
+    emi_burden_pct: null,
+    financial_dependents: null,
+    emergency_fund_months: null,
+  }, { abortEarly: false }).error, undefined);
 });
 
 test('new persistence and API representations do not duplicate legacy financial sources', () => {
@@ -67,19 +108,58 @@ test('new persistence and API representations do not duplicate legacy financial 
   ].sort());
 });
 
-test('model validation requires every canonical fact and the schema version', async () => {
+test('model validation requires core facts and schema version while preserving optional nulls', async () => {
   const valid = new FinancialProfile({
     userId: new mongoose.Types.ObjectId(),
     ...toProfilePersistence(canonicalProfile(), assessSuitabilityRisk(canonicalProfile())),
   });
   await valid.validate();
+  const incompleteCanonical = buildRecommendationProfile({
+    monthlyTakeHome: 100000,
+    monthlySavings: 20000,
+    age: 35,
+    riskTolerance: 'Moderate',
+    investmentGoals: ['Wealth Growth'],
+    investmentHorizonYears: 10,
+  });
+  const incompleteSuitability = assessSuitabilityRisk(incompleteCanonical);
+  const optionalNulls = new FinancialProfile({
+    userId: new mongoose.Types.ObjectId(),
+    ...toProfilePersistence(incompleteCanonical, incompleteSuitability),
+  });
+  await optionalNulls.validate();
+  assert.equal(optionalNulls.liquidSavings, null);
+  assert.equal(optionalNulls.finalSuitabilityRisk, 'Conservative');
   const invalid = new FinancialProfile({ userId: new mongoose.Types.ObjectId(), monthlyTakeHome: 100000 });
   await assert.rejects(invalid.validate(), /required/);
+});
+
+test('model persistence recomputes suitability instead of trusting supplied derived fields', async () => {
+  const profile = new FinancialProfile({
+    userId: new mongoose.Types.ObjectId(),
+    ...canonicalProfile(),
+    recommendationProfileVersion: FINANCIAL_PROFILE_SCHEMA_VERSION,
+    riskCapacityScore: 100,
+    riskCapacityLevel: 5,
+    finalSuitabilityRisk: 'Aggressive',
+    suitabilityReasonCodes: ['FORGED'],
+  });
+  await profile.validate();
+  const expected = assessSuitabilityRisk(canonicalProfile());
+  assert.equal(profile.riskCapacityScore, expected.capacityScore);
+  assert.equal(profile.riskCapacityLevel, expected.capacityLevel);
+  assert.equal(profile.finalSuitabilityRisk, expected.finalRisk);
+  assert.deepEqual(profile.suitabilityReasonCodes, expected.reasonCodes);
 });
 
 test('property proceeds never become deployable initial capital', () => {
   const profile = canonicalProfile({ soldPropertyProceeds: 8_000_000 });
   assert.equal(deriveRecommendationMetrics(profile).deployableLumpSum, 0);
+  assert.equal(
+    assessSuitabilityRisk(profile).capacityScore,
+    assessSuitabilityRisk(canonicalProfile({ soldPropertyProceeds: 0 })).capacityScore,
+    'sold-property proceeds cannot increase risk capacity',
+  );
   assert.equal(buildProfileGroundedSimulation(profile, { monthlyInvestment: 10000, years: 5 }).initialCapital, 0);
   const declared = canonicalProfile({
     soldPropertyProceeds: 8_000_000, hasLumpSum: true, lumpSumAmount: 250000,
@@ -107,7 +187,7 @@ test('stated risk preference is a hard ceiling and capacity may only reduce it',
 
 test('unknown eligibility and unknown portfolio instruments are explicit exclusions', () => {
   const instrument = {
-    id: 'known', name: 'Known', riskLevel: 1, expectedReturn: 7, liquidityScore: 4,
+    id: 'known', type: 'FD', name: 'Known', riskLevel: 1, expectedReturn: 7, liquidityScore: 4,
     expenseRatio: 0.001, goalTags: ['Wealth Growth'], idealHorizon: { min: 1, max: 30 }, lockIn: 0,
   };
   const result = filterEligible([instrument], canonicalProfile(), 3);
@@ -150,6 +230,8 @@ test('migration uses only equivalent aliases and refuses to guess from forbidden
   });
   assert.equal(ready.status, 'ready');
   assert.equal(ready.set.recommendationProfileVersion, FINANCIAL_PROFILE_SCHEMA_VERSION);
+  assert.equal(ready.unset.monthly_income, '');
+  assert.equal(ready.unset.existing_debt_emi_ratio_pct, '');
   const blocked = planFinancialProfileMigration({
     _id: new mongoose.Types.ObjectId(), annualIncome: 1200000, existing_debt: 10,
     goal_type: 'wealth-building', investableAmount: 20000,
@@ -157,6 +239,9 @@ test('migration uses only equivalent aliases and refuses to guess from forbidden
   assert.equal(blocked.status, 'manual_remediation_required');
   assert.ok(NEVER_INFER_FROM.every(field => typeof field === 'string'));
   assert.ok(blocked.ignoredNonEquivalentFields.includes('annualIncome'));
+  for (const retired of LEGACY_FIELDS_TO_UNSET) {
+    assert.equal(FinancialProfile.schema.path(retired), undefined, `${retired} must not remain a schema path`);
+  }
 });
 
 test('custom goal transport remains separate and profile-bound', () => {
@@ -203,4 +288,22 @@ test('agent tools label what-if calculations and enforce profile caps', async ()
   });
   assert.equal(tax.success, true);
   assert.equal(tax.result.classification, 'SEPARATE_TAX_WHAT_IF');
+
+  const conservativeContext = { profile: canonicalProfile({ riskTolerance: 'Conservative' }) };
+  const unsafeOptimiser = await FinancialToolRegistry.executeTool('portfolio_optimizer', {
+    strategy: 'max_sharpe', assets: ['Equity_MF', 'Debt_MF'],
+  }, conservativeContext);
+  assert.equal(unsafeOptimiser.success, false);
+  assert.match(unsafeOptimiser.error, /outside the profile suitability boundary/);
+  const unsafeRebalance = await FinancialToolRegistry.executeTool('rebalance_calculator', {
+    current_allocation: { FD: 100000 }, target_allocation: { Equity_MF: 100 },
+    threshold: 2, partial_ratio: 1, holding_months: 24,
+  }, conservativeContext);
+  assert.equal(unsafeRebalance.success, false);
+
+  const ungroundedOptimiser = await FinancialToolRegistry.executeTool('portfolio_optimizer', {
+    strategy: 'min_variance', assets: ['Equity_MF', 'Debt_MF'],
+  });
+  assert.equal(ungroundedOptimiser.success, true);
+  assert.equal(ungroundedOptimiser.result.classification, 'NON_RECOMMENDATION_WHAT_IF');
 });

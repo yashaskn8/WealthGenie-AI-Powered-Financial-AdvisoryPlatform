@@ -4,7 +4,7 @@ Computes comprehensive classification metrics, MCC, Balanced Accuracy, Top-k Acc
 """
 
 import time
-from typing import Dict, Any, Tuple, List, Optional
+from typing import Dict, Any, List
 import numpy as np
 import torch
 from sklearn.metrics import (
@@ -16,7 +16,7 @@ from sklearn.metrics import (
     classification_report,
 )
 
-from model.config import ArtifactPaths, get_device, PyTorchModelConfig
+from model.config import get_device
 from model.data.preprocessing import FeaturePreprocessor
 
 

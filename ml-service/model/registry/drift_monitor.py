@@ -82,6 +82,16 @@ class InferenceBuffer:
         with self._lock:
             return len(self._buffer)
 
+    def discard_oldest(self, count: int) -> int:
+        """Discard only an evaluated prefix while preserving concurrent arrivals."""
+        if not isinstance(count, int) or count < 0:
+            raise ValueError("count must be a non-negative integer")
+        with self._lock:
+            removed = min(count, len(self._buffer))
+            for _ in range(removed):
+                self._buffer.popleft()
+            return removed
+
 
 # Singleton buffer instance
 inference_buffer = InferenceBuffer(capacity=2000)

@@ -36,20 +36,21 @@
   },
   "metric_reframe": {
     "reframed_metric_name": "Suitability-Policy Approximation Fidelity",
-    "policy_approximation_fidelity_random_forest": 0.528,
+    "policy_approximation_fidelity_random_forest": 0.991,
     "outcome_accuracy_claimed": false
   },
   "feature_ablation_impact": {
     "goal_tax_saving": 0.2115,
+    "goal_emergency_fund": 0.211,
     "risk_tolerance_encoded": 0.1135,
-    "investment_horizon_years": 0.0575,
-    "final_suitability_risk_encoded": 0.0125,
-    "emergency_fund_months": 0.003,
-    "risk_capacity_score": 0.0015,
+    "final_suitability_risk_encoded": 0.0785,
+    "investment_horizon_years": 0.0745,
+    "emergency_fund_months": 0.0725,
+    "emergency_fund_gap_months": 0.0265,
+    "risk_capacity_score": 0.0085,
+    "goal_wealth_growth": 0.0015,
     "age": 0.001,
     "financial_dependents": 0.001,
-    "emergency_fund_gap_months": 0.001,
-    "goal_wealth_growth": 0.0005,
     "monthly_take_home": 0.0,
     "monthly_savings": 0.0,
     "savings_rate": 0.0,
@@ -57,12 +58,11 @@
     "deployable_lump_sum": -0.0005,
     "liquidity_months": -0.0005,
     "liquid_savings": -0.001,
-    "goal_retirement": -0.0015,
-    "goal_emergency_fund": -0.0025
+    "goal_retirement": -0.0015
   },
   "noise_robustness": {
-    "noise_std_5pct_accuracy": 0.521,
-    "noise_std_10pct_accuracy": 0.51,
-    "noise_std_20pct_accuracy": 0.4965
+    "noise_std_5pct_accuracy": 0.979,
+    "noise_std_10pct_accuracy": 0.9655,
+    "noise_std_20pct_accuracy": 0.9345
   }
 }

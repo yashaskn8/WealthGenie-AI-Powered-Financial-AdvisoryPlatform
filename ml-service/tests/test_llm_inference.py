@@ -8,7 +8,6 @@ from fastapi.testclient import TestClient
 
 from llm.inference.conversation import ConversationHistory
 from llm.inference.tools import ToolCallingEngine
-from llm.schema import ChatMessage
 
 
 def test_conversation_history_management():
@@ -88,11 +87,11 @@ def test_tax_tool_golden_vector_parity():
         {"id": "GV-4", "income": 2500000, "regime": "new", "deductions": {}, "source": "salary", "expected_tax": 319800, "expected_taxable": 2425000},
         {"id": "GV-5", "income": 550000, "regime": "old", "deductions": {}, "source": "salary", "expected_tax": 0, "expected_taxable": 500000},
         {"id": "GV-6", "income": 550100, "regime": "old", "deductions": {}, "source": "salary", "expected_tax": 13021, "expected_taxable": 500100},
-        {"id": "GV-7", "income": 2500000, "regime": "old", "deductions": {"section80C": 150000, "section80D_self": 25000, "section80D_parents": 25000, "nps80CCD1B": 50000, "homeLoanInterest": 200000}, "source": "salary", "expected_tax": 429000, "expected_taxable": 2000000},
+        {"id": "GV-7", "income": 2500000, "regime": "old", "deductions": {"section80C": 150000, "section80D_self": 25000, "section80D_parents": 25000, "parents_senior": False, "age": 40, "nps80CCD1B": 50000, "homeLoanInterest": 200000}, "source": "salary", "expected_tax": 429000, "expected_taxable": 2000000},
         {"id": "GV-8", "income": 8000000, "regime": "new", "deductions": {}, "source": "salary", "expected_tax": 2239380, "expected_taxable": 7925000},
         {"id": "GV-9", "income": 5100000, "regime": "new", "deductions": {}, "source": "salary", "expected_tax": 1149200, "expected_taxable": 5025000},
         {"id": "GV-10", "income": 60000000, "regime": "old", "deductions": {}, "source": "salary", "expected_tax": 25357878, "expected_taxable": 59950000},
-        {"id": "GV-11", "income": 1800000, "regime": "new", "deductions": {"basicSalary": 900000, "nps80CCD2": 90000, "section80D_parents": 50000, "parents_senior": True}, "source": "salary", "expected_tax": 132080, "expected_taxable": 1635000},
+        {"id": "GV-11", "income": 1800000, "regime": "new", "deductions": {"basicSalary": 900000, "isGovtEmployee": False, "nps80CCD2": 90000, "section80D_parents": 50000, "parents_senior": True, "age": 40}, "source": "salary", "expected_tax": 132080, "expected_taxable": 1635000},
     ]
 
     for v in vectors:
@@ -105,6 +104,32 @@ def test_tax_tool_golden_vector_parity():
         assert res.success, f"Failed on {v['id']}: {res.result}"
         assert res.result["taxable_income"] == v["expected_taxable"], f"{v['id']} taxable income mismatch: {res.result['taxable_income']} vs {v['expected_taxable']}"
         assert res.result["net_tax_liability"] == v["expected_tax"], f"{v['id']} tax liability mismatch: {res.result['net_tax_liability']} vs {v['expected_tax']}"
+
+
+@pytest.mark.parametrize("arguments, expected_error", [
+    ({"annual_income": 1800000, "regime": "new"}, "income_source"),
+    ({"annual_income": 1800000, "income_source": "salary"}, "regime"),
+    ({"annual_income": 1800000, "taxable_income": 1725000, "regime": "new", "income_source": "salary"}, "exactly one"),
+    ({"annual_income": 1800000, "regime": "new", "income_source": "salary", "deductions": {"nps80CCD2": 90000}}, "basic_salary"),
+    ({"annual_income": 1800000, "regime": "old", "income_source": "salary", "deductions": {"section80D_self": 25000}}, "age"),
+    ({"taxable_income": 1200000, "regime": "new", "fiscal_year": "FY2099-00"}, "not verified"),
+])
+def test_tax_tool_rejects_hidden_or_conflicting_assumptions(arguments, expected_error):
+    result = ToolCallingEngine().execute_tool("calculate_tax_rebate", arguments)
+    assert result.success is False
+    assert expected_error in result.result["error"]
+
+
+def test_financial_tools_are_explicitly_non_recommendation_calculations():
+    engine = ToolCallingEngine()
+    sip = engine.execute_tool("calculate_sip", {
+        "monthly_investment": 10000, "rate_pct": 12.0, "years": 10,
+    })
+    tax = engine.execute_tool("calculate_tax_rebate", {
+        "taxable_income": 600000, "regime": "new",
+    })
+    assert sip.result["classification"] == "NON_RECOMMENDATION_WHAT_IF"
+    assert tax.result["classification"] == "SEPARATE_TAX_WHAT_IF"
 
 
 def test_tool_calling_engine_unknown_tool():

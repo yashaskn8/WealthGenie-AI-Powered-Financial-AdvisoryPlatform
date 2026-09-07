@@ -7,9 +7,10 @@ import GenieChat from './components/GenieChat';
 import ErrorBoundary from './components/ErrorBoundary';
 import * as api from './services/api';
 import { useAuth } from './context/AuthContext';
-import { assertKnownBackendInstrumentTypes, backendToLocalInstrument } from './utils/instrumentTypeMap';
+import { assertKnownBackendInstrumentTypes } from './utils/instrumentTypeMap';
 import { investmentDatabase } from './investmentDatabase';
 import { financialProfileKey } from './utils/financialProfile';
+import { assertBackendRecommendationInstrument } from './utils/recommendationPresentation';
 
 // ── Lazy-loaded page components (code-split for faster initial load) ──
 const GoalTracker = lazy(() => import('./components/GoalTracker'));
@@ -96,39 +97,44 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
 
     assertKnownBackendInstrumentTypes(backendRecs.instruments?.map(bi => bi.type), 'recommendation merge');
 
-    const totalSavings = Number(userProfile.monthly_savings);
-
     // Treat backend response as the single source of truth for order, ranking, and allocations.
     // Map over backend instruments directly to preserve their exact order and allocations.
-    let merged = (backendRecs.instruments || []).map((bi) => {
-      const localId = backendToLocalInstrument(bi.type);
-      
+    const merged = (backendRecs.instruments || []).map((bi) => {
+      assertBackendRecommendationInstrument(bi);
+
       // Look up full display attributes from the investment database catalog
       const dbMatch = investmentDatabase.find(inv => 
-        inv.id === (bi.id || localId)
+        inv.id === bi.id
       );
+      if (!dbMatch) throw new TypeError(`Frontend catalog is missing authoritative instrument ${bi.id}`);
 
       const backendWeight = Number(bi.allocationWeight);
-      if (!Number.isFinite(backendWeight)) throw new Error(`Backend omitted allocation weight for ${bi.id || bi.type}`);
+      if (!Number.isFinite(backendWeight) || backendWeight < 0 || backendWeight > 1) {
+        throw new Error(`Backend returned an invalid allocation weight for ${bi.id || bi.type}`);
+      }
 
-      const allocation = Math.round((backendWeight * totalSavings) / 100) * 100;
+      const allocation = Number(backendRecs.dashboard_projection?.instrument_monthly_allocations?.[bi.id]);
+      if (!Number.isFinite(allocation) || allocation <= 0) {
+        throw new Error(`Backend did not return a valid monthly allocation for ${bi.id || bi.type}`);
+      }
 
       return {
         ...dbMatch,
         // Enriched presentation metadata from the catalog
-        id: bi.id || dbMatch?.id || localId,
-        name: bi.name || dbMatch?.name || bi.type,
+        id: bi.id,
+        name: bi.name,
+        type: bi.type,
         abbr: dbMatch?.abbr || bi.type,
         color: dbMatch?.color || '#38bdf8',
         desc: dbMatch?.desc || '',
         category: dbMatch?.category || dbMatch?.cat || 'Other',
         cat: dbMatch?.cat || dbMatch?.category || 'Other',
         assetClass: dbMatch?.assetClass || 'Other',
-        riskLabel: bi.riskLevel || dbMatch?.riskLabel,
-        risk: bi.riskScore ?? dbMatch?.risk,
-        lockIn: bi.lockIn ?? dbMatch?.lockIn,
-        lock_in_years: bi.lockIn ?? dbMatch?.lockIn,
-        goalTags: dbMatch?.goalTags || [],
+        riskLabel: bi.riskLevel,
+        risk: bi.riskScore,
+        lockIn: bi.lockIn,
+        lock_in_years: bi.lockIn,
+        goalTags: [...bi.tags],
         
         // Dynamic values from backend response
         monthly_allocation: allocation,
@@ -138,38 +144,24 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
         nominalReturn: bi.nominalReturn,
         rate: bi.nominalReturn,
         expectedReturn: bi.nominalReturn,
-        ml_confidence: backendRecs?.confidence_scores?.[bi.type] ?? 0,
+        allocationWeight: backendWeight,
+        allocation_pct: Number(bi.allocation_pct),
+        score: Number(bi.score),
+        scoreFactors: { ...bi.scoreFactors },
+        ml_confidence: backendRecs.confidence_scores?.[bi.type] ?? null,
         advisory_text: backendRecs.advisory_text,
         _source: 'backend',
       };
     });
 
-    const activeMerged = merged.filter(r => r.monthly_allocation > 0);
-    if (activeMerged.length > 0) {
-      const allocatedSum = merged.reduce((s, r) => s + r.monthly_allocation, 0);
-      const residual = totalSavings - allocatedSum;
-      if (residual !== 0) {
-        const maxItem = activeMerged.reduce((max, r) => r.monthly_allocation > max.monthly_allocation ? r : max, activeMerged[0]);
-        maxItem.monthly_allocation += residual;
-      }
+    const weightTotal = merged.reduce((sum, item) => sum + item.allocationWeight, 0);
+    if (merged.length > 0 && Math.abs(weightTotal - 1) > 0.001) {
+      throw new Error(`Backend allocation weights must total 1; received ${weightTotal}`);
     }
     return merged;
-  }, [backendRecs, userProfile]);
+  }, [backendRecs]);
   const handleLearnMore = (investment) => {
-    const normalized = {
-      ...investment,
-      expected_return_min: investment.expected_return_min ?? investment.returnRange?.min ?? null,
-      expected_return_max: investment.expected_return_max ?? investment.returnRange?.max ?? investment.nominalReturn ?? null,
-      category: investment.category || investment.cat || 'Unclassified',
-      risk_level: investment.risk_level || investment.riskLabel || 'Unknown',
-      lock_in_years: investment.lock_in_years ?? investment.lockIn ?? null,
-      tax_benefit: investment.tax_benefit ?? (investment.taxType === 'eee' || investment.taxType === 'elss' || investment.taxType === 'nps'),
-      tax_section: investment.tax_section || (investment.taxType === 'eee' ? '80C' : investment.taxType === 'elss' ? '80C' : investment.taxType === 'nps' ? '80CCD(1B)' : null),
-      tax_free_interest: investment.tax_free_interest ?? (investment.taxType === 'eee'),
-      liquidity: investment.liquidity || null,
-      description: investment.description || investment.desc || '',
-    };
-    setDeepDiveInvestment(normalized);
+    setDeepDiveInvestment(investment);
   };
 
   const handleRebalanceSave = async (updated) => {
@@ -192,6 +184,9 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
         return {
           ...prev,
           instruments: response.instruments,
+          portfolio_expected_return: response.portfolio_expected_return,
+          asset_class_allocation: response.asset_class_allocation,
+          dashboard_projection: response.dashboard_projection,
         };
       });
 
@@ -209,6 +204,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
           <RecommendationDashboard
             userProfile={userProfile}
             recommendations={recommendations}
+            recommendationMeta={backendRecs}
             isLoading={isLoading}
             explanation={backendRecs?.explanation || null}
             fallbackNotice={backendFallback}
@@ -226,7 +222,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
       case 'health':
         return <ErrorBoundary><HealthScoreScreen profile={userProfile} recommendations={recommendations} onNavigate={setActivePage} /></ErrorBoundary>;
       case 'goals':
-        return <ErrorBoundary><GoalTracker profile={userProfile} recommendations={recommendations} /></ErrorBoundary>;
+        return <ErrorBoundary><GoalTracker profile={userProfile} onNavigate={setActivePage} /></ErrorBoundary>;
       case 'goal-planner':
         return <ErrorBoundary><GoalPlanner profile={userProfile} /></ErrorBoundary>;
       case 'rebalancer':
@@ -243,7 +239,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
       case 'sip-planner':
         return <ErrorBoundary><StepUpPlanner key={`${userProfile.profileId}:${userProfile.version}`} profile={userProfile} /></ErrorBoundary>;
       case 'tax-optimizer':
-        return <ErrorBoundary><TaxScreen profile={userProfile} onLearnMore={handleLearnMore} /></ErrorBoundary>;
+        return <ErrorBoundary><TaxScreen profile={userProfile} recommendations={recommendations} onLearnMore={handleLearnMore} /></ErrorBoundary>;
       case 'compare':
         return (
           <ErrorBoundary>
@@ -268,12 +264,13 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
               allInvestments={investmentDatabase}
               embedded={true}
               profile={userProfile}
+              recommendations={recommendations}
             />
           </div>
           </ErrorBoundary>
         );
       case 'allocation':
-        return <ErrorBoundary><AllocationPlanner profile={userProfile} recommendations={recommendations} /></ErrorBoundary>;
+        return <ErrorBoundary><AllocationPlanner profile={userProfile} recommendations={recommendations} recommendationMeta={backendRecs} /></ErrorBoundary>;
       case 'profile':
         return (
           <ErrorBoundary>
@@ -284,7 +281,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
           </ErrorBoundary>
         );
       case 'insights':
-        return <ErrorBoundary><InsightsScreen profile={userProfile} recommendations={recommendations} /></ErrorBoundary>;
+        return <ErrorBoundary><InsightsScreen profile={userProfile} recommendations={recommendations} recommendationMeta={backendRecs} /></ErrorBoundary>;
       case 'help':
         return <ErrorBoundary><HelpTourScreen /></ErrorBoundary>;
       default:
@@ -348,9 +345,9 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
           onClose={() => setDeepDiveInvestment(null)}
           investment={deepDiveInvestment}
           onSelectInvestment={setDeepDiveInvestment}
+          userProfile={userProfile}
           allRecommendations={recommendations}
           horizon={userProfile.investment_horizon_years}
-          userProfile={userProfile}
         />
       </Suspense>
 
@@ -362,6 +359,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
             onClose={() => setShowComparisonTable(false)}
             allInvestments={investmentDatabase}
             profile={userProfile}
+            recommendations={recommendations}
           />
         </Suspense>
       )}

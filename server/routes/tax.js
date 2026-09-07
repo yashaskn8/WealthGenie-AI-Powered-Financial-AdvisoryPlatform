@@ -8,9 +8,16 @@ import {
   postTaxReturnSchema,
   postTaxReturnBatchSchema,
 } from '../validation/schemas.js';
-import { computeTax, compareTaxRegimes, isFYVerified, CURRENT_FY } from '../services/taxEngine.js';
+import {
+  computeTax,
+  compareTaxRegimes,
+  isFYVerified,
+  CURRENT_FY,
+  buildTaxSlabBreakdown,
+  analyzeTaxOptimization,
+} from '../services/taxEngine.js';
 import { CESS_RATE } from '../services/instrumentConstants.js';
-import { calculatePostTaxReturnSafe } from '../services/postTaxCalculator.js';
+import { calculatePostTaxReturnSafe, calculatePostTaxProjection } from '../services/postTaxCalculator.js';
 
 const router = Router();
 
@@ -20,12 +27,18 @@ function _parseTaxDeductionsFromQuery(query) {
     nps80CCD1B: Number(query.nps80CCD1B) || 0,
     nps80CCD2: Number(query.nps80CCD2) || 0,
     basicSalary: query.basicSalary !== undefined ? Number(query.basicSalary) : undefined,
-    isGovtEmployee: query.isGovtEmployee === 'true' || query.isGovtEmployee === true,
+    isGovtEmployee: query.isGovtEmployee === undefined
+      ? undefined
+      : query.isGovtEmployee === 'true' || query.isGovtEmployee === true,
     section80D: Number(query.section80D) || 0,
     section80D_self: query.section80D_self !== undefined ? Number(query.section80D_self) : undefined,
     section80D_parents: query.section80D_parents !== undefined ? Number(query.section80D_parents) : undefined,
-    parents_senior: query.parents_senior === 'true' || query.parents_senior === true,
-    self_senior: query.self_senior === 'true' || query.self_senior === true,
+    parents_senior: query.parents_senior === undefined
+      ? undefined
+      : query.parents_senior === 'true' || query.parents_senior === true,
+    self_senior: query.self_senior === undefined
+      ? undefined
+      : query.self_senior === 'true' || query.self_senior === true,
     hra: Number(query.hra) || 0,
     homeLoanInterest: Number(query.homeLoanInterest) || 0,
     other: Number(query.other) || 0,
@@ -41,21 +54,19 @@ router.get('/compute', validateQuery(taxComputeSchema), asyncHandler(async (req,
   // Joi coerces query strings to numbers via taxComputeSchema
   const income = Number(req.query.income);
   const regime = req.query.regime;
+  const fiscalYear = req.query.fiscalYear || CURRENT_FY;
 
   if (!Number.isFinite(income) || income < 0) {
     return sendError(req, res, 400, 'Income must be a valid positive number.', 'INCOME_INVALID');
   }
 
-  const deductions = _parseTaxDeductionsFromQuery(req.query);
-  const result = computeTax(income, regime, deductions, req.query.incomeSource, req.query.fiscalYear);
-
-  const fiscalYear = result.fiscalYear || req.query.fiscalYear || CURRENT_FY;
-  const verified = isFYVerified(fiscalYear);
-  const response = { ...result, fiscal_year: fiscalYear, verified };
-  if (!verified) {
-    response.warning = `UNVERIFIED: Tax slabs for ${fiscalYear} have not been confirmed against an official source. Do not rely on this for tax filing.`;
+  if (!isFYVerified(fiscalYear)) {
+    return sendError(req, res, 422, `Verified tax slabs are unavailable for ${fiscalYear}.`, 'FISCAL_YEAR_UNSUPPORTED');
   }
-  res.json(response);
+
+  const deductions = _parseTaxDeductionsFromQuery(req.query);
+  const result = computeTax(income, regime, deductions, req.query.incomeSource, fiscalYear);
+  res.json({ ...result, fiscal_year: fiscalYear, verified: true });
 }));
 
 /**
@@ -64,22 +75,25 @@ router.get('/compute', validateQuery(taxComputeSchema), asyncHandler(async (req,
  */
 router.get('/compare', validateQuery(taxCompareSchema), asyncHandler(async (req, res) => {
   const income = Number(req.query.income);
+  const fiscalYear = req.query.fiscalYear || CURRENT_FY;
 
   if (!Number.isFinite(income) || income < 0) {
     return sendError(req, res, 400, 'Income must be a valid positive number.', 'INCOME_INVALID');
   }
 
-  const deductions = _parseTaxDeductionsFromQuery(req.query);
-  const { newRegime, oldRegime, recommended } = compareTaxRegimes(income, deductions, req.query.incomeSource, req.query.fiscalYear);
-  const saving = Math.abs(newRegime.taxAmount - oldRegime.taxAmount);
+  if (!isFYVerified(fiscalYear)) {
+    return sendError(req, res, 422, `Verified tax slabs are unavailable for ${fiscalYear}.`, 'FISCAL_YEAR_UNSUPPORTED');
+  }
 
-  const fiscalYear = newRegime.fiscalYear || req.query.fiscalYear || CURRENT_FY;
-  const verified = isFYVerified(fiscalYear);
+  const deductions = _parseTaxDeductionsFromQuery(req.query);
+  const { newRegime, oldRegime, recommended } = compareTaxRegimes(income, deductions, req.query.incomeSource, fiscalYear);
+  const optimization = analyzeTaxOptimization(income, deductions, req.query.incomeSource, fiscalYear);
+  const saving = Math.abs(newRegime.taxAmount - oldRegime.taxAmount);
 
   const response = {
     income,
     fiscal_year: fiscalYear,
-    verified,
+    verified: true,
     new_regime: {
       tax: newRegime.taxAmount,
       effective_rate: newRegime.effectiveRate,
@@ -91,6 +105,7 @@ router.get('/compare', validateQuery(taxCompareSchema), asyncHandler(async (req,
       cess: Math.round(newRegime.taxAmount * CESS_RATE / (1 + CESS_RATE)),
       nps80CCD2: newRegime.nps80CCD2 || 0,
       allowed80D: newRegime.allowed80D || 0,
+      slab_breakdown: buildTaxSlabBreakdown(newRegime, fiscalYear),
     },
     old_regime: {
       tax: oldRegime.taxAmount,
@@ -98,20 +113,25 @@ router.get('/compare', validateQuery(taxCompareSchema), asyncHandler(async (req,
       rebate_applied: oldRegime.rebateApplied,
       taxable_income: oldRegime.taxableIncome,
       standard_deduction: oldRegime.standardDeduction,
+      old_regime_deductions: oldRegime.oldRegimeDeductions,
       marginal_relief_applied: oldRegime.marginalReliefApplied || false,
       marginal_relief_amount: oldRegime.marginalReliefAmount || 0,
       cess: Math.round(oldRegime.taxAmount * CESS_RATE / (1 + CESS_RATE)),
       nps80CCD2: oldRegime.nps80CCD2 || 0,
       allowed80D: oldRegime.allowed80D || 0,
+      slab_breakdown: buildTaxSlabBreakdown(oldRegime, fiscalYear),
     },
     recommended_regime: recommended,
     saving,
     saving_pct: income > 0 ? parseFloat(((saving / income) * 100).toFixed(2)) : 0,
     saving_with: recommended,
+    calculation_classification: 'SEPARATE_TAX_WHAT_IF',
+    deduction_limits: optimization.deductionLimits,
+    remaining_deductions: optimization.remaining,
+    optimized_old_regime_tax: optimization.optimizedOld.taxAmount,
+    potential_tax_saving: optimization.potentialSaving,
+    crossover_breakpoint: optimization.crossoverBreakpoint,
   };
-  if (!verified) {
-    response.warning = `UNVERIFIED: Tax slabs for ${fiscalYear} have not been confirmed against an official source. Do not rely on this for tax filing.`;
-  }
   res.json(response);
 }));
 
@@ -141,7 +161,17 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
     incomeSource,
   );
 
-  res.json({ ...result, calculation_classification: 'SEPARATE_TAX_WHAT_IF' });
+  const whatIfPrincipal = 100000;
+  const nominalGain = Math.round(whatIfPrincipal * nominalRate);
+  const netGain = Math.round(whatIfPrincipal * result.postTaxReturn);
+  res.json({
+    ...result,
+    calculation_classification: 'SEPARATE_TAX_WHAT_IF',
+    what_if_principal: whatIfPrincipal,
+    what_if_nominal_gain: nominalGain,
+    what_if_estimated_tax: Math.max(0, nominalGain - netGain),
+    what_if_net_gain: netGain,
+  });
 }));
 
 /**
@@ -150,11 +180,10 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
  * Used by PostTaxAnalysis.jsx to compute all instrument post-tax returns in one call.
  */
 router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncHandler(async (req, res) => {
-  const { instruments, annualIncome, regime, userAge, incomeSource } = req.body;
+  const { instruments, annualIncome, regime, userAge, incomeSource, inflationRate } = req.body;
 
-  const results = instruments.map(inv => ({
-    instrumentType: inv.instrumentType,
-    ...calculatePostTaxReturnSafe(
+  const results = instruments.map(inv => {
+    const taxResult = calculatePostTaxReturnSafe(
       inv.instrumentType,
       inv.nominalRate,
       annualIncome,
@@ -163,10 +192,68 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
       inv.monthlySIP,
       userAge,
       incomeSource,
-    ),
-  }));
+    );
+    return {
+      instrumentType: inv.instrumentType,
+      ...taxResult,
+      ...calculatePostTaxProjection(taxResult, inv, inflationRate),
+    };
+  });
 
-  res.json({ calculation_classification: 'SEPARATE_TAX_WHAT_IF', results });
+  const totalTaxDrag = results.reduce((sum, item) => sum + item.taxDragWealth, 0);
+  const grossProfit = results.reduce((sum, item) => sum + Math.max(0, item.nominalFutureValue - item.totalInvested), 0);
+  const retainedProfit = results.reduce((sum, item) => sum + Math.max(0, item.postTaxFutureValue - item.totalInvested), 0);
+  const keptPerThousand = grossProfit > 0
+    ? Math.max(0, Math.min(1000, Math.round((retainedProfit / grossProfit) * 1000)))
+    : 1000;
+  const maxTaxRate = results.reduce((max, item) => Math.max(max, item.taxRate || 0), 0);
+  const nonPositiveRealCount = results.filter(item => item.realReturnPercent <= 0).length;
+  const insights = [];
+  if (totalTaxDrag > 0) {
+    insights.push({
+      title: 'Review Tax Drag',
+      body: `The selected suitable portfolio loses an estimated ₹${Math.round(totalTaxDrag).toLocaleString('en-IN')} to tax over this horizon. Review the explicit tax assumptions with a qualified adviser.`,
+      icon: 'shield',
+      color: 'blue',
+    });
+  } else {
+    insights.push({
+      title: 'No Estimated Tax Drag',
+      body: 'Under the explicit what-if context, the server estimates no tax drag for the selected suitable instruments.',
+      icon: 'shield',
+      color: 'green',
+    });
+  }
+  if (nonPositiveRealCount > 0) {
+    insights.push({
+      title: 'Inflation Pressure',
+      body: `${nonPositiveRealCount} selected instrument${nonPositiveRealCount === 1 ? '' : 's'} may not preserve purchasing power at the inflation rate you entered.`,
+      icon: 'trend',
+      color: 'amber',
+    });
+  }
+
+  res.json({
+    calculation_classification: 'SEPARATE_TAX_WHAT_IF',
+    assumptions: {
+      annualIncome,
+      incomeSource,
+      regime,
+      userAge,
+      inflationRate,
+      deductions: 0,
+      contributionGrowthRate: 0,
+    },
+    results,
+    summary: {
+      totalTaxDrag,
+      keptPerThousand,
+      erodedPerThousand: 1000 - keptPerThousand,
+      retentionEfficiencyPercent: keptPerThousand / 10,
+      maxTaxRate,
+    },
+    insights,
+  });
 }));
 
 export default router;

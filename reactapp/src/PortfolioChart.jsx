@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 /**
@@ -10,59 +10,32 @@ const formatYAxis = (tickItem) => {
   return `₹${tickItem.toLocaleString('en-IN')}`;
 };
 
-const PortfolioChart = ({ recommendations, horizon }) => {
+const PortfolioTooltip = ({ active, payload, label }) => {
+  if (active && payload && payload.length) {
+    return (
+      <div style={{ background: '#0B131E', padding: '12px 16px', border: '1px solid rgba(6,182,212,0.4)', borderRadius: '8px', boxShadow: '0 10px 25px rgba(0,0,0,0.8)' }}>
+        <p style={{ color: '#94a3b8', marginBottom: '8px', fontSize: '0.85rem' }}>{label}</p>
+        <p style={{ color: '#0ea5e9', fontSize: '1.2rem', fontWeight: 'bold' }}>
+          {formatYAxis(payload[0].value)}
+        </p>
+      </div>
+    );
+  }
+  return null;
+};
 
-  const data = useMemo(() => {
-    let resultData = [];
-    // We calculate projected value for each year from 1 to horizon
-    for (let year = 1; year <= horizon; year++) {
-      let totalValueForYear = 0;
-      
-      recommendations.forEach(inv => {
-        // Compound interest calculation
-        const rate = (inv.expected_return_max / 100);
-        const monthlyRate = rate / 12;
-        const totalMonths = year * 12;
-        const monthlyDeposit = inv.monthly_allocation;
+const PortfolioChart = ({ projectionData = [], horizon }) => {
+  const data = projectionData.map(point => ({
+    year: point.year_label || `Year ${point.year}`,
+    value: Number(point.total_value ?? point.total_nominal_value),
+  })).filter(point => Number.isFinite(point.value));
 
-        if (monthlyDeposit > 0) {
-          if (monthlyRate === 0) {
-             totalValueForYear += monthlyDeposit * totalMonths;
-          } else {
-             const fv = monthlyDeposit * ((Math.pow(1 + monthlyRate, totalMonths) - 1) / monthlyRate) * (1 + monthlyRate);
-             totalValueForYear += fv;
-          }
-        }
-      });
-
-      resultData.push({
-        year: `Year ${year}`,
-        value: totalValueForYear
-      });
-    }
-    return resultData;
-  }, [recommendations, horizon]);
-
-
-  const CustomTooltip = ({ active, payload, label }) => {
-    if (active && payload && payload.length) {
-      return (
-        <div style={{ background: '#0B131E', padding: '12px 16px', border: '1px solid rgba(6,182,212,0.4)', borderRadius: '8px', boxShadow: '0 10px 25px rgba(0,0,0,0.8)' }}>
-          <p style={{ color: '#94a3b8', marginBottom: '8px', fontSize: '0.85rem' }}>{label}</p>
-          <p style={{ color: '#0ea5e9', fontSize: '1.2rem', fontWeight: 'bold' }}>
-            {formatYAxis(payload[0].value)}
-          </p>
-        </div>
-      );
-    }
-    return null;
-  };
 
   return (
     <div className="projection-chart-wrapper">
       <div style={{ marginBottom: '24px' }}>
         <h3 className="card-title" style={{ fontSize: '1.4rem' }}>Trajectory of your Portfolio</h3>
-        <p className="dashboard-subtitle">Combined hypothetical growth based on upper-bound historical returns over {horizon} years.</p>
+        <p className="dashboard-subtitle">Backend-generated pre-tax nominal portfolio trajectory over {horizon} years.</p>
       </div>
 
       <div style={{ width: '100%', height: 400 }}>
@@ -71,7 +44,7 @@ const PortfolioChart = ({ recommendations, horizon }) => {
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
             <XAxis dataKey="year" stroke="#64748b" tick={{fill: '#64748b', fontSize: 12}} dy={10} axisLine={false} tickLine={false} minTickGap={30} />
             <YAxis tickFormatter={formatYAxis} stroke="#64748b" tick={{fill: '#64748b', fontSize: 12}} dx={-10} axisLine={false} tickLine={false} />
-            <Tooltip content={<CustomTooltip />} cursor={{ stroke: 'rgba(6,182,212,0.2)', strokeWidth: 2 }} />
+            <Tooltip content={<PortfolioTooltip />} cursor={{ stroke: 'rgba(6,182,212,0.2)', strokeWidth: 2 }} />
             <Line 
               type="monotone" 
               dataKey="value" 

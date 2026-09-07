@@ -10,6 +10,7 @@
 
 import { getEffectiveMarginalRate } from './taxEngine.js';
 import { toMonthlyRate } from './instrumentConstants.js';
+import { realReturn, sipFV } from './projectionEngine.js';
 
 // =========================================================================
 // 📘 BEGINNER NOTE: INDIAN INVESTMENT TAXATION & TERMINOLOGY
@@ -430,4 +431,51 @@ export function calculatePostTaxReturnSafe(...args) {
   // but we do a second pass here for defense-in-depth
   const [instrumentType, nominalRate] = args;
   return validatePostTaxResult(result, nominalRate, instrumentType);
+}
+
+/**
+ * Server-owned projection metrics for the restored post-tax dashboard. The
+ * calculation uses a flat SIP because no step-up fact is collected on this
+ * screen. Inflation is always an explicit user-supplied input.
+ */
+export function calculatePostTaxProjection(postTaxResult, instrument, inflationRate) {
+  if (!postTaxResult || !Number.isFinite(postTaxResult.postTaxReturn)) {
+    throw new TypeError('postTaxResult is required');
+  }
+  if (!instrument || !Number.isFinite(instrument.nominalRate)
+      || !Number.isFinite(instrument.monthlySIP) || instrument.monthlySIP < 0
+      || !Number.isFinite(instrument.holdingYears) || instrument.holdingYears <= 0) {
+    throw new TypeError('Explicit instrument projection inputs are required');
+  }
+  if (!Number.isFinite(inflationRate) || inflationRate < 0 || inflationRate > 1) {
+    throw new RangeError('inflationRate must be an explicit decimal from 0 to 1');
+  }
+
+  const totalInvested = instrument.monthlySIP * instrument.holdingYears * 12;
+  const nominalFutureValue = instrument.monthlySIP > 0
+    ? sipFV(instrument.monthlySIP, instrument.nominalRate, instrument.holdingYears)
+    : 0;
+  const postTaxFutureValue = instrument.monthlySIP > 0
+    ? sipFV(instrument.monthlySIP, postTaxResult.postTaxReturn, instrument.holdingYears)
+    : 0;
+  const inflationAdjustedReturn = realReturn(postTaxResult.postTaxReturn, inflationRate);
+  const realFutureValue = instrument.monthlySIP > 0
+    ? sipFV(instrument.monthlySIP, inflationAdjustedReturn, instrument.holdingYears)
+    : 0;
+
+  return {
+    totalInvested: Math.round(totalInvested),
+    nominalFutureValue: Math.round(nominalFutureValue),
+    postTaxFutureValue: Math.round(postTaxFutureValue),
+    realFutureValue: Math.round(realFutureValue),
+    postTaxGain: Math.round(Math.max(0, postTaxFutureValue - totalInvested)),
+    taxDragWealth: Math.round(Math.max(0, nominalFutureValue - postTaxFutureValue)),
+    taxDragCAGR: round4(Math.max(0, instrument.nominalRate - postTaxResult.postTaxReturn)),
+    nominalReturnPercent: round4(instrument.nominalRate * 100),
+    postTaxReturnPercent: round4(postTaxResult.postTaxReturn * 100),
+    realReturnPercent: round4(inflationAdjustedReturn * 100),
+    effectiveTaxPercent: instrument.nominalRate > 0
+      ? round4(Math.max(0, ((instrument.nominalRate - postTaxResult.postTaxReturn) / instrument.nominalRate) * 100))
+      : 0,
+  };
 }

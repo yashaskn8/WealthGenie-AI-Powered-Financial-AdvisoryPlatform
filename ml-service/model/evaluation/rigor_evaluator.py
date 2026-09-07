@@ -97,14 +97,18 @@ def evaluate_noise_robustness(
 def run_full_rigor_audit() -> Dict[str, Any]:
     metadata_path = MODEL_DIR / "metadata.json"
     model_path = MODEL_DIR / "model.pkl"
-    if not metadata_path.exists() or not model_path.exists():
-        raise FileNotFoundError("v4 model artifact or metadata is missing")
+    encoder_path = MODEL_DIR / "label_encoder.pkl"
+    if not metadata_path.exists() or not model_path.exists() or not encoder_path.exists():
+        raise FileNotFoundError("v4 model, label encoder, or metadata artifact is missing")
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     if metadata.get("feature_schema_version") != FEATURE_SCHEMA_VERSION or metadata.get("feature_names") != FEATURE_NAMES:
         raise ValueError("stale or incompatible model metadata")
 
     model = joblib.load(model_path)
-    x_test, y_test = prepare_synthetic_training_data(num_samples=2_000, seed=20260907)
+    label_encoder = joblib.load(encoder_path)
+    x_test, generator_targets = prepare_synthetic_training_data(num_samples=2_000, seed=20260907)
+    generator_class_order = np.asarray(["Equity_MF", "ELSS", "ETF", "Debt_MF", "FD", "RBI_Bond"])
+    y_test = label_encoder.transform(generator_class_order[generator_targets])
     x_frame = pd.DataFrame(x_test, columns=FEATURE_NAMES)
     baseline = float(accuracy_score(y_test, model.predict(x_test)))
     report = {

@@ -3,7 +3,7 @@ WealthGenie Open-Weight LLM Platform - Dataset Chat Template Formatter
 Formats raw instruction or conversation samples into standard ChatML, Alpaca, or ShareGPT formats.
 """
 
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 
 def format_alpaca_template(sample: Dict[str, Any]) -> str:

@@ -3,13 +3,10 @@ WealthGenie Production Open-Weight LLM Platform - Dataset Pipeline Test Suite (P
 Tests cleaning, deduplication, formatting, multi-format I/O (JSONL, JSON, CSV, Parquet), splitting, and quality reports.
 """
 
-import json
-import pytest
-from pathlib import Path
 from llm.dataset.cleaner import clean_text, validate_sample, deduplicate_samples
-from llm.dataset.formatter import format_alpaca_template, format_chatml_template, format_sample_to_text
+from llm.dataset.formatter import format_alpaca_template, format_chatml_template
 from llm.dataset.loader import load_dataset_file, save_dataset_file
-from llm.dataset.pipeline import FinancialDatasetPipeline, compute_dataset_stats
+from llm.dataset.pipeline import FinancialDatasetPipeline
 
 
 def test_text_cleaner_and_normalizer():

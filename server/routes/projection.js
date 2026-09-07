@@ -1,19 +1,153 @@
 import { Router } from 'express';
 import { verifyJWT } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
-import { personalizedProjectionSchema, validateStrict } from '../validation/financialSchemas.js';
+import { customPortfolioProjectionSchema, historicalXirrSchema, personalizedProjectionSchema, projectionComparisonSchema, stepUpProjectionSchema, validateStrict } from '../validation/financialSchemas.js';
 import FinancialProfile from '../models/FinancialProfile.js';
-import { generateProjections } from '../services/projectionEngine.js';
+import Recommendation from '../models/Recommendation.js';
+import { generatePortfolioProjection, generateProjectionComparison, generateProjections, sipFV, stepUpSipFV } from '../services/projectionEngine.js';
 import { computeXIRR, computeSIPXIRR } from '../services/xirrCalculator.js';
-import { buildRateLookup } from '../services/instrumentConstants.js';
+import { getNominalRate, INSTRUMENT_PARAMS } from '../services/instrumentConstants.js';
 import { buildRecommendationProfile, buildProfileGroundedSimulation } from '../services/recommendationProfile.js';
-import { assertPortfolioSuitable } from '../services/RecommendationPipeline.js';
+import { assertPortfolioSuitable, resolveConcentrationCap } from '../services/RecommendationPipeline.js';
+import { resolveAssetKey } from '../services/portfolioEngine.js';
 
 const router = Router();
 
-const RATE_LOOKUP = buildRateLookup();
 const PROJECTION_INFLATION_ASSUMPTION = 0.05;
 const PERSONALIZED_CONTRIBUTION_STEP_UP = 0;
+
+const RISK_LEVEL_SCORE = Object.freeze({
+  'Very Low': 1, Low: 1.5, 'Low-Medium': 2, 'Medium-Low': 2.5,
+  Medium: 3, High: 4, 'Very High': 5,
+});
+
+function assertCustomConcentration(allocations) {
+  const grouped = new Map();
+  for (const [key, weight] of Object.entries(allocations)) {
+    const cap = resolveConcentrationCap({ id: key, type: key, name: key });
+    if (cap) grouped.set(cap.key, (grouped.get(cap.key) || 0) + (weight * 100));
+  }
+  for (const [group, total] of grouped.entries()) {
+    const cap = resolveConcentrationCap({ id: group, type: group, name: group });
+    if (cap && total > cap.maxPct + 0.0001) {
+      throw createError(400, `${group} allocation exceeds ${cap.maxPct}%`, 'Allocation exceeds suitability limits.');
+    }
+  }
+}
+
+router.post('/custom-portfolio', verifyJWT, validateStrict(customPortfolioProjectionSchema), asyncHandler(async (req, res) => {
+  const { profileId, allocations, years } = req.body;
+  const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
+  if (!stored) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
+  const profile = buildRecommendationProfile(stored);
+  const keys = Object.keys(allocations).filter(key => allocations[key] > 0);
+  if (keys.some(key => !INSTRUMENT_PARAMS[key])) {
+    throw createError(400, 'Allocation contains an unknown instrument.', 'Unknown instrument.');
+  }
+  const suitability = assertPortfolioSuitable(profile, keys);
+  assertCustomConcentration(allocations);
+  const simulation = buildProfileGroundedSimulation(profile, {
+    monthlyInvestment: profile.monthlySavings,
+    years,
+  });
+  const instruments = keys.map(key => ({
+    id: key,
+    nominalReturn: getNominalRate(key),
+    allocationWeight: allocations[key],
+  }));
+  const projection = generatePortfolioProjection({
+    monthlyContribution: simulation.monthlyContribution,
+    initialLumpSum: simulation.initialCapital,
+    horizonYears: simulation.years,
+    instruments,
+  });
+  const portfolioNominalReturn = instruments.reduce(
+    (sum, instrument) => sum + instrument.nominalReturn * instrument.allocationWeight,
+    0,
+  );
+  const portfolioRiskScore = instruments.reduce((sum, instrument) => (
+    sum + (RISK_LEVEL_SCORE[INSTRUMENT_PARAMS[instrument.id].riskLevel] * instrument.allocationWeight)
+  ), 0);
+  const safeWeight = instruments.reduce((sum, instrument) => (
+    ['Very Low', 'Low', 'Low-Medium'].includes(INSTRUMENT_PARAMS[instrument.id].riskLevel)
+      ? sum + instrument.allocationWeight
+      : sum
+  ), 0);
+  const assetClassAllocation = { equity: 0, etf: 0, debt: 0 };
+  for (const instrument of instruments) {
+    if (instrument.id === 'ETF') assetClassAllocation.etf += instrument.allocationWeight * 100;
+    else if (['Equity_MF', 'Index_MF', 'Midcap_MF', 'Smallcap_MF', 'ELSS'].includes(instrument.id)) {
+      assetClassAllocation.equity += instrument.allocationWeight * 100;
+    } else assetClassAllocation.debt += instrument.allocationWeight * 100;
+  }
+
+  const recommendation = await Recommendation.findOne({ profileId, userId: req.user.userId }).sort({ generatedAt: -1 }).lean();
+  let recommendationMatchPct = null;
+  if (recommendation?.instruments?.length) {
+    const reference = {};
+    for (const instrument of recommendation.instruments) {
+      const key = resolveAssetKey(instrument.id);
+      reference[key] = (reference[key] || 0) + Number(instrument.allocationWeight);
+    }
+    const allKeys = new Set([...Object.keys(reference), ...Object.keys(allocations)]);
+    const totalVariation = [...allKeys].reduce(
+      (sum, key) => sum + Math.abs((reference[key] || 0) - (allocations[key] || 0)),
+      0,
+    ) / 2;
+    recommendationMatchPct = Math.max(0, Math.round((1 - totalVariation) * 100));
+  }
+
+  res.json({
+    ...projection,
+    simulation_classification: simulation.classification,
+    portfolio_nominal_return: Number(portfolioNominalReturn.toFixed(2)),
+    portfolio_risk_score: Number(portfolioRiskScore.toFixed(2)),
+    recommendation_match_pct: recommendationMatchPct,
+    allocation_match_pct: recommendationMatchPct,
+    risk_match_pct: Math.max(0, Math.round(100 - (Math.abs(portfolioRiskScore - suitability.finalLevel) * 25))),
+    goal_horizon_match_pct: 100,
+    affordability_match_pct: 100,
+    liquidity_warning: safeWeight < 0.15,
+    asset_class_allocation: Object.fromEntries(Object.entries(assetClassAllocation).map(([key, value]) => [key, Math.round(value)])),
+    final_suitability_risk: suitability.finalRisk,
+    suitability_reason_codes: suitability.reasonCodes,
+  });
+}));
+
+router.post('/compare', verifyJWT, validateStrict(projectionComparisonSchema), asyncHandler(async (req, res) => {
+  res.json(generateProjectionComparison(req.body));
+}));
+
+router.post('/step-up', verifyJWT, validateStrict(stepUpProjectionSchema), asyncHandler(async (req, res) => {
+  const { monthlyInvestment, annualReturnRate, years, annualStepUpRate } = req.body;
+  const chartData = [];
+  let steppedInvested = 0;
+  let currentMonthlyInvestment = monthlyInvestment;
+  for (let year = 1; year <= years; year += 1) {
+    steppedInvested += currentMonthlyInvestment * 12;
+    chartData.push({
+      year,
+      flatSIP: Math.round(sipFV(monthlyInvestment, annualReturnRate, year)),
+      stepUpSIP: Math.round(stepUpSipFV(monthlyInvestment, annualReturnRate, year, annualStepUpRate)),
+      flatInvested: Math.round(monthlyInvestment * 12 * year),
+      stepUpInvested: Math.round(steppedInvested),
+    });
+    currentMonthlyInvestment *= 1 + annualStepUpRate;
+  }
+  const last = chartData.at(-1);
+  res.json({
+    calculation_classification: 'NON_RECOMMENDATION_STEP_UP_CALCULATION',
+    return_basis: 'PRE_TAX_NOMINAL',
+    assumptions: { monthlyInvestment, annualReturnRate, years, annualStepUpRate },
+    chartData,
+    flatFinal: last.flatSIP,
+    stepUpFinal: last.stepUpSIP,
+    flatInvested: last.flatInvested,
+    stepUpInvested: last.stepUpInvested,
+    additionalCorpus: last.stepUpSIP - last.flatSIP,
+    additionalPercent: last.flatSIP > 0 ? ((last.stepUpSIP - last.flatSIP) / last.flatSIP) * 100 : 0,
+  });
+}));
 
 /**
  * POST /api/projection [Protected]
@@ -40,8 +174,8 @@ router.post('/', verifyJWT, validateStrict(personalizedProjectionSchema), asyncH
   // Use authoritative pre-tax nominal rates. A tax profile is not inferred.
   const instKeys = instruments;
   const instList = instKeys.map(key => {
-    const nominalRate = RATE_LOOKUP[key];
-    if (nominalRate === undefined) {
+    const nominalRate = getNominalRate(key);
+    if (nominalRate === null) {
       throw createError(400, `Unknown instrument key: ${key}`, 'Unknown instrument.');
     }
     return { name: key, type: key, nominalRate };
@@ -84,57 +218,25 @@ router.post('/', verifyJWT, validateStrict(personalizedProjectionSchema), asyncH
  * Body: { cashflows: [{amount, date}], guess?: number }
  *   OR: { monthlySIP, months, currentValue }  (SIP convenience mode)
  */
-router.post('/xirr', verifyJWT, asyncHandler(async (req, res) => {
+router.post('/xirr', verifyJWT, validateStrict(historicalXirrSchema), asyncHandler(async (req, res) => {
   const { cashflows, monthlySIP, months, currentValue, guess } = req.body;
 
   // SIP convenience mode
-  if (monthlySIP && months && currentValue) {
-    if (!Number.isFinite(monthlySIP) || monthlySIP <= 0) {
-      throw createError(400, 'Invalid monthlySIP', 'Monthly SIP must be a positive number.');
-    }
-    if (!Number.isFinite(months) || months < 1 || months > 1200) {
-      throw createError(400, 'Invalid months', 'Months must be between 1 and 1200 (max 100 years).');
-    }
-    if (!Number.isFinite(currentValue) || currentValue <= 0) {
-      throw createError(400, 'Invalid currentValue', 'Current value must be a positive number.');
-    }
+  if (monthlySIP !== undefined) {
     const result = computeSIPXIRR(monthlySIP, months, currentValue);
-    return res.json({ mode: 'sip', ...result });
+    return res.json({
+      mode: 'sip',
+      ...result,
+      calculation_classification: 'NON_RECOMMENDATION_HISTORICAL_RETURN_CALCULATION',
+    });
   }
 
-  // General XIRR mode
-  if (!Array.isArray(cashflows) || cashflows.length < 2) {
-    throw createError(400, 'Invalid cashflows', 'Provide at least 2 cashflows with amount and date.');
-  }
-
-  if (cashflows.length > 1000) {
-    throw createError(400, 'Too many cashflows', 'Maximum 1000 cashflows allowed to prevent server overhead.');
-  }
-
-  // Validate each cashflow
-  for (const cf of cashflows) {
-    if (!Number.isFinite(cf.amount)) {
-      throw createError(400, `Invalid cashflow amount: ${cf.amount}`, 'Each cashflow must have a finite amount.');
-    }
-    if (!cf.date) {
-      throw createError(400, 'Missing cashflow date', 'Each cashflow must have a date.');
-    }
-    const parsedDate = new Date(cf.date);
-    if (!Number.isFinite(parsedDate.getTime())) {
-      throw createError(400, `Invalid cashflow date: ${cf.date}`, 'Each cashflow must have a valid date.');
-    }
-  }
-
-  let safeGuess = guess;
-  if (guess !== undefined) {
-    safeGuess = Number(guess);
-    if (!Number.isFinite(safeGuess)) {
-      throw createError(400, `Invalid XIRR guess: ${guess}`, 'Guess must be a finite number.');
-    }
-  }
-
-  const result = computeXIRR(cashflows, safeGuess);
-  res.json({ mode: 'general', ...result });
+  const result = computeXIRR(cashflows, guess);
+  res.json({
+    mode: 'general',
+    ...result,
+    calculation_classification: 'NON_RECOMMENDATION_HISTORICAL_RETURN_CALCULATION',
+  });
 }));
 
 export default router;

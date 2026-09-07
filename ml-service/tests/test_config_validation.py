@@ -2,7 +2,6 @@
 Tests for ML Service fail-closed configuration validation and security startup checks.
 """
 
-import os
 import pytest
 from fastapi import HTTPException
 from security import validate_ml_service_config, validate_ml_operator_config, verify_api_key, verify_operator_key

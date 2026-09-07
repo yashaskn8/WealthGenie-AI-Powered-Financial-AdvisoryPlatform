@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ChevronDown, ChevronUp, ShieldAlert, ShieldCheck, Landmark } from 'lucide-react';
-import { formatINR } from './utils/recommendationPresentation';
+import { formatINR } from './recommendationEngine';
 import { TRUST_BADGES } from './investmentDatabase';
 import JargonTooltip from './components/JargonTooltip';
 

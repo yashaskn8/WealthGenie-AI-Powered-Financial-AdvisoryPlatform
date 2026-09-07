@@ -4,21 +4,17 @@ Serves RandomForest (TreeSHAP), PyTorch MLP, and FT-Transformer predictions via 
 Integrated with persistent MongoModelRegistry / SQLite ModelRegistry via store_factory.
 """
 
-import hmac
 import json
 import logging
 import os
-import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import List
 
 from dotenv import load_dotenv
-import numpy as np  # type: ignore[import-not-found]
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, Security, status
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import APIKeyHeader
 
 from model.evaluation.explainer import ModelExplainer
 from model.data.feature_engineering import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, engineer_features, to_model_array
@@ -35,7 +31,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("wealthgenie.ml")
 
-from security import API_KEY_NAME, api_key_header, verify_api_key
+from security import verify_api_key
 
 
 # Application State & Lifespan
@@ -299,7 +295,7 @@ async def lifespan(app: FastAPI):
             label_encoder = rf_pred.label_encoder
             logger.info(f"RandomForest loaded from registry version {active_rf['version_id']}")
     else:
-        logger.info(f"RandomForest loaded from default path (no active registry version).")
+        logger.info("RandomForest loaded from default path (no active registry version).")
 
     active_mlp = version_registry.get_active_model("PyTorch_MLP")
     active_mlp_schema = (active_mlp or {}).get("hyperparameters", {}).get("feature_schema_version")

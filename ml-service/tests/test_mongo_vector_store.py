@@ -6,7 +6,6 @@ BaseVectorStore interface and that state written by one instance is
 readable from a second instance (cross-replica proof).
 """
 
-import os
 import pytest
 import numpy as np
 from unittest.mock import patch

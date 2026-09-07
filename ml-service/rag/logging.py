@@ -6,7 +6,6 @@ Provides enterprise-grade structured JSON log formatting with context tracking (
 import json
 import logging
 import sys
-import time
 from pathlib import Path
 from typing import Dict, Any, Optional
 

@@ -233,15 +233,39 @@ export const MessageBubble = ({ msg, onAction, isLatest }) => {
   );
 };
 
+// ── Proactive Nudge Banner ────────────────────────────────────────
+export function ProactiveNudge({ profile, onAsk }) {
+  const [dismissed, setDismissed] = useState(false);
+  if (dismissed || !profile) return null;
+  let nudge = null;
+  if (profile.final_suitability_risk && profile.final_suitability_risk !== profile.risk_tolerance) {
+    nudge = { 
+      icon: <AlertTriangle size={15} style={{ verticalAlign: 'middle' }} />, 
+      text: `Your declared ${profile.risk_tolerance} preference was reduced to ${profile.final_suitability_risk} by the server suitability assessment.`,
+      question: 'Why did my suitability assessment reduce my risk level?'
+    };
+  }
+  if (!nudge) return null;
+  return (
+    <div className="proactive-nudge">
+      <span className="nudge-icon">{nudge.icon}</span>
+      <span className="nudge-text">{nudge.text}</span>
+      <button className="nudge-btn" onClick={() => { onAsk(nudge.question); setDismissed(true); }}>Ask Genie</button>
+      <button className="nudge-dismiss" onClick={() => setDismissed(true)}>✕</button>
+    </div>
+  );
+}
+
 // ── Portfolio Snapshot Widget ─────────────────────────────────────
 export function PortfolioSnapshot({ profile }) {
   if (!profile) return null;
-  const takeHome = Number(profile.monthly_take_home);
-  const riskLabel = profile.risk_tolerance || 'N/A';
+  const monthlySavings = Number(profile.monthly_savings);
+  const riskLabel = profile.final_suitability_risk || 'N/A';
+  const horizon = Number(profile.investment_horizon_years);
   const items = [
-    { label: 'Take-home', value: Number.isFinite(takeHome) ? `₹${takeHome.toLocaleString('en-IN')}/mo` : 'N/A', color: '#38bdf8' },
+    { label: 'Monthly capacity', value: Number.isFinite(monthlySavings) ? `₹${monthlySavings.toLocaleString('en-IN')}` : 'N/A', color: '#38bdf8' },
     { label: 'Risk', value: riskLabel, color: riskLabel.includes('Aggressive') ? '#ef4444' : riskLabel.includes('Conservative') ? '#22c55e' : '#f59e0b' },
-    { label: 'Goals', value: Array.isArray(profile.investment_goals) ? profile.investment_goals.length : 'N/A', color: '#a855f7' },
+    { label: 'Horizon', value: Number.isFinite(horizon) ? `${horizon} years` : 'N/A', color: '#a855f7' },
   ];
   return (
     <div className="portfolio-snapshot">

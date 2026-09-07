@@ -21,6 +21,24 @@ export const RECOMMENDATION_PROFILE_KEYS = Object.freeze([
   'investmentHorizonYears',
 ]);
 
+export const OPTIONAL_RECOMMENDATION_PROFILE_KEYS = Object.freeze([
+  'soldPropertyProceeds',
+  'hasLumpSum',
+  'lumpSumAmount',
+  'liquidSavings',
+  'emiBurdenPct',
+  'financialDependents',
+  'emergencyFundMonths',
+]);
+
+const ML_REQUIRED_PROFILE_KEYS = Object.freeze([
+  'hasLumpSum',
+  'liquidSavings',
+  'emiBurdenPct',
+  'financialDependents',
+  'emergencyFundMonths',
+]);
+
 export const SUPPORTED_INVESTMENT_GOALS = Object.freeze([
   'Retirement',
   'Wealth Growth',
@@ -28,16 +46,17 @@ export const SUPPORTED_INVESTMENT_GOALS = Object.freeze([
   'Emergency Fund',
 ]);
 
-export const FINANCIAL_PROFILE_SCHEMA_VERSION = 'financial-profile-1.0.0';
-export const RECOMMENDATION_POLICY_VERSION = 'suitability-freeze-1.0.0';
+export const FINANCIAL_PROFILE_SCHEMA_VERSION = 'financial-profile-1.1.0';
+export const RECOMMENDATION_POLICY_VERSION = 'suitability-freeze-1.1.0';
 
 const GOALS = new Set(SUPPORTED_INVESTMENT_GOALS);
 const RISKS = new Set(['Conservative', 'Moderate', 'Aggressive']);
 
 const ALIASES = Object.freeze({
-  // monthlyIncome/income were historically the application's monthly cash-flow
-  // field. They are compatibility aliases for take-home, never gross salary.
-  monthlyTakeHome: ['monthlyTakeHome', 'monthly_take_home', 'monthlyIncome', 'monthly_income', 'income'],
+  // monthlyIncome/monthly_income were historically the application's monthly
+  // cash-flow field. Plain `income` is intentionally excluded because old
+  // callers used it for both monthly and annual amounts.
+  monthlyTakeHome: ['monthlyTakeHome', 'monthly_take_home', 'monthlyIncome', 'monthly_income'],
   monthlySavings: ['monthlySavings', 'monthly_savings', 'savings'],
   age: ['age'],
   riskTolerance: ['riskTolerance', 'risk_tolerance'],
@@ -71,7 +90,7 @@ function sourceObject(value) {
 
 function firstDefined(source, keys) {
   for (const key of keys) {
-    if (Object.prototype.hasOwnProperty.call(source, key) && source[key] !== undefined && source[key] !== null) {
+    if (Object.prototype.hasOwnProperty.call(source, key) && source[key] !== undefined) {
       return source[key];
     }
   }
@@ -79,6 +98,7 @@ function firstDefined(source, keys) {
 }
 
 function aliasValuesEquivalent(key, left, right) {
+  if (left === null || right === null) return left === right;
   if (key === 'investmentGoals') {
     if (!Array.isArray(left) || !Array.isArray(right)) return false;
     return JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
@@ -97,7 +117,8 @@ function asFiniteNumber(value) {
 
 /**
  * PICK-only normalizer. It never spreads a raw document and it intentionally
- * has no suitability-changing defaults. Missing or invalid facts fail closed.
+ * has no suitability-changing defaults. Missing core facts and invalid supplied
+ * facts fail closed; omitted optional facts remain explicitly unknown.
  */
 export function buildRecommendationProfile(rawProfile) {
   const source = sourceObject(rawProfile);
@@ -107,7 +128,7 @@ export function buildRecommendationProfile(rawProfile) {
   const errors = [];
   for (const key of RECOMMENDATION_PROFILE_KEYS) {
     const definedAliases = ALIASES[key]
-      .filter(alias => Object.prototype.hasOwnProperty.call(source, alias) && source[alias] !== undefined && source[alias] !== null)
+      .filter(alias => Object.prototype.hasOwnProperty.call(source, alias) && source[alias] !== undefined)
       .map(alias => ({ alias, value: source[alias] }));
     if (definedAliases.length > 1
         && definedAliases.slice(1).some(entry => !aliasValuesEquivalent(key, definedAliases[0].value, entry.value))) {
@@ -116,32 +137,45 @@ export function buildRecommendationProfile(rawProfile) {
     picked[key] = firstDefined(source, ALIASES[key]);
   }
 
-  const numberFields = [
-    'monthlyTakeHome', 'monthlySavings', 'age', 'soldPropertyProceeds',
-    'lumpSumAmount', 'liquidSavings', 'emiBurdenPct', 'financialDependents',
-    'emergencyFundMonths', 'investmentHorizonYears',
+  const requiredNumberFields = [
+    'monthlyTakeHome', 'monthlySavings', 'age', 'investmentHorizonYears',
   ];
-  for (const key of numberFields) {
+  for (const key of requiredNumberFields) {
     const parsed = asFiniteNumber(picked[key]);
     if (parsed === null) errors.push(`${key} is required and must be a finite number`);
     picked[key] = parsed;
   }
+  const optionalNumberFields = [
+    'soldPropertyProceeds', 'lumpSumAmount', 'liquidSavings', 'emiBurdenPct',
+    'financialDependents', 'emergencyFundMonths',
+  ];
+  for (const key of optionalNumberFields) {
+    const rawValue = picked[key];
+    const parsed = asFiniteNumber(rawValue);
+    if (rawValue !== undefined && rawValue !== null && rawValue !== '' && parsed === null) {
+      errors.push(`${key} must be a finite number when provided`);
+    }
+    picked[key] = parsed;
+  }
 
-  if (picked.monthlyTakeHome !== null && (picked.monthlyTakeHome < 1000 || picked.monthlyTakeHome > 100000000)) errors.push('monthlyTakeHome must be from 1000 to 100000000');
-  if (picked.monthlySavings !== null && (picked.monthlySavings < 500 || picked.monthlySavings > 100000000)) errors.push('monthlySavings must be from 500 to 100000000');
+  if (picked.monthlyTakeHome !== null && (!(picked.monthlyTakeHome > 0) || picked.monthlyTakeHome > 100000000)) errors.push('monthlyTakeHome must be greater than 0 and no more than 100000000');
+  if (picked.monthlySavings !== null && (!(picked.monthlySavings > 0) || picked.monthlySavings > 100000000)) errors.push('monthlySavings must be greater than 0 and no more than 100000000');
   if (picked.monthlySavings !== null && picked.monthlyTakeHome !== null && picked.monthlySavings >= picked.monthlyTakeHome) {
     errors.push('monthlySavings must be less than monthlyTakeHome');
   }
   if (!Number.isInteger(picked.age) || picked.age < 18 || picked.age > 80) errors.push('age must be an integer from 18 to 80');
   if (!RISKS.has(picked.riskTolerance)) errors.push('riskTolerance must be Conservative, Moderate, or Aggressive');
   if (picked.soldPropertyProceeds !== null && (picked.soldPropertyProceeds < 0 || picked.soldPropertyProceeds > 10000000000)) errors.push('soldPropertyProceeds must be from 0 to 10000000000');
-  if (typeof picked.hasLumpSum !== 'boolean') errors.push('hasLumpSum must be a boolean');
+  if (picked.hasLumpSum === undefined || picked.hasLumpSum === '') picked.hasLumpSum = null;
+  if (picked.hasLumpSum !== null && typeof picked.hasLumpSum !== 'boolean') errors.push('hasLumpSum must be a boolean or null');
   if (picked.lumpSumAmount !== null && (picked.lumpSumAmount < 0 || picked.lumpSumAmount > 10000000000)) errors.push('lumpSumAmount must be from 0 to 10000000000');
   if (picked.hasLumpSum === false && picked.lumpSumAmount !== 0) errors.push('lumpSumAmount must equal 0 when hasLumpSum is false');
   if (picked.hasLumpSum === true && !(picked.lumpSumAmount > 0)) errors.push('lumpSumAmount must be greater than 0 when hasLumpSum is true');
+  if (picked.hasLumpSum === null && picked.lumpSumAmount !== null) errors.push('lumpSumAmount must be null when hasLumpSum is unknown');
   if (picked.liquidSavings !== null && (picked.liquidSavings < 0 || picked.liquidSavings > 1000000000)) errors.push('liquidSavings must be from 0 to 1000000000');
   if (picked.emiBurdenPct !== null && (picked.emiBurdenPct < 0 || picked.emiBurdenPct > 100)) errors.push('emiBurdenPct must be from 0 to 100');
-  if (!Number.isInteger(picked.financialDependents) || picked.financialDependents < 0 || picked.financialDependents > 15) errors.push('financialDependents must be an integer from 0 to 15');
+  if (picked.financialDependents !== null
+      && (!Number.isInteger(picked.financialDependents) || picked.financialDependents < 0 || picked.financialDependents > 15)) errors.push('financialDependents must be an integer from 0 to 15');
   if (picked.emergencyFundMonths !== null && (picked.emergencyFundMonths < 0 || picked.emergencyFundMonths > 120)) errors.push('emergencyFundMonths must be from 0 to 120');
   if (!Array.isArray(picked.investmentGoals) || picked.investmentGoals.length === 0) {
     errors.push('investmentGoals must contain at least one supported goal');
@@ -163,7 +197,7 @@ export function buildRecommendationProfile(rawProfile) {
     riskTolerance: picked.riskTolerance,
     soldPropertyProceeds: picked.soldPropertyProceeds,
     hasLumpSum: picked.hasLumpSum,
-    lumpSumAmount: picked.hasLumpSum ? picked.lumpSumAmount : 0,
+    lumpSumAmount: picked.hasLumpSum === true ? picked.lumpSumAmount : picked.hasLumpSum === false ? 0 : null,
     liquidSavings: picked.liquidSavings,
     emiBurdenPct: picked.emiBurdenPct,
     financialDependents: picked.financialDependents,
@@ -179,8 +213,12 @@ export function deriveRecommendationMetrics(profileInput) {
   return Object.freeze({
     savingsRate: profile.monthlySavings / profile.monthlyTakeHome,
     monthlyDiscretionaryAfterSavings: profile.monthlyTakeHome - profile.monthlySavings,
-    estimatedMonthlyEmi: profile.monthlyTakeHome * profile.emiBurdenPct / 100,
-    deployableLumpSum: profile.hasLumpSum ? profile.lumpSumAmount : 0,
+    estimatedMonthlyEmi: profile.emiBurdenPct === null
+      ? null
+      : profile.monthlyTakeHome * profile.emiBurdenPct / 100,
+    deployableLumpSum: profile.hasLumpSum === true
+      ? profile.lumpSumAmount
+      : profile.hasLumpSum === false ? 0 : null,
     liquidityBuffer: profile.liquidSavings,
     emergencyCoverageMonths: profile.emergencyFundMonths,
   });
@@ -225,13 +263,21 @@ export function toProfileApiResponse(rawProfile) {
     investment_goals: [...profile.investmentGoals],
     investment_horizon_years: profile.investmentHorizonYears,
     monthly_investment_capacity: profile.monthlySavings,
-    one_time_investment_capacity: profile.hasLumpSum ? profile.lumpSumAmount : 0,
+    one_time_investment_capacity: profile.hasLumpSum === true
+      ? profile.lumpSumAmount
+      : profile.hasLumpSum === false ? 0 : null,
     profile_schema_version: FINANCIAL_PROFILE_SCHEMA_VERSION,
   };
 }
 
-export function toProfilePersistence(rawProfile, suitability = {}) {
+export function toProfilePersistence(rawProfile, suitability) {
   const profile = buildRecommendationProfile(rawProfile);
+  if (!suitability || !Number.isFinite(suitability.capacityScore)
+      || !Number.isInteger(suitability.capacityLevel)
+      || typeof suitability.finalRisk !== 'string'
+      || !Array.isArray(suitability.reasonCodes)) {
+    throw new TypeError('Complete deterministic suitability output is required for profile persistence');
+  }
   return {
     monthlyTakeHome: profile.monthlyTakeHome,
     monthlySavings: profile.monthlySavings,
@@ -246,16 +292,22 @@ export function toProfilePersistence(rawProfile, suitability = {}) {
     emergencyFundMonths: profile.emergencyFundMonths,
     investmentGoals: [...profile.investmentGoals],
     investmentHorizonYears: profile.investmentHorizonYears,
-    riskCapacityScore: suitability.capacityScore ?? undefined,
-    riskCapacityLevel: suitability.capacityLevel ?? undefined,
-    finalSuitabilityRisk: suitability.finalRisk ?? undefined,
-    suitabilityReasonCodes: suitability.reasonCodes ?? [],
+    riskCapacityScore: suitability.capacityScore,
+    riskCapacityLevel: suitability.capacityLevel,
+    finalSuitabilityRisk: suitability.finalRisk,
+    suitabilityReasonCodes: [...suitability.reasonCodes],
     recommendationProfileVersion: FINANCIAL_PROFILE_SCHEMA_VERSION,
   };
 }
 
 export function buildMlProfileInput(profileInput, suitability) {
   const profile = buildRecommendationProfile(profileInput);
+  const missingFields = getMissingMlProfileFields(profile);
+  if (missingFields.length > 0) {
+    throw new RecommendationProfileValidationError([
+      `ML input unavailable because optional facts are unknown: ${missingFields.join(', ')}`,
+    ]);
+  }
   const metrics = deriveRecommendationMetrics(profile);
   return Object.freeze({
     feature_schema_version: 'recommendation-features-4.0.0',
@@ -273,6 +325,18 @@ export function buildMlProfileInput(profileInput, suitability) {
     risk_capacity_score: suitability.capacityScore,
     final_suitability_risk: suitability.finalRisk,
   });
+}
+
+export function getMissingMlProfileFields(profileInput) {
+  const profile = buildRecommendationProfile(profileInput);
+  const missing = ML_REQUIRED_PROFILE_KEYS.filter(key => profile[key] === null);
+  if (profile.hasLumpSum === true && profile.lumpSumAmount === null) missing.push('lumpSumAmount');
+  return Object.freeze(missing);
+}
+
+export function getUnknownOptionalProfileFields(profileInput) {
+  const profile = buildRecommendationProfile(profileInput);
+  return Object.freeze(OPTIONAL_RECOMMENDATION_PROFILE_KEYS.filter(key => profile[key] === null));
 }
 
 export function buildLlmFinancialContext(profileInput, suitability) {
@@ -317,7 +381,7 @@ export function buildProfileGroundedSimulation(profileInput, request) {
   return Object.freeze({
     classification: 'PROFILE_GROUNDED',
     monthlyContribution: requestedMonthly,
-    initialCapital: profile.hasLumpSum ? profile.lumpSumAmount : 0,
+    initialCapital: profile.hasLumpSum === true ? profile.lumpSumAmount : 0,
     years: requestedYears,
   });
 }

@@ -6,7 +6,7 @@ Defines hyperparameters, default models, device selection, quantization preferen
 import json
 import os
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from pydantic import BaseModel, ConfigDict, Field
 from model.config import BASE_DIR
 

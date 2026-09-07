@@ -3,7 +3,6 @@ WealthGenie ML Microservice - ModelRegistry Test Suite
 Tests predictor registration, dynamic retrieval, and BasePredictor interface compliance.
 """
 
-import pytest
 import numpy as np
 from model.architecture.base import BasePredictor
 from model.serving.registry import ModelRegistry

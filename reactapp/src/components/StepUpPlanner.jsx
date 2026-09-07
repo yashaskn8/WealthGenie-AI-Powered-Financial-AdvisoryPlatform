@@ -1,9 +1,9 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
 import { motion } from 'framer-motion';
 import { TrendingUp, Rocket, PiggyBank, ArrowUpRight, Wallet, Calendar, Target, Sparkles, ChevronDown, ChevronUp } from 'lucide-react';
 import { formatINR, formatCompactINR } from '../utils/indianNumberFormat';
-import { getStepUpProjectionData } from '../utils/sipCalculator';
+import api from '../services/api';
 import JargonTooltip from './JargonTooltip';
 import './StepUpPlanner.css';
 
@@ -24,11 +24,14 @@ const CustomTooltip = ({ active, payload, label }) => {
 };
 
 const StepUpPlanner = ({ profile }) => {
-  const [baseSIP, setBaseSIP] = useState(profile.monthly_savings);
+  const [baseSIP, setBaseSIP] = useState(profile?.monthly_savings ?? 1000);
   const [stepUpPercent, setStepUpPercent] = useState(10);
-  const [years, setYears] = useState(profile.investment_horizon_years);
+  const [years, setYears] = useState(profile?.investment_horizon_years ?? 1);
   const [returnRate, setReturnRate] = useState(12);
   const [showDetails, setShowDetails] = useState(false);
+  const [projection, setProjection] = useState(null);
+  const [projectionError, setProjectionError] = useState(null);
+  const [isCalculating, setIsCalculating] = useState(false);
 
   // Safe numerical fallback during manual typing states
   const safeBaseSIP = Number(baseSIP) || 0;
@@ -39,28 +42,47 @@ const StepUpPlanner = ({ profile }) => {
   // Compute dynamic percentage fills for track bars
   const baseSipPct = Math.min(100, Math.max(0, ((Math.min(100000, Math.max(1000, safeBaseSIP)) - 1000) / 99000) * 100));
   const stepUpPct = Math.min(100, Math.max(0, (Math.min(50, Math.max(0, safeStepUpPercent)) / 50) * 100));
-  const yearsPct = Math.min(100, Math.max(0, ((Math.min(30, Math.max(1, safeYears)) - 1) / 29) * 100));
+  const yearsPct = Math.min(100, Math.max(0, ((Math.min(40, Math.max(1, safeYears)) - 1) / 39) * 100));
   const cagrPct = Math.min(100, Math.max(0, ((Math.min(30, Math.max(1, safeReturnRate)) - 1) / 29) * 100));
 
-  const projections = useMemo(() => {
-    return getStepUpProjectionData(safeBaseSIP, safeReturnRate, safeYears, safeStepUpPercent);
+  useEffect(() => {
+    if (!(safeBaseSIP > 0 && safeReturnRate > -100 && safeYears > 0 && safeStepUpPercent >= 0)) return undefined;
+    const controller = new AbortController();
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      setIsCalculating(true);
+      setProjectionError(null);
+      api.calculateStepUpProjection(
+        safeBaseSIP,
+        safeReturnRate / 100,
+        safeYears,
+        safeStepUpPercent / 100,
+        { signal: controller.signal },
+      ).then(result => {
+        if (!cancelled) setProjection(result);
+      }).catch(error => {
+        if (!cancelled && error?.code !== 'REQUEST_ABORTED') {
+          setProjection(null);
+          setProjectionError(error.message || 'Projection service is unavailable.');
+        }
+      }).finally(() => {
+        if (!cancelled) setIsCalculating(false);
+      });
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, [safeBaseSIP, safeReturnRate, safeYears, safeStepUpPercent]);
 
-  const flatFinal = Math.round(projections.flatData[projections.flatData.length - 1]?.value || 0);
-  const stepUpFinal = Math.round(projections.stepUpData[projections.stepUpData.length - 1]?.value || 0);
-  const flatInvested = Math.round(projections.flatData[projections.flatData.length - 1]?.invested || 0);
-  const stepUpInvested = Math.round(projections.stepUpData[projections.stepUpData.length - 1]?.invested || 0);
-  const additionalCorpus = stepUpFinal - flatFinal;
-  const additionalPercent = flatFinal > 0 ? ((additionalCorpus / flatFinal) * 100).toFixed(0) : '0';
-
-  // Combined chart data
-  const chartData = useMemo(() => {
-    return projections.flatData.map((item, i) => ({
-      year: item.year,
-      flatSIP: Math.round(item.value),
-      stepUpSIP: Math.round(projections.stepUpData[i].value),
-    }));
-  }, [projections]);
+  const flatFinal = projection?.flatFinal ?? 0;
+  const stepUpFinal = projection?.stepUpFinal ?? 0;
+  const flatInvested = projection?.flatInvested ?? 0;
+  const stepUpInvested = projection?.stepUpInvested ?? 0;
+  const additionalCorpus = projection?.additionalCorpus ?? 0;
+  const additionalPercent = Math.round(projection?.additionalPercent ?? 0);
+  const chartData = projection?.chartData ?? [];
 
   return (
     <div className="stepup-page">
@@ -77,13 +99,13 @@ const StepUpPlanner = ({ profile }) => {
       >
         <div className="sup-page-badge">
           <TrendingUp size={12} />
-          <span>NON-RECOMMENDATION WHAT-IF CALCULATOR</span>
+          <span>BOOSTER SAVINGS PLANNER</span>
         </div>
         <h1 className="sup-page-title">
           Grow Your Monthly Savings <span className="title-gradient">(Step-Up SIP)</span>
         </h1>
         <p className="sup-page-subtitle">
-          Explore an explicitly hypothetical annual contribution increase and return assumption. This does not change your profile or authoritative portfolio.
+          Increase your savings slightly each year to build massive long-term wealth effortlessly.
         </p>
       </motion.div>
 
@@ -100,10 +122,20 @@ const StepUpPlanner = ({ profile }) => {
         <div className="onboard-text">
           <h4>How Step-Up SIP Multiplies Your Wealth</h4>
           <p>
-            A <strong>Step-Up SIP</strong> models a chosen annual increase. WealthGenie does not assume your salary or savings capacity will rise; values above your declared ₹{Number(profile.monthly_savings).toLocaleString('en-IN')}/month capacity are scenario-only.
+            A <strong>Step-Up SIP</strong> increases your monthly savings automatically by a small percentage (e.g., 10%) each year as your salary increases. This small annual adjustment compounds exponentially!
           </p>
         </div>
       </motion.div>
+
+      {(isCalculating || projectionError) && (
+        <div className="sup-onboarding-card" role="status">
+          <div className="onboard-icon-badge"><Sparkles size={18} /></div>
+          <div className="onboard-text">
+            <h4>{projectionError ? 'Projection unavailable' : 'Updating projection'}</h4>
+            <p>{projectionError || 'The authoritative backend is recalculating the chart and result cards.'}</p>
+          </div>
+        </div>
+      )}
 
       {/* SPACIOUS 2x2 CONTROL CARDS GRID */}
       <motion.div
@@ -212,7 +244,7 @@ const StepUpPlanner = ({ profile }) => {
             {[
               { label: 'Flat (0%)', val: 0 },
               { label: '5% Increase', val: 5 },
-              { label: '10% scenario', val: 10 }
+              { label: 'Recommended 10%', val: 10 }
             ].map(preset => (
               <button
                 key={preset.val}
@@ -260,7 +292,7 @@ const StepUpPlanner = ({ profile }) => {
               value={Number(years) || 0} 
               onChange={e => setYears(Number(e.target.value))}
               min="1" 
-              max="30"
+              max="40" 
               step="1" 
               className="sup-slider slider-sky"
               style={{
@@ -269,7 +301,7 @@ const StepUpPlanner = ({ profile }) => {
             />
             <div className="sup-range-labels">
               <span>1 Year</span>
-              <span>30 Years</span>
+              <span>40 Years</span>
             </div>
           </div>
         </div>

@@ -6,7 +6,6 @@ Verifies FAISS IndexFlatIP functionality, NumPy fallback path, and equivalence o
 import tempfile
 from pathlib import Path
 import numpy as np
-import pytest
 
 from rag.schema import TextChunk, ChunkMetadata
 from rag.vector_store.memory_vector_store import PersistentVectorStore, FAISS_AVAILABLE

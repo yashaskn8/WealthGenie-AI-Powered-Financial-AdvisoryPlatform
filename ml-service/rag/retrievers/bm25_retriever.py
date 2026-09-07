@@ -5,7 +5,7 @@ Computes BM25 term frequency-inverse document frequency keyword scores across in
 
 import math
 import re
-from typing import List, Dict, Set, Optional
+from typing import List, Dict, Optional
 import numpy as np
 
 from rag.retrievers.base import BaseRetriever

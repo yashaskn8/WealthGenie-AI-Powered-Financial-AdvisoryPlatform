@@ -5,7 +5,7 @@ Implements sliding-window token bucket rate limiter for LLM generation requests 
 
 import logging
 import time
-from typing import Dict, Optional
+from typing import Dict
 
 logger = logging.getLogger("wealthgenie.llm.ops.rate_limiter")
 

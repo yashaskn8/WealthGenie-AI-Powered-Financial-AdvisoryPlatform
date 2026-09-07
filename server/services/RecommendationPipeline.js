@@ -1,4 +1,5 @@
 import { investmentDatabase, CONCENTRATION_CAPS } from '../data/investmentDatabase.js';
+import whereToInvestCatalog from '../data/whereToInvestCatalog.js';
 import { INSTRUMENT_PARAMS } from './instrumentConstants.js';
 import { buildRecommendationProfile } from './recommendationProfile.js';
 import { assessSuitabilityRisk } from './riskProfiler.js';
@@ -29,26 +30,28 @@ const RISK_LABEL_SCORE = Object.freeze({
 
 const round = (value, digits = 2) => Number(Number(value).toFixed(digits));
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+const isEstablishedNumber = value => (
+  value !== null && value !== undefined && value !== '' && typeof value !== 'boolean'
+  && Number.isFinite(Number(value))
+);
 
 export function resolveBackendType(instrument = {}) {
   const id = String(instrument.id || '').toLowerCase();
   if (INSTRUMENT_KEY_MAP[id]) return INSTRUMENT_KEY_MAP[id];
+  if (instrument.recommendationType === null) return null;
+  const recommendationType = String(instrument.recommendationType || '');
+  if (INSTRUMENT_PARAMS[recommendationType]) return recommendationType;
   const explicit = String(instrument.type || '');
   if (INSTRUMENT_PARAMS[explicit]) return explicit;
-  const text = `${instrument.id || ''} ${instrument.name || ''} ${instrument.category || ''}`.toLowerCase();
-  if (/small.?cap/.test(text)) return 'Smallcap_MF';
-  if (/mid.?cap/.test(text)) return 'Midcap_MF';
-  if (/index fund|index mutual/.test(text)) return 'Index_MF';
-  if (/liquid/.test(text)) return 'Liquid_MF';
-  if (/arbitrage/.test(text)) return 'Arbitrage_MF';
-  if (/hybrid|balanced/.test(text)) return 'Hybrid_MF';
-  if (/elss/.test(text)) return 'ELSS';
-  if (/debt|bond fund/.test(text)) return 'Debt_MF';
-  if (/mutual fund|equity fund|flexi|large.?cap/.test(text)) return 'Equity_MF';
-  if (/gold/.test(text)) return 'Gold';
-  if (/etf/.test(text)) return 'ETF';
-  if (/fixed deposit|\bfd\b/.test(text)) return 'FD';
-  return explicit || null;
+  return null;
+}
+
+function supportedGoalTags(instrument = {}) {
+  const tags = instrument.goalTags ?? instrument.dynamicData?.goalTags;
+  if (!Array.isArray(tags)) throw new TypeError('Instrument goal classification is not established');
+  return [...new Set(tags.filter(tag => [
+    'Retirement', 'Wealth Growth', 'Tax Saving', 'Emergency Fund',
+  ].includes(tag)))];
 }
 
 export function getInstrumentRisk(instrument = {}) {
@@ -87,41 +90,64 @@ export function reconcileRisk(profileInput) {
 }
 
 function exclusionReason(instrument, profile, finalLevel) {
+  if (!resolveBackendType(instrument)) return 'INSTRUMENT_TYPE_NOT_ESTABLISHED';
   const risk = getInstrumentRisk(instrument);
   if (risk === null) return 'RISK_CLASSIFICATION_NOT_ESTABLISHED';
   if (risk > finalLevel) return 'RISK_EXCEEDS_FINAL_SUITABILITY';
 
   const expectedReturn = instrument.expectedReturn ?? instrument.dynamicData?.expectedReturn?.avg;
-  if (!Number.isFinite(Number(expectedReturn))) return 'RETURN_ASSUMPTION_NOT_ESTABLISHED';
+  if (!isEstablishedNumber(expectedReturn)) return 'RETURN_ASSUMPTION_NOT_ESTABLISHED';
   const liquidityScore = instrument.liquidityScore ?? instrument.dynamicData?.liquidity?.score;
-  if (!Number.isFinite(Number(liquidityScore))) return 'LIQUIDITY_CLASSIFICATION_NOT_ESTABLISHED';
+  if (!isEstablishedNumber(liquidityScore)
+      || Number(liquidityScore) < 0 || Number(liquidityScore) > 5) return 'LIQUIDITY_CLASSIFICATION_NOT_ESTABLISHED';
   const expenseRatio = instrument.expenseRatio ?? instrument.dynamicData?.expenseRatio;
-  if (!Number.isFinite(Number(expenseRatio))) return 'COST_ASSUMPTION_NOT_ESTABLISHED';
+  if (!isEstablishedNumber(expenseRatio)
+      || Number(expenseRatio) < 0 || Number(expenseRatio) > 1) return 'COST_ASSUMPTION_NOT_ESTABLISHED';
   const goalTags = instrument.goalTags ?? instrument.dynamicData?.goalTags;
   if (!Array.isArray(goalTags)) return 'GOAL_CLASSIFICATION_NOT_ESTABLISHED';
 
   if (!instrument.eligibility || typeof instrument.eligibility !== 'object'
       || Array.isArray(instrument.eligibility)) return 'ELIGIBILITY_NOT_ESTABLISHED';
   const eligibility = instrument.eligibility;
-  if (eligibility.minAge !== null && eligibility.minAge !== undefined
-      && Number.isFinite(Number(eligibility.minAge)) && profile.age < Number(eligibility.minAge)) return 'MINIMUM_AGE_NOT_MET';
-  if (eligibility.maxAge !== null && eligibility.maxAge !== undefined
-      && Number.isFinite(Number(eligibility.maxAge)) && profile.age > Number(eligibility.maxAge)) return 'MAXIMUM_AGE_EXCEEDED';
+  const requiredEligibilityFields = [
+    'minAge', 'maxAge', 'minAnnualIncome', 'minMonthlySavings', 'hasGirlChild', 'requiresDemat',
+  ];
+  if (requiredEligibilityFields.some(field => !Object.hasOwn(eligibility, field))) {
+    return 'ELIGIBILITY_NOT_ESTABLISHED';
+  }
+  const minAgeEstablished = eligibility.minAge === null || (isEstablishedNumber(eligibility.minAge)
+    && Number(eligibility.minAge) >= 0 && Number(eligibility.minAge) <= 120);
+  const maxAgeEstablished = eligibility.maxAge === null || (isEstablishedNumber(eligibility.maxAge)
+    && Number(eligibility.maxAge) >= 0 && Number(eligibility.maxAge) <= 120);
+  const minIncomeEstablished = isEstablishedNumber(eligibility.minAnnualIncome)
+    && Number(eligibility.minAnnualIncome) >= 0;
+  const minMonthlyEstablished = isEstablishedNumber(eligibility.minMonthlySavings)
+    && Number(eligibility.minMonthlySavings) >= 0;
+  const childRequirementEstablished = eligibility.hasGirlChild === null
+    || typeof eligibility.hasGirlChild === 'boolean';
+  const dematRequirementEstablished = eligibility.requiresDemat === null
+    || typeof eligibility.requiresDemat === 'boolean';
+  if (!minAgeEstablished || !maxAgeEstablished || !minIncomeEstablished || !minMonthlyEstablished
+      || !childRequirementEstablished || !dematRequirementEstablished) {
+    return 'ELIGIBILITY_NOT_ESTABLISHED';
+  }
+  if (eligibility.minAge !== null && eligibility.maxAge !== null
+      && Number(eligibility.minAge) > Number(eligibility.maxAge)) return 'ELIGIBILITY_NOT_ESTABLISHED';
+  if (eligibility.minAge !== null && profile.age < Number(eligibility.minAge)) return 'MINIMUM_AGE_NOT_MET';
+  if (eligibility.maxAge !== null && profile.age > Number(eligibility.maxAge)) return 'MAXIMUM_AGE_EXCEEDED';
   if (Number(eligibility.minAnnualIncome) > 0) return 'GROSS_INCOME_ELIGIBILITY_NOT_ESTABLISHED';
   if (eligibility.hasGirlChild === true) return 'GIRL_CHILD_ELIGIBILITY_NOT_ESTABLISHED';
   if (eligibility.requiresDemat === true) return 'DEMAT_ELIGIBILITY_NOT_ESTABLISHED';
 
-  const minMonthlyRaw = eligibility.minMonthlySavings ?? instrument.minMonthlyInvestment;
-  if (minMonthlyRaw === undefined || !Number.isFinite(Number(minMonthlyRaw))) {
-    return 'MINIMUM_INVESTMENT_NOT_ESTABLISHED';
-  }
-  const minMonthly = Number(minMonthlyRaw);
+  const minMonthly = Number(eligibility.minMonthlySavings);
   if (Number.isFinite(minMonthly) && profile.monthlySavings < minMonthly) return 'MINIMUM_INVESTMENT_NOT_MET';
 
   const minimumHorizonRaw = instrument.idealHorizon?.min ?? instrument.dynamicData?.idealHorizon?.min;
+  const maximumHorizonRaw = instrument.idealHorizon?.max ?? instrument.dynamicData?.idealHorizon?.max;
   const lockInRaw = instrument.lockIn ?? instrument.dynamicData?.liquidity?.lockIn;
-  if (!Number.isFinite(Number(minimumHorizonRaw))) return 'MINIMUM_HORIZON_NOT_ESTABLISHED';
-  if (!Number.isFinite(Number(lockInRaw))) return 'LOCK_IN_NOT_ESTABLISHED';
+  if (!isEstablishedNumber(minimumHorizonRaw) || Number(minimumHorizonRaw) < 0) return 'MINIMUM_HORIZON_NOT_ESTABLISHED';
+  if (!isEstablishedNumber(maximumHorizonRaw) || Number(maximumHorizonRaw) < Number(minimumHorizonRaw)) return 'MAXIMUM_HORIZON_NOT_ESTABLISHED';
+  if (!isEstablishedNumber(lockInRaw) || Number(lockInRaw) < 0) return 'LOCK_IN_NOT_ESTABLISHED';
   const minimumHorizon = Number(minimumHorizonRaw);
   const lockIn = Number(lockInRaw);
   if (Number.isFinite(minimumHorizon) && minimumHorizon > profile.investmentHorizonYears) return 'HORIZON_BELOW_MINIMUM';
@@ -162,7 +188,9 @@ export function parseProfile(profileInput) {
 
 export function deriveWeights(parsedProfile) {
   const shortHorizon = parsedProfile.horizon <= 3;
-  const emergencyPriority = parsedProfile.goals.includes('Emergency Fund') || parsedProfile.emergencyFundMonths < 3;
+  const emergencyPriority = parsedProfile.goals.includes('Emergency Fund')
+    || parsedProfile.emergencyFundMonths === null
+    || parsedProfile.emergencyFundMonths < 3;
   const goalWeight = parsedProfile.goals.length > 1 ? 0.17 : 0.13;
   const weights = {
     expectedReturn: shortHorizon ? 0.15 : 0.25,
@@ -194,8 +222,7 @@ export const scoreCost = instrument => {
   return clamp(100 - value * 2000, 0, 100);
 };
 export const scoreGoal = (instrument, profile) => {
-  const tags = instrument.goalTags ?? instrument.dynamicData?.goalTags;
-  if (!Array.isArray(tags)) throw new TypeError('Instrument goal classification is not established');
+  const tags = supportedGoalTags(instrument);
   return profile.goals.some(goal => tags.includes(goal)) ? 100 : 35;
 };
 export const scoreHorizon = (instrument, profile) => {
@@ -203,14 +230,16 @@ export const scoreHorizon = (instrument, profile) => {
   if (!Number.isFinite(Number(range.min)) || !Number.isFinite(Number(range.max))) {
     throw new TypeError('Instrument horizon classification is not established');
   }
-  return profile.horizon >= Number(range.min) && profile.horizon <= Number(range.max ?? 30) ? 100 : 40;
+  return profile.horizon >= Number(range.min) && profile.horizon <= Number(range.max) ? 100 : 40;
 };
 export function normaliseConfidenceScores(mlResult = {}) {
   const source = mlResult.confidence_scores || mlResult.confidenceScores || {};
   const result = {};
   for (const [key, value] of Object.entries(source)) {
-    const number = Number(value);
-    if (Number.isFinite(number)) result[key] = clamp(number, 0, 1);
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) {
+      throw new TypeError(`ML confidence for ${key} must be between 0 and 1`);
+    }
+    result[key] = value;
   }
   return result;
 }
@@ -298,7 +327,9 @@ export function enforceAllocationTargets(instruments) {
     });
     if (overflow < 1e-8) break;
     const recipients = allocations.map((_, index) => index).filter(index => !cappedIndexes.has(index) && !resolveConcentrationCap(allocations[index]));
-    if (!recipients.length) break;
+    if (!recipients.length) {
+      throw new RangeError('Concentration caps leave no uncapped instrument for the remaining allocation');
+    }
     const base = recipients.reduce((sum, index) => sum + allocations[index].allocation_pct, 0);
     recipients.forEach(index => {
       allocations[index].allocation_pct += overflow * (base > 0 ? allocations[index].allocation_pct / base : 1 / recipients.length);
@@ -308,10 +339,13 @@ export function enforceAllocationTargets(instruments) {
   const sum = allocations.reduce((total, item) => total + item.allocation_pct, 0);
   if (!Number.isFinite(sum) || sum <= 0) throw new RangeError('Capped allocations have no positive total');
   let assignedWeight = 0;
-  return allocations.map((item, index) => {
+  const normalized = allocations.map((item, index) => {
     const allocationWeight = index === allocations.length - 1
       ? round(1 - assignedWeight, 4)
       : round(item.allocation_pct / sum, 4);
+    if (allocationWeight < 0 || allocationWeight > 1) {
+      throw new RangeError('Rounded allocation weights fall outside the valid range');
+    }
     assignedWeight = round(assignedWeight + allocationWeight, 4);
     return {
       ...item,
@@ -319,15 +353,25 @@ export function enforceAllocationTargets(instruments) {
       allocationWeight,
     };
   });
+  const grouped = new Map();
+  normalized.forEach(item => {
+    const cap = resolveConcentrationCap(item);
+    if (cap) grouped.set(cap.key, (grouped.get(cap.key) || 0) + item.allocationWeight * 100);
+  });
+  for (const [key, total] of grouped.entries()) {
+    const cap = CONCENTRATION_CAPS[key]?.maxPct;
+    if (!Number.isFinite(cap) || total > cap + 0.01) {
+      throw new RangeError(`Final allocation exceeds the ${key} concentration cap`);
+    }
+  }
+  return normalized;
 }
-
-export const enforceAllocationTargetsHeuristic = enforceAllocationTargets;
 
 function presentationInstrument(row) {
   const instrument = row.instrument;
   const backendType = resolveBackendType(instrument);
   const nominalReturn = round(Number(instrument.expectedReturn ?? instrument.dynamicData?.expectedReturn?.avg));
-  const params = INSTRUMENT_PARAMS[backendType] || {};
+  const riskScore = getInstrumentRisk(instrument);
   return {
     id: instrument.id,
     name: instrument.name,
@@ -337,11 +381,11 @@ function presentationInstrument(row) {
     effectiveYield: nominalReturn,
     postTaxReturn: null,
     returnBasis: 'PRE_TAX_NOMINAL',
-    expenseRatio: Number(instrument.expenseRatio ?? params.expenseRatio ?? 0),
-    riskLevel: instrument.riskLabel || instrument.dynamicData?.risk?.level || params.riskLevel,
-    riskScore: getInstrumentRisk(instrument),
-    lockIn: Number(instrument.lockIn ?? instrument.dynamicData?.liquidity?.lockIn ?? 0),
-    tags: [...(instrument.goalTags || instrument.dynamicData?.goalTags || [])],
+    expenseRatio: Number(instrument.expenseRatio ?? instrument.dynamicData?.expenseRatio),
+    riskLevel: instrument.riskLabel || instrument.dynamicData?.risk?.level || `Risk ${riskScore}`,
+    riskScore,
+    lockIn: Number(instrument.lockIn ?? instrument.dynamicData?.liquidity?.lockIn),
+    tags: supportedGoalTags(instrument),
     taxNotes: 'Tax impact is not personalized because gross taxable income and deductions are outside the Financial Profile.',
     score: row.score,
     scoreFactors: row.factors,
@@ -363,18 +407,20 @@ export function runPipeline(profileInput, mlResult = {}, options = {}) {
     throw new RangeError('minAssetClasses must be an integer from 1 to topN');
   }
   const selected = enforceDiversity(ranked, topN, minAssetClasses);
-  let instruments = enforceAllocationTargets(selected.map(presentationInstrument));
-  instruments = instruments.filter(instrument => instrument.riskScore <= riskReconciliation.final_score);
+  const instruments = enforceAllocationTargets(selected.map(presentationInstrument));
+  if (instruments.some(instrument => instrument.riskScore > riskReconciliation.final_score)) {
+    throw new Error('Suitability invariant failed after ranking');
+  }
   riskReconciliation.excluded_due_to_eligibility = excluded;
   return { instruments, confidenceScores, riskReconciliation, computedWeights };
 }
 
 /**
  * WTI is an alternate presentation of the same server-side suitability decision.
- * Client candidates are display selectors only; all financial metadata comes from
- * the authoritative catalog and unknown ids fail closed.
+ * Provider universe and order come from the authoritative server catalog. The
+ * client supplies only the owned profile id and exact parent catalog id.
  */
-export function rankWhereToInvestBackend(candidates = [], profileInput, options = {}) {
+export function rankWhereToInvestBackend(profileInput, options = {}) {
   const canonical = buildRecommendationProfile(profileInput);
   const riskReconciliation = reconcileRisk(canonical);
   const catalog = investmentDatabase.find(instrument => String(instrument.id) === String(options.parentInstrumentId));
@@ -400,15 +446,29 @@ export function rankWhereToInvestBackend(candidates = [], profileInput, options 
   const weights = deriveWeights(parsed);
   const scored = computeInstrumentScore(catalog, parsed, weights, {});
   const parent = presentationInstrument({ instrument: catalog, ...scored });
-  const ranked = candidates.map((candidate, index) => ({
-    id: candidate.id || `${catalog.id}:provider:${index + 1}`,
-    name: candidate.name,
-    provider: candidate.provider,
-    platform: candidate.platform,
-    minInvestment: candidate.minInvestment,
-    tenure: candidate.tenure,
-    highlight: candidate.highlight,
-    badge: candidate.badge,
+  const providerEntry = whereToInvestCatalog[catalog.id];
+  const providerCatalog = providerEntry?.products;
+  const requiredProviderFields = ['name', 'provider', 'highlight', 'platform', 'minInvestment'];
+  if (!providerEntry || !Array.isArray(providerCatalog) || providerCatalog.length !== 5
+      || providerCatalog.some(product => !product || requiredProviderFields.some(
+        field => typeof product[field] !== 'string' || !product[field].trim(),
+      ))
+      || new Set(providerCatalog.map(product => product.name)).size !== providerCatalog.length) {
+    excluded.push({ id: catalog.id, name: catalog.name, reasonCode: 'PROVIDER_CATALOG_NOT_ESTABLISHED' });
+    const empty = [];
+    Object.defineProperty(empty, 'metadata', { value: { excluded, riskReconciliation }, enumerable: false });
+    return empty;
+  }
+  const ranked = providerCatalog.map((product, index) => ({
+    id: `${catalog.id}:provider:${index + 1}`,
+    name: product.name,
+    provider: product.provider,
+    platform: product.platform,
+    highlight: product.highlight,
+    minInvestment: product.minInvestment,
+    tenure: product.tenure || null,
+    badge: product.badge || null,
+    providerRank: index + 1,
     parentInstrumentId: catalog.id,
     nominalReturn: parent.nominalReturn,
     effectiveYield: parent.effectiveYield,
@@ -419,10 +479,22 @@ export function rankWhereToInvestBackend(candidates = [], profileInput, options 
     riskScore: parent.riskScore,
     score: parent.score,
     matchTags: [...new Set([...(parent.tags || []), `Suitable for ${riskReconciliation.final_risk_tier}`])],
-    investmentRoute: canonical.hasLumpSum ? 'SIP + Lump Sum' : 'SIP',
-    rankingBasis: 'AUTHORITATIVE_PARENT_INSTRUMENT_SUITABILITY_CURATED_PROVIDER_ORDER',
+    investmentRoute: canonical.hasLumpSum === true ? 'SIP + Lump Sum' : 'SIP',
+    rankingBasis: 'AUTHORITATIVE_SERVER_CATALOG_ORDER_WITH_PARENT_SUITABILITY',
   }));
-  Object.defineProperty(ranked, 'metadata', { value: { excluded, riskReconciliation }, enumerable: false });
+  Object.defineProperty(ranked, 'metadata', {
+    value: {
+      excluded,
+      riskReconciliation,
+      catalog: {
+        title: providerEntry.title,
+        note: providerEntry.note,
+        howToStart: providerEntry.howToStart,
+        riskLevel: providerEntry.riskLevel,
+      },
+    },
+    enumerable: false,
+  });
   return ranked;
 }
 

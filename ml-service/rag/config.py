@@ -6,7 +6,7 @@ Defines hyperparameters for chunking, vector embeddings, storage paths, and retr
 import json
 import os
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from pydantic import BaseModel, Field, model_validator
 from model.config import BASE_DIR
 

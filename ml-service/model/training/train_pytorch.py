@@ -8,7 +8,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Dict, Any, Tuple, List, Optional
+from typing import Dict, Any, List, Optional
 
 import numpy as np
 import torch
@@ -22,7 +22,7 @@ from model.config import (
     get_device,
     set_random_seed,
 )
-from model.data.data_validator import PreTrainingDataValidator, DataValidationError
+from model.data.data_validator import PreTrainingDataValidator
 from model.data.dataset import create_data_loaders
 from model.evaluation.evaluate import evaluate_pytorch_model
 from model.evaluation.experiments import ExperimentTracker
@@ -80,7 +80,7 @@ def train_pytorch_model(
 
     # 2. Pre-Training Data Validation Gate
     validator = PreTrainingDataValidator()
-    validator_report = validator.validate(X, y)
+    validator.validate(X, y)
     logger.info("Data Validation Gate Passed.")
 
     # 3. Create DataLoaders
@@ -257,7 +257,7 @@ def train_pytorch_model(
         model_artifact_path=paths.model_weights,
     )
 
-    logger.info(f"PyTorch MLP training pipeline finished successfully.")
+    logger.info("PyTorch MLP training pipeline finished successfully.")
     return {
         "metadata": metadata,
         "metrics": eval_metrics,
@@ -298,9 +298,6 @@ def train_ft_transformer_model(
     model = FTTransformer(config).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=training_config.learning_rate, weight_decay=1e-4)
-
-    start_time = time.time()
-    best_loss = float("inf")
 
     for epoch in range(1, training_config.epochs + 1):
         model.train()

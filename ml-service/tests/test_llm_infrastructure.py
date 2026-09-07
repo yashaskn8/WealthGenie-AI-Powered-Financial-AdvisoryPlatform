@@ -120,6 +120,8 @@ def test_huggingface_provider_disables_remote_code_execution(monkeypatch, tmp_pa
     assert calls["tokenizer"]["trust_remote_code"] is False
     assert calls["model"]["trust_remote_code"] is False
     assert calls["model"]["use_safetensors"] is True
+    assert calls["model"]["dtype"] is not None
+    assert "torch_dtype" not in calls["model"]
 
 
 def test_local_llm_loader():

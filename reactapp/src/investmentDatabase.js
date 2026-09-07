@@ -6,7 +6,8 @@
  * run `npm run catalog:sync` from server and commit both files.
  * Dynamically loads investment_master.json and flattens properties
  * to maintain 100% backward compatibility with all UI pages, charts,
- * comparison modals, and local recommendation engines.
+ * and non-personalized comparison/details views. It is never a browser-side
+ * recommendation or ranking authority.
  */
 
 import masterCatalog from './data/investment_master.json' with { type: 'json' };

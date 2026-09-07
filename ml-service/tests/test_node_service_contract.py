@@ -29,6 +29,16 @@ def test_prediction_success_response_matches_fastapi_schema():
     assert response.explanation is not None
 
 
+def test_prediction_response_rejects_class_probability_and_version_drift():
+    response = FIXTURES["prediction_response"]
+    with pytest.raises(ValidationError):
+        PredictResponse.model_validate({**response, "tertiary": "SGB"})
+    with pytest.raises(ValidationError):
+        PredictResponse.model_validate({**response, "confidence_scores": {"ETF": 1.0}})
+    with pytest.raises(ValidationError):
+        PredictResponse.model_validate({**response, "dataset_version": ""})
+
+
 def test_prediction_request_rejects_unknown_casing_or_duplicate_fields():
     with pytest.raises(ValidationError):
         PredictRequest.model_validate({**FIXTURES["prediction_request"], "annual_income": 1800000})

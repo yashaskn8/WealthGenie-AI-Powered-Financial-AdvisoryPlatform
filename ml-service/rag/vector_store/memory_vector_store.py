@@ -20,7 +20,7 @@ except ImportError:
     FAISS_AVAILABLE = False
 
 from rag.config import RAGConfig
-from rag.schema import TextChunk, RetrievedChunk, ChunkMetadata, is_scope_accessible
+from rag.schema import TextChunk, RetrievedChunk, is_scope_accessible
 from rag.vector_store.base import BaseVectorStore
 
 logger = logging.getLogger("wealthgenie.rag.vector_store")

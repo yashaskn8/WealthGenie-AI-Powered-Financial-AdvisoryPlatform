@@ -1,15 +1,16 @@
 import { Router } from 'express';
 import { verifyJWT, isValidObjectId } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
-import { customGoalSchema, customGoalUpdateSchema, validateStrict } from '../validation/financialSchemas.js';
+import { customGoalSchema, customGoalUpdateSchema, goalSimulationSchema, validateStrict } from '../validation/financialSchemas.js';
 import Goal from '../models/Goal.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
-import { reverseSIP, runMonteCarloWithGoal, getInstrumentVolatility } from '../services/monteCarloEngine.js';
+import { reverseSIP, runMonteCarloWithGoal } from '../services/monteCarloEngine.js';
 import { buildCovarianceMatrix, portfolioReturn, portfolioVol } from '../services/portfolioEngine.js';
 import { getGoalAdvisory } from '../services/geminiService.js';
 import {
   buildRecommendationProfile,
+  buildRecommendationProfileHash,
   buildLlmFinancialContext,
 } from '../services/recommendationProfile.js';
 import { assessSuitabilityRisk } from '../services/riskProfiler.js';
@@ -51,42 +52,45 @@ function computeYearsRemaining(targetDate) {
 
 function toDecimalRate(value) {
   const number = Number(value);
-  if (!Number.isFinite(number)) throw new TypeError('Recommendation return must be finite');
-  return Math.abs(number) > 1 ? number / 100 : number;
+  if (!Number.isFinite(number) || number < -100 || number > 100) {
+    throw new TypeError('Recommendation nominal return must be a percentage from -100 to 100');
+  }
+  return number / 100;
 }
 
 /** Uses only the persisted authoritative recommendation for this exact profile. */
-export async function _getBlendedPortfolioMetrics(userId, profileId, _unused = undefined, overrideRec = null) {
+export async function _getBlendedPortfolioMetrics(userId, profileId, profile = undefined, overrideRec = null) {
   const recommendation = overrideRec || await Recommendation.findOne({ userId, profileId }).sort({ generatedAt: -1 }).lean();
-  const instruments = recommendation?.instruments?.filter(instrument =>
-    instrument.type && Number(instrument.allocationWeight) > 0 && Number.isFinite(Number(instrument.nominalReturn))
-  );
+  const instruments = recommendation?.instruments;
   if (!instruments?.length) {
     const error = new Error('Generate an authoritative recommendation before creating or recalculating goals.');
     error.status = 409;
     error.code = 'RECOMMENDATION_REQUIRED';
     throw error;
   }
+  if (profile) {
+    const expectedProfileHash = buildRecommendationProfileHash(profile, { modelVersion: recommendation.modelVersion });
+    if (recommendation.profileInputHash !== expectedProfileHash) {
+      const error = new Error('The authoritative recommendation is stale for the current Financial Profile.');
+      error.status = 409;
+      error.code = 'RECOMMENDATION_STALE';
+      throw error;
+    }
+  }
+  if (instruments.some(instrument => (
+    !instrument.type || !Number.isFinite(Number(instrument.allocationWeight))
+    || Number(instrument.allocationWeight) <= 0 || !Number.isFinite(Number(instrument.nominalReturn))
+    || instrument.returnBasis !== 'PRE_TAX_NOMINAL' || instrument.postTaxReturn !== null
+  ))) throw new TypeError('Persisted recommendation contains an invalid instrument');
   const totalWeight = instruments.reduce((sum, instrument) => sum + Number(instrument.allocationWeight), 0);
-  if (!(totalWeight > 0)) throw new TypeError('Persisted recommendation has invalid allocation weights');
-  const weights = instruments.map(instrument => Number(instrument.allocationWeight) / totalWeight);
+  if (!Number.isFinite(totalWeight) || Math.abs(totalWeight - 1) > 0.001) {
+    throw new TypeError('Persisted recommendation allocation weights must total 1');
+  }
+  const weights = instruments.map(instrument => Number(instrument.allocationWeight));
   const returns = instruments.map(instrument => toDecimalRate(instrument.nominalReturn));
   const assetKeys = instruments.map(instrument => instrument.type);
   const expectedReturn = Number(portfolioReturn(weights, returns).toFixed(4));
-  let volatility;
-  try {
-    volatility = Number(portfolioVol(buildCovarianceMatrix(assetKeys).matrix, weights).toFixed(4));
-  } catch {
-    const componentVolatilities = assetKeys.map(key => {
-      const parameters = getInstrumentVolatility(key);
-      if (!parameters) throw new TypeError(`No volatility parameters for ${key}`);
-      return parameters.stdDev;
-    });
-    volatility = Math.sqrt(componentVolatilities.reduce(
-      (sum, component, index) => sum + (weights[index] * component) ** 2,
-      0,
-    ));
-  }
+  const volatility = Number(portfolioVol(buildCovarianceMatrix(assetKeys).matrix, weights).toFixed(4));
   return {
     expectedReturn,
     volatility,
@@ -135,13 +139,14 @@ export async function persistGoalAtomically(goalData, _profileId, { testHooks = 
 
 async function calculateGoalPlan({ profile, profileId, userId, targetAmount, targetDate, currentSavings }) {
   const yearsRemaining = computeYearsRemaining(targetDate);
-  const metrics = await _getBlendedPortfolioMetrics(userId, profileId);
+  const metrics = await _getBlendedPortfolioMetrics(userId, profileId, profile);
   const inflationAdjustedTarget = Math.round(targetAmount * (1 + GOAL_INFLATION_ASSUMPTION) ** yearsRemaining);
   const rawSip = reverseSIP(inflationAdjustedTarget, metrics.expectedReturn, yearsRemaining, currentSavings);
   if (!Number.isFinite(rawSip)) throw new Error('Unable to calculate required SIP');
   const requiredSip = Math.max(0, Math.round(rawSip));
+  const simulatedMonthlyContribution = Math.min(requiredSip, profile.monthlySavings);
   const result = runMonteCarloWithGoal({
-    monthlyInvestment: requiredSip,
+    monthlyInvestment: simulatedMonthlyContribution,
     annualExpectedReturn: metrics.expectedReturn,
     annualVolatility: metrics.volatility,
     years: yearsRemaining,
@@ -157,6 +162,7 @@ async function calculateGoalPlan({ profile, profileId, userId, targetAmount, tar
     metrics,
     inflationAdjustedTarget,
     requiredSip,
+    simulatedMonthlyContribution,
     result,
     lastIndex,
     gap,
@@ -189,6 +195,7 @@ router.post('/create', verifyJWT, idempotency(), validateStrict(customGoalSchema
     target_date: new Date(target_date),
     current_savings,
     recommended_sip: plan.requiredSip,
+    simulated_monthly_contribution: plan.simulatedMonthlyContribution,
     recommended_instrument: plan.metrics.primaryInstrument,
     probability_of_success: plan.result.goal_probability,
     gap_amount: plan.gap,
@@ -202,7 +209,7 @@ router.post('/create', verifyJWT, idempotency(), validateStrict(customGoalSchema
     chart_data: chartData(plan.result),
     mc_computed_at: new Date(),
     years_remaining: plan.yearsRemaining,
-    simulation_classification: 'NON_RECOMMENDATION_GOAL_WHAT_IF',
+    simulation_classification: 'PROFILE_GROUNDED_GOAL_PLAN',
     return_basis: plan.metrics.returnBasis,
     inflation_assumption: GOAL_INFLATION_ASSUMPTION,
   };
@@ -236,6 +243,48 @@ router.get('/', verifyJWT, asyncHandler(async (req, res) => {
   res.json({ goals: goals.map(goal => ({ ...goal.toObject(), chartData: goal.chart_data })) });
 }));
 
+router.post('/:goalId/simulate', verifyJWT, validateStrict(goalSimulationSchema), asyncHandler(async (req, res) => {
+  if (!isValidObjectId(req.params.goalId)) throw createError(400, 'Invalid goalId', 'Invalid goal ID.');
+  const goal = await Goal.findOne({ _id: req.params.goalId, userId: req.user.userId }).lean();
+  if (!goal) throw createError(404, 'Goal not found', 'Goal not found.');
+  const stored = await findOwnedProfile(goal.profileId, req.user.userId);
+  if (!stored) throw createError(409, 'The goal profile is unavailable.', 'Financial profile unavailable.');
+  const profile = buildRecommendationProfile(stored);
+  const monthlyContribution = req.body.monthly_contribution;
+  if (monthlyContribution > profile.monthlySavings) {
+    throw createError(400, 'Monthly contribution exceeds the Financial Profile savings capacity.', 'Contribution exceeds monthly savings capacity.');
+  }
+  const yearsRemaining = computeYearsRemaining(goal.target_date);
+  const metrics = await _getBlendedPortfolioMetrics(req.user.userId, goal.profileId, profile);
+  const result = runMonteCarloWithGoal({
+    monthlyInvestment: monthlyContribution,
+    annualExpectedReturn: metrics.expectedReturn,
+    annualVolatility: metrics.volatility,
+    years: yearsRemaining,
+    simulations: 5000,
+    inflationRate: GOAL_INFLATION_ASSUMPTION,
+    targetAmount: goal.inflation_adjusted_target,
+    currentSavings: goal.current_savings,
+  });
+  const lastIndex = validateMonteCarlo(result);
+  const gap = Math.max(0, goal.recommended_sip - monthlyContribution);
+  res.json({
+    goalId: goal._id,
+    monthly_contribution: monthlyContribution,
+    probability_of_success: result.goal_probability,
+    status: determineGoalStatus(result.goal_probability, gap, profile.monthlySavings),
+    gap_amount: gap,
+    chartData: chartData(result),
+    monte_carlo_summary: {
+      p10: result.p10[lastIndex], p25: result.p25[lastIndex], p50: result.p50[lastIndex],
+      p75: result.p75[lastIndex], p90: result.p90[lastIndex], simulations_run: result.simulations_run,
+    },
+    simulation_classification: 'NON_RECOMMENDATION_GOAL_WHAT_IF',
+    return_basis: metrics.returnBasis,
+    inflation_assumption: GOAL_INFLATION_ASSUMPTION,
+  });
+}));
+
 router.patch('/:goalId/refresh-advice', verifyJWT, asyncHandler(async (req, res) => {
   if (!isValidObjectId(req.params.goalId)) throw createError(400, 'Invalid goalId', 'Invalid goal ID.');
   const goal = await Goal.findOne({ _id: req.params.goalId, userId: req.user.userId });
@@ -267,6 +316,7 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
     });
     goal.inflation_adjusted_target = plan.inflationAdjustedTarget;
     goal.recommended_sip = plan.requiredSip;
+    goal.simulated_monthly_contribution = plan.simulatedMonthlyContribution;
     goal.recommended_instrument = plan.metrics.primaryInstrument;
     goal.probability_of_success = plan.result.goal_probability;
     goal.gap_amount = plan.gap;
@@ -279,7 +329,7 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
     goal.chart_data = chartData(plan.result);
     goal.mc_computed_at = new Date();
     goal.years_remaining = plan.yearsRemaining;
-    goal.simulation_classification = 'NON_RECOMMENDATION_GOAL_WHAT_IF';
+    goal.simulation_classification = 'PROFILE_GROUNDED_GOAL_PLAN';
     goal.return_basis = plan.metrics.returnBasis;
     goal.inflation_assumption = GOAL_INFLATION_ASSUMPTION;
     goal.gemini_advice = await generateGoalAdvice(goal, profile);

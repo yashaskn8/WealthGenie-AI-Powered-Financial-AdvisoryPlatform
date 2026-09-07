@@ -2,17 +2,18 @@ import mongoose from 'mongoose';
 
 const GoalSchema = new mongoose.Schema({
   userId:     { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  profileId:  { type: mongoose.Schema.Types.ObjectId, ref: 'FinancialProfile' },
+  profileId:  { type: mongoose.Schema.Types.ObjectId, ref: 'FinancialProfile', required: true },
   goal_name:  { type: String, required: true, trim: true, maxlength: 100 },
   target_amount:  { type: Number, required: true, min: 1000 },
   inflation_adjusted_target: { type: Number },
   target_date:    { type: Date,   required: true },
-  current_savings:       { type: Number, default: 0, min: 0 },
+  current_savings:       { type: Number, required: true, min: 0 },
   recommended_sip:       { type: Number, min: 0 },    // computed field
+  simulated_monthly_contribution: { type: Number, min: 0 },
   recommended_instrument: { type: String },
   probability_of_success: { type: Number, min: 0, max: 1 },  // 0–1 decimal
   gap_amount:             { type: Number, min: 0 },
-  priority:               { type: String, enum: ['Critical', 'High', 'Medium', 'Low'], default: 'Medium' },
+  priority:               { type: String, enum: ['Critical', 'High', 'Medium', 'Low'], required: true },
   status: {
     type: String,
     enum: ['on_track', 'at_risk', 'off_track'],

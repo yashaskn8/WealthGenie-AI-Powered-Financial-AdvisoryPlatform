@@ -19,6 +19,7 @@ import Goal from '../models/Goal.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
+import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
 
 const testSecret = ['wg037', 'test', 'jwt', 'secret', 'key'].join('-');
 process.env.JWT_SECRET = process.env.JWT_SECRET || testSecret;
@@ -59,10 +60,18 @@ async function ensureDb() {
     {
       userId: TEST_USER_ID, profileId: profile._id,
       instruments: [{
-        type: 'FD', name: 'Bank Fixed Deposit', allocationWeight: 1,
-        nominalReturn: 7.5, effectiveYield: 7.5,
+        id: 'fd', type: 'FD', name: 'Bank Fixed Deposit', assetClass: 'Fixed Income',
+        allocationWeight: 1, allocation_pct: 100, nominalReturn: 7.5, effectiveYield: 7.5,
+        postTaxReturn: null, returnBasis: 'PRE_TAX_NOMINAL', expenseRatio: 0,
+        riskLevel: 'Low', riskScore: 1, lockIn: 0, tags: ['Wealth Growth'],
+        score: 80, scoreFactors: {
+          expectedReturn: 60, riskFit: 100, liquidity: 80, goalFit: 100,
+          horizonFit: 100, cost: 100, mlConfidence: 0,
+        },
       }],
-      advisoryText: 'Fixture recommendation', generatedAt: new Date(),
+      advisoryText: 'Fixture recommendation', mlFallback: true,
+      modelVersion: 'test-rule-fallback-4.0.0', generatedAt: new Date(),
+      profileInputHash: buildRecommendationProfileHash(profile.toObject(), { modelVersion: 'test-rule-fallback-4.0.0' }),
     },
     { upsert: true, new: true },
   );
@@ -112,6 +121,7 @@ test('WG-037 Scenario (a): POST /create goal with known target_amount and target
     assert.equal(body.goal.target_amount, 1000000);
     assert.ok(body.goal.inflation_adjusted_target > 1000000, 'Inflation target must be greater than initial target_amount');
     assert.ok(body.goal.recommended_sip > 0, 'Recommended SIP must be positive');
+    assert.ok(body.goal.simulated_monthly_contribution <= 30000, 'Goal simulation must not exceed profile savings capacity');
   });
 });
 

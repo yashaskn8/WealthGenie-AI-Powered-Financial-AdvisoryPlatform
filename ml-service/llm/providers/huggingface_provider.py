@@ -57,18 +57,18 @@ class HuggingFaceLLMProvider(BaseLLMProvider):
 
             logger.info(f"Loading Hugging Face model '{self.model_id}' on device '{self.device}'...")
 
-            torch_dtype = torch.float32
+            model_dtype = torch.float32
             if self.device == "cpu":
                 if self.quantization in ("float16", "fp16", "bfloat16", "bf16"):
                     logger.info(
                         f"CPU device detected — overriding float16/quantization '{self.quantization}' to float32 for generation stability."
                     )
-                torch_dtype = torch.float32
+                model_dtype = torch.float32
             else:
                 if self.quantization in ("float16", "fp16"):
-                    torch_dtype = torch.float16
+                    model_dtype = torch.float16
                 elif self.quantization in ("bfloat16", "bf16") and hasattr(torch, "bfloat16"):
-                    torch_dtype = torch.bfloat16
+                    model_dtype = torch.bfloat16
 
             model_path = Path(self.model_id)
             if model_path.exists():
@@ -103,7 +103,7 @@ class HuggingFaceLLMProvider(BaseLLMProvider):
             # Auto model loading
             self.model = AutoModelForCausalLM.from_pretrained(
                 resolved_model_path,
-                torch_dtype=torch_dtype,
+                dtype=model_dtype,
                 device_map="auto" if self.device != "cpu" else None,
                 local_files_only=True,
                 trust_remote_code=False,

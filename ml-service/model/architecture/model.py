@@ -3,7 +3,7 @@ WealthGenie ML Microservice - Neural Network Architecture Module
 Configurable Multi-Layer Perceptron (MLP) for investment suitability classification.
 """
 
-from typing import List, Dict, Any
+from typing import List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

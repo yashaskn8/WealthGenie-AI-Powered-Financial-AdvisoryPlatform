@@ -4,7 +4,6 @@ Feature Tokenizer Transformer (FT-Transformer) for state-of-the-art tabular deep
 Reference: Gorishniy et al., "Revisiting Deep Learning Models for Tabular Data" (NeurIPS 2021).
 """
 
-from typing import List, Dict, Any, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

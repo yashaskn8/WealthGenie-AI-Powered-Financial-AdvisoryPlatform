@@ -5,7 +5,7 @@ Generates and saves figures for loss/accuracy curves, confusion matrices, and fe
 
 import logging
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, List, Optional
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")  # Non-interactive backend for headless server execution

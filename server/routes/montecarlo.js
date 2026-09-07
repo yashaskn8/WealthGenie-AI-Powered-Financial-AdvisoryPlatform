@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { verifyJWT } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
-import { personalizedMonteCarloSchema, validateStrict } from '../validation/financialSchemas.js';
+import { personalizedMonteCarloSchema, portfolioMonteCarloSchema, validateStrict } from '../validation/financialSchemas.js';
 import { runMonteCarloWithGoal, getInstrumentVolatility } from '../services/monteCarloEngine.js';
 import { getLiveInstrumentParams } from '../services/marketDataService.js';
 import {
@@ -9,13 +9,129 @@ import {
   buildProfileGroundedSimulation,
   buildRecommendationProfileHash,
 } from '../services/recommendationProfile.js';
-import { assertPortfolioSuitable } from '../services/RecommendationPipeline.js';
+import { assertPortfolioSuitable, resolveConcentrationCap } from '../services/RecommendationPipeline.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import { getCache, setCache } from '../config/redis.js';
+import { INSTRUMENT_PARAMS } from '../services/instrumentConstants.js';
+import { ASSET_KEYS, evaluatePortfolio } from '../services/portfolioEngine.js';
 
 const router = Router();
 const MONTE_CARLO_INFLATION_ASSUMPTION = 0.05;
 const MONTE_CARLO_SIMULATIONS = 10000;
+
+function buildMonteCarloResponse(result, context) {
+  const chartData = result.years_array.map((year, index) => ({
+    year,
+    p10: result.p10[index], p25: result.p25[index], p50: result.p50[index],
+    p75: result.p75[index], p90: result.p90[index], mean: result.mean[index],
+    p10_real: result.p10_real?.[index], p50_real: result.p50_real?.[index],
+    p90_real: result.p90_real?.[index], standard_error: result.standard_error?.[index],
+  }));
+  const terminalIndex = result.p50.length - 1;
+  const confidenceIntervalWidth = terminalIndex >= 0 && result.p50[terminalIndex] > 0
+    ? Number(((result.p75[terminalIndex] - result.p25[terminalIndex]) / result.p50[terminalIndex]).toFixed(3))
+    : null;
+  return {
+    ...context,
+    return_basis: 'PRE_TAX_NOMINAL',
+    chartData,
+    goal_probability: result.goal_probability,
+    target_amount: result.target_amount,
+    simulations_run: result.simulations_run,
+    variance_reduction: result.variance_reduction,
+    percentile_summary: {
+      p10: result.p10[terminalIndex], p25: result.p25[terminalIndex], p50: result.p50[terminalIndex],
+      p75: result.p75[terminalIndex], p90: result.p90[terminalIndex],
+    },
+    percentile_summary_real: result.p50_real ? {
+      p10: result.p10_real[terminalIndex], p25: result.p25_real[terminalIndex],
+      p50: result.p50_real[terminalIndex], p75: result.p75_real[terminalIndex],
+      p90: result.p90_real[terminalIndex],
+    } : null,
+    confidence_interval_width: confidenceIntervalWidth,
+    sequence_of_returns_risk: result.sequence_of_returns_risk || null,
+    sharpe_ratio_sensitivity: result.sharpe_ratio_sensitivity || null,
+    inflation_rate: result.inflation_rate,
+  };
+}
+
+function validatePortfolioConcentration(allocations) {
+  const grouped = new Map();
+  for (const [key, weight] of Object.entries(allocations)) {
+    const cap = resolveConcentrationCap({ id: key, type: key, name: key });
+    if (cap) grouped.set(cap.key, { cap, total: (grouped.get(cap.key)?.total || 0) + (weight * 100) });
+  }
+  for (const { cap, total } of grouped.values()) {
+    if (total > cap.maxPct + 0.0001) {
+      throw createError(400, `${cap.key} allocation exceeds ${cap.maxPct}%`, 'Allocation exceeds suitability limits.');
+    }
+  }
+}
+
+router.post('/portfolio', verifyJWT, validateStrict(portfolioMonteCarloSchema), asyncHandler(async (req, res) => {
+  const { profileId, allocations, years, target_amount } = req.body;
+  const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
+  if (!stored) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
+  const profile = buildRecommendationProfile(stored);
+  const keys = Object.keys(allocations).filter(key => allocations[key] > 0);
+  if (keys.some(key => !INSTRUMENT_PARAMS[key])) {
+    throw createError(400, 'Allocation contains an unknown instrument.', 'Unknown instrument.');
+  }
+  if (keys.some(key => !ASSET_KEYS.includes(key))) {
+    throw createError(422, 'Portfolio covariance is unavailable for one or more instruments.', 'Portfolio simulation is unavailable for this mix.');
+  }
+  const suitability = assertPortfolioSuitable(profile, keys);
+  validatePortfolioConcentration(allocations);
+  const simulation = buildProfileGroundedSimulation(profile, {
+    monthlyInvestment: profile.monthlySavings,
+    years,
+  });
+  const nominalReturns = keys.map(key => INSTRUMENT_PARAMS[key].nominalRate / 100);
+  const weights = Object.fromEntries(keys.map(key => [key, allocations[key]]));
+  const metrics = evaluatePortfolio(keys, nominalReturns, weights);
+  const profileHash = buildRecommendationProfileHash(profile, { modelVersion: 'portfolio-monte-carlo-1.0.0' });
+  const allocationKey = keys.sort().map(key => `${key}:${allocations[key].toFixed(6)}`).join(',');
+  const targetKey = target_amount === undefined ? 'none' : String(Math.round(target_amount));
+  const cacheKey = [
+    'portfolio-mc-v1', req.user.userId, profileId, profileHash, years,
+    simulation.monthlyContribution, simulation.initialCapital, targetKey,
+    allocationKey, metrics.expectedReturn, metrics.volatility,
+  ].join(':');
+  const cached = await getCache(cacheKey);
+  if (cached) return res.json({ ...cached, cached: true });
+
+  const result = runMonteCarloWithGoal({
+    monthlyInvestment: simulation.monthlyContribution,
+    annualExpectedReturn: metrics.expectedReturn,
+    annualVolatility: metrics.volatility,
+    years: simulation.years,
+    simulations: MONTE_CARLO_SIMULATIONS,
+    inflationRate: MONTE_CARLO_INFLATION_ASSUMPTION,
+    targetAmount: target_amount ?? null,
+    currentSavings: simulation.initialCapital,
+  });
+  const response = buildMonteCarloResponse(result, {
+    simulation_classification: simulation.classification,
+    years: simulation.years,
+    monthly_investment: simulation.monthlyContribution,
+    initial_capital: simulation.initialCapital,
+    allocations,
+    portfolio_expected_return: metrics.expectedReturn,
+    portfolio_volatility: metrics.volatility,
+    portfolio_sharpe_ratio: metrics.sharpe,
+    data_source: 'central-instrument-parameters-and-covariance-matrix',
+    assumptions: {
+      inflation_rate: MONTE_CARLO_INFLATION_ASSUMPTION,
+      simulations: MONTE_CARLO_SIMULATIONS,
+      initial_capital_source: 'declared_lump_sum_only',
+    },
+    final_suitability_risk: suitability.finalRisk,
+    suitability_reason_codes: suitability.reasonCodes,
+    cached: false,
+  });
+  await setCache(cacheKey, response, 1800);
+  return res.json(response);
+}));
 
 router.post('/montecarlo', verifyJWT, validateStrict(personalizedMonteCarloSchema), asyncHandler(async (req, res) => {
   const { instrument, monthly_investment, years, target_amount, profileId } = req.body;

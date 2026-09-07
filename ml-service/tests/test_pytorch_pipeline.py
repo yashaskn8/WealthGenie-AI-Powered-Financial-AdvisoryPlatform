@@ -3,8 +3,6 @@ WealthGenie ML Microservice - PyTorch Pipeline Test Suite
 Tests PyTorch preprocessing, dataset loading, MLP network forward pass, training, evaluation, and FastAPI endpoints.
 """
 
-import json
-from pathlib import Path
 import numpy as np
 import pytest
 import torch
@@ -13,14 +11,12 @@ from model.config import (
     PyTorchModelConfig,
     TrainingConfig,
     ArtifactPaths,
-    get_device,
     set_random_seed,
 )
 from model.data.preprocessing import FeaturePreprocessor, prepare_synthetic_training_data
 from model.data.dataset import FinancialDataset, create_data_loaders
 from model.architecture.model import FinancialMLP
 from model.training.train_pytorch import train_pytorch_model
-from model.evaluation.evaluate import evaluate_pytorch_model, compare_models
 from model.serving.inference import PyTorchInferenceEngine
 from model.data.feature_engineering import FEATURE_NAMES
 

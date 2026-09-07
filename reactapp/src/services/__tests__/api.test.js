@@ -114,21 +114,19 @@ describe('frontend API contracts', () => {
     expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer market-token');
   });
 
-  it('routes personalized product ranking to Express with explicit decision options', async () => {
+  it('routes personalized product ranking to Express without a client product universe', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ products: [{ id: 'index' }] }));
     vi.stubGlobal('fetch', fetchMock);
 
     await api.rankInvestmentCandidates(
       '64b000000000000000000001',
       'Index_MF',
-      [{ id: 'index', name: 'Index Fund', highlight: 'Low-cost option' }],
     );
 
     expect(fetchMock.mock.calls[0][0]).toMatch(/\/api\/instruments\/rank-wti$/);
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
       profileId: '64b000000000000000000001',
       parentInstrumentId: 'Index_MF',
-      candidates: [{ id: 'index', name: 'Index Fund', highlight: 'Low-cost option' }],
     });
   });
 

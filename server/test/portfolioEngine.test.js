@@ -18,7 +18,9 @@ import {
   ASSET_KEYS,
   CORR_LOWER,
   buildFullCorrelation,
+  evaluatePortfolio,
 } from '../services/portfolioEngine.js';
+import { RISK_FREE_RATE } from '../services/instrumentConstants.js';
 
 const ASSETS = ['Equity_MF', 'Debt_MF', 'Gold'];
 const RETURNS = [0.10, 0.06, 0.08];
@@ -45,6 +47,15 @@ test('portfolio optimizer returns complete metrics for every exposed strategy', 
     () => optimisePortfolio(ASSETS, RETURNS, 'invalid_strategy'),
     /Unknown optimisation strategy "invalid_strategy"/
   );
+});
+
+test('final portfolio metrics are recomputed from the exact published weights', () => {
+  const weights = { Equity_MF: 0.2, Debt_MF: 0.5, Gold: 0.3 };
+  const metrics = evaluatePortfolio(ASSETS, RETURNS, weights);
+  assert.equal(metrics.expectedReturn, 0.074);
+  assert.ok(metrics.volatility > 0);
+  assert.equal(metrics.sharpe, Number(((metrics.expectedReturn - RISK_FREE_RATE) / metrics.volatility).toFixed(4)));
+  assert.deepEqual(Object.keys(metrics.riskContributions), ASSETS);
 });
 
 test('buildCovarianceMatrix handles aliases and rejects unknown or empty inputs', () => {

@@ -9,8 +9,10 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from main import app, build_model_input, get_decision_path_description, model
+from main import app, build_model_input, get_decision_path_description
 from model.data.feature_engineering import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, engineer_features, to_model_array
+from model.serving.inference import RandomForestPredictor
+from model.serving.registry import registry
 from schemas import PredictRequest
 
 API_KEY = "wealthgenie_secret_api_key_2026"
@@ -46,6 +48,15 @@ def client():
 def test_predict_request_rejects_monthly_savings_at_or_above_take_home():
     with pytest.raises(ValidationError, match="monthly_savings must be less"):
         PredictRequest.model_validate(canonical_payload(monthly_savings=150_000.0))
+
+
+def test_predict_request_accepts_positive_values_below_legacy_ui_minimums():
+    request = PredictRequest.model_validate(canonical_payload(
+        monthly_take_home=1.0,
+        monthly_savings=0.5,
+    ))
+    assert request.monthly_take_home == 1.0
+    assert request.monthly_savings == 0.5
 
 
 @pytest.mark.parametrize(
@@ -109,7 +120,8 @@ def test_api_key_security_unauthorized(client, monkeypatch):
 
 
 def test_predict_endpoint_accepts_v4_and_rejects_v3(client, monkeypatch):
-    if model is None:
+    predictor = registry.get("random_forest")
+    if predictor is None or not predictor.is_loaded:
         pytest.skip("RandomForest artifact is unavailable")
     monkeypatch.setenv("ML_SERVICE_API_KEY", API_KEY)
     headers = {"X-API-Key": API_KEY}
@@ -123,6 +135,20 @@ def test_predict_endpoint_accepts_v4_and_rejects_v3(client, monkeypatch):
     stale = canonical_payload()
     stale["feature_schema_version"] = "recommendation-features-3.0.0"
     assert client.post("/predict", json=stale, headers=headers).status_code == 422
+
+
+def test_random_forest_probability_indices_use_encoder_class_order():
+    """Regression: sklearn's alphabetic encoder order must not be remapped to a hardcoded order."""
+    predictor = RandomForestPredictor()
+    predictor.load_artifacts()
+    if not predictor.is_loaded:
+        pytest.skip("RandomForest artifact is unavailable")
+    request = PredictRequest.model_validate(canonical_payload())
+    _, model_input = build_model_input(request)
+    probabilities = predictor.predict_proba(model_input)[0]
+    model_class = predictor.model.classes_[int(np.argmax(probabilities))]
+    expected = str(predictor.label_encoder.inverse_transform([model_class])[0])
+    assert predictor.predict(model_input)["primary"] == expected
 
 
 def test_decision_path_discloses_only_approved_suitability_facts():

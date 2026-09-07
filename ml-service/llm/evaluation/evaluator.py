@@ -9,7 +9,6 @@ from typing import Dict, Any, List, Optional
 import numpy as np
 
 from llm.evaluation.metrics import (
-    compute_perplexity,
     compute_bleu,
     compute_rouge,
     compute_lexical_overlap_score,

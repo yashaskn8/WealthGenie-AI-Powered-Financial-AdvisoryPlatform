@@ -34,8 +34,8 @@
     "feature_count": 19,
     "class_count": 6,
     "age_range": [
-      20.0,
-      75.0
+      18.0,
+      80.0
     ],
     "monthly_take_home_range": [
       20000.0,
@@ -60,12 +60,18 @@
     ]
   },
   "policy_config_version": "suitability-freeze-1.0.0",
-  "dataset_timestamp": "2026-09-06T18:35:20.082350+00:00",
-  "trained_at": "2026-09-06T18:35:20.082350+00:00",
-  "test_accuracy": 1.0,
-  "rule_approximation_fidelity": 1.0,
-  "balanced_accuracy": 1.0,
-  "macro_f1": 1.0,
+  "dataset_timestamp": "2026-09-07T02:29:04.823942+00:00",
+  "trained_at": "2026-09-07T02:29:04.823942+00:00",
+  "test_accuracy": 0.99,
+  "rule_approximation_fidelity": 0.99,
+  "balanced_accuracy": 0.9733,
+  "macro_f1": 0.9806,
+  "evaluation_split": {
+    "method": "stratified_holdout",
+    "test_fraction": 0.2,
+    "random_seed": 42,
+    "evaluated_samples": 400
+  },
   "training_methodology": "deterministic synthetic approximation of the frozen suitability policy",
   "metric_interpretation": "policy-approximation fidelity, not investment outcome accuracy"
 }

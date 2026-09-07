@@ -1,5 +1,9 @@
 import crypto from 'crypto';
-import { buildRecommendationProfile, buildLlmFinancialContext } from './recommendationProfile.js';
+import {
+  buildRecommendationProfile,
+  buildLlmFinancialContext,
+  RECOMMENDATION_POLICY_VERSION,
+} from './recommendationProfile.js';
 import { assessSuitabilityRisk } from './riskProfiler.js';
 
 const _midTermStores = new Map();
@@ -225,7 +229,7 @@ export class LayeredMemoryManager {
     }));
 
     // 7. System Memory (Metadata & checksum provenance)
-    const promptVersionInfo = { promptVersion: '4.0.0', policyVersion: 'suitability-freeze-1.0.0' };
+    const promptVersionInfo = { promptVersion: '4.0.0', policyVersion: RECOMMENDATION_POLICY_VERSION };
     const auditResult = userId ? this.verifyMemoryAuditChain(userId) : { valid: true, headHash: null };
     const systemMemory = {
       ...promptVersionInfo,
