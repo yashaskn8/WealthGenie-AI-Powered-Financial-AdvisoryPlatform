@@ -78,11 +78,13 @@ const getCache = async (key) => {
  * Set cache with TTL (default 24 hours).
  */
 const setCache = async (key, value, ttlSeconds = 86400) => {
-  if (!redisAvailable || !redisClient) return;
+  if (!redisAvailable || !redisClient) return false;
   try {
     await redisClient.setEx(key, ttlSeconds, JSON.stringify(value));
+    return true;
   } catch {
     // Silently fail — caching is non-critical
+    return false;
   }
 };
 

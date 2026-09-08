@@ -92,18 +92,7 @@ export const postTaxReturnBatchSchema = Joi.object({
   inflationRate: Joi.number().min(0).max(1).required(),
 }).unknown(false);
 
-export const macroRegimeKeys = [
-  'normal', 'geopolitical_conflict', 'pandemic_health_crisis',
-  'broad_market_crash', 'inflation_spike', 'rate_cut_cycle',
-];
-
-export const regimeQuerySchema = Joi.object({
-  regime: Joi.string().valid(...macroRegimeKeys).optional(),
-}).unknown(false);
-
-export const regimeTiltsQuerySchema = Joi.object({
-  regime: Joi.string().valid(...macroRegimeKeys).required(),
-}).unknown(false);
+export const marketContextQuerySchema = Joi.object({}).unknown(false);
 
 export const marketNavQuerySchema = Joi.object({
   schemeCodes: Joi.string()
@@ -114,15 +103,7 @@ export const marketNavQuerySchema = Joi.object({
 }).unknown(false);
 
 export const regimeAdjustSchema = Joi.object({
-  baseWeights: Joi.object()
-    .pattern(Joi.string().pattern(/^[A-Za-z0-9_-]{1,50}$/), Joi.number().min(0).max(1))
-    .min(1).max(30).required(),
-  regimeKey: Joi.string().valid(...macroRegimeKeys).required(),
-}).custom((value, helpers) => {
-  const total = Object.values(value.baseWeights).reduce((sum, weight) => sum + weight, 0);
-  return Math.abs(total - 1) <= 0.0001
-    ? value
-    : helpers.message({ custom: 'baseWeights must sum to exactly 1' });
+  profileId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).message('Invalid ID format').required(),
 }).unknown(false);
 
 function createValidator(schema, property) {

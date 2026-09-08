@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { parseAmfiNavReport } from '../services/marketData/AmfiNavProvider.js';
 import UpstoxMarketDataProvider from '../services/marketData/UpstoxMarketDataProvider.js';
+import UpstoxHistoricalCandleProvider, {
+  parseUpstoxDailyCandles,
+} from '../services/marketData/UpstoxHistoricalCandleProvider.js';
 import {
   AVAILABILITY,
   FRESHNESS,
@@ -17,6 +20,7 @@ import {
   buildProductOperations,
   persistVerifiedMarketSnapshot,
 } from '../services/marketData/MarketDataRepository.js';
+import { setRedisAvailable, setRedisClient } from '../config/redis.js';
 
 const FIXED_NOW = new Date('2026-09-08T12:00:00.000Z');
 const AMFI_REPORT = [
@@ -141,6 +145,81 @@ test('Upstox adapter normalizes a verified quote and preserves a missing quote a
   assert.notEqual(snapshot.facts[0].metrics.previousClose, snapshot.facts[0].metrics.close);
   assert.equal(snapshot.facts[1].value, null);
   assert.equal(snapshot.facts[1].availabilityStatus, AVAILABILITY.UNAVAILABLE);
+});
+
+test('Upstox V3 historical candles are normalized, sorted, and source timestamped', () => {
+  const snapshot = parseUpstoxDailyCandles({
+    data: {
+      candles: [
+        ['2026-09-07T00:00:00+05:30', 25000, 25200, 24900, 25100, 1000, 0],
+        ['2026-09-06T00:00:00+05:30', 24800, 25100, 24700, 25000, 900, 0],
+        ['invalid', 0, 0, 0, 0, 0, 0],
+      ],
+    },
+  }, {
+    instrumentKey: 'NSE_INDEX|Nifty 50',
+    fetchedAt: FIXED_NOW.toISOString(),
+    now: FIXED_NOW,
+    sourceUrl: 'https://api.upstox.com/v3/historical-candle/NSE_INDEX%7CNifty%2050/days/1/2026-09-07/2025-08-03',
+  });
+  assert.equal(snapshot.status, AVAILABILITY.AVAILABLE);
+  assert.equal(snapshot.candleCount, 2);
+  assert.equal(snapshot.candles[0].close, 25000);
+  assert.equal(snapshot.candles[1].close, 25100);
+  assert.equal(snapshot.observedAt, '2026-09-06T18:30:00.000Z');
+  assert.equal(snapshot.freshness.status, FRESHNESS.FRESH);
+  assert.match(snapshot.source.url, /^https:\/\/api\.upstox\.com\/v3\/historical-candle/);
+});
+
+test('Upstox history returns PROVIDER_NOT_CONFIGURED without a request or fallback candles', async () => {
+  let calls = 0;
+  const provider = new UpstoxHistoricalCandleProvider({
+    accessToken: '',
+    clock: () => FIXED_NOW,
+    httpClient: { get: async () => { calls += 1; } },
+  });
+  const snapshot = await provider.getDailyCandles('NSE_INDEX|Nifty 50', {
+    fromDate: '2025-08-03',
+    toDate: '2026-09-07',
+  });
+  assert.equal(snapshot.status, AVAILABILITY.PROVIDER_NOT_CONFIGURED);
+  assert.deepEqual(snapshot.candles, []);
+  assert.equal(snapshot.error.code, 'PROVIDER_NOT_CONFIGURED');
+  assert.equal(calls, 0);
+});
+
+test('Upstox history uses the shared Redis read-through cache instead of refetching', async () => {
+  const values = new Map();
+  setRedisClient({
+    get: async key => values.get(key) ?? null,
+    setEx: async (key, _ttl, value) => { values.set(key, value); },
+  });
+  setRedisAvailable(true);
+  let calls = 0;
+  try {
+    const provider = new UpstoxHistoricalCandleProvider({
+      accessToken: 'test-token-not-a-real-secret',
+      clock: () => FIXED_NOW,
+      httpClient: {
+        get: async () => {
+          calls += 1;
+          return { data: { data: { candles: [
+            ['2026-09-07T00:00:00+05:30', 25000, 25200, 24900, 25100, 1000, 0],
+          ] } } };
+        },
+      },
+    });
+    const request = { fromDate: '2025-08-03', toDate: '2026-09-07' };
+    const first = await provider.getDailyCandles('NSE_INDEX|Nifty 50', request);
+    const second = await provider.getDailyCandles('NSE_INDEX|Nifty 50', request);
+    assert.equal(first.cache.hit, false);
+    assert.equal(second.cache.hit, true);
+    assert.equal(second.cache.backend, 'REDIS');
+    assert.equal(calls, 1);
+  } finally {
+    setRedisAvailable(false);
+    setRedisClient(null);
+  }
 });
 
 test('request coalescing executes one loader for concurrent identical requests', async () => {

@@ -523,12 +523,12 @@ export async function compareTax(income, deductions = {}) {
   return request('GET', `/tax/compare?${params.toString()}`);
 }
 
-export async function getCurrentMacroRegime(options = {}) {
+export async function getCurrentMarketContext(options = {}) {
   return request('GET', '/regime/current', null, options);
 }
 
-export async function simulateMacroRegimeAdjustment(baseWeights, regimeKey, options = {}) {
-  return request('POST', '/regime/adjust', { baseWeights, regimeKey }, options);
+export async function previewMarketContextAdjustment(profileId, options = {}) {
+  return request('POST', '/regime/adjust', { profileId }, options);
 }
 
 export async function rebalancePortfolio(profileId, currentAllocation, targetAllocation, threshold, partialRatio, holdingMonths) {
@@ -587,7 +587,7 @@ const api = {
   getMarketRates, getBenchmarkMarketFacts, getMutualFundNavFacts, refreshMarketRates,
   sendChatMessage, getChatHistory, clearChatSession, rebalancePortfolio,
   updateRecommendationWeights, optimisePortfolio,
-  computeTax, compareTax, getCurrentMacroRegime, simulateMacroRegimeAdjustment, computePostTaxReturn, computePostTaxReturnBatch,
+  computeTax, compareTax, getCurrentMarketContext, previewMarketContextAdjustment, computePostTaxReturn, computePostTaxReturnBatch,
 };
 
 export default api;

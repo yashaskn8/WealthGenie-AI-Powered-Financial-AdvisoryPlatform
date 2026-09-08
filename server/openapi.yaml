@@ -142,7 +142,7 @@ paths:
       x-csrf-protection: cookie-session
       parameters: [{ $ref: '#/components/parameters/GoalId' }]
       requestBody: { $ref: '#/components/requestBodies/GoalSimulation' }
-      responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+      responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' } }
   /api/goals/{goalId}:
     patch:
       operationId: updateGoal
@@ -346,17 +346,15 @@ paths:
       responses: { '200': { $ref: '#/components/responses/Message' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
 
   /api/regime/current:
-    get: { operationId: getCurrentRegime, tags: [Regime], security: [], parameters: [{ $ref: '#/components/parameters/MacroRegime' }], responses: { '200': { $ref: '#/components/responses/Object' } } }
-  /api/regime/tilts:
-    get: { operationId: getRegimeTilts, tags: [Regime], security: [], parameters: [{ name: regime, in: query, required: true, schema: { type: string, enum: [normal, geopolitical_conflict, pandemic_health_crisis, broad_market_crash, inflation_spike, rate_cut_cycle] } }], responses: { '200': { $ref: '#/components/responses/Object' } } }
+    get: { operationId: getCurrentMarketContext, tags: [Regime], security: [], responses: { '200': { $ref: '#/components/responses/Object' } } }
   /api/regime/adjust:
     post:
-      operationId: adjustAllocationForRegime
+      operationId: previewProfileSafeMarketContextAdjustment
       tags: [Regime]
-      security: []
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       x-csrf-protection: cookie-session
       requestBody: { $ref: '#/components/requestBodies/RegimeAdjust' }
-      responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' } }
+      responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
 
   /health:
     get: { operationId: getHealth, tags: [Health], security: [], responses: { '200': { $ref: '#/components/responses/Health' } } }
@@ -388,7 +386,6 @@ components:
     Income: { name: income, in: query, required: true, schema: { type: number, minimum: 0, maximum: 1000000000 } }
     IncomeSource: { name: incomeSource, in: query, required: true, schema: { type: string, enum: [salary, pension, family_pension, business, other] } }
     FiscalYear: { name: fiscalYear, in: query, required: false, schema: { type: string, enum: [FY2025-26, FY2026-27] } }
-    MacroRegime: { name: regime, in: query, schema: { type: string, enum: [normal, geopolitical_conflict, pandemic_health_crisis, broad_market_crash, inflation_spike, rate_cut_cycle] } }
   requestBodies:
     Register: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RegisterRequest' } } } }
     Login: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } } }
@@ -567,5 +564,5 @@ components:
     PortfolioResult: { type: object, properties: { weights: { type: object, additionalProperties: { type: number } }, trades: { type: array, items: { type: object, additionalProperties: true } } }, additionalProperties: true }
     ChatRequest: { type: object, additionalProperties: false, required: [message], properties: { message: { type: string, minLength: 1, maxLength: 1000 }, session_id: { type: string, maxLength: 100 } } }
     ChatResponse: { type: object, properties: { response: { type: string }, session_id: { type: string }, citations: { type: array, items: { type: string } } }, additionalProperties: true }
-    RegimeAdjustRequest: { type: object, additionalProperties: false, required: [baseWeights, regimeKey], properties: { baseWeights: { type: object, minProperties: 1, maxProperties: 30, additionalProperties: { type: number, minimum: 0, maximum: 1 }, description: Weights must sum to exactly 1. }, regimeKey: { type: string, enum: [normal, geopolitical_conflict, pandemic_health_crisis, broad_market_crash, inflation_spike, rate_cut_cycle] } } }
+    RegimeAdjustRequest: { type: object, additionalProperties: false, required: [profileId], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' } } }
     HealthStatus: { type: object, required: [status], properties: { status: { type: string }, timestamp: { type: string, format: date-time }, service: { type: string } }, additionalProperties: true }

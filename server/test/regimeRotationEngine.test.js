@@ -1,47 +1,111 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getCurrentRegime, getRegimeTilts, calculateTiltAdjustedAllocation, MACRO_REGIMES } from '../services/regimeRotationEngine.js';
+import {
+  MARKET_CONTEXT_MAX_TOTAL_TILT_PCT,
+  applyProfileSafeMarketContextAdjustment,
+} from '../services/regimeRotationEngine.js';
 
-test('1. getCurrentRegime returns the explicit/default regime and rejects unknown states', () => {
-  const currentDefault = getCurrentRegime('normal');
-  assert.equal(currentDefault.key, 'normal');
-  assert.equal(currentDefault.title, 'Normal Market Environment');
-
-  const override = getCurrentRegime('pandemic_health_crisis');
-  assert.equal(override.key, 'pandemic_health_crisis');
-  assert.equal(override.title, 'Health Emergency & Lockdown Shock');
-  assert.throws(() => getCurrentRegime('invented'), /Unknown macro regime/);
-  assert.throws(() => getRegimeTilts('invented'), /Unknown macro regime/);
+const PROFILE = Object.freeze({
+  monthlyTakeHome: 100000,
+  monthlySavings: 30000,
+  age: 25,
+  riskTolerance: 'Aggressive',
+  soldPropertyProceeds: 0,
+  hasLumpSum: false,
+  lumpSumAmount: 0,
+  liquidSavings: 600000,
+  emiBurdenPct: 0,
+  financialDependents: 0,
+  emergencyFundMonths: 12,
+  investmentGoals: ['Wealth Growth'],
+  investmentHorizonYears: 30,
 });
 
-test('2. getRegimeTilts returns correct tilt mappings', () => {
-  const conflictTilts = getRegimeTilts('geopolitical_conflict');
-  assert(conflictTilts.tilts.defence, 'Geopolitical conflict must include defence tilt');
-  assert.equal(conflictTilts.tilts.defence.weightDelta, 0.15);
-
-  const crashTilts = getRegimeTilts('broad_market_crash');
-  assert(crashTilts.tilts.liquid_mf, 'Market crash must include liquid fund tilt');
-  assert.equal(crashTilts.tilts.liquid_mf.weightDelta, 0.25);
-});
-
-test('3. calculateTiltAdjustedAllocation applies sector weight adjustments and normalizes', () => {
-  const baseWeights = {
-    defence: 0.10,
-    energy_oil_gas: 0.10,
-    auto: 0.20,
-    other: 0.60
+function instrument(id, riskScore, allocationWeight, overrides = {}) {
+  return {
+    id,
+    name: id,
+    type: id,
+    assetClass: id,
+    riskScore,
+    allocationWeight,
+    allocation_pct: allocationWeight * 100,
+    ...overrides,
   };
+}
 
-  const result = calculateTiltAdjustedAllocation(baseWeights, 'geopolitical_conflict');
+test('risk-off adjustment stays inside the authoritative eligible set and maximum tilt', () => {
+  const instruments = [
+    instrument('ppf', 1, 0.85),
+    instrument('smallcap_mf', 5, 0.15),
+  ];
+  const result = applyProfileSafeMarketContextAdjustment({
+    profile: PROFILE,
+    instruments,
+    marketContext: { status: 'MARKET_CONTEXT_AVAILABLE', context: 'RISK_OFF' },
+  });
+  assert.equal(result.applied, true);
+  assert.equal(result.actualTotalTiltPct, MARKET_CONTEXT_MAX_TOTAL_TILT_PCT.RISK_OFF);
+  assert.deepEqual(Object.keys(result.adjustedWeights).sort(), ['ppf', 'smallcap_mf']);
+  assert.deepEqual(result.introducedInstrumentIds, []);
+  assert.equal(result.adjustedWeights.ppf, 0.9);
+  assert.equal(result.adjustedWeights.smallcap_mf, 0.1);
+  assert.equal(result.suitabilityRevalidated, true);
+  assert.equal(result.concentrationCapsRevalidated, true);
+});
 
-  assert.equal(result.regime, 'geopolitical_conflict');
-  assert.equal(result.classification, 'NON_RECOMMENDATION_MACRO_WHAT_IF');
-  assert(result.adjustedWeights.defence > baseWeights.defence, 'Defence weight must increase in conflict regime');
-  assert(result.adjustedWeights.auto < baseWeights.auto, 'Auto weight must decrease in conflict regime');
+test('unavailable and normal contexts never change the recommendation', () => {
+  const instruments = [instrument('ppf', 1, 0.85), instrument('smallcap_mf', 5, 0.15)];
+  const unavailable = applyProfileSafeMarketContextAdjustment({
+    profile: PROFILE,
+    instruments,
+    marketContext: { status: 'MARKET_CONTEXT_UNAVAILABLE', context: null },
+  });
+  const normal = applyProfileSafeMarketContextAdjustment({
+    profile: PROFILE,
+    instruments,
+    marketContext: { status: 'MARKET_CONTEXT_AVAILABLE', context: 'NORMAL' },
+  });
+  assert.equal(unavailable.applied, false);
+  assert.equal(normal.applied, false);
+  assert.deepEqual(unavailable.adjustedWeights, unavailable.baseWeights);
+  assert.deepEqual(normal.adjustedWeights, normal.baseWeights);
+});
 
-  // Verify normalized weights sum to 1.0 (with floating-point precision tolerance)
-  const sum = Object.values(result.adjustedWeights).reduce((a, b) => a + b, 0);
-  assert(Math.abs(sum - 1.0) < 0.02, `Normalized weights sum (${sum}) must be approximately 1.0`);
-  assert.throws(() => calculateTiltAdjustedAllocation({}, 'normal'), /non-empty/);
-  assert.throws(() => calculateTiltAdjustedAllocation({ equity: 0.9 }, 'normal'), /sum to 1/);
+test('suitability validation remains a hard pre-adjustment boundary', () => {
+  const expected = new Error('blocked by suitability');
+  assert.throws(() => applyProfileSafeMarketContextAdjustment({
+    profile: PROFILE,
+    instruments: [instrument('safe', 1, 0.5), instrument('unsafe', 5, 0.5)],
+    marketContext: { status: 'MARKET_CONTEXT_AVAILABLE', context: 'RISK_OFF' },
+  }, {
+    assertPortfolioSuitable: () => { throw expected; },
+    resolveConcentrationCap: () => null,
+  }), error => error === expected);
+});
+
+test('recipient concentration caps prevent an otherwise available transfer', () => {
+  const instruments = [instrument('low', 1, 0.6), instrument('high', 5, 0.4)];
+  const result = applyProfileSafeMarketContextAdjustment({
+    profile: PROFILE,
+    instruments,
+    marketContext: { status: 'MARKET_CONTEXT_AVAILABLE', context: 'RISK_OFF' },
+  }, {
+    assertPortfolioSuitable: () => ({ finalLevel: 5 }),
+    resolveConcentrationCap: item => item.id === 'low' ? { key: 'low_group', maxPct: 60 } : null,
+  });
+  assert.equal(result.applied, false);
+  assert.deepEqual(result.adjustedWeights, { low: 0.6, high: 0.4 });
+  assert.deepEqual(result.reasonCodes, ['CONCENTRATION_CAPS_PREVENT_LOWER_RISK_TRANSFER']);
+});
+
+test('an authoritative recommendation already outside concentration limits fails closed', () => {
+  assert.throws(() => applyProfileSafeMarketContextAdjustment({
+    profile: PROFILE,
+    instruments: [instrument('low', 1, 0.7), instrument('high', 5, 0.3)],
+    marketContext: { status: 'MARKET_CONTEXT_AVAILABLE', context: 'CAUTIOUS' },
+  }, {
+    assertPortfolioSuitable: () => ({ finalLevel: 5 }),
+    resolveConcentrationCap: item => item.id === 'low' ? { key: 'low_group', maxPct: 60 } : null,
+  }), error => error.code === 'MARKET_CONTEXT_CONCENTRATION_CAP_VIOLATION');
 });

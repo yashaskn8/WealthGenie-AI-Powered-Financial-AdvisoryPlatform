@@ -85,49 +85,53 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
   const subKeys = subCategoryMap ? Object.keys(subCategoryMap) : [];
 
   const [activeSubTab, setActiveSubTab] = useState(subKeys[0] || null);
-  const [regimePreview, setRegimePreview] = useState(null);
-  const [regimePreviewError, setRegimePreviewError] = useState(null);
-  const [regimePreviewLoading, setRegimePreviewLoading] = useState(false);
-  const [activeRegime, setActiveRegime] = useState(null);
+  const [contextPreview, setContextPreview] = useState(null);
+  const [contextPreviewError, setContextPreviewError] = useState(null);
+  const [contextPreviewLoading, setContextPreviewLoading] = useState(false);
+  const [marketContext, setMarketContext] = useState(null);
+  const [marketContextError, setMarketContextError] = useState(null);
   const [sortBy, setSortBy] = useState('score');
 
   useEffect(() => {
     const controller = new AbortController();
-    api.getCurrentMacroRegime({ signal: controller.signal })
-      .then(result => setActiveRegime(result))
+    api.getCurrentMarketContext({ signal: controller.signal })
+      .then((result) => {
+        setMarketContext(result);
+        setMarketContextError(null);
+      })
       .catch(error => {
-        if (error?.code !== 'REQUEST_ABORTED') setActiveRegime(null);
+        if (error?.code !== 'REQUEST_ABORTED') {
+          setMarketContext(null);
+          setMarketContextError(error.message || 'Live market context request failed.');
+        }
       });
     return () => controller.abort();
   }, []);
 
   useEffect(() => {
-    setRegimePreview(null);
-    setRegimePreviewError(null);
+    setContextPreview(null);
+    setContextPreviewError(null);
   }, [parentInstrumentId]);
 
-  const toggleRegimePreview = async () => {
-    if (regimePreview) {
-      setRegimePreview(null);
+  const toggleContextPreview = async () => {
+    if (contextPreview) {
+      setContextPreview(null);
       return;
     }
-    if (!activeRegime?.key || !parentInstrumentId) {
-      setRegimePreviewError('Macro context or instrument identifier is unavailable.');
+    if (marketContext?.status !== 'MARKET_CONTEXT_AVAILABLE' || !profileId) {
+      setContextPreviewError('A live market context and saved Financial Profile are required.');
       return;
     }
     try {
-      setRegimePreviewLoading(true);
-      setRegimePreviewError(null);
-      const result = await api.simulateMacroRegimeAdjustment(
-        { [parentInstrumentId]: 1 },
-        activeRegime.key,
-      );
-      setRegimePreview(result);
+      setContextPreviewLoading(true);
+      setContextPreviewError(null);
+      const result = await api.previewMarketContextAdjustment(profileId);
+      setContextPreview(result);
     } catch (error) {
-      setRegimePreview(null);
-      setRegimePreviewError(error.message || 'Macro tilt preview is unavailable.');
+      setContextPreview(null);
+      setContextPreviewError(error.message || 'Market-context adjustment preview is unavailable.');
     } finally {
-      setRegimePreviewLoading(false);
+      setContextPreviewLoading(false);
     }
   };
 
@@ -210,6 +214,15 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
       : isComparableSet
         ? `Verified Products (${products.length} Comparable Option${products.length === 1 ? '' : 's'})`
         : 'Verified Products Unavailable';
+  const contextAvailable = marketContext?.status === 'MARKET_CONTEXT_AVAILABLE';
+  const contextColor = contextAvailable ? '#38bdf8' : '#f59e0b';
+  const contextSignals = Object.entries(marketContext?.signals || {});
+  const contextReasonCodes = marketContext?.reasonCodes || (marketContextError ? ['MARKET_CONTEXT_REQUEST_FAILED'] : []);
+  const formatSignal = (item) => {
+    if (!item?.available || !Number.isFinite(item.value)) return 'UNAVAILABLE';
+    const value = Number(item.value).toLocaleString('en-IN', { maximumFractionDigits: 2 });
+    return item.unit === 'PERCENT' ? `${value}%` : value;
+  };
 
   return (
     <div className="tab-fade-in">
@@ -251,11 +264,10 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
         </div>
       </div>
 
-      {/* Macro Market Regime & Crash Rotation Banner */}
-      {activeRegime && (
-        <div style={{
+      {/* Verified live market context. It is never replaced with a static regime. */}
+      <div data-testid="market-context-panel" style={{
           background: 'rgba(15, 23, 42, 0.85)',
-          border: `1px solid ${activeRegime.color}`,
+          border: `1px solid ${contextColor}`,
           borderRadius: '12px',
           padding: '14px 18px',
           marginBottom: '1.25rem',
@@ -263,8 +275,8 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
         }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 8 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Globe size={18} style={{ color: activeRegime.color }} />
-              <span style={{ fontSize: '0.9rem', fontWeight: '700', color: '#f8fafc' }}>{activeRegime.title}</span>
+              <Globe size={18} style={{ color: contextColor }} />
+              <span style={{ fontSize: '0.9rem', fontWeight: '700', color: '#f8fafc' }}>Verified Live Market Context</span>
             </div>
             <span style={{
               fontSize: '0.72rem',
@@ -272,31 +284,54 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
               padding: '4px 10px',
               borderRadius: '12px',
               background: 'rgba(255,255,255,0.08)',
-              color: activeRegime.color,
-              border: `1px solid ${activeRegime.color}`
+              color: contextColor,
+              border: `1px solid ${contextColor}`
             }}>
-              {activeRegime.badge}
+              {marketContext === null && !marketContextError
+                ? 'LOADING'
+                : contextAvailable ? marketContext.context : 'MARKET_CONTEXT_UNAVAILABLE'}
             </span>
           </div>
           <p style={{ fontSize: '0.82rem', lineHeight: '1.5', color: '#cbd5e1', margin: '0 0 10px 0' }}>
-            {activeRegime.description}
+            {contextAvailable
+              ? `${marketContext.classification} · ${marketContext.policyVersion} · confidence: unavailable (deterministic policy, not ML)`
+              : marketContextError || 'No usable live context is published unless NIFTY 50, India VIX, and sufficient fresh history are all verified.'}
           </p>
+          {contextSignals.length > 0 && (
+            <div data-testid="market-context-signals" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 6, marginBottom: 10 }}>
+              {contextSignals.map(([key, item]) => (
+                <div key={key} style={{ background: 'rgba(255,255,255,0.035)', borderRadius: 6, padding: '6px 8px' }}>
+                  <div style={{ color: '#64748b', fontSize: '0.64rem' }}>{key.replace(/([A-Z])/g, ' $1').trim()}</div>
+                  <div style={{ color: item?.available ? '#e2e8f0' : '#fbbf24', fontSize: '0.76rem', fontWeight: 650 }}>{formatSignal(item)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ fontSize: '0.7rem', lineHeight: 1.55, color: '#94a3b8', marginBottom: 8 }}>
+            <div>Observed: {marketContext?.observedAt || 'UNAVAILABLE'} · Evaluated: {marketContext?.evaluatedAt || 'UNAVAILABLE'} · Freshness: {marketContext?.freshness?.status || 'UNAVAILABLE'}</div>
+            <div>Sources: {marketContext?.sources?.length
+              ? marketContext.sources.map(source => `${source.provider || 'UNAVAILABLE'} (${source.instrumentId || 'benchmark history'})`).join(', ')
+              : 'UNAVAILABLE'}</div>
+            <div>Reason codes: {contextReasonCodes.length ? contextReasonCodes.join(', ') : 'UNAVAILABLE'}</div>
+          </div>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.08)' }}>
             <span style={{ fontSize: '0.75rem', fontStyle: 'italic', color: '#94a3b8' }}>
-              {activeRegime.disclaimer}
+              Context can only reduce risk within the already eligible recommendation. It cannot add products, override suitability, or execute trades.
             </span>
             <button
-              onClick={toggleRegimePreview}
-              disabled={regimePreviewLoading}
+              type="button"
+              onClick={toggleContextPreview}
+              disabled={contextPreviewLoading || !contextAvailable || !profileId}
               style={{
                 padding: '6px 14px',
                 borderRadius: '6px',
                 border: 'none',
-                background: regimePreview ? '#22c55e' : activeRegime.color,
+                background: contextPreview ? '#22c55e' : contextColor,
                 color: '#020617',
                 fontSize: '0.75rem',
                 fontWeight: '700',
-                cursor: 'pointer',
+                cursor: contextAvailable && profileId ? 'pointer' : 'not-allowed',
+                opacity: contextAvailable && profileId ? 1 : 0.55,
                 display: 'flex',
                 alignItems: 'center',
                 gap: '6px',
@@ -304,17 +339,16 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
               }}
             >
               <Activity size={14} />
-              {regimePreviewLoading ? 'Running Server Preview…' : regimePreview ? 'Tilt Preview Ready ✓' : 'Run Non-Recommendation Tilt Preview'}
+              {contextPreviewLoading ? 'Running Server Preview…' : contextPreview ? 'Adjustment Preview Ready ✓' : 'Preview Profile-Safe Adjustment'}
             </button>
           </div>
-          {regimePreview && (
+          {contextPreview && (
             <p style={{ fontSize: '0.72rem', color: '#94a3b8', margin: '10px 0 0' }}>
-              Server preview generated {regimePreview.explanations?.length ?? 0} contextual tilt{regimePreview.explanations?.length === 1 ? '' : 's'}. It does not change your recommendation or execute trades.
+              Server preview {contextPreview.applied ? 'applied' : 'did not apply'} a bounded {contextPreview.actualTotalTiltPct ?? 0}% total transfer across {contextPreview.explanations?.length ?? 0} allocation change{contextPreview.explanations?.length === 1 ? '' : 's'}. It is not persisted and does not execute trades.
             </p>
           )}
-          {regimePreviewError && <p role="alert" style={{ fontSize: '0.72rem', color: '#fca5a5', margin: '10px 0 0' }}>{regimePreviewError}</p>}
+          {contextPreviewError && <p role="alert" style={{ fontSize: '0.72rem', color: '#fca5a5', margin: '10px 0 0' }}>{contextPreviewError}</p>}
         </div>
-      )}
 
       {wtiData.note && (
         <div className="wti-note-banner">

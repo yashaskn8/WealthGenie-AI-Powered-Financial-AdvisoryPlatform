@@ -3,14 +3,14 @@
  * Refreshes live market data on a schedule.
  *
  * - AMFI NAVs: current universe plus one bounded seven-day historical window daily
- * - Upstox benchmark quotes: one two-instrument request every 2 hours
+ * - Upstox market context: batched benchmark quotes plus cached daily history
  */
 
 import {
   fetchAmfiHistoricalNavSnapshot,
   fetchAmfiProductSnapshot,
-  fetchBenchmarkQuotes,
 } from '../services/marketDataService.js';
+import { getLiveMarketContext } from '../services/marketContextService.js';
 
 let activeJobStopper = null;
 
@@ -31,10 +31,11 @@ export function startMarketDataRefreshJobs() {
     console.info(`[CRON] AMFI: ${current.productCount} current products (${current.status}), ${historical.productCount} historical observations (${historical.status})`);
   }));
 
-  // A single batched request refreshes NIFTY 50 and India VIX every 2 hours.
-  cancellations.push(scheduleJob('0 */2 * * *', 'Upstox Benchmark Quotes', async () => {
-    const result = await fetchBenchmarkQuotes({ forceRefresh: true });
-    console.info(`[CRON] Upstox benchmarks: ${result.availableFactCount} available, status ${result.status}`);
+  // A single batched request refreshes NIFTY 50 and India VIX every 2 hours;
+  // daily history remains protected by its longer cache window.
+  cancellations.push(scheduleJob('0 */2 * * *', 'Upstox Market Context', async () => {
+    const result = await getLiveMarketContext({ forceQuoteRefresh: true });
+    console.info(`[CRON] Upstox market context: ${result.context || 'UNAVAILABLE'}, status ${result.status}`);
   }));
 
   console.info('[CRON] Market data refresh jobs scheduled');

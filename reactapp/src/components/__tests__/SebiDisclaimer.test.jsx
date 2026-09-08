@@ -34,8 +34,17 @@ vi.mock('../../services/api', () => ({
       historicalEvidenceProductCount: 0,
     },
   })),
-  getCurrentMacroRegime: vi.fn(async () => ({ regime: 'neutral', label: 'Neutral' })),
-  simulateMacroRegimeAdjustment: vi.fn(async () => ({ allocation_adjustments: [] })),
+  getCurrentMarketContext: vi.fn(async () => ({
+    status: 'MARKET_CONTEXT_UNAVAILABLE',
+    context: null,
+    classification: 'DETERMINISTIC_POLICY_HEURISTIC',
+    policyVersion: 'market-context-policy-1.0.0',
+    confidence: null,
+    reasonCodes: ['PROVIDER_NOT_CONFIGURED'],
+    signals: {},
+    sources: [],
+  })),
+  previewMarketContextAdjustment: vi.fn(async () => ({ applied: false, explanations: [] })),
 }));
 
 describe('SebiDisclaimer Component', () => {
@@ -57,6 +66,8 @@ describe('SebiDisclaimer Component', () => {
     expect(screen.getByText('Plan: UNAVAILABLE')).toBeTruthy();
     expect(screen.getByTestId('wti-comparison-universe')).toBeTruthy();
     expect(screen.queryByText('Top Pick')).toBeNull();
+    expect(await screen.findByText('MARKET_CONTEXT_UNAVAILABLE')).toBeTruthy();
+    expect(screen.getByText(/PROVIDER_NOT_CONFIGURED/)).toBeTruthy();
   });
 
   it('labels the unique historical-return leader precisely without calling it a Top Pick', async () => {

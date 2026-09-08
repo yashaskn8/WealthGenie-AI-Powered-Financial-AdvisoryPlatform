@@ -184,24 +184,21 @@ describe('frontend API contracts', () => {
     });
   });
 
-  it('loads and simulates macro-regime context through its separate server endpoints', async () => {
+  it('loads verified market context and requests a server-owned profile adjustment', async () => {
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ key: 'normal', tilts: {} }))
+      .mockResolvedValueOnce(jsonResponse({ status: 'MARKET_CONTEXT_AVAILABLE', context: 'NORMAL' }))
       .mockResolvedValueOnce(jsonResponse({
-        calculation_classification: 'NON_RECOMMENDATION_MACRO_WHAT_IF',
+        classification: 'PROFILE_SAFE_MARKET_CONTEXT_ADJUSTMENT',
         adjustedWeights: { Index_MF: 1 },
       }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await api.getCurrentMacroRegime();
-    await api.simulateMacroRegimeAdjustment({ Index_MF: 1 }, 'normal');
+    await api.getCurrentMarketContext();
+    await api.previewMarketContextAdjustment('64b000000000000000000001');
 
     expect(fetchMock.mock.calls[0][0]).toMatch(/\/api\/regime\/current$/);
     expect(fetchMock.mock.calls[1][0]).toMatch(/\/api\/regime\/adjust$/);
-    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({
-      baseWeights: { Index_MF: 1 },
-      regimeKey: 'normal',
-    });
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ profileId: '64b000000000000000000001' });
   });
 
   it('adds a correlation ID and does not retry failed mutations', async () => {

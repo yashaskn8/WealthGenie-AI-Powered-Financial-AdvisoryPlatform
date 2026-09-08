@@ -12,6 +12,9 @@ import AmfiNavHistoryProvider from './marketData/AmfiNavHistoryProvider.js';
 import UpstoxMarketDataProvider, {
   DEFAULT_BENCHMARK_INSTRUMENT_KEYS,
 } from './marketData/UpstoxMarketDataProvider.js';
+import UpstoxHistoricalCandleProvider, {
+  NIFTY_50_INSTRUMENT_KEY,
+} from './marketData/UpstoxHistoricalCandleProvider.js';
 import {
   AVAILABILITY,
   MARKET_DATA_SCHEMA_VERSION,
@@ -21,6 +24,7 @@ import { persistVerifiedMarketSnapshot } from './marketData/MarketDataRepository
 const amfiProvider = new AmfiNavProvider();
 const amfiHistoryProvider = new AmfiNavHistoryProvider();
 const upstoxProvider = new UpstoxMarketDataProvider();
+const upstoxHistoryProvider = new UpstoxHistoricalCandleProvider();
 
 export const MARKET_PARAMETER_SCHEMA_VERSION = 'simulation-assumptions-3.0.0';
 export const MARKET_PARAMETER_CACHE_KEY = `mc:instrument:params:${MARKET_PARAMETER_SCHEMA_VERSION}`;
@@ -113,6 +117,35 @@ export async function fetchBenchmarkQuotes({ forceRefresh = false, persist = tru
   const snapshot = await upstoxProvider.getQuotes(DEFAULT_BENCHMARK_INSTRUMENT_KEYS, { forceRefresh });
   const persistence = persist ? await persistFreshSnapshot(snapshot) : { status: 'NOT_REQUESTED' };
   return { ...snapshot, persistence };
+}
+
+export function buildNiftyHistoryWindow(now = new Date()) {
+  const reference = now instanceof Date ? new Date(now.getTime()) : new Date(now);
+  if (Number.isNaN(reference.getTime())) throw new TypeError('now must be a valid date.');
+  reference.setUTCHours(0, 0, 0, 0);
+  const to = new Date(reference.getTime());
+  to.setUTCDate(to.getUTCDate() - 1);
+  const from = new Date(to.getTime());
+  from.setUTCDate(from.getUTCDate() - 400);
+  return {
+    fromDate: from.toISOString().slice(0, 10),
+    toDate: to.toISOString().slice(0, 10),
+  };
+}
+
+/**
+ * One bounded daily-history request supplies more than 200 expected trading
+ * sessions without streaming or retrieving an entire market universe.
+ */
+export async function fetchNiftyHistoricalCandles({
+  forceRefresh = false,
+  now = new Date(),
+} = {}) {
+  const window = buildNiftyHistoryWindow(now);
+  return upstoxHistoryProvider.getDailyCandles(NIFTY_50_INSTRUMENT_KEY, {
+    ...window,
+    forceRefresh,
+  });
 }
 
 /**

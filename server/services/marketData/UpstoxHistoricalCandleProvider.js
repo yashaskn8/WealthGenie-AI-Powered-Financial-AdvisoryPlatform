@@ -1,0 +1,189 @@
+import crypto from 'node:crypto';
+import MarketDataProvider from './MarketDataProvider.js';
+import {
+  AVAILABILITY,
+  FRESHNESS,
+  MARKET_DATA_SCHEMA_VERSION,
+  PROVIDERS,
+  evaluateFreshness,
+  normalizeTimestamp,
+  nullableFiniteNumber,
+} from './contracts.js';
+import { buildUpstoxInstrumentIdentity } from './productIdentity.js';
+import { readThroughMarketCache } from './requestCache.js';
+
+export const UPSTOX_HISTORICAL_CANDLE_V3_URL = 'https://api.upstox.com/v3/historical-candle';
+export const UPSTOX_HISTORY_CACHE_TTL_SECONDS = 6 * 60 * 60;
+export const UPSTOX_DAILY_HISTORY_FRESHNESS_SECONDS = 4 * 24 * 60 * 60;
+export const NIFTY_50_INSTRUMENT_KEY = 'NSE_INDEX|Nifty 50';
+
+function requireIsoDate(value, fieldName) {
+  const text = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || Number.isNaN(Date.parse(`${text}T00:00:00.000Z`))) {
+    throw new TypeError(`${fieldName} must use YYYY-MM-DD format.`);
+  }
+  return text;
+}
+
+function finitePositive(value) {
+  const parsed = nullableFiniteNumber(value);
+  return parsed !== null && parsed > 0 ? parsed : null;
+}
+
+function sourceUrlFor(instrumentKey, toDate, fromDate) {
+  return `${UPSTOX_HISTORICAL_CANDLE_V3_URL}/${encodeURIComponent(instrumentKey)}/days/1/${toDate}/${fromDate}`;
+}
+
+function cacheKeyFor(instrumentKey, toDate, fromDate) {
+  const digest = crypto.createHash('sha256')
+    .update(`${instrumentKey}\n${fromDate}\n${toDate}`)
+    .digest('hex');
+  return `market:upstox:daily-candles:${MARKET_DATA_SCHEMA_VERSION}:${digest}`;
+}
+
+/**
+ * Parse the documented Upstox V3 candle tuple:
+ * [timestamp, open, high, low, close, volume, openInterest].
+ */
+export function parseUpstoxDailyCandles(payload, {
+  instrumentKey,
+  fetchedAt,
+  now = new Date(),
+  sourceUrl,
+} = {}) {
+  buildUpstoxInstrumentIdentity(instrumentKey);
+  const normalizedFetchedAt = normalizeTimestamp(fetchedAt);
+  if (!normalizedFetchedAt) throw new TypeError('fetchedAt must be a valid timestamp.');
+  const rows = payload?.data?.candles;
+  if (!Array.isArray(rows)) throw new Error('UPSTOX_HISTORY_SCHEMA_MISMATCH:candles');
+
+  const byTimestamp = new Map();
+  for (const row of rows) {
+    if (!Array.isArray(row) || row.length < 5) continue;
+    const timestamp = normalizeTimestamp(row[0]);
+    const open = finitePositive(row[1]);
+    const high = finitePositive(row[2]);
+    const low = finitePositive(row[3]);
+    const close = finitePositive(row[4]);
+    if (!timestamp || open === null || high === null || low === null || close === null
+        || high < low || high < open || high < close || low > open || low > close) continue;
+    byTimestamp.set(timestamp, {
+      timestamp,
+      open,
+      high,
+      low,
+      close,
+      volume: nullableFiniteNumber(row[5]),
+      openInterest: nullableFiniteNumber(row[6]),
+    });
+  }
+
+  const candles = [...byTimestamp.values()].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+  if (candles.length === 0) throw new Error('UPSTOX_HISTORY_NO_VALID_CANDLES');
+  const observedAt = candles.at(-1).timestamp;
+  return {
+    schemaVersion: MARKET_DATA_SCHEMA_VERSION,
+    provider: PROVIDERS.UPSTOX,
+    status: AVAILABILITY.AVAILABLE,
+    instrumentKey,
+    interval: '1 day',
+    fetchedAt: normalizedFetchedAt,
+    observedAt,
+    freshness: evaluateFreshness({
+      observedAt,
+      fetchedAt: normalizedFetchedAt,
+      maxAgeSeconds: UPSTOX_DAILY_HISTORY_FRESHNESS_SECONDS,
+      now,
+    }),
+    candleCount: candles.length,
+    candles,
+    source: {
+      provider: PROVIDERS.UPSTOX,
+      instrumentId: instrumentKey,
+      url: sourceUrl,
+    },
+  };
+}
+
+export default class UpstoxHistoricalCandleProvider extends MarketDataProvider {
+  constructor({
+    accessToken = process.env.UPSTOX_ANALYTICS_TOKEN || process.env.UPSTOX_ACCESS_TOKEN || '',
+    ...options
+  } = {}) {
+    super({ providerName: PROVIDERS.UPSTOX, ...options });
+    this.accessToken = String(accessToken || '').trim();
+  }
+
+  isConfigured() {
+    return this.accessToken.length > 0;
+  }
+
+  async getDailyCandles(instrumentKey, { fromDate, toDate, forceRefresh = false } = {}) {
+    buildUpstoxInstrumentIdentity(instrumentKey);
+    const normalizedFromDate = requireIsoDate(fromDate, 'fromDate');
+    const normalizedToDate = requireIsoDate(toDate, 'toDate');
+    if (normalizedFromDate > normalizedToDate) throw new RangeError('fromDate must not be after toDate.');
+    const fetchedAt = this.nowIso();
+    if (!this.isConfigured()) {
+      return {
+        schemaVersion: MARKET_DATA_SCHEMA_VERSION,
+        provider: PROVIDERS.UPSTOX,
+        status: AVAILABILITY.PROVIDER_NOT_CONFIGURED,
+        instrumentKey,
+        fetchedAt,
+        observedAt: null,
+        freshness: { status: FRESHNESS.UNKNOWN, ageSeconds: null, maxAgeSeconds: UPSTOX_DAILY_HISTORY_FRESHNESS_SECONDS },
+        candleCount: 0,
+        candles: [],
+        source: { provider: PROVIDERS.UPSTOX, instrumentId: instrumentKey, url: null },
+        error: {
+          code: 'PROVIDER_NOT_CONFIGURED',
+          message: 'Set UPSTOX_ANALYTICS_TOKEN or UPSTOX_ACCESS_TOKEN on the server to enable Upstox history.',
+        },
+        cache: { hit: false, backend: 'NONE' },
+      };
+    }
+
+    const sourceUrl = sourceUrlFor(instrumentKey, normalizedToDate, normalizedFromDate);
+    return readThroughMarketCache({
+      cacheKey: cacheKeyFor(instrumentKey, normalizedToDate, normalizedFromDate),
+      ttlSeconds: UPSTOX_HISTORY_CACHE_TTL_SECONDS,
+      forceRefresh,
+      loader: async () => {
+        const requestFetchedAt = this.nowIso();
+        try {
+          const response = await this.httpClient.get(sourceUrl, {
+            timeout: 15_000,
+            headers: {
+              Accept: 'application/json',
+              Authorization: `Bearer ${this.accessToken}`,
+            },
+          });
+          return parseUpstoxDailyCandles(response.data, {
+            instrumentKey,
+            fetchedAt: requestFetchedAt,
+            now: this.clock(),
+            sourceUrl,
+          });
+        } catch (error) {
+          return {
+            schemaVersion: MARKET_DATA_SCHEMA_VERSION,
+            provider: PROVIDERS.UPSTOX,
+            status: AVAILABILITY.SOURCE_ERROR,
+            instrumentKey,
+            fetchedAt: requestFetchedAt,
+            observedAt: null,
+            freshness: { status: FRESHNESS.UNKNOWN, ageSeconds: null, maxAgeSeconds: UPSTOX_DAILY_HISTORY_FRESHNESS_SECONDS },
+            candleCount: 0,
+            candles: [],
+            source: { provider: PROVIDERS.UPSTOX, instrumentId: instrumentKey, url: sourceUrl },
+            error: {
+              code: 'UPSTOX_HISTORY_FETCH_FAILED',
+              message: error?.message || 'Upstox historical candle request failed.',
+            },
+          };
+        }
+      },
+    });
+  }
+}
