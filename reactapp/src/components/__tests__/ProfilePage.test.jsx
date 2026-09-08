@@ -38,12 +38,13 @@ describe('ProfilePage backend version contract', () => {
     );
 
     const scrollRegion = await screen.findByRole('region', { name: 'Financial profile form' });
-    const formCard = screen.getByTestId('profile-form-card');
+    const formCard = screen.getByTestId('profile-scroll-region');
     const saveButton = screen.getByTestId('profile-save');
 
     expect(scrollRegion.tabIndex).toBe(0);
     expect(scrollRegion.className).toContain('profile-content');
     expect(formCard.className).toContain('profile-form-card');
+    expect(formCard.style.overflowY).toBe('auto');
     expect(formCard.contains(saveButton)).toBe(true);
   });
 

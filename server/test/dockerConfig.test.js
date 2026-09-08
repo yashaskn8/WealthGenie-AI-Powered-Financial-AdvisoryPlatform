@@ -81,3 +81,20 @@ test('Kubernetes supplies every production ML credential using the expected vari
   assert.match(cdWorkflow, /--from-literal=METRICS_TOKEN="\$EPHEMERAL_METRICS_TOKEN"/);
   assert.match(cdWorkflow, /MONGODB_URI="mongodb:\/\/wealthgenie-mongodb[^"\s]+\?replicaSet=rs0"/);
 });
+
+test('Kind smoke verification owns and cleans up its server port-forward', () => {
+  const rootDir = fs.existsSync(path.join(process.cwd(), 'docker-compose.yml'))
+    ? process.cwd()
+    : path.resolve(process.cwd(), '..');
+  const cdWorkflow = fs.readFileSync(path.join(rootDir, '.github', 'workflows', 'cd.yml'), 'utf8');
+  const smokeStep = cdWorkflow.match(
+    /- name: Execute Live Smoke Tests & Prove Request Flow \(Step 2\)[\s\S]*?(?=\n\s{6}- name:|$)/,
+  )?.[0];
+
+  assert.ok(smokeStep, 'Kind live smoke step is missing');
+  assert.match(smokeStep, /kubectl port-forward[^\n]+svc\/wealthgenie-server 5000:5000/);
+  assert.match(smokeStep, /PORT_FORWARD_PID=\$!/);
+  assert.match(smokeStep, /trap 'kill "\$PORT_FORWARD_PID"[^\n]+EXIT/);
+  assert.match(smokeStep, /for attempt in \$\(seq 1 30\)/);
+  assert.doesNotMatch(cdWorkflow, /- name: Port-Forward Express Server for Live Request Verification/);
+});

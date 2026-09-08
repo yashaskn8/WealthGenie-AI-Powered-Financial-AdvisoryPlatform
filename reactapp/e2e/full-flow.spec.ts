@@ -60,7 +60,12 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     await page.getByTestId('profile-input-monthly_take_home').fill('90000');
     await page.getByTestId('profile-input-monthly_savings').fill('25000');
     await page.getByTestId('profile-input-age').fill('34');
-    await page.getByTestId('profile-input-investment_horizon_years').fill('12');
+    const horizonInput = page.getByTestId('profile-input-investment_horizon_years');
+    await horizonInput.focus();
+    await horizonInput.press('Home');
+    for (let year = 1; year < 12; year += 1) {
+      await horizonInput.press('ArrowRight');
+    }
     await page.getByRole('button', { name: 'Moderate', exact: true }).click();
     await page.getByRole('button', { name: 'Wealth Growth', exact: true }).click();
 

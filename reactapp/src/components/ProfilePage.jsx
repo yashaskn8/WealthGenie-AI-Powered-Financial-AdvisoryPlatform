@@ -165,7 +165,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
         </h1>
         <div
           className="profile-form-card"
-          data-testid="profile-form-card"
+          data-testid="profile-scroll-region"
           style={{
             flex: 1,
             overflowY: 'auto',
@@ -204,6 +204,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
                 <div className="pf-input-prefix">
                   <span className="prefix-symbol">₹</span>
                   <input 
+                    data-testid="profile-input-monthly_take_home"
                     type="number" 
                     placeholder="65000" 
                     value={monthlyTakeHome ?? ''} 
@@ -220,6 +221,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
                 <div className="pf-input-prefix">
                   <span className="prefix-symbol">₹</span>
                   <input 
+                    data-testid="profile-input-monthly_savings"
                     type="number" 
                     placeholder="12000" 
                     value={monthlySavings ?? ''} 
@@ -243,6 +245,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
               <div className="pf-field">
                 <label>Age</label>
                 <input 
+                  data-testid="profile-input-age"
                   type="number" 
                   placeholder="32" 
                   value={age ?? ''} 
@@ -423,6 +426,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
               <label>Investment Horizon</label>
               <div className="horizon-slider-container">
                 <input
+                  data-testid="profile-input-investment_horizon_years"
                   type="range"
                   min="1"
                   max="30"
