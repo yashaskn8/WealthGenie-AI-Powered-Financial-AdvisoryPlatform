@@ -1,0 +1,143 @@
+{
+  "schemaVersion": "market-context-model-registry-1.0.0",
+  "champion": {
+    "modelFamily": "DETERMINISTIC_POLICY",
+    "modelVersion": "market-context-policy-1.0.0",
+    "role": "CHAMPION"
+  },
+  "models": [
+    {
+      "modelFamily": "GAUSSIAN_HMM",
+      "modelVersion": "gaussian-hmm-market-context-1.0.0",
+      "featureSchemaVersion": "market-regime-features-1.0.0",
+      "datasetVersion": "market-regime-dataset-1.0.0+sha256:958f1d9a072ede61",
+      "datasetHashSha256": "958f1d9a072ede6169973da93949aba5c894db4d41b25ad5a4b018c3ac5cccad",
+      "trainingStart": "2022-06-28",
+      "trainingEnd": "2025-09-01",
+      "trainingRowCount": 788,
+      "hyperparameters": {
+        "stateCount": 2,
+        "covarianceType": "diag",
+        "maximumIterations": 300,
+        "tolerance": 0.0001
+      },
+      "seed": 17,
+      "preprocessing": {
+        "kind": "STANDARD_SCALER",
+        "fitBoundary": "DEVELOPMENT_ROWS_ONLY_FINAL_HOLDOUT_EXCLUDED",
+        "mean": [
+          0.0005605683389047991,
+          0.003053867237689853,
+          0.011691298311872444,
+          0.11972298924179892,
+          -0.03036119493492067,
+          0.013820969503008908,
+          0.04744650944192012,
+          14.389045050761423
+        ],
+        "scale": [
+          0.007896939934089213,
+          0.017847078315942653,
+          0.034298902838643064,
+          0.042371871569159995,
+          0.027737795447211094,
+          0.03005973879685057,
+          0.04998819137366778,
+          2.7734450501600407
+        ]
+      },
+      "validationMetrics": {
+        "stateCount": 2,
+        "qualifiedForShadow": true,
+        "qualificationReasonCodes": [
+          "HMM_SHADOW_THRESHOLDS_MET"
+        ],
+        "convergenceRate": 1.0,
+        "minimumTrainingStateOccupancy": 0.37351190476190477,
+        "minimumStateOccupancy": 0.0,
+        "validationRunsWithAllStatesRate": 0.6666666666666666,
+        "medianPermutationAlignedSeedAgreement": 1.0,
+        "meanPermutationAlignedFoldCentroidDistance": 0.09601392487147756,
+        "maximumSwitchingRate": 0.060240963855421686,
+        "meanValidationLogLikelihoodPerObservation": -10.580648420729396,
+        "meanTrainingBic": 11337.888519921205
+      },
+      "holdoutMetrics": {
+        "converged": true,
+        "iterations": 35,
+        "holdoutLogLikelihoodPerObservation": -12.796799241406994,
+        "causalCombinedLogLikelihoodPerObservation": -10.265704353529056,
+        "holdout": {
+          "occupancy": [
+            0.6428571428571429,
+            0.35714285714285715
+          ],
+          "minimumOccupancy": 0.35714285714285715,
+          "switchingRate": 0.04780876494023904,
+          "meanDurationSessions": [
+            23.142857142857142,
+            15.0
+          ]
+        },
+        "transitionMatrix": [
+          [
+            0.9567066082558212,
+            0.04329339174417876
+          ],
+          [
+            0.03813744015355677,
+            0.9618625598464432
+          ]
+        ],
+        "trainingAic": 14972.989720425767,
+        "trainingBic": 15136.422153570793,
+        "trainingStateCharacteristics": [
+          {
+            "state": "STATE_0",
+            "featureMeans": {
+              "daily_log_return": -0.0007362919036564248,
+              "return_5d": -0.004372959784368468,
+              "return_20d": -0.014583139512616541,
+              "realized_volatility_20d": 0.12029434310006515,
+              "drawdown_60d": -0.05401175504038744,
+              "price_vs_ma50": -0.012363324074859891,
+              "price_vs_ma200": 0.017825614691504583,
+              "india_vix_level": 14.585265667574927
+            }
+          },
+          {
+            "state": "STATE_1",
+            "featureMeans": {
+              "daily_log_return": 0.0016910854624676722,
+              "return_5d": 0.00952808461796397,
+              "return_20d": 0.034595618220631265,
+              "realized_volatility_20d": 0.11922492067651692,
+              "drawdown_60d": -0.00974419835842112,
+              "price_vs_ma50": 0.036646707610082166,
+              "price_vs_ma200": 0.07326804952126094,
+              "india_vix_level": 14.21799287410927
+            }
+          }
+        ]
+      },
+      "pythonVersion": "3.12.3",
+      "libraryVersions": {
+        "numpy": "1.26.4",
+        "pandas": "2.2.3",
+        "scikitLearn": "1.5.2",
+        "hmmlearn": "0.3.3"
+      },
+      "createdAt": "2026-09-08T16:13:12.921579Z",
+      "qualificationStatus": "QUALIFIED_FOR_SHADOW_OBSERVATION_ONLY",
+      "role": "SHADOW",
+      "semanticLabels": null,
+      "calibratedProbabilities": false,
+      "controlsAllocation": false,
+      "artifactFile": "gaussian-hmm-market-context-1.0.0.npz",
+      "artifactChecksumSha256": "8796f024ab0a1d707585212a3dc79f969993909cb658e7a07a0397ac49cf1463",
+      "artifactSchemaVersion": "market-context-hmm-artifact-1.0.0"
+    }
+  ],
+  "createdAt": "2026-09-08T16:13:13.105079Z",
+  "automaticPromotion": false
+}

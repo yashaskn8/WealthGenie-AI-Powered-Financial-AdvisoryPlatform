@@ -16,6 +16,10 @@ import {
 import { clearInFlightMarketRequestsForTest } from '../services/marketData/requestCache.js';
 import { setRedisAvailable, setRedisClient } from '../config/redis.js';
 import { computeMarketContextFeatures } from '../services/marketContextFeatureEngine.js';
+import {
+  MARKET_REGIME_DATASET_SCHEMA_VERSION,
+  buildMarketRegimeDataset,
+} from '../services/marketData/marketRegimeDataset.js';
 
 const FETCHED_AT = '2026-09-08T10:01:00.000Z';
 const QUOTE_PAYLOAD = Object.freeze({
@@ -174,6 +178,61 @@ test('NSE historical parser sorts unordered rows and removes exact duplicates', 
     '2026-09-05', '2026-09-06', '2026-09-07',
   ]);
   assert.equal(snapshot.freshness.status, 'FRESH');
+});
+
+test('NSE historical adapter supports India VIX through the same provider-neutral contract', () => {
+  const rows = [
+    historyRow('2026-09-07', 11.2, { EOD_INDEX_NAME: 'INDIA VIX' }),
+    historyRow('2026-09-05', 11.4, { EOD_INDEX_NAME: 'INDIA VIX' }),
+  ];
+  const snapshot = parseNseHistoricalData({ data: rows }, {
+    fetchedAt: '2026-09-08T04:00:00.000Z',
+    fromDate: '2026-09-01',
+    toDate: '2026-09-07',
+    canonicalProductId: MARKET_BENCHMARKS.INDIA_VIX.canonicalProductId,
+    now: new Date('2026-09-08T04:00:00.000Z'),
+  });
+  assert.equal(snapshot.instrumentKey, MARKET_BENCHMARKS.INDIA_VIX.canonicalProductId);
+  assert.equal(snapshot.source.instrumentId, 'INDIA VIX');
+  assert.deepEqual(snapshot.candles.map(candle => candle.close), [11.4, 11.2]);
+});
+
+test('market-regime dataset joins only verified common sessions and records a stable content hash', () => {
+  const options = {
+    fetchedAt: '2026-09-08T04:00:00.000Z',
+    fromDate: '2026-09-01',
+    toDate: '2026-09-07',
+    now: new Date('2026-09-08T04:00:00.000Z'),
+  };
+  const niftySnapshot = parseNseHistoricalData({ data: [
+    historyRow('2026-09-04', 24000),
+    historyRow('2026-09-05', 24010),
+    historyRow('2026-09-07', 24020),
+  ] }, options);
+  const vixSnapshot = parseNseHistoricalData({ data: [
+    historyRow('2026-09-05', 12.2, { EOD_INDEX_NAME: 'INDIA VIX' }),
+    historyRow('2026-09-07', 11.8, { EOD_INDEX_NAME: 'INDIA VIX' }),
+  ] }, {
+    ...options,
+    canonicalProductId: MARKET_BENCHMARKS.INDIA_VIX.canonicalProductId,
+  });
+  const first = buildMarketRegimeDataset({
+    niftySnapshot,
+    vixSnapshot,
+    retrievedAt: '2026-09-08T04:05:00.000Z',
+  });
+  const second = buildMarketRegimeDataset({
+    niftySnapshot,
+    vixSnapshot,
+    retrievedAt: '2026-09-08T05:05:00.000Z',
+  });
+  assert.equal(first.schemaVersion, MARKET_REGIME_DATASET_SCHEMA_VERSION);
+  assert.equal(first.rowCount, 2);
+  assert.deepEqual(first.rows.map(row => row.effectiveTradingDate), ['2026-09-05', '2026-09-07']);
+  assert.equal(first.missingObservations.nifty50WithoutIndiaVix, 1);
+  assert.equal(first.missingObservations.policy, 'INNER_JOIN_NO_IMPUTATION_NO_FORWARD_FILL');
+  assert.equal(first.contentHash, second.contentHash);
+  assert.equal(first.source.provider, 'NSE');
 });
 
 test('malformed OHLC, conflicting duplicates, schema drift, and stale history are rejected', () => {

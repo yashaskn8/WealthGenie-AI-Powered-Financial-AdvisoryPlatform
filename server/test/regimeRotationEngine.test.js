@@ -72,6 +72,25 @@ test('unavailable and normal contexts never change the recommendation', () => {
   assert.deepEqual(normal.adjustedWeights, normal.baseWeights);
 });
 
+test('an ML shadow state cannot become an allocation context', () => {
+  const instruments = [instrument('ppf', 1, 0.85), instrument('smallcap_mf', 5, 0.15)];
+  const result = applyProfileSafeMarketContextAdjustment({
+    profile: PROFILE,
+    instruments,
+    marketContext: {
+      status: 'MODEL_CONTEXT_AVAILABLE',
+      role: 'SHADOW',
+      state: 'STATE_1',
+      semanticContext: null,
+    },
+  });
+  assert.equal(result.applied, false);
+  assert.equal(result.contextStatus, 'MODEL_CONTEXT_AVAILABLE');
+  assert.deepEqual(result.adjustedInstruments, instruments);
+  assert.deepEqual(result.introducedInstrumentIds, []);
+  assert(result.reasonCodes.includes('MARKET_CONTEXT_UNAVAILABLE_NO_ADJUSTMENT'));
+});
+
 test('suitability validation remains a hard pre-adjustment boundary', () => {
   const expected = new Error('blocked by suitability');
   assert.throws(() => applyProfileSafeMarketContextAdjustment({

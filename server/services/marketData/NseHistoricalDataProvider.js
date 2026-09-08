@@ -66,8 +66,8 @@ function positiveNumber(value) {
   return number !== null && number > 0 ? number : null;
 }
 
-function normalizedHistoryRow(row, index) {
-  if (row?.EOD_INDEX_NAME !== MARKET_BENCHMARKS.NIFTY_50.nseIndexName) {
+function normalizedHistoryRow(row, index, benchmark) {
+  if (row?.EOD_INDEX_NAME !== benchmark.nseIndexName) {
     throw new Error(`NSE_HISTORY_SCHEMA_MISMATCH:data[${index}].EOD_INDEX_NAME`);
   }
   const effectiveTradingDate = parseNseDate(row.EOD_TIMESTAMP);
@@ -97,6 +97,7 @@ export function parseNseHistoricalData(payload, {
   fetchedAt,
   fromDate,
   toDate,
+  canonicalProductId = MARKET_BENCHMARKS.NIFTY_50.canonicalProductId,
   now = new Date(),
   holidayDates = [],
   sourceUrl = NSE_HISTORICAL_INDEX_URL,
@@ -104,12 +105,14 @@ export function parseNseHistoricalData(payload, {
   const normalizedFromDate = requireIsoDate(fromDate, 'fromDate');
   const normalizedToDate = requireIsoDate(toDate, 'toDate');
   const normalizedFetchedAt = normalizeTimestamp(fetchedAt);
+  const benchmark = benchmarkByCanonicalId(canonicalProductId);
+  if (!benchmark) throw new TypeError(`Unsupported canonical benchmark: ${canonicalProductId}`);
   if (!normalizedFetchedAt) throw new TypeError('fetchedAt must be a valid timestamp.');
   if (!payload || !Array.isArray(payload.data)) throw new Error('NSE_HISTORY_SCHEMA_MISMATCH:data');
   const byDate = new Map();
   let duplicateRowCount = 0;
   for (const [index, row] of payload.data.entries()) {
-    const candle = normalizedHistoryRow(row, index);
+    const candle = normalizedHistoryRow(row, index, benchmark);
     if (candle.effectiveTradingDate < normalizedFromDate || candle.effectiveTradingDate > normalizedToDate) {
       throw new Error(`NSE_HISTORY_OUT_OF_RANGE:data[${index}]`);
     }
@@ -133,7 +136,7 @@ export function parseNseHistoricalData(payload, {
     status: AVAILABILITY.AVAILABLE,
     qualification: 'OFFICIAL_NSE_WEBSITE_ENDPOINT_UNDOCUMENTED_SCHEMA_VALIDATED',
     dataClass: NSE_HISTORY_DATA_CLASS,
-    instrumentKey: MARKET_BENCHMARKS.NIFTY_50.canonicalProductId,
+    instrumentKey: benchmark.canonicalProductId,
     interval: '1 day',
     fetchedAt: normalizedFetchedAt,
     observedAt: latest.timestamp,
@@ -152,15 +155,40 @@ export function parseNseHistoricalData(payload, {
     candles,
     source: {
       provider: PROVIDERS.NSE,
-      instrumentId: MARKET_BENCHMARKS.NIFTY_50.nseIndexName,
+      instrumentId: benchmark.nseIndexName,
       url: sourceUrl,
     },
   };
 }
 
-function cacheKeyFor(fromDate, toDate) {
-  const digest = crypto.createHash('sha256').update(`${fromDate}\n${toDate}`).digest('hex');
+function cacheKeyFor(canonicalProductId, fromDate, toDate) {
+  const digest = crypto.createHash('sha256')
+    .update(`${canonicalProductId}\n${fromDate}\n${toDate}`)
+    .digest('hex');
   return `market:nse:daily-index-history:${MARKET_DATA_SCHEMA_VERSION}:${digest}`;
+}
+
+async function fetchHistoryWindows(httpClient, windows, benchmark) {
+  const responses = [];
+  const concurrency = 4;
+  for (let offset = 0; offset < windows.length; offset += concurrency) {
+    const batch = windows.slice(offset, offset + concurrency);
+    const batchResponses = await Promise.all(batch.map(window => getNseJson(
+      httpClient,
+      NSE_HISTORICAL_INDEX_URL,
+      {
+        params: {
+          indexType: benchmark.nseIndexName,
+          from: formatNseQueryDate(window.fromDate),
+          to: formatNseQueryDate(window.toDate),
+        },
+        referer: 'https://www.nseindia.com/reports-indices-historical-index-data',
+        timeout: 15_000,
+      },
+    )));
+    responses.push(...batchResponses);
+  }
+  return responses;
 }
 
 export default class NseHistoricalDataProvider extends MarketDataProvider {
@@ -175,14 +203,14 @@ export default class NseHistoricalDataProvider extends MarketDataProvider {
 
   async getDailyCandles(canonicalProductId, { fromDate, toDate, forceRefresh = false } = {}) {
     const benchmark = benchmarkByCanonicalId(canonicalProductId);
-    if (benchmark?.canonicalProductId !== MARKET_BENCHMARKS.NIFTY_50.canonicalProductId) {
-      throw new TypeError('NSE history currently supports only the canonical NIFTY 50 benchmark.');
+    if (!benchmark) {
+      throw new TypeError('NSE history requires a supported canonical benchmark.');
     }
     const normalizedFromDate = requireIsoDate(fromDate, 'fromDate');
     const normalizedToDate = requireIsoDate(toDate, 'toDate');
     if (normalizedFromDate > normalizedToDate) throw new RangeError('fromDate must not be after toDate.');
     return readThroughMarketCache({
-      cacheKey: cacheKeyFor(normalizedFromDate, normalizedToDate),
+      cacheKey: cacheKeyFor(benchmark.canonicalProductId, normalizedFromDate, normalizedToDate),
       ttlSeconds: NSE_HISTORY_CACHE_TTL_SECONDS,
       forceRefresh,
       loader: async () => {
@@ -190,15 +218,7 @@ export default class NseHistoricalDataProvider extends MarketDataProvider {
         try {
           const windows = buildNseHistoryWindows(normalizedFromDate, normalizedToDate);
           const [responses, holidaySnapshot] = await Promise.all([
-            Promise.all(windows.map(window => getNseJson(this.httpClient, NSE_HISTORICAL_INDEX_URL, {
-              params: {
-                indexType: MARKET_BENCHMARKS.NIFTY_50.nseIndexName,
-                from: formatNseQueryDate(window.fromDate),
-                to: formatNseQueryDate(window.toDate),
-              },
-              referer: 'https://www.nseindia.com/reports-indices-historical-index-data',
-              timeout: 15_000,
-            }))),
+            fetchHistoryWindows(this.httpClient, windows, benchmark),
             this.holidayLoader({ forceRefresh: false }),
           ]);
           if (holidaySnapshot?.status !== AVAILABILITY.AVAILABLE) {
@@ -215,6 +235,7 @@ export default class NseHistoricalDataProvider extends MarketDataProvider {
             fetchedAt,
             fromDate: normalizedFromDate,
             toDate: normalizedToDate,
+            canonicalProductId: benchmark.canonicalProductId,
             now: this.clock(),
             holidayDates: holidaySnapshot.dates,
           });
@@ -239,7 +260,7 @@ export default class NseHistoricalDataProvider extends MarketDataProvider {
             candles: [],
             source: {
               provider: PROVIDERS.NSE,
-              instrumentId: MARKET_BENCHMARKS.NIFTY_50.nseIndexName,
+              instrumentId: benchmark.nseIndexName,
               url: NSE_HISTORICAL_INDEX_URL,
             },
             error: {

@@ -350,10 +350,12 @@ setup_tracing(app)
 from rag.router import rag_router
 from llm.router import llm_router
 from model.registry.router import registry_router
+from market_context.router import market_context_router
 
 app.include_router(rag_router)
 app.include_router(llm_router)
 app.include_router(registry_router)
+app.include_router(market_context_router)
 
 
 @app.middleware("http")

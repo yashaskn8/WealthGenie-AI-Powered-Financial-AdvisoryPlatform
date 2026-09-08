@@ -1,0 +1,1778 @@
+{
+  "phase": "Phase 4 Market-Regime ML Qualification",
+  "generatedAt": "2026-09-08T16:13:12.921579Z",
+  "data": {
+    "sourceProvider": "NSE",
+    "sourceQualification": "OFFICIAL_NSE_WEBSITE_ENDPOINT_UNDOCUMENTED_SCHEMA_VALIDATED",
+    "sourceInstruments": [
+      {
+        "canonicalProductId": "market:index:nifty-50",
+        "sourceInstrumentId": "NIFTY 50",
+        "sourceUrl": "https://www.nseindia.com/api/historicalOR/indicesHistory"
+      },
+      {
+        "canonicalProductId": "market:index:india-vix",
+        "sourceInstrumentId": "INDIA VIX",
+        "sourceUrl": "https://www.nseindia.com/api/historicalOR/indicesHistory"
+      }
+    ],
+    "startDate": "2021-09-08",
+    "endDate": "2026-09-07",
+    "rawRowCount": 1239,
+    "featureRowCount": 1040,
+    "missingObservations": {
+      "nifty50WithoutIndiaVix": 0,
+      "indiaVixWithoutNifty50": 0,
+      "policy": "INNER_JOIN_NO_IMPUTATION_NO_FORWARD_FILL"
+    },
+    "datasetVersion": "market-regime-dataset-1.0.0+sha256:958f1d9a072ede61",
+    "datasetHash": "958f1d9a072ede6169973da93949aba5c894db4d41b25ad5a4b018c3ac5cccad",
+    "rawDatasetCommitted": false
+  },
+  "features": [
+    {
+      "name": "daily_log_return",
+      "unit": "DECIMAL",
+      "lookback_sessions": 1,
+      "calculation": "ln(NIFTY_close_t / NIFTY_close_t-1)",
+      "causality": "Uses observations at or before trading day t only.",
+      "missing_value_policy": "Drop until lookback is complete; never impute or forward-fill."
+    },
+    {
+      "name": "return_5d",
+      "unit": "DECIMAL",
+      "lookback_sessions": 5,
+      "calculation": "NIFTY_close_t / NIFTY_close_t-5 - 1",
+      "causality": "Uses observations at or before trading day t only.",
+      "missing_value_policy": "Drop until lookback is complete; never impute or forward-fill."
+    },
+    {
+      "name": "return_20d",
+      "unit": "DECIMAL",
+      "lookback_sessions": 20,
+      "calculation": "NIFTY_close_t / NIFTY_close_t-20 - 1",
+      "causality": "Uses observations at or before trading day t only.",
+      "missing_value_policy": "Drop until lookback is complete; never impute or forward-fill."
+    },
+    {
+      "name": "realized_volatility_20d",
+      "unit": "ANNUALIZED_DECIMAL",
+      "lookback_sessions": 20,
+      "calculation": "sample_std(last 20 daily log returns through t) * sqrt(252)",
+      "causality": "Uses observations at or before trading day t only.",
+      "missing_value_policy": "Drop until lookback is complete; never impute or forward-fill."
+    },
+    {
+      "name": "drawdown_60d",
+      "unit": "DECIMAL",
+      "lookback_sessions": 60,
+      "calculation": "NIFTY_close_t / max(NIFTY_high over trailing 60 sessions through t) - 1",
+      "causality": "Uses observations at or before trading day t only.",
+      "missing_value_policy": "Drop until lookback is complete; never impute or forward-fill."
+    },
+    {
+      "name": "price_vs_ma50",
+      "unit": "DECIMAL",
+      "lookback_sessions": 50,
+      "calculation": "NIFTY_close_t / trailing_mean_50(close through t) - 1",
+      "causality": "Uses observations at or before trading day t only.",
+      "missing_value_policy": "Drop until lookback is complete; never impute or forward-fill."
+    },
+    {
+      "name": "price_vs_ma200",
+      "unit": "DECIMAL",
+      "lookback_sessions": 200,
+      "calculation": "NIFTY_close_t / trailing_mean_200(close through t) - 1",
+      "causality": "Uses observations at or before trading day t only.",
+      "missing_value_policy": "Drop until lookback is complete; never impute or forward-fill."
+    },
+    {
+      "name": "india_vix_level",
+      "unit": "INDEX_POINTS",
+      "lookback_sessions": 1,
+      "calculation": "Verified India VIX close at t",
+      "causality": "Uses observations at or before trading day t only.",
+      "missing_value_policy": "Drop until lookback is complete; never impute or forward-fill."
+    }
+  ],
+  "splits": {
+    "strategy": "EXPANDING_WINDOW_WALK_FORWARD",
+    "rationale": "Expanding windows preserve temporal order and increasing information. The final 252 sessions are isolated before state-count selection.",
+    "walkForwardFolds": [
+      {
+        "fold": 1,
+        "train_start": 0,
+        "train_end": 504,
+        "validation_start": 504,
+        "validation_end": 588,
+        "embargo_sessions": 0,
+        "trainStartDate": "2022-06-28",
+        "trainEndDate": "2024-07-10",
+        "validationStartDate": "2024-07-11",
+        "validationEndDate": "2024-11-08"
+      },
+      {
+        "fold": 2,
+        "train_start": 0,
+        "train_end": 588,
+        "validation_start": 588,
+        "validation_end": 672,
+        "embargo_sessions": 0,
+        "trainStartDate": "2022-06-28",
+        "trainEndDate": "2024-11-08",
+        "validationStartDate": "2024-11-11",
+        "validationEndDate": "2025-03-11"
+      },
+      {
+        "fold": 3,
+        "train_start": 0,
+        "train_end": 672,
+        "validation_start": 672,
+        "validation_end": 756,
+        "embargo_sessions": 0,
+        "trainStartDate": "2022-06-28",
+        "trainEndDate": "2025-03-11",
+        "validationStartDate": "2025-03-12",
+        "validationEndDate": "2025-07-15"
+      }
+    ],
+    "finalHoldout": {
+      "startIndex": 788,
+      "endIndexExclusive": 1040,
+      "startDate": "2025-09-02",
+      "endDate": "2026-09-07",
+      "rowCount": 252,
+      "usedForSelection": false
+    },
+    "randomShuffle": false,
+    "supervisedPurgeSessions": 0,
+    "supervisedPurgeReason": "NOT_APPLICABLE_NO_SUPERVISED_TARGET_QUALIFIED"
+  },
+  "leakageAudit": {
+    "status": "PASS",
+    "centeredWindows": false,
+    "futureFeatures": false,
+    "fullDatasetScaling": false,
+    "retrospectiveHmmSmoothing": false,
+    "finalHoldoutUsedForSelection": false
+  },
+  "deterministicBaseline": {
+    "modelVersion": "market-context-policy-1.0.0",
+    "role": "CHAMPION",
+    "contexts": [
+      "NORMAL",
+      "CAUTIOUS",
+      "HIGH_VOLATILITY",
+      "RISK_OFF"
+    ],
+    "thresholdsChanged": false
+  },
+  "hmm": {
+    "status": "SHADOW",
+    "candidateStateCounts": [
+      2,
+      3,
+      4
+    ],
+    "seeds": [
+      7,
+      17,
+      29
+    ],
+    "qualificationThresholds": {
+      "convergenceRateMin": 1.0,
+      "minimumTrainingStateOccupancy": 0.01,
+      "medianSeedAgreementMin": 0.7,
+      "maximumSwitchingRate": 0.35
+    },
+    "selectionMethod": "LEXICOGRAPHIC_PERMUTATION_ALIGNED_SEED_STABILITY_THEN_FOLD_CENTROID_STABILITY_THEN_OOS_LIKELIHOOD_THEN_SIMPLER_STATE_COUNT",
+    "selectedStateCount": 2,
+    "states": [
+      "STATE_0",
+      "STATE_1"
+    ],
+    "semanticInterpretation": null,
+    "candidates": [
+      {
+        "stateCount": 2,
+        "qualifiedForShadow": true,
+        "qualificationReasonCodes": [
+          "HMM_SHADOW_THRESHOLDS_MET"
+        ],
+        "convergenceRate": 1.0,
+        "minimumTrainingStateOccupancy": 0.37351190476190477,
+        "minimumStateOccupancy": 0.0,
+        "validationRunsWithAllStatesRate": 0.6666666666666666,
+        "medianPermutationAlignedSeedAgreement": 1.0,
+        "meanPermutationAlignedFoldCentroidDistance": 0.09601392487147756,
+        "maximumSwitchingRate": 0.060240963855421686,
+        "meanValidationLogLikelihoodPerObservation": -10.580648420729396,
+        "meanTrainingBic": 11337.888519921205,
+        "runs": [
+          {
+            "fold": 1,
+            "seed": 7,
+            "trainRows": 504,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 22,
+            "validationLogLikelihoodPerObservation": -9.020069910244104,
+            "causalSequenceLogLikelihoodPerObservation": -9.476187645080998,
+            "aicTraining": 9729.08055840486,
+            "bicTraining": 9876.870727787358,
+            "transitionMatrix": [
+              [
+                0.9567247467323283,
+                0.04327525326767168
+              ],
+              [
+                0.04980824103319823,
+                0.9501917589668017
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.498015873015873,
+            "occupancy": [
+              0.5595238095238095,
+              0.44047619047619047
+            ],
+            "minimumOccupancy": 0.44047619047619047,
+            "switchingRate": 0.03614457831325301,
+            "meanDurationSessions": [
+              23.5,
+              18.5
+            ],
+            "scalerTrainingMean": [
+              0.0008520747041219103,
+              0.004544728346182806,
+              0.016654793044092977,
+              0.11627557569959651,
+              -0.024875469397824517,
+              0.018796317353980414,
+              0.05656574998753784,
+              14.383844246031748
+            ]
+          },
+          {
+            "fold": 1,
+            "seed": 17,
+            "trainRows": 504,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 27,
+            "validationLogLikelihoodPerObservation": -9.020074906059497,
+            "causalSequenceLogLikelihoodPerObservation": -9.476188909401717,
+            "aicTraining": 9729.08053912856,
+            "bicTraining": 9876.870708511058,
+            "transitionMatrix": [
+              [
+                0.9567229758061891,
+                0.0432770241938108
+              ],
+              [
+                0.04980734633770221,
+                0.9501926536622979
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.498015873015873,
+            "occupancy": [
+              0.5595238095238095,
+              0.44047619047619047
+            ],
+            "minimumOccupancy": 0.44047619047619047,
+            "switchingRate": 0.03614457831325301,
+            "meanDurationSessions": [
+              23.5,
+              18.5
+            ],
+            "scalerTrainingMean": [
+              0.0008520747041219103,
+              0.004544728346182806,
+              0.016654793044092977,
+              0.11627557569959651,
+              -0.024875469397824517,
+              0.018796317353980414,
+              0.05656574998753784,
+              14.383844246031748
+            ]
+          },
+          {
+            "fold": 1,
+            "seed": 29,
+            "trainRows": 504,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 28,
+            "validationLogLikelihoodPerObservation": -9.02007145546811,
+            "causalSequenceLogLikelihoodPerObservation": -9.476188036021162,
+            "aicTraining": 9729.080552062229,
+            "bicTraining": 9876.870721444728,
+            "transitionMatrix": [
+              [
+                0.9567241988715769,
+                0.04327580112842314
+              ],
+              [
+                0.049807964367548856,
+                0.9501920356324511
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.498015873015873,
+            "occupancy": [
+              0.5595238095238095,
+              0.44047619047619047
+            ],
+            "minimumOccupancy": 0.44047619047619047,
+            "switchingRate": 0.03614457831325301,
+            "meanDurationSessions": [
+              23.5,
+              18.5
+            ],
+            "scalerTrainingMean": [
+              0.0008520747041219103,
+              0.004544728346182806,
+              0.016654793044092977,
+              0.11627557569959651,
+              -0.024875469397824517,
+              0.018796317353980414,
+              0.05656574998753784,
+              14.383844246031748
+            ]
+          },
+          {
+            "fold": 2,
+            "seed": 7,
+            "trainRows": 588,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 39,
+            "validationLogLikelihoodPerObservation": -11.549979319636074,
+            "causalSequenceLogLikelihoodPerObservation": -9.750427851560882,
+            "aicTraining": 11234.080120911205,
+            "bicTraining": 11387.265564087656,
+            "transitionMatrix": [
+              [
+                0.95199742988011,
+                0.04800257011988987
+              ],
+              [
+                0.04299750725523627,
+                0.9570024927447638
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.4880952380952381,
+            "occupancy": [
+              1.0,
+              0.0
+            ],
+            "minimumOccupancy": 0.0,
+            "switchingRate": 0.0,
+            "meanDurationSessions": [
+              84.0,
+              0.0
+            ],
+            "scalerTrainingMean": [
+              0.0007179821032369386,
+              0.0038719027344536793,
+              0.015194437595460575,
+              0.11607270342735199,
+              -0.02533914351368933,
+              0.01834651555914709,
+              0.06237692101389495,
+              14.3371556122449
+            ]
+          },
+          {
+            "fold": 2,
+            "seed": 17,
+            "trainRows": 588,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 41,
+            "validationLogLikelihoodPerObservation": -11.55014028052776,
+            "causalSequenceLogLikelihoodPerObservation": -9.750447940455112,
+            "aicTraining": 11234.08008377842,
+            "bicTraining": 11387.265526954872,
+            "transitionMatrix": [
+              [
+                0.9519997257537215,
+                0.048000274246278424
+              ],
+              [
+                0.04299891308344699,
+                0.9570010869165531
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.4880952380952381,
+            "occupancy": [
+              1.0,
+              0.0
+            ],
+            "minimumOccupancy": 0.0,
+            "switchingRate": 0.0,
+            "meanDurationSessions": [
+              84.0,
+              0.0
+            ],
+            "scalerTrainingMean": [
+              0.0007179821032369386,
+              0.0038719027344536793,
+              0.015194437595460575,
+              0.11607270342735199,
+              -0.02533914351368933,
+              0.01834651555914709,
+              0.06237692101389495,
+              14.3371556122449
+            ]
+          },
+          {
+            "fold": 2,
+            "seed": 29,
+            "trainRows": 588,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 39,
+            "validationLogLikelihoodPerObservation": -11.550044913949126,
+            "causalSequenceLogLikelihoodPerObservation": -9.75043603746789,
+            "aicTraining": 11234.080104889797,
+            "bicTraining": 11387.265548066249,
+            "transitionMatrix": [
+              [
+                0.957001920165392,
+                0.04299807983460812
+              ],
+              [
+                0.04800163513024345,
+                0.9519983648697566
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.4880952380952381,
+            "occupancy": [
+              0.0,
+              1.0
+            ],
+            "minimumOccupancy": 0.0,
+            "switchingRate": 0.0,
+            "meanDurationSessions": [
+              0.0,
+              84.0
+            ],
+            "scalerTrainingMean": [
+              0.0007179821032369386,
+              0.0038719027344536793,
+              0.015194437595460575,
+              0.11607270342735199,
+              -0.02533914351368933,
+              0.01834651555914709,
+              0.06237692101389495,
+              14.3371556122449
+            ]
+          },
+          {
+            "fold": 3,
+            "seed": 7,
+            "trainRows": 672,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 26,
+            "validationLogLikelihoodPerObservation": -11.238350929749236,
+            "causalSequenceLogLikelihoodPerObservation": -9.521695349430617,
+            "aicTraining": 12578.678848595751,
+            "bicTraining": 12736.537890514062,
+            "transitionMatrix": [
+              [
+                0.9613053744085646,
+                0.03869462559143547
+              ],
+              [
+                0.03996138631062606,
+                0.9600386136893739
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.49404761904761907,
+            "occupancy": [
+              0.7380952380952381,
+              0.2619047619047619
+            ],
+            "minimumOccupancy": 0.2619047619047619,
+            "switchingRate": 0.03614457831325301,
+            "meanDurationSessions": [
+              31.0,
+              11.0
+            ],
+            "scalerTrainingMean": [
+              0.0005228952456328149,
+              0.0028592342368051775,
+              0.011040543198677073,
+              0.11764734796700163,
+              -0.03167899319018267,
+              0.013161280851575943,
+              0.0525976328015899,
+              14.396424851190478
+            ]
+          },
+          {
+            "fold": 3,
+            "seed": 17,
+            "trainRows": 672,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 6,
+            "validationLogLikelihoodPerObservation": -11.173451871223145,
+            "causalSequenceLogLikelihoodPerObservation": -9.53312941134699,
+            "aicTraining": 12606.891249448443,
+            "bicTraining": 12764.750291366754,
+            "transitionMatrix": [
+              [
+                0.9701999726915221,
+                0.029800027308477906
+              ],
+              [
+                0.017275366844740615,
+                0.9827246331552594
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.37351190476190477,
+            "occupancy": [
+              0.15476190476190477,
+              0.8452380952380952
+            ],
+            "minimumOccupancy": 0.15476190476190477,
+            "switchingRate": 0.060240963855421686,
+            "meanDurationSessions": [
+              4.333333333333333,
+              23.666666666666668
+            ],
+            "scalerTrainingMean": [
+              0.0005228952456328149,
+              0.0028592342368051775,
+              0.011040543198677073,
+              0.11764734796700163,
+              -0.03167899319018267,
+              0.013161280851575943,
+              0.0525976328015899,
+              14.396424851190478
+            ]
+          },
+          {
+            "fold": 3,
+            "seed": 29,
+            "trainRows": 672,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 22,
+            "validationLogLikelihoodPerObservation": -11.103652199707494,
+            "causalSequenceLogLikelihoodPerObservation": -9.513856995875658,
+            "aicTraining": 12589.440658639804,
+            "bicTraining": 12747.299700558115,
+            "transitionMatrix": [
+              [
+                0.9632904279864244,
+                0.0367095720135757
+              ],
+              [
+                0.04760440225145745,
+                0.9523955977485425
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.43154761904761907,
+            "occupancy": [
+              0.8214285714285714,
+              0.17857142857142858
+            ],
+            "minimumOccupancy": 0.17857142857142858,
+            "switchingRate": 0.03614457831325301,
+            "meanDurationSessions": [
+              34.5,
+              7.5
+            ],
+            "scalerTrainingMean": [
+              0.0005228952456328149,
+              0.0028592342368051775,
+              0.011040543198677073,
+              0.11764734796700163,
+              -0.03167899319018267,
+              0.013161280851575943,
+              0.0525976328015899,
+              14.396424851190478
+            ]
+          }
+        ]
+      },
+      {
+        "stateCount": 3,
+        "qualifiedForShadow": true,
+        "qualificationReasonCodes": [
+          "HMM_SHADOW_THRESHOLDS_MET"
+        ],
+        "convergenceRate": 1.0,
+        "minimumTrainingStateOccupancy": 0.25793650793650796,
+        "minimumStateOccupancy": 0.0,
+        "validationRunsWithAllStatesRate": 0.6666666666666666,
+        "medianPermutationAlignedSeedAgreement": 0.9821428571428572,
+        "meanPermutationAlignedFoldCentroidDistance": 0.21701495495163764,
+        "maximumSwitchingRate": 0.12048192771084337,
+        "meanValidationLogLikelihoodPerObservation": -10.039801485115232,
+        "meanTrainingBic": 10432.18300205346,
+        "runs": [
+          {
+            "fold": 1,
+            "seed": 7,
+            "trainRows": 504,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 15,
+            "validationLogLikelihoodPerObservation": -9.507223187970048,
+            "causalSequenceLogLikelihoodPerObservation": -8.6527912595936,
+            "aicTraining": 8740.739402518815,
+            "bicTraining": 8977.203673530812,
+            "transitionMatrix": [
+              [
+                0.9777591657513783,
+                0.005612999112768152,
+                0.01662783513585358
+              ],
+              [
+                0.0118408981439526,
+                0.9593033707094766,
+                0.028855731146570765
+              ],
+              [
+                0.01578494188257595,
+                0.048104636964129546,
+                0.9361104211532945
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.2896825396825397,
+            "occupancy": [
+              0.13095238095238096,
+              0.4523809523809524,
+              0.4166666666666667
+            ],
+            "minimumOccupancy": 0.13095238095238096,
+            "switchingRate": 0.08433734939759036,
+            "meanDurationSessions": [
+              5.5,
+              9.5,
+              17.5
+            ],
+            "scalerTrainingMean": [
+              0.0008520747041219103,
+              0.004544728346182806,
+              0.016654793044092977,
+              0.11627557569959651,
+              -0.024875469397824517,
+              0.018796317353980414,
+              0.05656574998753784,
+              14.383844246031748
+            ]
+          },
+          {
+            "fold": 1,
+            "seed": 17,
+            "trainRows": 504,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 41,
+            "validationLogLikelihoodPerObservation": -8.95772794328917,
+            "causalSequenceLogLikelihoodPerObservation": -8.66210249635922,
+            "aicTraining": 8860.470599835546,
+            "bicTraining": 9096.934870847543,
+            "transitionMatrix": [
+              [
+                0.9235973535862227,
+                1.4652668157709204e-53,
+                0.07640264641377721
+              ],
+              [
+                0.00804498244443618,
+                0.9557800822913338,
+                0.03617493526422994
+              ],
+              [
+                0.07047764902850394,
+                0.02282720370729939,
+                0.9066951472641966
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.25793650793650796,
+            "occupancy": [
+              0.42857142857142855,
+              0.32142857142857145,
+              0.25
+            ],
+            "minimumOccupancy": 0.25,
+            "switchingRate": 0.12048192771084337,
+            "meanDurationSessions": [
+              9.0,
+              13.5,
+              4.2
+            ],
+            "scalerTrainingMean": [
+              0.0008520747041219103,
+              0.004544728346182806,
+              0.016654793044092977,
+              0.11627557569959651,
+              -0.024875469397824517,
+              0.018796317353980414,
+              0.05656574998753784,
+              14.383844246031748
+            ]
+          },
+          {
+            "fold": 1,
+            "seed": 29,
+            "trainRows": 504,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 14,
+            "validationLogLikelihoodPerObservation": -9.507163862269984,
+            "causalSequenceLogLikelihoodPerObservation": -8.652785316318509,
+            "aicTraining": 8740.739410491324,
+            "bicTraining": 8977.20368150332,
+            "transitionMatrix": [
+              [
+                0.9593033132595009,
+                0.0288555343677391,
+                0.011841152372760075
+              ],
+              [
+                0.04810288995261448,
+                0.9361117051514672,
+                0.015785404895918377
+              ],
+              [
+                0.005612629840341501,
+                0.01662899058760314,
+                0.9777583795720554
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.2896825396825397,
+            "occupancy": [
+              0.4523809523809524,
+              0.4166666666666667,
+              0.13095238095238096
+            ],
+            "minimumOccupancy": 0.13095238095238096,
+            "switchingRate": 0.08433734939759036,
+            "meanDurationSessions": [
+              9.5,
+              17.5,
+              5.5
+            ],
+            "scalerTrainingMean": [
+              0.0008520747041219103,
+              0.004544728346182806,
+              0.016654793044092977,
+              0.11627557569959651,
+              -0.024875469397824517,
+              0.018796317353980414,
+              0.05656574998753784,
+              14.383844246031748
+            ]
+          },
+          {
+            "fold": 2,
+            "seed": 7,
+            "trainRows": 588,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 31,
+            "validationLogLikelihoodPerObservation": -10.31078852834045,
+            "causalSequenceLogLikelihoodPerObservation": -8.855828059394259,
+            "aicTraining": 10281.90876016723,
+            "bicTraining": 10527.005469249554,
+            "transitionMatrix": [
+              [
+                0.9702599315455714,
+                0.012601890539803077,
+                0.017138177914625487
+              ],
+              [
+                0.017226077558260885,
+                0.9494847346286033,
+                0.0332891878131359
+              ],
+              [
+                0.013010202743900074,
+                0.04129884164575354,
+                0.9456909556103464
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.32142857142857145,
+            "occupancy": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "minimumOccupancy": 0.0,
+            "switchingRate": 0.0,
+            "meanDurationSessions": [
+              0.0,
+              0.0,
+              84.0
+            ],
+            "scalerTrainingMean": [
+              0.0007179821032369386,
+              0.0038719027344536793,
+              0.015194437595460575,
+              0.11607270342735199,
+              -0.02533914351368933,
+              0.01834651555914709,
+              0.06237692101389495,
+              14.3371556122449
+            ]
+          },
+          {
+            "fold": 2,
+            "seed": 17,
+            "trainRows": 588,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 23,
+            "validationLogLikelihoodPerObservation": -10.352060545466035,
+            "causalSequenceLogLikelihoodPerObservation": -8.870850452152292,
+            "aicTraining": 10295.16221917209,
+            "bicTraining": 10540.258928254414,
+            "transitionMatrix": [
+              [
+                0.9502451853258533,
+                0.02785884993573985,
+                0.021895964738406867
+              ],
+              [
+                0.004642741977382979,
+                0.9686468302436139,
+                0.02671042777900321
+              ],
+              [
+                0.041510601350659995,
+                0.014186636026613044,
+                0.944302762622727
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.3010204081632653,
+            "occupancy": [
+              0.0,
+              0.0,
+              1.0
+            ],
+            "minimumOccupancy": 0.0,
+            "switchingRate": 0.0,
+            "meanDurationSessions": [
+              0.0,
+              0.0,
+              84.0
+            ],
+            "scalerTrainingMean": [
+              0.0007179821032369386,
+              0.0038719027344536793,
+              0.015194437595460575,
+              0.11607270342735199,
+              -0.02533914351368933,
+              0.01834651555914709,
+              0.06237692101389495,
+              14.3371556122449
+            ]
+          },
+          {
+            "fold": 2,
+            "seed": 29,
+            "trainRows": 588,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 28,
+            "validationLogLikelihoodPerObservation": -10.310773730950224,
+            "causalSequenceLogLikelihoodPerObservation": -8.855826227468182,
+            "aicTraining": 10281.908788357288,
+            "bicTraining": 10527.005497439612,
+            "transitionMatrix": [
+              [
+                0.9494791953010863,
+                0.03328907541104239,
+                0.01723172928787125
+              ],
+              [
+                0.04129987014897219,
+                0.9456930063726148,
+                0.013007123478413084
+              ],
+              [
+                0.01260514914810484,
+                0.017136348463609584,
+                0.9702585023882855
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.32142857142857145,
+            "occupancy": [
+              0.0,
+              1.0,
+              0.0
+            ],
+            "minimumOccupancy": 0.0,
+            "switchingRate": 0.0,
+            "meanDurationSessions": [
+              0.0,
+              84.0,
+              0.0
+            ],
+            "scalerTrainingMean": [
+              0.0007179821032369386,
+              0.0038719027344536793,
+              0.015194437595460575,
+              0.11607270342735199,
+              -0.02533914351368933,
+              0.01834651555914709,
+              0.06237692101389495,
+              14.3371556122449
+            ]
+          },
+          {
+            "fold": 3,
+            "seed": 7,
+            "trainRows": 672,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 26,
+            "validationLogLikelihoodPerObservation": -10.364134723810281,
+            "causalSequenceLogLikelihoodPerObservation": -8.680595857575854,
+            "aicTraining": 11495.812947442953,
+            "bicTraining": 11748.38741451225,
+            "transitionMatrix": [
+              [
+                0.9639866761998472,
+                0.02824678725691167,
+                0.00776653654324123
+              ],
+              [
+                0.032482976836181274,
+                0.9510508231689394,
+                0.01646619999487936
+              ],
+              [
+                0.014179982062098214,
+                0.012933756827968306,
+                0.9728862611099335
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.28125,
+            "occupancy": [
+              0.25,
+              0.47619047619047616,
+              0.27380952380952384
+            ],
+            "minimumOccupancy": 0.25,
+            "switchingRate": 0.024096385542168676,
+            "meanDurationSessions": [
+              21.0,
+              40.0,
+              23.0
+            ],
+            "scalerTrainingMean": [
+              0.0005228952456328149,
+              0.0028592342368051775,
+              0.011040543198677073,
+              0.11764734796700163,
+              -0.03167899319018267,
+              0.013161280851575943,
+              0.0525976328015899,
+              14.396424851190478
+            ]
+          },
+          {
+            "fold": 3,
+            "seed": 17,
+            "trainRows": 672,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 22,
+            "validationLogLikelihoodPerObservation": -10.524039574124947,
+            "causalSequenceLogLikelihoodPerObservation": -8.697990887025563,
+            "aicTraining": 11495.249286449583,
+            "bicTraining": 11747.82375351888,
+            "transitionMatrix": [
+              [
+                0.9778168295281875,
+                0.007437436788399893,
+                0.01474573368341247
+              ],
+              [
+                0.009788885002814128,
+                0.9590479179430509,
+                0.031163197054134995
+              ],
+              [
+                0.008034390880920105,
+                0.028427404486926176,
+                0.9635382046321537
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.27380952380952384,
+            "occupancy": [
+              0.23809523809523808,
+              0.5119047619047619,
+              0.25
+            ],
+            "minimumOccupancy": 0.23809523809523808,
+            "switchingRate": 0.024096385542168676,
+            "meanDurationSessions": [
+              20.0,
+              43.0,
+              21.0
+            ],
+            "scalerTrainingMean": [
+              0.0005228952456328149,
+              0.0028592342368051775,
+              0.011040543198677073,
+              0.11764734796700163,
+              -0.03167899319018267,
+              0.013161280851575943,
+              0.0525976328015899,
+              14.396424851190478
+            ]
+          },
+          {
+            "fold": 3,
+            "seed": 29,
+            "trainRows": 672,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 20,
+            "validationLogLikelihoodPerObservation": -10.524301269815952,
+            "causalSequenceLogLikelihoodPerObservation": -8.698019959994165,
+            "aicTraining": 11495.249262555437,
+            "bicTraining": 11747.823729624733,
+            "transitionMatrix": [
+              [
+                0.9635298476079646,
+                0.028430808044040773,
+                0.008039344347994738
+              ],
+              [
+                0.03117363534643643,
+                0.9590530557490602,
+                0.009773308904503312
+              ],
+              [
+                0.014742368364910578,
+                0.00743177367382537,
+                0.9778258579612641
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.27380952380952384,
+            "occupancy": [
+              0.25,
+              0.5119047619047619,
+              0.23809523809523808
+            ],
+            "minimumOccupancy": 0.23809523809523808,
+            "switchingRate": 0.024096385542168676,
+            "meanDurationSessions": [
+              21.0,
+              43.0,
+              20.0
+            ],
+            "scalerTrainingMean": [
+              0.0005228952456328149,
+              0.0028592342368051775,
+              0.011040543198677073,
+              0.11764734796700163,
+              -0.03167899319018267,
+              0.013161280851575943,
+              0.0525976328015899,
+              14.396424851190478
+            ]
+          }
+        ]
+      },
+      {
+        "stateCount": 4,
+        "qualifiedForShadow": true,
+        "qualificationReasonCodes": [
+          "HMM_SHADOW_THRESHOLDS_MET"
+        ],
+        "convergenceRate": 1.0,
+        "minimumTrainingStateOccupancy": 0.03231292517006803,
+        "minimumStateOccupancy": 0.0,
+        "validationRunsWithAllStatesRate": 0.3333333333333333,
+        "medianPermutationAlignedSeedAgreement": 0.9880952380952381,
+        "meanPermutationAlignedFoldCentroidDistance": 0.9543920834179604,
+        "maximumSwitchingRate": 0.10843373493975904,
+        "meanValidationLogLikelihoodPerObservation": -9.603542728223584,
+        "meanTrainingBic": 9937.956398768585,
+        "runs": [
+          {
+            "fold": 1,
+            "seed": 7,
+            "trainRows": 504,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 24,
+            "validationLogLikelihoodPerObservation": -9.192241654161867,
+            "causalSequenceLogLikelihoodPerObservation": -8.296513402419,
+            "aicTraining": 8413.630046197974,
+            "bicTraining": 8747.213571375612,
+            "transitionMatrix": [
+              [
+                0.9473642723005471,
+                0.0,
+                0.05263572769945283,
+                1.1816632278153804e-260
+              ],
+              [
+                0.0,
+                0.9170507212823952,
+                0.05788395592557378,
+                0.025065322792031004
+              ],
+              [
+                0.0,
+                0.03695905941467445,
+                0.9494192966207794,
+                0.013621643964546114
+              ],
+              [
+                0.007152867839291474,
+                0.014919743938967403,
+                0.028724724343706133,
+                0.949202663878035
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.037698412698412696,
+            "occupancy": [
+              0.0,
+              0.07142857142857142,
+              0.5119047619047619,
+              0.4166666666666667
+            ],
+            "minimumOccupancy": 0.0,
+            "switchingRate": 0.08433734939759036,
+            "meanDurationSessions": [
+              0.0,
+              2.0,
+              14.333333333333334,
+              17.5
+            ],
+            "scalerTrainingMean": [
+              0.0008520747041219103,
+              0.004544728346182806,
+              0.016654793044092977,
+              0.11627557569959651,
+              -0.024875469397824517,
+              0.018796317353980414,
+              0.05656574998753784,
+              14.383844246031748
+            ]
+          },
+          {
+            "fold": 1,
+            "seed": 17,
+            "trainRows": 504,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 37,
+            "validationLogLikelihoodPerObservation": -8.800157007480543,
+            "causalSequenceLogLikelihoodPerObservation": -8.100057896164635,
+            "aicTraining": 8246.76678510644,
+            "bicTraining": 8580.350310284077,
+            "transitionMatrix": [
+              [
+                0.8888547406695039,
+                0.02298321542488347,
+                0.028006487942997253,
+                0.060155555962615265
+              ],
+              [
+                0.02797934082820113,
+                0.9503635980776046,
+                0.01430838599860467,
+                0.007348675095589736
+              ],
+              [
+                0.05353289440913161,
+                0.02132213105726229,
+                0.9251449745336061,
+                2.115584404489201e-50
+              ],
+              [
+                0.12744074977457553,
+                5.5630719439454216e-83,
+                2.3924111986054213e-80,
+                0.8725592502254244
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.16666666666666666,
+            "occupancy": [
+              0.42857142857142855,
+              0.42857142857142855,
+              0.0,
+              0.14285714285714285
+            ],
+            "minimumOccupancy": 0.0,
+            "switchingRate": 0.0963855421686747,
+            "meanDurationSessions": [
+              9.0,
+              18.0,
+              0.0,
+              4.0
+            ],
+            "scalerTrainingMean": [
+              0.0008520747041219103,
+              0.004544728346182806,
+              0.016654793044092977,
+              0.11627557569959651,
+              -0.024875469397824517,
+              0.018796317353980414,
+              0.05656574998753784,
+              14.383844246031748
+            ]
+          },
+          {
+            "fold": 1,
+            "seed": 29,
+            "trainRows": 504,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 24,
+            "validationLogLikelihoodPerObservation": -9.740482246081552,
+            "causalSequenceLogLikelihoodPerObservation": -8.285580258209967,
+            "aicTraining": 8318.92270190514,
+            "bicTraining": 8652.506227082777,
+            "transitionMatrix": [
+              [
+                0.977975958458355,
+                0.011069535869596954,
+                0.0,
+                0.010954505672047917
+              ],
+              [
+                0.022122976017167794,
+                0.9463920246044014,
+                0.007476828927367721,
+                0.024008170451063
+              ],
+              [
+                1.7227794320271782e-212,
+                0.0,
+                0.9444444431246007,
+                0.05555555687539926
+              ],
+              [
+                0.0062093416245312906,
+                0.024554382383876652,
+                2.0500086675782836e-216,
+                0.969236275991592
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.03571428571428571,
+            "occupancy": [
+              0.047619047619047616,
+              0.40476190476190477,
+              0.0,
+              0.5476190476190477
+            ],
+            "minimumOccupancy": 0.0,
+            "switchingRate": 0.10843373493975904,
+            "meanDurationSessions": [
+              2.0,
+              11.333333333333334,
+              0.0,
+              9.2
+            ],
+            "scalerTrainingMean": [
+              0.0008520747041219103,
+              0.004544728346182806,
+              0.016654793044092977,
+              0.11627557569959651,
+              -0.024875469397824517,
+              0.018796317353980414,
+              0.05656574998753784,
+              14.383844246031748
+            ]
+          },
+          {
+            "fold": 2,
+            "seed": 7,
+            "trainRows": 588,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 25,
+            "validationLogLikelihoodPerObservation": -9.597911069992069,
+            "causalSequenceLogLikelihoodPerObservation": -8.460915093057462,
+            "aicTraining": 9916.871729433655,
+            "bicTraining": 10262.633158317647,
+            "transitionMatrix": [
+              [
+                0.9558437210945099,
+                0.0033411057531551294,
+                0.040815173152334974,
+                0.0
+              ],
+              [
+                0.008909932564883155,
+                0.9281629783251116,
+                0.054019297386234906,
+                0.008907791723770288
+              ],
+              [
+                0.07188111863795572,
+                0.04522590002574483,
+                0.8828929813362995,
+                5.891821936346038e-214
+              ],
+              [
+                0.052631640592876776,
+                0.0,
+                0.0,
+                0.9473683594071232
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.03231292517006803,
+            "occupancy": [
+              0.0,
+              1.0,
+              0.0,
+              0.0
+            ],
+            "minimumOccupancy": 0.0,
+            "switchingRate": 0.0,
+            "meanDurationSessions": [
+              0.0,
+              84.0,
+              0.0,
+              0.0
+            ],
+            "scalerTrainingMean": [
+              0.0007179821032369386,
+              0.0038719027344536793,
+              0.015194437595460575,
+              0.11607270342735199,
+              -0.02533914351368933,
+              0.01834651555914709,
+              0.06237692101389495,
+              14.3371556122449
+            ]
+          },
+          {
+            "fold": 2,
+            "seed": 17,
+            "trainRows": 588,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 26,
+            "validationLogLikelihoodPerObservation": -9.834113510944562,
+            "causalSequenceLogLikelihoodPerObservation": -8.413842246015994,
+            "aicTraining": 9813.996118230676,
+            "bicTraining": 10159.757547114668,
+            "transitionMatrix": [
+              [
+                0.9012448017142468,
+                0.07243565614909761,
+                3.5287285708674494e-304,
+                0.026319542136655702
+              ],
+              [
+                0.07689069791735881,
+                0.9231093020826412,
+                0.0,
+                1.5322476979834135e-35
+              ],
+              [
+                3.573417028388792e-198,
+                0.05263159686039277,
+                0.9473684031396072,
+                0.0
+              ],
+              [
+                0.030857730822228074,
+                3.487430422037817e-62,
+                0.006809802023629869,
+                0.9623324671541421
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.03231292517006803,
+            "occupancy": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "minimumOccupancy": 0.0,
+            "switchingRate": 0.0,
+            "meanDurationSessions": [
+              0.0,
+              0.0,
+              0.0,
+              84.0
+            ],
+            "scalerTrainingMean": [
+              0.0007179821032369386,
+              0.0038719027344536793,
+              0.015194437595460575,
+              0.11607270342735199,
+              -0.02533914351368933,
+              0.01834651555914709,
+              0.06237692101389495,
+              14.3371556122449
+            ]
+          },
+          {
+            "fold": 2,
+            "seed": 29,
+            "trainRows": 588,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 21,
+            "validationLogLikelihoodPerObservation": -10.354900170016762,
+            "causalSequenceLogLikelihoodPerObservation": -8.412663066165239,
+            "aicTraining": 9724.879816328325,
+            "bicTraining": 10070.641245212317,
+            "transitionMatrix": [
+              [
+                0.9435952008178308,
+                0.02189412613073455,
+                0.016647106175370296,
+                0.017863566876064423
+              ],
+              [
+                0.027931340537730637,
+                0.9441208474914969,
+                0.014176162050672007,
+                0.013771649920100411
+              ],
+              [
+                0.016867356460028862,
+                0.011673130804012659,
+                0.9714595127359585,
+                6.353978255781746e-31
+              ],
+              [
+                0.0373182351968216,
+                0.02403064792426694,
+                1.202837448659229e-19,
+                0.9386511168789115
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.14625850340136054,
+            "occupancy": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "minimumOccupancy": 0.0,
+            "switchingRate": 0.0,
+            "meanDurationSessions": [
+              84.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "scalerTrainingMean": [
+              0.0007179821032369386,
+              0.0038719027344536793,
+              0.015194437595460575,
+              0.11607270342735199,
+              -0.02533914351368933,
+              0.01834651555914709,
+              0.06237692101389495,
+              14.3371556122449
+            ]
+          },
+          {
+            "fold": 3,
+            "seed": 7,
+            "trainRows": 672,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 30,
+            "validationLogLikelihoodPerObservation": -9.634147365549504,
+            "causalSequenceLogLikelihoodPerObservation": -7.994839883072101,
+            "aicTraining": 10627.614800930309,
+            "bicTraining": 10983.925209831637,
+            "transitionMatrix": [
+              [
+                0.9770939877758144,
+                1.345621186947151e-170,
+                0.009462476070947672,
+                0.013443536153237894
+              ],
+              [
+                0.004522052727919028,
+                0.9563636600559531,
+                0.02920407108754501,
+                0.009910216128582982
+              ],
+              [
+                0.0302211912525337,
+                0.04951578444806975,
+                0.9202630242993965,
+                4.373530303988231e-36
+              ],
+              [
+                0.007849502842725372,
+                0.029896758392415096,
+                4.566659173477136e-61,
+                0.9622537387648595
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.15178571428571427,
+            "occupancy": [
+              0.14285714285714285,
+              0.21428571428571427,
+              0.09523809523809523,
+              0.5476190476190477
+            ],
+            "minimumOccupancy": 0.09523809523809523,
+            "switchingRate": 0.08433734939759036,
+            "meanDurationSessions": [
+              6.0,
+              9.0,
+              4.0,
+              23.0
+            ],
+            "scalerTrainingMean": [
+              0.0005228952456328149,
+              0.0028592342368051775,
+              0.011040543198677073,
+              0.11764734796700163,
+              -0.03167899319018267,
+              0.013161280851575943,
+              0.0525976328015899,
+              14.396424851190478
+            ]
+          },
+          {
+            "fold": 3,
+            "seed": 17,
+            "trainRows": 672,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 20,
+            "validationLogLikelihoodPerObservation": -9.638966366691468,
+            "causalSequenceLogLikelihoodPerObservation": -8.000953835324243,
+            "aicTraining": 10635.979752738112,
+            "bicTraining": 10992.290161639441,
+            "transitionMatrix": [
+              [
+                0.9633971003734982,
+                0.0073013447960354316,
+                4.884510023077461e-44,
+                0.02930155483046627
+              ],
+              [
+                0.017123214854165483,
+                0.9436043381913093,
+                0.03927244695452527,
+                1.5979654684755798e-114
+              ],
+              [
+                4.7669853124726375e-32,
+                0.06052340325600359,
+                0.905180373899086,
+                0.034296222844910476
+              ],
+              [
+                0.009532553430932738,
+                1.465051415635792e-54,
+                0.03317347852052662,
+                0.9572939680485406
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.20684523809523808,
+            "occupancy": [
+              0.5595238095238095,
+              0.13095238095238096,
+              0.09523809523809523,
+              0.21428571428571427
+            ],
+            "minimumOccupancy": 0.09523809523809523,
+            "switchingRate": 0.08433734939759036,
+            "meanDurationSessions": [
+              23.5,
+              5.5,
+              4.0,
+              9.0
+            ],
+            "scalerTrainingMean": [
+              0.0005228952456328149,
+              0.0028592342368051775,
+              0.011040543198677073,
+              0.11764734796700163,
+              -0.03167899319018267,
+              0.013161280851575943,
+              0.0525976328015899,
+              14.396424851190478
+            ]
+          },
+          {
+            "fold": 3,
+            "seed": 29,
+            "trainRows": 672,
+            "validationRows": 84,
+            "converged": true,
+            "iterations": 19,
+            "validationLogLikelihoodPerObservation": -9.638965163093925,
+            "causalSequenceLogLikelihoodPerObservation": -8.000953698089765,
+            "aicTraining": 10635.979749157761,
+            "bicTraining": 10992.29015805909,
+            "transitionMatrix": [
+              [
+                0.9436051467694622,
+                0.01712309958004296,
+                3.781356785490577e-130,
+                0.03927175365049499
+              ],
+              [
+                0.007301335599562509,
+                0.9633971392265295,
+                0.029301525173908126,
+                1.0991727529257124e-29
+              ],
+              [
+                2.0336474198227666e-53,
+                0.009532580359408056,
+                0.9572938436219516,
+                0.03317357601864041
+              ],
+              [
+                0.06052324853504673,
+                2.035534946163743e-25,
+                0.034296444778624445,
+                0.9051803066863288
+              ]
+            ],
+            "trainingMinimumOccupancy": 0.20684523809523808,
+            "occupancy": [
+              0.13095238095238096,
+              0.5595238095238095,
+              0.21428571428571427,
+              0.09523809523809523
+            ],
+            "minimumOccupancy": 0.09523809523809523,
+            "switchingRate": 0.08433734939759036,
+            "meanDurationSessions": [
+              5.5,
+              23.5,
+              9.0,
+              4.0
+            ],
+            "scalerTrainingMean": [
+              0.0005228952456328149,
+              0.0028592342368051775,
+              0.011040543198677073,
+              0.11764734796700163,
+              -0.03167899319018267,
+              0.013161280851575943,
+              0.0525976328015899,
+              14.396424851190478
+            ]
+          }
+        ]
+      }
+    ],
+    "finalHoldoutMetrics": {
+      "converged": true,
+      "iterations": 35,
+      "holdoutLogLikelihoodPerObservation": -12.796799241406994,
+      "causalCombinedLogLikelihoodPerObservation": -10.265704353529056,
+      "holdout": {
+        "occupancy": [
+          0.6428571428571429,
+          0.35714285714285715
+        ],
+        "minimumOccupancy": 0.35714285714285715,
+        "switchingRate": 0.04780876494023904,
+        "meanDurationSessions": [
+          23.142857142857142,
+          15.0
+        ]
+      },
+      "transitionMatrix": [
+        [
+          0.9567066082558212,
+          0.04329339174417876
+        ],
+        [
+          0.03813744015355677,
+          0.9618625598464432
+        ]
+      ],
+      "trainingAic": 14972.989720425767,
+      "trainingBic": 15136.422153570793,
+      "trainingStateCharacteristics": [
+        {
+          "state": "STATE_0",
+          "featureMeans": {
+            "daily_log_return": -0.0007362919036564248,
+            "return_5d": -0.004372959784368468,
+            "return_20d": -0.014583139512616541,
+            "realized_volatility_20d": 0.12029434310006515,
+            "drawdown_60d": -0.05401175504038744,
+            "price_vs_ma50": -0.012363324074859891,
+            "price_vs_ma200": 0.017825614691504583,
+            "india_vix_level": 14.585265667574927
+          }
+        },
+        {
+          "state": "STATE_1",
+          "featureMeans": {
+            "daily_log_return": 0.0016910854624676722,
+            "return_5d": 0.00952808461796397,
+            "return_20d": 0.034595618220631265,
+            "realized_volatility_20d": 0.11922492067651692,
+            "drawdown_60d": -0.00974419835842112,
+            "price_vs_ma50": 0.036646707610082166,
+            "price_vs_ma200": 0.07326804952126094,
+            "india_vix_level": 14.21799287410927
+          }
+        }
+      ]
+    },
+    "sameSeedRetrainingNumericallyReproducible": true,
+    "artifact": {
+      "artifactFile": "gaussian-hmm-market-context-1.0.0.npz",
+      "registryFile": "registry.json",
+      "checksumSha256": "8796f024ab0a1d707585212a3dc79f969993909cb658e7a07a0397ac49cf1463"
+    }
+  },
+  "xgboost": {
+    "labelQualification": "FAIL",
+    "status": "NOT_IMPLEMENTED",
+    "reasonCode": "XGBOOST_SUPERVISED_LABELS_NOT_QUALIFIED",
+    "reason": "No independently justified forward-risk outcome thresholds were established; deterministic-policy labels are explicitly excluded because they test imitation rather than added market intelligence."
+  },
+  "lightgbm": {
+    "status": "NOT_IMPLEMENTED",
+    "reason": "No qualified supervised target; adding a second tree package would provide no defensible evidence."
+  },
+  "recommendationLayerEvaluation": {
+    "mlControlsAllocation": false,
+    "allocationAdjustmentAttempts": 0,
+    "suitabilityViolations": 0,
+    "concentrationViolations": 0,
+    "newInstrumentIntroductions": 0,
+    "averageTacticalTurnoverPct": 0,
+    "maximumTacticalTurnoverPct": 0,
+    "boundedAdjustmentCompliance": "NOT_APPLICABLE_SHADOW_HAS_NO_ADJUSTMENT_PATH",
+    "unavailableDataBehavior": "MODEL_CONTEXT_UNAVAILABLE_DETERMINISTIC_CHAMPION_REMAINS_AUTHORITY",
+    "shadowStateSwitchingRate": 0.04780876494023904
+  },
+  "modelRegistry": {
+    "automaticPromotion": false,
+    "champion": "market-context-policy-1.0.0",
+    "shadowArtifact": {
+      "artifactFile": "gaussian-hmm-market-context-1.0.0.npz",
+      "registryFile": "registry.json",
+      "checksumSha256": "8796f024ab0a1d707585212a3dc79f969993909cb658e7a07a0397ac49cf1463"
+    }
+  },
+  "finalDecision": "DETERMINISTIC_CHAMPION_HMM_SHADOW",
+  "knownLimitations": [
+    "The official NSE website history schema is validated but not a versioned contractual API.",
+    "The reliable joined qualification period is five years; a ten-year India VIX retrieval did not qualify reliably.",
+    "HMM states are unsupervised numeric clusters and have no claimed bull/bear/crash meaning.",
+    "HMM probabilities are uncalibrated and intentionally not exposed as confidence.",
+    "Drift output is diagnostic raw PSI/KS data with no automatic retraining or promotion.",
+    "No investment-performance or excess-return claim is made."
+  ]
+}
