@@ -1,3 +1,8 @@
+import {
+  benchmarkByNseIndexName,
+  benchmarkByUpstoxInstrumentKey,
+} from './marketBenchmarks.js';
+
 function clean(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -28,7 +33,18 @@ export function buildUpstoxInstrumentIdentity(instrumentKey) {
     throw new TypeError('Upstox instrument key is required and must be at most 200 characters.');
   }
   return {
-    canonicalProductId: `market:upstox:${normalizedKey}`,
+    canonicalProductId: benchmarkByUpstoxInstrumentKey(normalizedKey)?.canonicalProductId
+      || `market:upstox:${normalizedKey}`,
     externalIds: [{ source: 'UPSTOX_INSTRUMENT_KEY', value: normalizedKey }],
+  };
+}
+
+export function buildNseIndexIdentity(indexName) {
+  const normalizedName = clean(indexName).toUpperCase();
+  const benchmark = benchmarkByNseIndexName(normalizedName);
+  if (!benchmark) throw new TypeError(`Unsupported NSE index identity: ${normalizedName || 'missing'}`);
+  return {
+    canonicalProductId: benchmark.canonicalProductId,
+    externalIds: [{ source: 'NSE_INDEX_NAME', value: benchmark.nseIndexName }],
   };
 }

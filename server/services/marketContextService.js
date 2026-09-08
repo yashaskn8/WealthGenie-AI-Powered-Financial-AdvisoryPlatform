@@ -52,7 +52,7 @@ async function writeState(state, setState) {
 }
 
 /**
- * Builds the sole authoritative market-context response from verified Upstox
+ * Builds the sole authoritative market-context response from verified normalized
  * observations. Missing, stale, malformed, or failed data never receives a
  * numeric or classification fallback and never mutates hysteresis state.
  */
@@ -70,10 +70,10 @@ export async function getLiveMarketContext(options = {}, dependencies = {}) {
   ]);
   const quoteSnapshot = quoteResult.status === 'fulfilled'
     ? quoteResult.value
-    : sourceFailureSnapshot('UPSTOX_QUOTE_REQUEST_FAILED', quoteResult.reason?.message || 'Quote request failed.');
+    : sourceFailureSnapshot('MARKET_QUOTE_REQUEST_FAILED', quoteResult.reason?.message || 'Quote request failed.');
   const historicalSnapshot = historyResult.status === 'fulfilled'
     ? historyResult.value
-    : sourceFailureSnapshot('UPSTOX_HISTORY_REQUEST_FAILED', historyResult.reason?.message || 'History request failed.');
+    : sourceFailureSnapshot('MARKET_HISTORY_REQUEST_FAILED', historyResult.reason?.message || 'History request failed.');
 
   const features = computeMarketContextFeatures({ quoteSnapshot, historicalSnapshot });
   const candidate = classifyDeterministicMarketContext(features);

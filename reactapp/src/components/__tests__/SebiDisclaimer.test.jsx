@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import SebiDisclaimer from '../SebiDisclaimer';
 import WhereToInvestTab from '../deepdive/WhereToInvestTab';
@@ -68,6 +68,37 @@ describe('SebiDisclaimer Component', () => {
     expect(screen.queryByText('Top Pick')).toBeNull();
     expect(await screen.findByText('MARKET_CONTEXT_UNAVAILABLE')).toBeTruthy();
     expect(screen.getByText(/PROVIDER_NOT_CONFIGURED/)).toBeTruthy();
+  });
+
+  it('renders normalized NSE provenance, update class, timestamp, and freshness from the backend', async () => {
+    api.getCurrentMarketContext.mockResolvedValueOnce({
+      status: 'MARKET_CONTEXT_AVAILABLE',
+      context: 'NORMAL',
+      classification: 'DETERMINISTIC_POLICY_HEURISTIC',
+      policyVersion: 'market-context-policy-1.0.0',
+      confidence: null,
+      observedAt: '2026-09-08T10:00:00.000Z',
+      evaluatedAt: '2026-09-08T10:01:00.000Z',
+      freshness: { status: 'FRESH' },
+      reasonCodes: ['NO_CAUTION_OR_RISK_OFF_POLICY_THRESHOLD_MET'],
+      signals: {
+        nifty50Current: { value: 23635.1, unit: 'INDEX_POINTS', available: true },
+      },
+      sources: [{
+        provider: 'NSE', instrumentId: 'NIFTY 50', dataClass: 'LIVE',
+        observedAt: '2026-09-08T10:00:00.000Z',
+        fetchedAt: '2026-09-08T10:00:30.000Z',
+        freshness: { status: 'FRESH' },
+      }],
+    });
+    render(<WhereToInvestTab inv={{ id: 'mid_cap_stocks', name: 'Mid Cap Growth Stocks', riskLevel: 5 }} userProfile={{ profileId: '64b000000000000000000001' }} />);
+    expect(await screen.findByText('NORMAL')).toBeTruthy();
+    const sourceEvidence = screen.getByText(/NSE \(NIFTY 50 · LIVE\)/);
+    expect(sourceEvidence).toBeTruthy();
+    expect(screen.getByText(/Observed: 2026-09-08T10:00:00.000Z/)).toBeTruthy();
+    const contextPanel = sourceEvidence.closest('[data-testid="market-context-panel"]');
+    expect(contextPanel).toBeTruthy();
+    expect(within(contextPanel).getByText(/Freshness: FRESH/)).toBeTruthy();
   });
 
   it('labels the unique historical-return leader precisely without calling it a Top Pick', async () => {

@@ -28,10 +28,9 @@ describe('DataFreshnessBar Component', () => {
             provider: 'AMFI', status: 'PARTIAL', fetchedAt: '2026-09-08T07:14:56.690Z',
             freshness: { FRESH: 14106, STALE: 0, UNKNOWN: 241 },
           },
-          upstox: {
-            provider: 'UPSTOX', status: 'PROVIDER_NOT_CONFIGURED', fetchedAt: null,
-            freshness: { FRESH: 0, STALE: 0, UNKNOWN: 0 },
-            error: { code: 'PROVIDER_NOT_CONFIGURED' },
+          nse: {
+            provider: 'NSE', status: 'AVAILABLE', fetchedAt: '2026-09-08T10:00:30.000Z',
+            freshness: { FRESH: 2, STALE: 0, UNKNOWN: 0 },
           },
         },
       }),
@@ -39,7 +38,7 @@ describe('DataFreshnessBar Component', () => {
 
     render(<DataFreshnessBar instruments={['Equity_MF']} />);
     expect(await screen.findByText('AMFI: PARTIAL')).toBeTruthy();
-    expect(await screen.findByText('UPSTOX: PROVIDER NOT CONFIGURED')).toBeTruthy();
+    expect(await screen.findByText('NSE: AVAILABLE')).toBeTruthy();
     const refresh = screen.getByRole('button', { name: 'Refresh Sources' });
     fireEvent.click(refresh);
     await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(2));

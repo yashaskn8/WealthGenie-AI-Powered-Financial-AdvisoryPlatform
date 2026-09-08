@@ -17,6 +17,7 @@
     "loadtest": "node scripts/loadtest.js",
     "seed": "node config/seedInstruments.js",
     "catalog:sync": "node scripts/syncFrontendCatalog.js",
+    "qualify:nse": "node scripts/qualifyNseProvider.js",
     "eval": "node scripts/run-eval.js",
     "profile:migrate": "node scripts/migrateFinancialProfilesV4.js"
   },

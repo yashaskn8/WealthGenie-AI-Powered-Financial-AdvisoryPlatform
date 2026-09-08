@@ -7,7 +7,7 @@ import { generateAdvisory, getGoalAdvisory } from '../services/geminiService.js'
 import { processChat } from '../services/geminiChatService.js';
 import { buildSystemPrompt } from '../services/genieChatSystemPrompt.js';
 import { INSTRUMENT_PARAMS, buildRateLookup, getNominalRate, getVolatility, toMonthlyRate, updateLiveParam } from '../services/instrumentConstants.js';
-import { fetchIndexStatistics, fetchMutualFundNAVs, checkFDRateStaleness } from '../services/marketDataService.js';
+import { fetchIndexStatistics, fetchMutualFundNAVs, checkFDRateStaleness, resolvePrimaryMarketProvider } from '../services/marketDataService.js';
 import { checkMLHealth, getMLPrediction, getRuleBasedFallback } from '../services/mlClient.js';
 import { queryRAG } from '../services/ragClient.js';
 import { computeCAGR, generateAllocationSplit, generatePortfolioProjection, generateProjectionComparison, generateProjections, lumpSumFV, realReturn, reverseSIPFromFV, sipFV, stepUpSipFV } from '../services/projectionEngine.js';
@@ -108,11 +108,21 @@ test('instrumentConstants exposes immutable rates and live override path', (t) =
   assert.equal(buildRateLookup().FD, 6.8);
 });
 
-test('marketDataService parses current AMFI schema and fails closed when Upstox is unconfigured', async (t) => {
+test('marketDataService parses AMFI and uses NSE as the no-account primary market provider', async (t) => {
   const originalGet = axios.get;
   axios.get = async (url) => {
     if (url.includes('NAVAll.txt')) {
       return { data: 'Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;Scheme Name;Plan;Option;Net Asset Value;Date\n123;INF000A01010;;Example Fund;Direct;Growth;12.34;01-Jan-2026\n' };
+    }
+    if (url.includes('/api/holiday-master')) return { data: { CM: [] } };
+    if (url.includes('/api/allIndices')) {
+      return { data: {
+        timestamp: '08-Sep-2026 15:30',
+        data: [
+          { index: 'NIFTY 50', last: 25000, previousClose: 24900, open: 24950, high: 25100, low: 24850 },
+          { index: 'INDIA VIX', last: 14, previousClose: 13.5, open: 13.5, high: 14.2, low: 13.4 },
+        ],
+      } };
     }
     throw new Error(`Unexpected network request: ${url}`);
   };
@@ -125,8 +135,12 @@ test('marketDataService parses current AMFI schema and fails closed when Upstox 
   assert.equal(navs.navMap['123'].nav, 12.34);
   assert.equal(navs.navMap['123'].plan, 'Direct');
   assert.equal(stats.symbol, '^NSEI');
-  assert.equal(stats.status, 'PROVIDER_NOT_CONFIGURED');
-  assert.equal(stats.latest_price, null);
+  assert.equal(resolvePrimaryMarketProvider({}), 'NSE');
+  assert.equal(resolvePrimaryMarketProvider({ MARKET_DATA_PRIMARY_PROVIDER: 'upstox' }), 'UPSTOX');
+  assert.throws(() => resolvePrimaryMarketProvider({ MARKET_DATA_PRIMARY_PROVIDER: 'unknown' }), /must be one of/);
+  assert.equal(stats.status, 'AVAILABLE');
+  assert.equal(stats.latest_price, 25000);
+  assert.equal(stats.data_source, 'NSE');
   assert.equal(stats.annualised_return, null);
   assert.equal(stats.annualised_volatility, null);
 });

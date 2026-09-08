@@ -3,7 +3,7 @@
  * Refreshes live market data on a schedule.
  *
  * - AMFI NAVs: current universe plus one bounded seven-day historical window daily
- * - Upstox market context: batched benchmark quotes plus cached daily history
+ * - Primary market context: batched benchmark quotes plus cached daily history
  */
 
 import {
@@ -33,9 +33,9 @@ export function startMarketDataRefreshJobs() {
 
   // A single batched request refreshes NIFTY 50 and India VIX every 2 hours;
   // daily history remains protected by its longer cache window.
-  cancellations.push(scheduleJob('0 */2 * * *', 'Upstox Market Context', async () => {
+  cancellations.push(scheduleJob('0 */2 * * *', 'Primary Market Context', async () => {
     const result = await getLiveMarketContext({ forceQuoteRefresh: true });
-    console.info(`[CRON] Upstox market context: ${result.context || 'UNAVAILABLE'}, status ${result.status}`);
+    console.info(`[CRON] Primary market context: ${result.context || 'UNAVAILABLE'}, status ${result.status}`);
   }));
 
   console.info('[CRON] Market data refresh jobs scheduled');

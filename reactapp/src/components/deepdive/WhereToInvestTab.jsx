@@ -310,7 +310,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
           <div style={{ fontSize: '0.7rem', lineHeight: 1.55, color: '#94a3b8', marginBottom: 8 }}>
             <div>Observed: {marketContext?.observedAt || 'UNAVAILABLE'} · Evaluated: {marketContext?.evaluatedAt || 'UNAVAILABLE'} · Freshness: {marketContext?.freshness?.status || 'UNAVAILABLE'}</div>
             <div>Sources: {marketContext?.sources?.length
-              ? marketContext.sources.map(source => `${source.provider || 'UNAVAILABLE'} (${source.instrumentId || 'benchmark history'})`).join(', ')
+              ? marketContext.sources.map(source => `${source.provider || 'UNAVAILABLE'} (${source.instrumentId || 'benchmark history'} · ${source.dataClass || 'UNAVAILABLE'})`).join(', ')
               : 'UNAVAILABLE'}</div>
             <div>Reason codes: {contextReasonCodes.length ? contextReasonCodes.join(', ') : 'UNAVAILABLE'}</div>
           </div>

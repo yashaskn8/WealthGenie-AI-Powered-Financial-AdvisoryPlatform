@@ -3,14 +3,44 @@
 ## Scope and authority
 
 Phase 3 replaces the static current-regime and sector-tilt authority with a
-server-side pipeline built only from qualified Upstox observations. It does not
-contain HMM/XGBoost, an LLM/NIM decision, a forecast, or an execution path.
+server-side pipeline built only from verified, normalized provider observations.
+It does not contain HMM/XGBoost, an LLM/NIM decision, a forecast, or an
+execution path.
 
-The data sources are Upstox Full Market Quotes V3 for the batched NIFTY 50 and
-India VIX observations, and Upstox Historical Candle Data V3 for one bounded
-NIFTY 50 daily-candle window. The Analytics Token is read only from server
-environment variables. It is never sent to the browser, response provenance,
-cache key, or logs.
+The default provider is NSE. Upstox remains an optional adapter selected only
+when `MARKET_DATA_PRIMARY_PROVIDER=UPSTOX`; it is not required for normal app
+startup. Both adapters terminate their provider-specific payloads at the same
+normalized market-fact contract, so the feature, policy, hysteresis,
+recommendation-safety, and frontend layers do not understand raw NSE or Upstox
+response shapes.
+
+## NSE source qualification
+
+The following public endpoints are hosted on the official `nseindia.com`
+domain and require no account, PAN, broker relationship, API key, or cookie in
+the qualified server-side flow:
+
+- `https://www.nseindia.com/api/allIndices` supplies the current NIFTY 50 and
+  India VIX observations, the NIFTY previous-session close, and a provider
+  market timestamp in one response.
+- `https://www.nseindia.com/api/historicalOR/indicesHistory` supplies NIFTY 50
+  daily OHLC observations. The adapter downloads only the bounded history
+  required by the feature engine, split into at most 90-calendar-day requests.
+- `https://www.nseindia.com/api/holiday-master?type=trading` supplies the
+  current exchange capital-market holiday calendar used by freshness checks.
+
+These are official NSE website JSON endpoints, but they are not represented as
+a guaranteed, versioned public API contract. Their qualification is therefore
+`OFFICIAL_NSE_WEBSITE_ENDPOINT_UNDOCUMENTED_SCHEMA_VALIDATED`. The adapter uses
+strict field and OHLC validation and fails closed on contract drift. It uses a
+normal browser User-Agent, JSON accept headers, bounded timeouts, at most two
+attempts for transient failures, and no headless browser or cookie harvesting.
+
+The quote class is `LIVE`: the endpoint exposes current intraday index values
+during the session and the provider timestamp is retained separately from
+`fetchedAt`. Daily history is classed `DAILY`. Neither class is inferred from
+fetch time, and the frontend renders the returned provenance rather than a
+hardcoded provider label.
 
 ## Deterministic features
 
@@ -70,13 +100,17 @@ preview and cannot execute trades.
 
 ## Cost, cache, refresh, and failure behavior
 
-Benchmark quotes use one two-instrument request and the existing 60-second
-Redis/coalescing cache. The bounded daily-history request uses a six-hour
-Redis/coalescing cache. The existing two-hour periodic job refreshes quotes and
-evaluates context; it does not stream or persist ticks. No paid vendor, GPU,
-new microservice, or websocket was introduced.
+Benchmark quotes use one official all-indices response, normalized down to only
+NIFTY 50 and India VIX, and the existing 60-second Redis/coalescing cache. The
+bounded daily-history requests share one six-hour Redis/coalescing cache entry.
+The trading-holiday calendar is cached for 24 hours. The existing two-hour
+periodic job refreshes quotes and evaluates context; it does not stream or
+persist ticks. No paid vendor, account dependency, GPU, new microservice,
+headless browser, or websocket was introduced.
 
-Missing configuration returns `PROVIDER_NOT_CONFIGURED`. Source errors, stale
-NIFTY/VIX/history, missing VIX or previous close, malformed rows, and fewer than
-fifty valid candles remain explicit reason codes with null/unavailable values.
-There is no hardcoded market-value, regime, or financial-value fallback.
+An explicitly selected but unconfigured optional Upstox adapter returns
+`PROVIDER_NOT_CONFIGURED`. NSE source errors, holiday-calendar failures, stale
+NIFTY/VIX/history, missing VIX or previous close, malformed rows, conflicting
+duplicates, and fewer than fifty valid candles remain explicit unavailable
+states with null values. There is no hardcoded market-value, regime, or
+financial-value fallback.

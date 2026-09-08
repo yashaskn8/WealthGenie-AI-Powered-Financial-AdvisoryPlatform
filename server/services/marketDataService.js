@@ -15,6 +15,12 @@ import UpstoxMarketDataProvider, {
 import UpstoxHistoricalCandleProvider, {
   NIFTY_50_INSTRUMENT_KEY,
 } from './marketData/UpstoxHistoricalCandleProvider.js';
+import NseMarketDataProvider from './marketData/NseMarketDataProvider.js';
+import NseHistoricalDataProvider from './marketData/NseHistoricalDataProvider.js';
+import {
+  DEFAULT_BENCHMARK_IDS,
+  MARKET_BENCHMARKS,
+} from './marketData/marketBenchmarks.js';
 import {
   AVAILABILITY,
   MARKET_DATA_SCHEMA_VERSION,
@@ -25,13 +31,27 @@ const amfiProvider = new AmfiNavProvider();
 const amfiHistoryProvider = new AmfiNavHistoryProvider();
 const upstoxProvider = new UpstoxMarketDataProvider();
 const upstoxHistoryProvider = new UpstoxHistoricalCandleProvider();
+const nseProvider = new NseMarketDataProvider();
+const nseHistoryProvider = new NseHistoricalDataProvider();
+
+export const SUPPORTED_PRIMARY_MARKET_PROVIDERS = Object.freeze(['NSE', 'UPSTOX']);
+
+export function resolvePrimaryMarketProvider(env = process.env) {
+  const configured = String(env.MARKET_DATA_PRIMARY_PROVIDER || 'NSE').trim().toUpperCase();
+  if (!SUPPORTED_PRIMARY_MARKET_PROVIDERS.includes(configured)) {
+    throw new Error(`MARKET_DATA_PRIMARY_PROVIDER must be one of: ${SUPPORTED_PRIMARY_MARKET_PROVIDERS.join(', ')}.`);
+  }
+  return configured;
+}
+
+export const PRIMARY_MARKET_PROVIDER = resolvePrimaryMarketProvider();
 
 export const MARKET_PARAMETER_SCHEMA_VERSION = 'simulation-assumptions-3.0.0';
 export const MARKET_PARAMETER_CACHE_KEY = `mc:instrument:params:${MARKET_PARAMETER_SCHEMA_VERSION}`;
 
-const LEGACY_SYMBOL_TO_UPSTOX_KEY = Object.freeze({
-  '^NSEI': 'NSE_INDEX|Nifty 50',
-  '^INDIAVIX': 'NSE_INDEX|India VIX',
+const LEGACY_SYMBOL_TO_BENCHMARK_ID = Object.freeze({
+  '^NSEI': MARKET_BENCHMARKS.NIFTY_50.canonicalProductId,
+  '^INDIAVIX': MARKET_BENCHMARKS.INDIA_VIX.canonicalProductId,
 });
 
 async function persistFreshSnapshot(snapshot) {
@@ -114,7 +134,9 @@ export async function fetchMutualFundNAVs(options = {}) {
 }
 
 export async function fetchBenchmarkQuotes({ forceRefresh = false, persist = true } = {}) {
-  const snapshot = await upstoxProvider.getQuotes(DEFAULT_BENCHMARK_INSTRUMENT_KEYS, { forceRefresh });
+  const snapshot = PRIMARY_MARKET_PROVIDER === 'UPSTOX'
+    ? await upstoxProvider.getQuotes(DEFAULT_BENCHMARK_INSTRUMENT_KEYS, { forceRefresh })
+    : await nseProvider.getQuotes(DEFAULT_BENCHMARK_IDS, { forceRefresh });
   const persistence = persist ? await persistFreshSnapshot(snapshot) : { status: 'NOT_REQUESTED' };
   return { ...snapshot, persistence };
 }
@@ -142,7 +164,11 @@ export async function fetchNiftyHistoricalCandles({
   now = new Date(),
 } = {}) {
   const window = buildNiftyHistoryWindow(now);
-  return upstoxHistoryProvider.getDailyCandles(NIFTY_50_INSTRUMENT_KEY, {
+  const provider = PRIMARY_MARKET_PROVIDER === 'UPSTOX' ? upstoxHistoryProvider : nseHistoryProvider;
+  const instrumentId = PRIMARY_MARKET_PROVIDER === 'UPSTOX'
+    ? NIFTY_50_INSTRUMENT_KEY
+    : MARKET_BENCHMARKS.NIFTY_50.canonicalProductId;
+  return provider.getDailyCandles(instrumentId, {
     ...window,
     forceRefresh,
   });
@@ -154,8 +180,8 @@ export async function fetchNiftyHistoricalCandles({
  * from a single quote. Historical feature computation belongs to Phase 3.
  */
 export async function fetchIndexStatistics(symbol = '^NSEI', options = {}) {
-  const instrumentKey = LEGACY_SYMBOL_TO_UPSTOX_KEY[symbol];
-  if (!instrumentKey) {
+  const benchmarkId = LEGACY_SYMBOL_TO_BENCHMARK_ID[symbol];
+  if (!benchmarkId) {
     return {
       symbol,
       status: AVAILABILITY.UNAVAILABLE,
@@ -169,11 +195,12 @@ export async function fetchIndexStatistics(symbol = '^NSEI', options = {}) {
       error: { code: 'UNSUPPORTED_INDEX_SYMBOL', message: 'No qualified provider identity exists.' },
     };
   }
-  const snapshot = await upstoxProvider.getQuotes([instrumentKey], options);
-  const fact = snapshot.facts?.[0] || null;
+  const snapshot = await fetchBenchmarkQuotes(options);
+  const fact = snapshot.facts?.find(item => item.canonicalProductId === benchmarkId) || null;
   return {
     symbol,
-    instrument_key: instrumentKey,
+    instrument_key: fact?.source?.instrumentId ?? null,
+    canonical_product_id: benchmarkId,
     status: snapshot.status,
     available: fact?.availabilityStatus === AVAILABILITY.AVAILABLE,
     latest_price: fact?.value ?? null,
@@ -271,24 +298,26 @@ function sourceSummary(snapshot) {
 }
 
 export async function getMarketDataSummary(options = {}) {
-  const [amfi, upstox] = await Promise.all([
+  const [amfi, market] = await Promise.all([
     fetchAmfiProductSnapshot(options),
     fetchBenchmarkQuotes(options),
   ]);
-  const statuses = [amfi.status, upstox.status];
+  const statuses = [amfi.status, market.status];
   const availableSources = statuses.filter(status => [AVAILABILITY.AVAILABLE, AVAILABILITY.PARTIAL].includes(status)).length;
   const status = availableSources === statuses.length
     ? AVAILABILITY.AVAILABLE
     : availableSources > 0 ? AVAILABILITY.PARTIAL : AVAILABILITY.UNAVAILABLE;
-  const timestamps = [amfi.fetchedAt, upstox.fetchedAt].filter(Boolean).sort();
+  const timestamps = [amfi.fetchedAt, market.fetchedAt].filter(Boolean).sort();
+  const marketSourceKey = String(market.provider || PRIMARY_MARKET_PROVIDER).toLowerCase();
   return {
     schemaVersion: MARKET_DATA_SCHEMA_VERSION,
     status,
     lastRefresh: timestamps.at(-1) ?? null,
     sources: {
       amfi: sourceSummary(amfi),
-      upstox: sourceSummary(upstox),
+      [marketSourceKey]: sourceSummary(market),
     },
-    benchmarks: upstox.facts || [],
+    primaryMarketProvider: PRIMARY_MARKET_PROVIDER,
+    benchmarks: market.facts || [],
   };
 }

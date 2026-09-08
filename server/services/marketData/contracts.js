@@ -2,6 +2,7 @@ export const MARKET_DATA_SCHEMA_VERSION = 'market-fact-1.0.0';
 
 export const PROVIDERS = Object.freeze({
   AMFI: 'AMFI',
+  NSE: 'NSE',
   UPSTOX: 'UPSTOX',
 });
 
@@ -74,6 +75,9 @@ export function createMarketFact({
   observedAt,
   fetchedAt,
   maxAgeSeconds,
+  providerTimestamp = null,
+  effectiveTradingDate = null,
+  dataClass = null,
   metrics = {},
   now = new Date(),
 }) {
@@ -96,7 +100,10 @@ export function createMarketFact({
     currency,
     unit,
     observedAt: normalizedObservedAt,
+    providerTimestamp: normalizeTimestamp(providerTimestamp),
+    effectiveTradingDate: effectiveTradingDate || null,
     fetchedAt: normalizedFetchedAt,
+    dataClass,
     availabilityStatus,
     freshness: evaluateFreshness({
       observedAt: normalizedObservedAt,

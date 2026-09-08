@@ -16,7 +16,7 @@ const investmentProductSchema = new mongoose.Schema({
   option: { type: String, default: null, trim: true },
   externalIds: { type: [externalIdSchema], default: [] },
   source: {
-    provider: { type: String, enum: ['AMFI', 'UPSTOX'], required: true },
+    provider: { type: String, enum: ['AMFI', 'NSE', 'UPSTOX'], required: true },
     url: { type: String, required: true },
   },
   sourceUpdatedAt: { type: Date, default: null },

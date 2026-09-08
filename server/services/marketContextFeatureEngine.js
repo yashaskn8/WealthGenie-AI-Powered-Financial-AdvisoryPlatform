@@ -1,8 +1,8 @@
 import { AVAILABILITY, FRESHNESS } from './marketData/contracts.js';
-import { NIFTY_50_INSTRUMENT_KEY } from './marketData/UpstoxHistoricalCandleProvider.js';
-import { DEFAULT_BENCHMARK_INSTRUMENT_KEYS } from './marketData/UpstoxMarketDataProvider.js';
+import { MARKET_BENCHMARKS } from './marketData/marketBenchmarks.js';
 
-export const INDIA_VIX_INSTRUMENT_KEY = DEFAULT_BENCHMARK_INSTRUMENT_KEYS[1];
+export const NIFTY_50_BENCHMARK_ID = MARKET_BENCHMARKS.NIFTY_50.canonicalProductId;
+export const INDIA_VIX_BENCHMARK_ID = MARKET_BENCHMARKS.INDIA_VIX.canonicalProductId;
 export const MARKET_CONTEXT_MINIMUM_HISTORY_SESSIONS = 50;
 export const MARKET_CONTEXT_RECENT_HIGH_SESSIONS = 252;
 
@@ -26,9 +26,9 @@ function signal(value, unit, basis) {
 
 function emptySignals() {
   return {
-    nifty50Current: signal(null, 'INDEX_POINTS', 'UPSTOX_FULL_MARKET_QUOTE_V3'),
-    nifty50PreviousClose: signal(null, 'INDEX_POINTS', 'UPSTOX_PREV_CLOSE_PRICE_V3'),
-    indiaVixCurrent: signal(null, 'INDEX_POINTS', 'UPSTOX_FULL_MARKET_QUOTE_V3'),
+    nifty50Current: signal(null, 'INDEX_POINTS', 'VERIFIED_CURRENT_NIFTY50_QUOTE'),
+    nifty50PreviousClose: signal(null, 'INDEX_POINTS', 'VERIFIED_PREVIOUS_TRADING_SESSION_CLOSE'),
+    indiaVixCurrent: signal(null, 'INDEX_POINTS', 'VERIFIED_CURRENT_INDIA_VIX_QUOTE'),
     return1DayPct: signal(null, 'PERCENT', 'CURRENT_VS_PREVIOUS_TRADING_SESSION_CLOSE'),
     return5DayPct: signal(null, 'PERCENT', 'CURRENT_VS_CLOSE_5_TRADING_SESSIONS_AGO'),
     return20DayPct: signal(null, 'PERCENT', 'CURRENT_VS_CLOSE_20_TRADING_SESSIONS_AGO'),
@@ -57,8 +57,8 @@ function returnPct(current, base) {
   return current > 0 && base > 0 ? round(((current / base) - 1) * 100) : null;
 }
 
-function findQuote(snapshot, instrumentKey) {
-  return (snapshot?.facts || []).find(fact => fact?.source?.instrumentId === instrumentKey) || null;
+function findQuote(snapshot, canonicalProductId) {
+  return (snapshot?.facts || []).find(fact => fact?.canonicalProductId === canonicalProductId) || null;
 }
 
 function quoteProblem(fact, label) {
@@ -69,7 +69,7 @@ function quoteProblem(fact, label) {
   return null;
 }
 
-function sourceDescriptor(source, observedAt, fetchedAt, freshness) {
+function sourceDescriptor(source, observedAt, fetchedAt, freshness, metadata = {}) {
   return {
     provider: source?.provider ?? null,
     instrumentId: source?.instrumentId ?? null,
@@ -77,6 +77,9 @@ function sourceDescriptor(source, observedAt, fetchedAt, freshness) {
     observedAt: observedAt ?? null,
     fetchedAt: fetchedAt ?? null,
     freshness: freshness ?? null,
+    providerTimestamp: metadata?.providerTimestamp ?? null,
+    effectiveTradingDate: metadata?.effectiveTradingDate ?? null,
+    dataClass: metadata?.dataClass ?? null,
   };
 }
 
@@ -88,8 +91,8 @@ function unavailableResult({ quoteSnapshot, historicalSnapshot, signals, reasonC
     observedAt: null,
     freshness: {
       status: FRESHNESS.UNKNOWN,
-      nifty50Quote: findQuote(quoteSnapshot, NIFTY_50_INSTRUMENT_KEY)?.freshness ?? null,
-      indiaVixQuote: findQuote(quoteSnapshot, INDIA_VIX_INSTRUMENT_KEY)?.freshness ?? null,
+      nifty50Quote: findQuote(quoteSnapshot, NIFTY_50_BENCHMARK_ID)?.freshness ?? null,
+      indiaVixQuote: findQuote(quoteSnapshot, INDIA_VIX_BENCHMARK_ID)?.freshness ?? null,
       nifty50History: historicalSnapshot?.freshness ?? null,
     },
     sources,
@@ -97,21 +100,22 @@ function unavailableResult({ quoteSnapshot, historicalSnapshot, signals, reasonC
 }
 
 /**
- * Converts verified normalized Upstox quote/history payloads into deterministic
+ * Converts verified provider-neutral quote/history payloads into deterministic
  * signals. It has no fallback values and performs no market classification.
  */
 export function computeMarketContextFeatures({ quoteSnapshot, historicalSnapshot }) {
   const signals = emptySignals();
-  const niftyFact = findQuote(quoteSnapshot, NIFTY_50_INSTRUMENT_KEY);
-  const vixFact = findQuote(quoteSnapshot, INDIA_VIX_INSTRUMENT_KEY);
+  const niftyFact = findQuote(quoteSnapshot, NIFTY_50_BENCHMARK_ID);
+  const vixFact = findQuote(quoteSnapshot, INDIA_VIX_BENCHMARK_ID);
   const sources = [
-    sourceDescriptor(niftyFact?.source, niftyFact?.observedAt, niftyFact?.fetchedAt, niftyFact?.freshness),
-    sourceDescriptor(vixFact?.source, vixFact?.observedAt, vixFact?.fetchedAt, vixFact?.freshness),
+    sourceDescriptor(niftyFact?.source, niftyFact?.observedAt, niftyFact?.fetchedAt, niftyFact?.freshness, niftyFact),
+    sourceDescriptor(vixFact?.source, vixFact?.observedAt, vixFact?.fetchedAt, vixFact?.freshness, vixFact),
     sourceDescriptor(
       historicalSnapshot?.source,
       historicalSnapshot?.observedAt,
       historicalSnapshot?.fetchedAt,
       historicalSnapshot?.freshness,
+      historicalSnapshot,
     ),
   ].filter(source => source.provider || source.instrumentId || source.url);
 
@@ -120,8 +124,8 @@ export function computeMarketContextFeatures({ quoteSnapshot, historicalSnapshot
       || historicalSnapshot?.status === AVAILABILITY.PROVIDER_NOT_CONFIGURED) {
     reasonCodes.push('PROVIDER_NOT_CONFIGURED');
   }
-  if (quoteSnapshot?.status === AVAILABILITY.SOURCE_ERROR) reasonCodes.push('UPSTOX_QUOTE_SOURCE_ERROR');
-  if (historicalSnapshot?.status === AVAILABILITY.SOURCE_ERROR) reasonCodes.push('UPSTOX_HISTORY_SOURCE_ERROR');
+  if (quoteSnapshot?.status === AVAILABILITY.SOURCE_ERROR) reasonCodes.push('MARKET_QUOTE_SOURCE_ERROR');
+  if (historicalSnapshot?.status === AVAILABILITY.SOURCE_ERROR) reasonCodes.push('MARKET_HISTORY_SOURCE_ERROR');
   const niftyProblem = quoteProblem(niftyFact, 'NIFTY50_QUOTE');
   const vixProblem = quoteProblem(vixFact, 'INDIA_VIX');
   if (niftyProblem) reasonCodes.push(niftyProblem);
@@ -130,13 +134,13 @@ export function computeMarketContextFeatures({ quoteSnapshot, historicalSnapshot
   const niftyCurrent = finitePositive(niftyFact?.value);
   const previousClose = finitePositive(niftyFact?.metrics?.previousClose);
   const vixCurrent = finitePositive(vixFact?.value);
-  signals.nifty50Current = signal(niftyCurrent, 'INDEX_POINTS', 'UPSTOX_FULL_MARKET_QUOTE_V3');
-  signals.nifty50PreviousClose = signal(previousClose, 'INDEX_POINTS', 'UPSTOX_PREV_CLOSE_PRICE_V3');
-  signals.indiaVixCurrent = signal(vixCurrent, 'INDEX_POINTS', 'UPSTOX_FULL_MARKET_QUOTE_V3');
+  signals.nifty50Current = signal(niftyCurrent, 'INDEX_POINTS', 'VERIFIED_CURRENT_NIFTY50_QUOTE');
+  signals.nifty50PreviousClose = signal(previousClose, 'INDEX_POINTS', 'VERIFIED_PREVIOUS_TRADING_SESSION_CLOSE');
+  signals.indiaVixCurrent = signal(vixCurrent, 'INDEX_POINTS', 'VERIFIED_CURRENT_INDIA_VIX_QUOTE');
   if (previousClose === null) reasonCodes.push('NIFTY50_PREVIOUS_CLOSE_UNAVAILABLE');
 
   if (historicalSnapshot?.status !== AVAILABILITY.AVAILABLE) {
-    if (!reasonCodes.includes('PROVIDER_NOT_CONFIGURED') && !reasonCodes.includes('UPSTOX_HISTORY_SOURCE_ERROR')) {
+    if (!reasonCodes.includes('PROVIDER_NOT_CONFIGURED') && !reasonCodes.includes('MARKET_HISTORY_SOURCE_ERROR')) {
       reasonCodes.push('NIFTY50_HISTORY_UNAVAILABLE');
     }
   } else if (historicalSnapshot?.freshness?.status !== FRESHNESS.FRESH) {

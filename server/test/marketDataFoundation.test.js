@@ -139,6 +139,7 @@ test('Upstox adapter normalizes a verified quote and preserves a missing quote a
   assert.equal(snapshot.status, AVAILABILITY.PARTIAL);
   assert.equal(snapshot.availableFactCount, 1);
   assert.equal(snapshot.facts[0].value, 25123.45);
+  assert.equal(snapshot.facts[0].canonicalProductId, 'market:index:nifty-50');
   assert.equal(snapshot.facts[0].source.instrumentId, 'NSE_INDEX|Nifty 50');
   assert.equal(snapshot.facts[0].metrics.close, 24980);
   assert.equal(snapshot.facts[0].metrics.previousClose, 24875.5);

@@ -9,6 +9,7 @@ import {
   getLiveInstrumentParams,
   getMarketDataSummary,
   getMutualFundNavsBySchemeCodes,
+  PRIMARY_MARKET_PROVIDER,
 } from '../services/marketDataService.js';
 import { getLiveMarketContext } from '../services/marketContextService.js';
 
@@ -41,7 +42,7 @@ router.get('/params', asyncHandler(async (_req, res) => {
   res.json(await getLiveInstrumentParams());
 }));
 
-/** Refreshes the two bounded Phase 1 source snapshots without widening scope. */
+/** Refreshes the bounded official source snapshots without widening scope. */
 router.post('/refresh', verifyJWT, asyncHandler(async (_req, res) => {
   Promise.allSettled([
     fetchAmfiProductSnapshot({ forceRefresh: true }),
@@ -50,7 +51,7 @@ router.post('/refresh', verifyJWT, asyncHandler(async (_req, res) => {
   ]).catch(() => {});
   res.status(202).json({
     status: 'REFRESH_INITIATED',
-    sources: ['AMFI_CURRENT_NAV', 'AMFI_HISTORICAL_NAV', 'UPSTOX_MARKET_CONTEXT'],
+    sources: ['AMFI_CURRENT_NAV', 'AMFI_HISTORICAL_NAV', `${PRIMARY_MARKET_PROVIDER}_MARKET_CONTEXT`],
     message: 'A bounded refresh was queued. Provider failures remain explicitly unavailable.',
   });
 }));

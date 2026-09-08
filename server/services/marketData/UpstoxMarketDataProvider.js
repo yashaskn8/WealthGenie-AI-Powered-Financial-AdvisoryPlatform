@@ -10,6 +10,7 @@ import {
 } from './contracts.js';
 import { buildUpstoxInstrumentIdentity } from './productIdentity.js';
 import { readThroughMarketCache } from './requestCache.js';
+import { isoDateInIndia } from './indiaMarketTime.js';
 
 export const UPSTOX_QUOTE_URL = 'https://api.upstox.com/v3/market-quote/quotes';
 export const UPSTOX_QUOTE_CACHE_TTL_SECONDS = 60;
@@ -111,7 +112,10 @@ export default class UpstoxMarketDataProvider extends MarketDataProvider {
               currency: 'INR',
               unit: 'PRICE',
               observedAt: quoteObservedAt(quote, responseTimestamp),
+              providerTimestamp: quoteObservedAt(quote, responseTimestamp),
+              effectiveTradingDate: isoDateInIndia(quoteObservedAt(quote, responseTimestamp)),
               fetchedAt: requestFetchedAt,
+              dataClass: 'LIVE',
               maxAgeSeconds: UPSTOX_QUOTE_FRESHNESS_SECONDS,
               metrics: {
                 open: quote?.ohlc?.open,

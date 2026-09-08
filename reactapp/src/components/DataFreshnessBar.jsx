@@ -93,7 +93,7 @@ const DataFreshnessBar = () => {
       <button
         onClick={handleRefresh}
         disabled={refreshCooldown || refreshing}
-        title={refreshCooldown ? 'Cooldown: wait 60s between refreshes' : 'Refresh official AMFI and configured Upstox sources'}
+        title={refreshCooldown ? 'Cooldown: wait 60s between refreshes' : 'Refresh official backend market-data sources'}
         style={{
           marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4,
           padding: '3px 10px', borderRadius: 6,

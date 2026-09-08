@@ -11,6 +11,7 @@ import {
 } from './contracts.js';
 import { buildUpstoxInstrumentIdentity } from './productIdentity.js';
 import { readThroughMarketCache } from './requestCache.js';
+import { isoDateInIndia } from './indiaMarketTime.js';
 
 export const UPSTOX_HISTORICAL_CANDLE_V3_URL = 'https://api.upstox.com/v3/historical-candle';
 export const UPSTOX_HISTORY_CACHE_TTL_SECONDS = 6 * 60 * 60;
@@ -89,6 +90,9 @@ export function parseUpstoxDailyCandles(payload, {
     interval: '1 day',
     fetchedAt: normalizedFetchedAt,
     observedAt,
+    providerTimestamp: observedAt,
+    effectiveTradingDate: isoDateInIndia(observedAt),
+    dataClass: 'DAILY',
     freshness: evaluateFreshness({
       observedAt,
       fetchedAt: normalizedFetchedAt,

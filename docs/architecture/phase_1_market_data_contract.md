@@ -1,5 +1,13 @@
 # Phase 1 market-data contract
 
+## Provider-neutral benchmark identity
+
+NIFTY 50 and India VIX use stable canonical identities independent of the
+active source. NSE and optional Upstox adapters map their own source instrument
+keys into those identities before data reaches downstream feature or policy
+code. Provider timestamps, effective trading date, data class, fetch time,
+freshness, and public provenance remain distinct normalized fields.
+
 ## Upstox Full Market Quotes V3
 
 `metrics.previousClose` maps only from the top-level V3 field `prev_close_price`.

@@ -11,19 +11,21 @@ import {
   getLiveMarketContext,
   resetMarketContextProcessStateForTest,
 } from '../services/marketContextService.js';
+import { MARKET_BENCHMARKS } from '../services/marketData/marketBenchmarks.js';
 
 const NOW = new Date('2026-09-08T12:00:00.000Z');
 const NIFTY = 'NSE_INDEX|Nifty 50';
 const VIX = 'NSE_INDEX|India VIX';
 
-function quoteFact(instrumentId, value, { previousClose = null, freshness = 'FRESH' } = {}) {
+function quoteFact(instrumentId, canonicalProductId, value, { previousClose = null, freshness = 'FRESH' } = {}) {
   return {
+    canonicalProductId,
     value,
     availabilityStatus: 'AVAILABLE',
     observedAt: '2026-09-08T11:59:00.000Z',
     fetchedAt: NOW.toISOString(),
     freshness: { status: freshness, ageSeconds: 60, maxAgeSeconds: 900 },
-    source: { provider: 'UPSTOX', instrumentId, url: 'https://api.upstox.com/v3/market-quote/quotes' },
+    source: { provider: 'NSE', instrumentId, url: 'https://www.nseindia.com/api/allIndices' },
     metrics: { previousClose },
   };
 }
@@ -32,8 +34,8 @@ function quoteSnapshot({ nifty = 160, previousClose = 159, vix = 14, niftyFreshn
   return {
     status: 'AVAILABLE',
     facts: [
-      quoteFact(NIFTY, nifty, { previousClose, freshness: niftyFreshness }),
-      ...(includeVix ? [quoteFact(VIX, vix, { freshness: vixFreshness })] : []),
+      quoteFact(NIFTY, MARKET_BENCHMARKS.NIFTY_50.canonicalProductId, nifty, { previousClose, freshness: niftyFreshness }),
+      ...(includeVix ? [quoteFact(VIX, MARKET_BENCHMARKS.INDIA_VIX.canonicalProductId, vix, { freshness: vixFreshness })] : []),
     ],
   };
 }
@@ -42,11 +44,11 @@ function historySnapshot(closes, { freshness = 'FRESH', status = 'AVAILABLE' } =
   const start = Date.parse('2026-06-01T00:00:00.000Z');
   return {
     status,
-    provider: 'UPSTOX',
+    provider: 'NSE',
     fetchedAt: NOW.toISOString(),
     observedAt: new Date(start + (closes.length - 1) * 86400000).toISOString(),
     freshness: { status: freshness, ageSeconds: 86400, maxAgeSeconds: 345600 },
-    source: { provider: 'UPSTOX', instrumentId: NIFTY, url: 'https://api.upstox.com/v3/historical-candle' },
+    source: { provider: 'NSE', instrumentId: 'NIFTY 50', url: 'https://www.nseindia.com/api/historicalOR/indicesHistory' },
     candles: closes.map((close, index) => ({
       timestamp: new Date(start + index * 86400000).toISOString(),
       open: close,
@@ -74,7 +76,7 @@ function policyFeatures(overrides = {}) {
     reasonCodes: [],
     observedAt: '2026-09-08T11:59:00.000Z',
     freshness: { status: 'FRESH' },
-    sources: [{ provider: 'UPSTOX' }],
+    sources: [{ provider: 'NSE' }],
   };
 }
 
@@ -206,7 +208,7 @@ test('unconfigured provider and provider failures never create a normal fallback
   });
   assert.equal(failed.status, 'MARKET_CONTEXT_UNAVAILABLE');
   assert.equal(failed.context, null);
-  assert(failed.reasonCodes.includes('UPSTOX_QUOTE_SOURCE_ERROR'));
-  assert(failed.reasonCodes.includes('UPSTOX_HISTORY_SOURCE_ERROR'));
+  assert(failed.reasonCodes.includes('MARKET_QUOTE_SOURCE_ERROR'));
+  assert(failed.reasonCodes.includes('MARKET_HISTORY_SOURCE_ERROR'));
   assert.equal(failed.statePersistence, 'NOT_WRITTEN_UNAVAILABLE_OBSERVATION');
 });
