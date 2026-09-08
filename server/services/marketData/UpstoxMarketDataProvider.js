@@ -118,7 +118,7 @@ export default class UpstoxMarketDataProvider extends MarketDataProvider {
                 high: quote?.ohlc?.high,
                 low: quote?.ohlc?.low,
                 close: quote?.ohlc?.close,
-                previousClose: quote?.ohlc?.close,
+                previousClose: quote?.prev_close_price,
                 volume: quote?.volume,
                 openInterest: quote?.oi,
               },

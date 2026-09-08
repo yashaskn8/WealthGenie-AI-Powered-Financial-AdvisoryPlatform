@@ -70,6 +70,8 @@ export function parseAmfiNavReport(text, { fetchedAt = new Date().toISOString(),
     primaryIsin: findColumn(headers, ['isin div payout/ isin growth', 'isin div payout/isin growth'], false),
     secondaryIsin: findColumn(headers, ['isin div reinvestment'], false),
     schemeName: findColumn(headers, ['scheme name']),
+    // NAVAll deployments/formats do not consistently expose separate Plan and
+    // Option columns. Missing columns remain null and are not classifications.
     plan: findColumn(headers, ['plan'], false),
     option: findColumn(headers, ['option'], false),
     nav: findColumn(headers, ['net asset value']),

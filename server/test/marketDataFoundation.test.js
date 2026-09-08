@@ -27,6 +27,12 @@ const AMFI_REPORT = [
   '124;;;Example Missing NAV Fund;Regular;Growth;;07-Sep-2026',
 ].join('\n');
 
+const AMFI_REPORT_WITHOUT_PLAN_OPTION = [
+  'Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;Scheme Name;Net Asset Value;Date',
+  'Example Mutual Fund',
+  '125;INF000A01028;;Example Legacy Format Fund;25.50;07-Sep-2026',
+].join('\n');
+
 test('AMFI current header is mapped by name and valuation date/provenance are preserved', () => {
   const snapshot = parseAmfiNavReport(AMFI_REPORT, {
     fetchedAt: FIXED_NOW.toISOString(),
@@ -57,6 +63,16 @@ test('missing financial values remain null and unavailable instead of becoming z
   assert.equal(nullableFiniteNumber(0), 0);
   assert.equal(snapshot.facts[1].value, null);
   assert.equal(snapshot.facts[1].availabilityStatus, AVAILABILITY.UNAVAILABLE);
+});
+
+test('AMFI reports without separate Plan and Option columns leave classifications unestablished', () => {
+  const snapshot = parseAmfiNavReport(AMFI_REPORT_WITHOUT_PLAN_OPTION, {
+    fetchedAt: FIXED_NOW.toISOString(),
+    now: FIXED_NOW,
+  });
+  assert.equal(snapshot.products[0].plan, null);
+  assert.equal(snapshot.products[0].option, null);
+  assert.equal(snapshot.facts[0].value, 25.5);
 });
 
 test('AMFI product identity is stable and retains valid ISIN cross-references', () => {
@@ -102,6 +118,7 @@ test('Upstox adapter normalizes a verified quote and preserves a missing quote a
                 last_price: 25123.45,
                 last_trade_time: '2026-09-08T11:59:30.000Z',
                 ohlc: { open: 25000, high: 25200, low: 24900, close: 24980 },
+                prev_close_price: 24875.5,
                 volume: 1200,
               },
             },
@@ -119,7 +136,9 @@ test('Upstox adapter normalizes a verified quote and preserves a missing quote a
   assert.equal(snapshot.availableFactCount, 1);
   assert.equal(snapshot.facts[0].value, 25123.45);
   assert.equal(snapshot.facts[0].source.instrumentId, 'NSE_INDEX|Nifty 50');
-  assert.equal(snapshot.facts[0].metrics.previousClose, 24980);
+  assert.equal(snapshot.facts[0].metrics.close, 24980);
+  assert.equal(snapshot.facts[0].metrics.previousClose, 24875.5);
+  assert.notEqual(snapshot.facts[0].metrics.previousClose, snapshot.facts[0].metrics.close);
   assert.equal(snapshot.facts[1].value, null);
   assert.equal(snapshot.facts[1].availabilityStatus, AVAILABILITY.UNAVAILABLE);
 });
