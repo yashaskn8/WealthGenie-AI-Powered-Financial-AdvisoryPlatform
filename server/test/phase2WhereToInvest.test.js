@@ -12,6 +12,7 @@ import { canonicalProfile } from './helpers/canonicalProfile.js';
 const CURRENT_DATE = '2026-09-07T00:00:00.000Z';
 const FETCHED_AT = '2026-09-08T00:00:00.000Z';
 const LARGE_CAP_CATEGORY = 'Open Ended Schemes(Equity Scheme - Large Cap Fund)';
+const FIXED_MATURITY_CATEGORY = 'Close Ended Schemes(Income/Debt Oriented Schemes - Fixed Term Plan)';
 
 function currentProduct(code, {
   category = LARGE_CAP_CATEGORY,
@@ -108,7 +109,7 @@ test('AMFI historical parser follows the live header contract and picks the obse
   assert.equal(snapshot.facts[0].historicalContext.option, 'Growth Option');
 });
 
-test('Phase 2 ranks at most five exact-category Growth options by verified historical return only', () => {
+test('Phase 2 ranks at most five exact-category Direct Growth options by verified historical return only', () => {
   const { current, historical } = snapshots();
   const result = rankVerifiedMutualFundProducts({
     parentInstrumentId: 'large_cap_mf',
@@ -124,6 +125,7 @@ test('Phase 2 ranks at most five exact-category Growth options by verified histo
     'mf:amfi:101', 'mf:amfi:102', 'mf:amfi:103', 'mf:amfi:104', 'mf:amfi:105',
   ]);
   assert.ok(result.products.every(product => product.presentationStatus === 'VERIFIED_RANKED_PRODUCT'));
+  assert.ok(result.products.every(product => product.planClass === 'DIRECT'));
   assert.ok(result.products.every(product => product.returnBasis === HISTORICAL_RETURN_BASIS));
   assert.ok(result.products.every(product => product.expectedReturn === null));
   assert.ok(result.products.every(product => product.postTaxReturn === null));
@@ -133,10 +135,41 @@ test('Phase 2 ranks at most five exact-category Growth options by verified histo
   assert.equal(result.products[0].nav.value, 125);
   assert.equal(result.products[0].historicalReturn.endNav, 125);
   assert.equal(result.comparisonUniverse.verifiedCategoryProductCount, 7);
+  assert.equal(result.comparisonUniverse.sourceEstablishedDirectPlanProductCount, 7);
   assert.equal(result.comparisonUniverse.historicalEvidenceProductCount, 6);
 });
 
-test('missing Plan or Option remains null and cannot be promoted into historical ranking', () => {
+test('Direct and Regular plans never share a merit universe', () => {
+  const { current, historical } = snapshots();
+  current.products = [
+    currentProduct('181', { plan: 'Direct Plan' }),
+    currentProduct('182', { plan: 'Direct' }),
+    currentProduct('183', { plan: 'Regular Plan' }),
+  ];
+  current.facts = [navFact('181', 125), navFact('182', 110), navFact('183', 250)];
+  historical.facts = [
+    navFact('181', 100, '2025-09-07T00:00:00.000Z'),
+    navFact('182', 100, '2025-09-07T00:00:00.000Z'),
+    navFact('183', 100, '2025-09-07T00:00:00.000Z'),
+  ];
+  const result = rankVerifiedMutualFundProducts({
+    parentInstrumentId: 'large_cap_mf',
+    currentSnapshot: current,
+    historicalSnapshot: historical,
+  });
+  assert.equal(result.ranking.status, 'EVIDENCE_RANKED');
+  assert.equal(result.ranking.planClass, 'DIRECT');
+  assert.equal(result.ranking.planClassSource, 'AMFI_PLAN_FIELD');
+  assert.equal(result.ranking.planClassInferredFromName, false);
+  assert.deepEqual(result.products.map(product => product.id), ['mf:amfi:181', 'mf:amfi:182']);
+  assert.ok(result.products.every(product => product.planClass === 'DIRECT'));
+  assert.ok(result.products.every(product => !/regular/i.test(product.plan)));
+  assert.equal(result.comparisonUniverse.verifiedCategoryProductCount, 3);
+  assert.equal(result.comparisonUniverse.sourceEstablishedDirectPlanProductCount, 2);
+  assert.equal(result.comparisonUniverse.historicalEvidenceProductCount, 2);
+});
+
+test('missing Plan remains null and cannot be treated as Direct or promoted into the product set', () => {
   const { current, historical } = snapshots();
   current.products = [currentProduct('201', { plan: null, option: null })];
   current.facts = [navFact('201', 20)];
@@ -146,13 +179,13 @@ test('missing Plan or Option remains null and cannot be promoted into historical
     currentSnapshot: current,
     historicalSnapshot: historical,
   });
-  assert.equal(result.ranking.status, 'VERIFIED_COMPARABLE_OPTIONS');
-  assert.equal(result.products.length, 1);
-  assert.equal(result.products[0].presentationStatus, 'VERIFIED_COMPARABLE_OPTION');
-  assert.equal(result.products[0].plan, null);
-  assert.equal(result.products[0].option, null);
-  assert.equal(result.products[0].historicalReturn, null);
-  assert.equal(result.products[0].returnBasis, null);
+  assert.equal(result.ranking.status, 'UNAVAILABLE');
+  assert.equal(result.products.length, 0);
+  assert.deepEqual(result.ranking.reasonCodes, ['NO_EXPLICIT_DIRECT_PLAN_PRODUCTS']);
+  assert.equal(result.comparisonUniverse.verifiedCategoryProductCount, 1);
+  assert.equal(result.comparisonUniverse.freshNavProductCount, 1);
+  assert.equal(result.comparisonUniverse.sourceEstablishedDirectPlanProductCount, 0);
+  assert.equal(result.comparisonUniverse.historicalEvidenceProductCount, 0);
 });
 
 test('indistinguishable historical evidence remains a comparable set instead of forcing ranks', () => {
@@ -172,6 +205,33 @@ test('indistinguishable historical evidence remains a comparable set instead of 
   assert.ok(result.products.every(product => product.presentationStatus === 'VERIFIED_COMPARABLE_OPTION'));
   assert.ok(result.products.every(product => product.rank === null));
   assert.ok(result.products.every(product => product.historicalReturn === null));
+});
+
+test('fixed maturity plans remain comparable and cannot be ranked without verified comparable tenure', () => {
+  const { current, historical } = snapshots();
+  current.products = [
+    currentProduct('351', { category: FIXED_MATURITY_CATEGORY }),
+    currentProduct('352', { category: FIXED_MATURITY_CATEGORY }),
+  ];
+  current.facts = [navFact('351', 140), navFact('352', 110)];
+  historical.facts = [
+    navFact('351', 100, '2025-09-07T00:00:00.000Z'),
+    navFact('352', 100, '2025-09-07T00:00:00.000Z'),
+  ];
+  const result = rankVerifiedMutualFundProducts({
+    parentInstrumentId: 'fixed_maturity_plan',
+    currentSnapshot: current,
+    historicalSnapshot: historical,
+  });
+  assert.equal(result.ranking.status, 'VERIFIED_COMPARABLE_OPTIONS');
+  assert.ok(result.ranking.reasonCodes.includes('COMPARABLE_MATURITY_TENURE_NOT_VERIFIED'));
+  assert.equal(result.ranking.hasUniqueLeader, false);
+  assert.equal(result.comparisonUniverse.historicalEvidenceProductCount, 0);
+  assert.equal(result.products.length, 2);
+  assert.ok(result.products.every(product => product.presentationStatus === 'VERIFIED_COMPARABLE_OPTION'));
+  assert.ok(result.products.every(product => product.rank === null));
+  assert.ok(result.products.every(product => product.historicalReturn === null));
+  assert.ok(result.products.every(product => product.rankingReasonCodes.includes('COMPARABLE_MATURITY_TENURE_NOT_VERIFIED')));
 });
 
 test('unavailable, stale, mismatched, and unsupported evidence produces zero products without fallback values', () => {

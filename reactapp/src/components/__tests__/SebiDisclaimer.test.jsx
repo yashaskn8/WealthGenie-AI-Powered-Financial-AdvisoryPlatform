@@ -30,6 +30,7 @@ vi.mock('../../services/api', () => ({
       disclosure: 'Verified AMFI category products.',
       verifiedCategoryProductCount: 8,
       freshNavProductCount: 7,
+      sourceEstablishedDirectPlanProductCount: 2,
       historicalEvidenceProductCount: 0,
     },
   })),
@@ -58,7 +59,7 @@ describe('SebiDisclaimer Component', () => {
     expect(screen.queryByText('Top Pick')).toBeNull();
   });
 
-  it('shows a Top Pick only for a unique evidence-ranked leader and labels return as historical', async () => {
+  it('labels the unique historical-return leader precisely without calling it a Top Pick', async () => {
     api.rankInvestmentCandidates.mockResolvedValueOnce({
       products: [
         {
@@ -83,6 +84,7 @@ describe('SebiDisclaimer Component', () => {
         disclosure: 'Ranked within exact AMFI category.',
         verifiedCategoryProductCount: 2,
         freshNavProductCount: 2,
+        sourceEstablishedDirectPlanProductCount: 2,
         historicalEvidenceProductCount: 2,
       },
     });
@@ -90,6 +92,7 @@ describe('SebiDisclaimer Component', () => {
     expect(await screen.findByText(/Verified Products \(2 Ranked Options\)/i)).toBeTruthy();
     expect((await screen.findAllByText('VERIFIED RANKED PRODUCT')).length).toBe(2);
     expect(screen.getByText('18.25% historical')).toBeTruthy();
-    expect(screen.getByText('Top Pick by Historical Evidence')).toBeTruthy();
+    expect(screen.getByText('Rank #1 by 1Y Historical NAV Return')).toBeTruthy();
+    expect(screen.queryByText(/Top Pick/i)).toBeNull();
   });
 });

@@ -1,8 +1,11 @@
 import { AVAILABILITY, FRESHNESS, PROVIDERS } from './marketData/contracts.js';
 
-export const MUTUAL_FUND_RANKING_VERSION = 'wti-mutual-fund-ranking-2.0.0';
+export const MUTUAL_FUND_RANKING_VERSION = 'wti-mutual-fund-ranking-2.0.1';
 export const MUTUAL_FUND_RESULT_LIMIT = 5;
 export const HISTORICAL_RETURN_BASIS = 'HISTORICAL_POINT_TO_POINT_NAV_RETURN_1Y';
+export const EVIDENCE_RANKING_PLAN_CLASS = 'DIRECT';
+
+const COMPARISON_ONLY_PARENT_CATEGORIES = new Set(['fixed_maturity_plan']);
 
 /**
  * Exact AMFI report headings qualified for an existing parent category.
@@ -159,6 +162,18 @@ function isEstablishedGrowthOption(option) {
   return typeof option === 'string' && /\bgrowth\b/i.test(option.trim());
 }
 
+/**
+ * Classify only the dedicated AMFI Plan field. Product names are deliberately
+ * excluded so an absent or unfamiliar value can never be promoted to Direct.
+ */
+export function sourceEstablishedPlanClass(plan) {
+  if (typeof plan !== 'string') return null;
+  const normalized = plan.replace(/\s+/g, ' ').trim().toLowerCase();
+  if (normalized === 'direct' || normalized === 'direct plan') return 'DIRECT';
+  if (normalized === 'regular' || normalized === 'regular plan') return 'REGULAR';
+  return null;
+}
+
 function annualizedHistoricalReturn(currentFact, historicalFact) {
   const endNav = establishedNumber(currentFact?.value);
   const startNav = establishedNumber(historicalFact?.value);
@@ -209,6 +224,7 @@ function buildProductDto({
     name: product.name,
     provider: product.providerName ?? null,
     plan: product.plan ?? null,
+    planClass: sourceEstablishedPlanClass(product.plan),
     option: product.option ?? null,
     schemeCategory: product.schemeCategory ?? null,
     source: {
@@ -230,23 +246,29 @@ function buildProductDto({
     productEligibility: {
       eligible: true,
       status: 'ELIGIBLE_WITHIN_SUITABLE_PARENT',
-      scope: 'PARENT_HARD_SUITABILITY_AND_VERIFIED_AMFI_CATEGORY_MEMBERSHIP',
+      scope: 'PARENT_HARD_SUITABILITY_VERIFIED_AMFI_CATEGORY_AND_EXPLICIT_DIRECT_PLAN',
       reasonCodes: [
         'PARENT_HARD_SUITABILITY_PASSED',
         'AMFI_CATEGORY_EXACT_MATCH',
         'CURRENT_NAV_VERIFIED_AND_FRESH',
+        'DIRECT_PLAN_ESTABLISHED_BY_SOURCE',
       ],
     },
     rankingReasonCodes: ranked
       ? [
         'AMFI_CATEGORY_EXACT_MATCH',
+        'DIRECT_PLAN_ESTABLISHED_BY_SOURCE',
         'GROWTH_OPTION_ESTABLISHED_BY_SOURCE',
         'HISTORICAL_NAV_PAIR_VERIFIED',
         'TRAILING_1Y_HISTORICAL_RETURN_DESC',
       ]
       : [
         'AMFI_CATEGORY_EXACT_MATCH',
+        'DIRECT_PLAN_ESTABLISHED_BY_SOURCE',
         'CURRENT_NAV_VERIFIED_AND_FRESH',
+        ...(COMPARISON_ONLY_PARENT_CATEGORIES.has(parentInstrumentId)
+          ? ['COMPARABLE_MATURITY_TENURE_NOT_VERIFIED']
+          : []),
         'NO_DEFENSIBLE_MERIT_ORDER_ESTABLISHED',
       ],
     historicalReturn: ranked ? historicalReturn : null,
@@ -299,6 +321,7 @@ export function rankVerifiedMutualFundProducts({
         qualifiedCategoryHeadings: [],
         verifiedCategoryProductCount: 0,
         freshNavProductCount: 0,
+        sourceEstablishedDirectPlanProductCount: 0,
         historicalEvidenceProductCount: 0,
         returnedProductCount: 0,
         resultLimit: MUTUAL_FUND_RESULT_LIMIT,
@@ -318,17 +341,27 @@ export function rankVerifiedMutualFundProducts({
     ))
     .map(product => [product.canonicalProductId, product])).values()];
 
-  const eligible = verifiedCategoryProducts.flatMap(product => {
+  const freshCategoryProducts = verifiedCategoryProducts.flatMap(product => {
     const currentFact = currentFacts.get(product.canonicalProductId);
     if (currentFact?.availabilityStatus !== AVAILABILITY.AVAILABLE
         || currentFact?.freshness?.status !== FRESHNESS.FRESH
         || establishedNumber(currentFact.value) === null
         || currentFact.value <= 0) return [];
-    const historicalReturn = isEstablishedGrowthOption(product.option)
-      ? annualizedHistoricalReturn(currentFact, historicalFacts.get(product.canonicalProductId))
-      : null;
-    return [{ product, currentFact, historicalReturn }];
+    return [{
+      product,
+      currentFact,
+      planClass: sourceEstablishedPlanClass(product.plan),
+    }];
   });
+  const eligible = freshCategoryProducts
+    .filter(item => item.planClass === EVIDENCE_RANKING_PLAN_CLASS)
+    .map(item => ({
+      ...item,
+      historicalReturn: !COMPARISON_ONLY_PARENT_CATEGORIES.has(parentInstrumentId)
+        && isEstablishedGrowthOption(item.product.option)
+        ? annualizedHistoricalReturn(item.currentFact, historicalFacts.get(item.product.canonicalProductId))
+        : null,
+    }));
   const evidenceCandidates = eligible.filter(item => item.historicalReturn !== null);
   const distinctReturns = new Set(evidenceCandidates.map(item => item.historicalReturn.valuePct));
   const hasDefensibleOrder = evidenceCandidates.length >= 2 && distinctReturns.size >= 2;
@@ -364,12 +397,16 @@ export function rankVerifiedMutualFundProducts({
       status: 'EVIDENCE_RANKED',
       authority: 'VERIFIED_AMFI_CURRENT_AND_HISTORICAL_NAV',
       method: 'ONE_YEAR_ANNUALIZED_POINT_TO_POINT_NAV_RETURN_DESCENDING',
+      planClass: EVIDENCE_RANKING_PLAN_CLASS,
+      planClassSource: 'AMFI_PLAN_FIELD',
+      planClassInferredFromName: false,
       historicalReturnIsExpectedReturn: false,
       arbitraryWeightedScoreUsed: false,
       hasUniqueLeader,
       reasonCodes: [
         'PARENT_HARD_SUITABILITY_PASSED',
         'AMFI_CATEGORY_EXACT_MATCH',
+        'DIRECT_PLAN_ESTABLISHED_BY_SOURCE',
         'GROWTH_OPTION_ESTABLISHED_BY_SOURCE',
         'TRAILING_1Y_HISTORICAL_RETURN_DESC',
       ],
@@ -390,15 +427,29 @@ export function rankVerifiedMutualFundProducts({
       status: selected.length > 0 ? 'VERIFIED_COMPARABLE_OPTIONS' : 'UNAVAILABLE',
       authority: selected.length > 0 ? 'VERIFIED_AMFI_CURRENT_NAV_ONLY' : 'NONE',
       method: selected.length > 0 ? 'STABLE_PRODUCT_ID_ASC_FOR_BOUNDED_DISPLAY_NOT_A_RANKING' : null,
+      planClass: EVIDENCE_RANKING_PLAN_CLASS,
+      planClassSource: 'AMFI_PLAN_FIELD',
+      planClassInferredFromName: false,
       historicalReturnIsExpectedReturn: false,
       arbitraryWeightedScoreUsed: false,
       hasUniqueLeader: false,
       reasonCodes: selected.length > 0
-        ? ['NO_DEFENSIBLE_MERIT_ORDER_ESTABLISHED', 'DISPLAY_ORDER_IS_NOT_A_RANKING']
-        : ['NO_FRESH_ELIGIBLE_AMFI_PRODUCTS'],
+        ? [
+            ...(COMPARISON_ONLY_PARENT_CATEGORIES.has(parentInstrumentId)
+              ? ['COMPARABLE_MATURITY_TENURE_NOT_VERIFIED']
+              : ['NO_DEFENSIBLE_MERIT_ORDER_ESTABLISHED']),
+            'DISPLAY_ORDER_IS_NOT_A_RANKING',
+          ]
+        : freshCategoryProducts.length > 0
+          ? ['NO_EXPLICIT_DIRECT_PLAN_PRODUCTS']
+          : ['NO_FRESH_ELIGIBLE_AMFI_PRODUCTS'],
       warning: selected.length > 0
-        ? 'These verified products are comparable options. Their display order is not a recommendation or ranking.'
-        : 'No product met the verified category and fresh-NAV evidence requirements.',
+        ? COMPARISON_ONLY_PARENT_CATEGORIES.has(parentInstrumentId)
+          ? 'These verified Direct-plan FMPs are comparable options only because comparable maturity and tenure facts are not established. Display order is not a recommendation or ranking.'
+          : 'These verified Direct-plan products are comparable options. Their display order is not a recommendation or ranking.'
+        : freshCategoryProducts.length > 0
+          ? 'No product had an explicit AMFI Direct Plan classification; Regular, unknown, and null Plan values were not substituted.'
+          : 'No product met the verified category and fresh-NAV evidence requirements.',
     };
   }
 
@@ -410,7 +461,8 @@ export function rankVerifiedMutualFundProducts({
       sourceProvider: PROVIDERS.AMFI,
       qualifiedCategoryHeadings: [...categories],
       verifiedCategoryProductCount: verifiedCategoryProducts.length,
-      freshNavProductCount: eligible.length,
+      freshNavProductCount: freshCategoryProducts.length,
+      sourceEstablishedDirectPlanProductCount: eligible.length,
       historicalEvidenceProductCount: evidenceCandidates.length,
       returnedProductCount: selected.length,
       resultLimit: MUTUAL_FUND_RESULT_LIMIT,
@@ -419,8 +471,10 @@ export function rankVerifiedMutualFundProducts({
       historicalSnapshotStatus: historicalSnapshot?.status ?? AVAILABILITY.UNAVAILABLE,
       historicalSnapshotFetchedAt: historicalSnapshot?.fetchedAt ?? null,
       disclosure: hasDefensibleOrder
-        ? 'Ranked only among source-qualified Growth options with a fresh current NAV and a verified approximately one-year historical NAV pair.'
-        : 'Bounded comparable set from source-qualified products with fresh current NAVs; stable-ID display order has no merit meaning.',
+        ? 'Ranked only among products explicitly classified by AMFI as Direct Plan and Growth Option, with a fresh current NAV and a verified approximately one-year historical NAV pair. Regular and unknown Plan classes are outside this merit universe.'
+        : COMPARISON_ONLY_PARENT_CATEGORIES.has(parentInstrumentId)
+          ? 'Bounded comparable set of explicitly sourced Direct-plan FMPs. Comparable maturity and tenure are not established, so historical-return ranking is disabled and stable-ID display order has no merit meaning.'
+          : 'Bounded comparable set of products explicitly classified by AMFI as Direct Plan with fresh current NAVs; Regular and unknown Plan classes are excluded, and stable-ID display order has no merit meaning.',
     },
   };
 }

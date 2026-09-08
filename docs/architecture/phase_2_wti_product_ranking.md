@@ -24,25 +24,31 @@ are coalesced. No per-product vendor calls are made.
 
 ## Deterministic ranking rule
 
-Rule version: `wti-mutual-fund-ranking-2.0.0`.
+Rule version: `wti-mutual-fund-ranking-2.0.1`.
 
 1. Require the parent instrument to pass hard Financial Profile suitability.
 2. Require an exact, allow-listed AMFI category heading for that parent.
 3. Require a verified, fresh, positive current NAV.
-4. For ranking, require the AMFI Option field itself to establish a Growth
-   option and require a positive historical NAV 330–400 days before the current
-   valuation date.
-5. Calculate annualized point-to-point historical NAV return and sort descending.
+4. For the self-directed WealthGenie product-selection flow, require the AMFI
+   Plan field itself to equal `Direct` or `Direct Plan`. The application does not
+   model distributor commissions, so Regular plans are outside this merit
+   universe. Null or unfamiliar Plan values are not treated as Direct.
+5. Require the AMFI Option field itself to establish a Growth option and require
+   a positive historical NAV 330–400 days before the current valuation date.
+6. Calculate annualized point-to-point historical NAV return and sort descending.
 
 No weighted score, expected return, NAV-size comparison, post-tax return, AUM,
 expense ratio, risk, tracking error, or benchmark assumption participates.
 The response states that historical return is backward-looking and not expected
-return. A unique first product may be labelled a Top Pick only under this rule.
-Tied leaders are not given a unique Top Pick label.
+return. A unique first product is described precisely as `Rank #1 by 1Y
+Historical NAV Return`; it is never described as a Top Pick. Tied leaders do not
+receive that unique-leader label.
 
-If fewer than two products have distinct qualified historical returns, products
-with verified category membership and fresh NAVs are returned as `VERIFIED
-COMPARABLE OPTION`. Their stable-ID display order is explicitly not a ranking.
+If fewer than two explicitly sourced Direct-plan products have distinct qualified
+historical returns, eligible Direct-plan products with verified category
+membership and fresh NAVs are returned as `VERIFIED COMPARABLE OPTION`. Their
+stable-ID display order is explicitly not a ranking. Regular plans and null or
+unrecognized Plan values are excluded rather than mixed into that set.
 
 ## Supported parent categories
 
@@ -54,7 +60,9 @@ money-market, ultra-short, short-duration, low-duration, medium-duration,
 banking-and-PSU, corporate-bond, credit-risk, dynamic-bond, gilt, floater,
 aggressive-hybrid, conservative-hybrid, balanced-advantage/dynamic-allocation,
 equity-savings, multi-asset, children, retirement, and fixed-term-plan parent
-categories where the parent itself is suitable.
+categories where the parent itself is suitable. Fixed-term plans are comparison
+only: they cannot be evidence-ranked until a verified source establishes
+comparable maturity and tenure information.
 
 ## Explicitly unsupported
 

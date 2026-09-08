@@ -229,7 +229,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
               type="button"
               disabled={mode.id !== 'score'}
               title={mode.id === 'score'
-                ? (isEvidenceRanked ? 'Server order from verified one-year historical NAV return' : 'Stable display order only; not a ranking')
+                ? (isEvidenceRanked ? 'Server order among explicitly sourced Direct Growth options by one-year historical NAV return' : 'Stable display order only; not a ranking')
                 : 'Unavailable without established provider-specific data'}
               onClick={() => mode.id === 'score' && setSortBy(mode.id)}
               style={{
@@ -329,7 +329,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
           <p>
             <strong>{isEvidenceRanked ? 'VERIFIED RANKING UNIVERSE' : 'VERIFIED COMPARISON UNIVERSE'}:</strong>{' '}
             {rankingResult.comparisonUniverse.disclosure}{' '}
-            Source-qualified: {rankingResult.comparisonUniverse.verifiedCategoryProductCount ?? 0}; fresh NAVs: {rankingResult.comparisonUniverse.freshNavProductCount ?? 0}; historical evidence: {rankingResult.comparisonUniverse.historicalEvidenceProductCount ?? 0}.
+            Source-qualified: {rankingResult.comparisonUniverse.verifiedCategoryProductCount ?? 0}; fresh NAVs: {rankingResult.comparisonUniverse.freshNavProductCount ?? 0}; explicit Direct plans: {rankingResult.comparisonUniverse.sourceEstablishedDirectPlanProductCount ?? 0}; historical evidence: {rankingResult.comparisonUniverse.historicalEvidenceProductCount ?? 0}.
           </p>
         </div>
       )}
@@ -544,7 +544,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
               </div>
               <p className="wti-highlights">
                 {isEvidenceRanked
-                  ? 'Ranked within the exact AMFI category by verified one-year historical NAV return. Historical performance is not an expected return.'
+                  ? 'Ranked only among explicitly sourced Direct Growth options in the exact AMFI category by verified one-year historical NAV return. Historical performance is not an expected return.'
                   : 'Verified AMFI category and fresh NAV. No defensible merit order is claimed for this comparable option.'}
               </p>
 
@@ -571,7 +571,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                 <div className="meta-box">Plan: {product.plan || 'UNAVAILABLE'}</div>
                 <div className="meta-box">Option: {product.option || 'UNAVAILABLE'}</div>
                 {product.historicalReturn && <div className="meta-box"><HistoryIcon size={12} /> History: {product.historicalReturn.startDate} → {product.historicalReturn.endDate}</div>}
-                {isEvidenceRanked && product.rank === 1 && rankingResult.ranking?.hasUniqueLeader && <div className="meta-box meta-box--pick"><Star size={12} /> Top Pick by Historical Evidence</div>}
+                {isEvidenceRanked && product.rank === 1 && rankingResult.ranking?.hasUniqueLeader && <div className="meta-box meta-box--pick"><Star size={12} /> Rank #1 by 1Y Historical NAV Return</div>}
               </div>
             </div>
           </div>
