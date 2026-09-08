@@ -67,7 +67,7 @@ test.describe('real WealthGenie dependency lifecycle', () => {
       await horizonInput.press('ArrowRight');
     }
     await page.getByRole('button', { name: 'Moderate', exact: true }).click();
-    await page.getByRole('button', { name: 'Wealth Growth', exact: true }).click();
+    await page.getByLabel('Wealth Growth', { exact: true }).check();
 
     const profileCreatePromise = page.waitForResponse(apiResponse('POST', '/api/profile/build'));
     const recommendationPromise = page.waitForResponse(apiResponse('POST', '/api/recommend'), { timeout: 90_000 });
