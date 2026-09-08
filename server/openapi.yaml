@@ -169,6 +169,7 @@ paths:
   /api/instruments/rank-wti:
     post:
       operationId: rankInstruments
+      description: Returns zero to five products from a source-qualified universe after parent-category hard suitability. Phase 2 ranks supported mutual-fund Growth options only when verified AMFI current and approximately one-year historical NAV observations establish an order; otherwise it returns explicitly comparable or unavailable results.
       tags: [Instruments]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       x-csrf-protection: cookie-session

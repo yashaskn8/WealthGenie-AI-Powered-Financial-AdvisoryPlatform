@@ -8,6 +8,7 @@
 
 import { INSTRUMENT_PARAMS } from './instrumentConstants.js';
 import AmfiNavProvider from './marketData/AmfiNavProvider.js';
+import AmfiNavHistoryProvider from './marketData/AmfiNavHistoryProvider.js';
 import UpstoxMarketDataProvider, {
   DEFAULT_BENCHMARK_INSTRUMENT_KEYS,
 } from './marketData/UpstoxMarketDataProvider.js';
@@ -18,6 +19,7 @@ import {
 import { persistVerifiedMarketSnapshot } from './marketData/MarketDataRepository.js';
 
 const amfiProvider = new AmfiNavProvider();
+const amfiHistoryProvider = new AmfiNavHistoryProvider();
 const upstoxProvider = new UpstoxMarketDataProvider();
 
 export const MARKET_PARAMETER_SCHEMA_VERSION = 'simulation-assumptions-3.0.0';
@@ -46,6 +48,22 @@ async function persistFreshSnapshot(snapshot) {
 
 export async function fetchAmfiProductSnapshot({ forceRefresh = false, persist = true } = {}) {
   const snapshot = await amfiProvider.getSnapshot({ forceRefresh });
+  const persistence = persist ? await persistFreshSnapshot(snapshot) : { status: 'NOT_REQUESTED' };
+  return { ...snapshot, persistence };
+}
+
+export async function fetchAmfiHistoricalNavSnapshot({
+  targetDate,
+  forceRefresh = false,
+  persist = true,
+} = {}) {
+  const target = targetDate ? new Date(targetDate) : new Date();
+  if (Number.isNaN(target.getTime())) throw new TypeError('targetDate must be a valid date.');
+  if (!targetDate) target.setUTCFullYear(target.getUTCFullYear() - 1);
+  const snapshot = await amfiHistoryProvider.getSnapshot({
+    targetDate: target.toISOString().slice(0, 10),
+    forceRefresh,
+  });
   const persistence = persist ? await persistFreshSnapshot(snapshot) : { status: 'NOT_REQUESTED' };
   return { ...snapshot, persistence };
 }

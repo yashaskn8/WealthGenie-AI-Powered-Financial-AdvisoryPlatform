@@ -244,7 +244,9 @@ test('WG-005: POST /api/instruments/rank-wti returns 200 for valid authenticated
     assert.equal(response.status, 200, 'rank-wti must succeed with valid auth + valid payload');
     assert.ok(body.success, 'Response should include success flag');
     assert.ok(Array.isArray(body.products), 'Response should include products array');
-      assert.ok(body.total > 0, 'Should return the server-owned provider catalog');
+    assert.equal(body.total, 0, 'Unsupported product categories must not receive fallback products');
+    assert.equal(body.ranking.status, 'UNAVAILABLE');
+    assert.deepEqual(body.ranking.reasonCodes, ['PRODUCT_CLASS_NOT_SUPPORTED_PHASE_2']);
   });
 });
 

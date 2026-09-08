@@ -380,7 +380,7 @@ export async function rankInvestmentCandidates(profileId, parentInstrumentId, re
   return request('POST', '/instruments/rank-wti', {
     profileId,
     parentInstrumentId,
-  }, requestOptions);
+  }, { timeoutMs: 90000, ...requestOptions });
 }
 
 // ─── PROJECTIONS ─────────────────────────────────────────

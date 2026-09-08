@@ -1,11 +1,10 @@
 /**
- * WealthGenie — 100% Hand-Curated "Where to Invest" Real Product Database
- * ──────────────────────────────────────────────────────────────────────────
- * Maps EVERY SINGLE investment instrument (155 total) to 5 top-rated,
- * accurate, precise real-world products, banks, AMCs, or platforms.
+ * Legacy Where-to-Invest copy archive.
  *
- * Data verified against AMFI, SEBI, RBI, and financial portals.
- * Last updated: August 2026
+ * Phase 2 exports only non-financial reference text from this module. Embedded
+ * legacy placement arrays are deliberately not exported and must never define
+ * a product universe, financial value, eligibility decision, or ranking order.
+ * Verified product facts come from qualified market-data providers.
  */
 
 const WHERE_TO_INVEST = {
@@ -8036,4 +8035,11 @@ const WHERE_TO_INVEST = {
   }
 };
 
-export default WHERE_TO_INVEST;
+const WHERE_TO_INVEST_REFERENCE_METADATA = Object.freeze(Object.fromEntries(
+  Object.entries(WHERE_TO_INVEST).map(([instrumentId, entry]) => [instrumentId, Object.freeze({
+    title: entry.title || null,
+    howToStart: entry.howToStart || null,
+  })]),
+));
+
+export default WHERE_TO_INVEST_REFERENCE_METADATA;

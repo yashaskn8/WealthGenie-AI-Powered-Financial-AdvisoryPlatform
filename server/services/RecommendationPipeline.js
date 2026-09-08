@@ -3,6 +3,11 @@ import whereToInvestCatalog from '../data/whereToInvestCatalog.js';
 import { INSTRUMENT_PARAMS } from './instrumentConstants.js';
 import { buildRecommendationProfile } from './recommendationProfile.js';
 import { assessSuitabilityRisk } from './riskProfiler.js';
+import { fetchAmfiHistoricalNavSnapshot, fetchAmfiProductSnapshot } from './marketDataService.js';
+import {
+  rankVerifiedMutualFundProducts,
+  supportsAmfiParentCategory,
+} from './mutualFundProductRanking.js';
 
 export const PIPELINE_CONFIG = Object.freeze({
   version: 'recommendation-pipeline-4.0.0',
@@ -415,12 +420,39 @@ export function runPipeline(profileInput, mlResult = {}, options = {}) {
   return { instruments, confidenceScores, riskReconciliation, computedWeights };
 }
 
+function attachWtiMetadata(products, metadata) {
+  Object.defineProperty(products, 'metadata', { value: metadata, enumerable: false });
+  return products;
+}
+
+function historicalTargetDate(snapshot) {
+  const candidates = (snapshot?.facts || [])
+    .map(fact => Date.parse(fact?.observedAt))
+    .filter(Number.isFinite);
+  const reference = candidates.length > 0
+    ? new Date(Math.max(...candidates))
+    : new Date(snapshot?.fetchedAt);
+  if (Number.isNaN(reference.getTime())) return null;
+  reference.setUTCFullYear(reference.getUTCFullYear() - 1);
+  return reference.toISOString().slice(0, 10);
+}
+
+function referenceMetadata(parent, entry) {
+  return {
+    dataClass: 'REFERENCE_METADATA',
+    title: entry?.title || `Where to invest in ${parent.name}`,
+    note: 'Product names, NAVs, historical returns, eligibility, and ordering come only from the qualified market-data response. This reference text is not ranking evidence.',
+    howToStart: entry?.howToStart || null,
+    riskLevel: parent.riskScore,
+  };
+}
+
 /**
- * WTI is an alternate presentation of the same server-side suitability decision.
- * Provider universe and order come from the authoritative server catalog. The
- * client supplies only the owned profile id and exact parent catalog id.
+ * WTI is an alternate presentation of the same hard parent-level suitability
+ * decision. Phase 2 sources mutual-fund products and ranking evidence from
+ * AMFI. The legacy catalog contributes reference text only.
  */
-export function rankWhereToInvestBackend(profileInput, options = {}) {
+export async function rankWhereToInvestBackend(profileInput, options = {}, dependencies = {}) {
   const canonical = buildRecommendationProfile(profileInput);
   const riskReconciliation = reconcileRisk(canonical);
   const catalog = investmentDatabase.find(instrument => String(instrument.id) === String(options.parentInstrumentId));
@@ -430,82 +462,50 @@ export function rankWhereToInvestBackend(profileInput, options = {}) {
       id: options.parentInstrumentId,
       reasonCode: 'CATALOG_INSTRUMENT_NOT_ESTABLISHED',
     });
-    const empty = [];
-    Object.defineProperty(empty, 'metadata', { value: { excluded, riskReconciliation }, enumerable: false });
-    return empty;
+    return attachWtiMetadata([], { excluded, riskReconciliation, catalog: null, ranking: null });
   }
   const reasonCode = exclusionReason(catalog, canonical, riskReconciliation.final_score);
   if (reasonCode) {
     excluded.push({ id: catalog.id, name: catalog.name, reasonCode });
-    const empty = [];
-    Object.defineProperty(empty, 'metadata', { value: { excluded, riskReconciliation }, enumerable: false });
-    return empty;
+    return attachWtiMetadata([], { excluded, riskReconciliation, catalog: null, ranking: null });
   }
 
-  const parsed = parseProfile(canonical);
-  const weights = deriveWeights(parsed);
-  const scored = computeInstrumentScore(catalog, parsed, weights, {});
-  const parent = presentationInstrument({ instrument: catalog, ...scored });
-  const providerEntry = whereToInvestCatalog[catalog.id];
-  const providerCatalog = providerEntry?.products;
-  const requiredProviderFields = ['name', 'provider', 'highlight', 'platform', 'minInvestment'];
-  if (!providerEntry || !Array.isArray(providerCatalog) || providerCatalog.length !== 5
-      || providerCatalog.some(product => !product || requiredProviderFields.some(
-        field => typeof product[field] !== 'string' || !product[field].trim(),
-      ))
-      || new Set(providerCatalog.map(product => (
-        [product.name, product.provider, product.platform]
-          .map(value => value.trim().toLowerCase())
-          .join('::')
-      ))).size !== providerCatalog.length) {
-    excluded.push({ id: catalog.id, name: catalog.name, reasonCode: 'PROVIDER_CATALOG_NOT_ESTABLISHED' });
-    const empty = [];
-    Object.defineProperty(empty, 'metadata', { value: { excluded, riskReconciliation }, enumerable: false });
-    return empty;
-  }
-  const ranked = providerCatalog.map((product, index) => ({
-    id: `${catalog.id}:provider:${index + 1}`,
-    name: product.name,
-    provider: product.provider,
-    platform: product.platform,
-    highlight: product.highlight,
-    minInvestment: null,
-    tenure: product.tenure || null,
-    badge: null,
-    listingPosition: index + 1,
-    parentInstrumentId: catalog.id,
-    nominalReturn: null,
-    effectiveYield: null,
-    postTaxReturn: null,
-    returnBasis: null,
-    expenseRatio: null,
-    riskLevel: null,
-    riskScore: null,
-    score: null,
-    matchTags: [...new Set([...(parent.tags || []), `Suitable for ${riskReconciliation.final_risk_tier}`])],
-    investmentRoute: canonical.hasLumpSum === true ? 'SIP + Lump Sum' : 'SIP',
-    rankingBasis: 'REFERENCE_METADATA_ONLY_NOT_RANKED',
-    marketDataStatus: 'UNAVAILABLE_PHASE_1',
-  }));
-  Object.defineProperty(ranked, 'metadata', {
-    value: {
+  const parent = { name: catalog.name, riskScore: getInstrumentRisk(catalog) };
+  const catalogMetadata = referenceMetadata(parent, whereToInvestCatalog[catalog.id]);
+  if (!supportsAmfiParentCategory(catalog.id)) {
+    const result = rankVerifiedMutualFundProducts({
+      parentInstrumentId: catalog.id,
+      currentSnapshot: null,
+      historicalSnapshot: null,
+    });
+    return attachWtiMetadata(result.products, {
       excluded,
       riskReconciliation,
-      catalog: {
-        title: providerEntry.title,
-        note: 'These are reference access channels only. Current product terms and evidence-based provider ranking are unavailable until verified product facts are connected.',
-        howToStart: providerEntry.howToStart,
-        riskLevel: providerEntry.riskLevel,
-      },
-      ranking: {
-        status: 'NOT_RANKED',
-        authority: 'REFERENCE_METADATA_ONLY',
-        reason: 'PHASE_1_PRODUCT_MARKET_FACTS_NOT_CONNECTED',
-      },
-    },
-    enumerable: false,
+      catalog: catalogMetadata,
+      ranking: result.ranking,
+      comparisonUniverse: result.comparisonUniverse,
+    });
+  }
+
+  const fetchCurrent = dependencies.fetchAmfiProductSnapshot || fetchAmfiProductSnapshot;
+  const fetchHistorical = dependencies.fetchAmfiHistoricalNavSnapshot || fetchAmfiHistoricalNavSnapshot;
+  const currentSnapshot = await fetchCurrent();
+  const targetDate = historicalTargetDate(currentSnapshot);
+  const historicalSnapshot = targetDate
+    ? await fetchHistorical({ targetDate })
+    : null;
+  const result = rankVerifiedMutualFundProducts({
+    parentInstrumentId: catalog.id,
+    currentSnapshot,
+    historicalSnapshot,
   });
-  return ranked;
+  return attachWtiMetadata(result.products, {
+    excluded,
+    riskReconciliation,
+    catalog: catalogMetadata,
+    ranking: result.ranking,
+    comparisonUniverse: result.comparisonUniverse,
+  });
 }
 
 export function assertPortfolioSuitable(profileInput, instruments) {

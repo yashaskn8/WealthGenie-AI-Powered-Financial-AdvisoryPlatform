@@ -20,7 +20,7 @@ const MONTHS = Object.freeze({
   jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
 });
 
-function normalizeHeader(value) {
+export function normalizeAmfiHeader(value) {
   return String(value || '')
     .replace(/^\uFEFF/, '')
     .replace(/\s+/g, ' ')
@@ -28,7 +28,7 @@ function normalizeHeader(value) {
     .toLowerCase();
 }
 
-function parseAmfiDate(value) {
+export function parseAmfiDate(value) {
   const match = String(value || '').trim().match(/^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/);
   if (!match) return { observedDate: null, observedAt: null };
   const month = MONTHS[match[2].toLowerCase()];
@@ -51,7 +51,7 @@ function findColumn(headers, aliases, required = true) {
   return index;
 }
 
-function categoryLine(line) {
+export function isAmfiCategoryLine(line) {
   return /^(open ended schemes|close ended schemes|interval fund schemes)/i.test(line);
 }
 
@@ -59,12 +59,12 @@ export function parseAmfiNavReport(text, { fetchedAt = new Date().toISOString(),
   if (typeof text !== 'string' || !text.trim()) throw new Error('AMFI_EMPTY_RESPONSE');
   const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
   const headerIndex = lines.findIndex(line => {
-    const headers = line.split(';').map(normalizeHeader);
+    const headers = line.split(';').map(normalizeAmfiHeader);
     return headers.includes('scheme code') && headers.includes('net asset value') && headers.includes('date');
   });
   if (headerIndex === -1) throw new Error('AMFI_SCHEMA_MISMATCH:header');
 
-  const headers = lines[headerIndex].split(';').map(normalizeHeader);
+  const headers = lines[headerIndex].split(';').map(normalizeAmfiHeader);
   const columns = {
     schemeCode: findColumn(headers, ['scheme code']),
     primaryIsin: findColumn(headers, ['isin div payout/ isin growth', 'isin div payout/isin growth'], false),
@@ -87,7 +87,7 @@ export function parseAmfiNavReport(text, { fetchedAt = new Date().toISOString(),
     const line = rawLine.trim();
     if (!line) continue;
     if (!line.includes(';')) {
-      if (categoryLine(line)) currentCategory = line;
+      if (isAmfiCategoryLine(line)) currentCategory = line;
       else currentAmc = line;
       continue;
     }

@@ -73,6 +73,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
     catalog: null,
     suitability: null,
     ranking: null,
+    comparisonUniverse: null,
     error: null,
   });
   const wtiData = useMemo(() => rankingResult.catalog || ({
@@ -141,18 +142,20 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
       setRankingResult({
         requestKey,
         products: ranked.map((product) => {
-          const nominalReturn = nullableMarketNumber(product.nominalReturn);
+          const historicalReturn = nullableMarketNumber(product.historicalReturn?.valuePct);
+          const nav = nullableMarketNumber(product.nav?.value);
           return {
             ...product,
-            rate: Number.isFinite(nominalReturn)
-              ? `${nominalReturn.toFixed(1)}% pre-tax nominal`
-              : 'Return unavailable',
-            profileMatchTag: Array.isArray(product.matchTags) ? product.matchTags.at(-1) : null,
+            displayMetricLabel: Number.isFinite(historicalReturn) ? 'Historical 1Y return' : 'Current NAV',
+            displayMetric: Number.isFinite(historicalReturn)
+              ? `${historicalReturn.toFixed(2)}% historical`
+              : Number.isFinite(nav) ? `₹${nav.toLocaleString('en-IN')}` : 'Unavailable',
           };
         }),
         catalog: result?.catalog || null,
         suitability: result?.suitability || null,
         ranking: result?.ranking || null,
+        comparisonUniverse: result?.comparisonUniverse || null,
         error: null,
       });
     }).catch((error) => {
@@ -163,6 +166,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
         catalog: null,
         suitability: null,
         ranking: null,
+        comparisonUniverse: null,
         error: 'Authoritative product ranking is temporarily unavailable. No personalized ranking has been generated.',
       });
     });
@@ -180,8 +184,8 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
   const riskLevel = Number(wtiData.riskLevel);
   const level = Number.isFinite(riskLevel) ? Math.max(0, Math.min(5, riskLevel - 1)) : null;
   const risk = level === null
-    ? { label: 'Not available', color: '#64748b', desc: 'The backend did not provide a risk classification.' }
-    : RISK_LEVELS[level];
+    ? { label: 'Not available', color: '#64748b', desc: 'The backend did not provide a parent-category suitability risk classification.' }
+    : { ...RISK_LEVELS[level], desc: `${RISK_LEVELS[level].desc} This is the parent-category suitability tier, not a verified product Risk-o-Meter.` };
   const CX = 140, CY = 125, R = 90, r2 = 62;
   const totalAngle = Math.PI;
   const segGap = 0.025;
@@ -194,14 +198,18 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
     : 'loading';
   const products = rankingStatus === 'ready' ? rankingResult.products : [];
   const isEvidenceRanked = rankingResult.ranking?.status === 'EVIDENCE_RANKED';
+  const isComparableSet = rankingResult.ranking?.status === 'VERIFIED_COMPARABLE_OPTIONS';
+  const isUnavailable = rankingStatus === 'ready' && rankingResult.ranking?.status === 'UNAVAILABLE';
   const rankingError = missingRankingInput
     ? 'A saved Financial Profile and authoritative parent instrument are required. No provider ranking is shown.'
     : rankingStatus === 'error' ? rankingResult.error : null;
   const headerLabel = rankingStatus === 'loading'
-    ? 'Loading Investment Access Data…'
+    ? 'Loading Verified Product Data…'
     : isEvidenceRanked
-      ? `Execution Pathway (${products.length} Ranked Option${products.length === 1 ? '' : 's'})`
-      : `Execution Pathway (${products.length} Reference Option${products.length === 1 ? '' : 's'})`;
+      ? `Verified Products (${products.length} Ranked Option${products.length === 1 ? '' : 's'})`
+      : isComparableSet
+        ? `Verified Products (${products.length} Comparable Option${products.length === 1 ? '' : 's'})`
+        : 'Verified Products Unavailable';
 
   return (
     <div className="tab-fade-in">
@@ -212,7 +220,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'rgba(15, 23, 42, 0.7)', padding: '4px 8px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.08)' }}>
           <span style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 600, marginRight: 2 }}>Sort:</span>
           {[
-            { id: 'score', label: isEvidenceRanked ? 'Profile Match' : 'Reference Order' },
+            { id: 'score', label: isEvidenceRanked ? 'Historical Evidence' : 'Comparable Set' },
             { id: 'postTaxYield', label: 'Post-Tax Yield' },
             { id: 'expense', label: 'Low Expense Ratio' }
           ].map(mode => (
@@ -221,7 +229,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
               type="button"
               disabled={mode.id !== 'score'}
               title={mode.id === 'score'
-                ? (isEvidenceRanked ? 'Evidence-ranked server order' : 'Reference listing only; not a personalized ranking')
+                ? (isEvidenceRanked ? 'Server order from verified one-year historical NAV return' : 'Stable display order only; not a ranking')
                 : 'Unavailable without established provider-specific data'}
               onClick={() => mode.id === 'score' && setSortBy(mode.id)}
               style={{
@@ -311,7 +319,42 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
       {wtiData.note && (
         <div className="wti-note-banner">
           <Info size={14} style={{ flexShrink: 0, marginTop: 2 }} />
-          <p>{wtiData.note}</p>
+          <p><strong>REFERENCE METADATA:</strong> {wtiData.note}</p>
+        </div>
+      )}
+
+      {rankingResult.comparisonUniverse && (
+        <div className="wti-note-banner" data-testid="wti-comparison-universe">
+          <TrendingUp size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+          <p>
+            <strong>{isEvidenceRanked ? 'VERIFIED RANKING UNIVERSE' : 'VERIFIED COMPARISON UNIVERSE'}:</strong>{' '}
+            {rankingResult.comparisonUniverse.disclosure}{' '}
+            Source-qualified: {rankingResult.comparisonUniverse.verifiedCategoryProductCount ?? 0}; fresh NAVs: {rankingResult.comparisonUniverse.freshNavProductCount ?? 0}; historical evidence: {rankingResult.comparisonUniverse.historicalEvidenceProductCount ?? 0}.
+          </p>
+        </div>
+      )}
+
+      {rankingResult.ranking?.warning && (
+        <div className="wti-note-banner">
+          <Info size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+          <p>{rankingResult.ranking.warning}</p>
+        </div>
+      )}
+
+      {isUnavailable && !rankingError && (
+        <div role="status" style={{
+          background: 'rgba(100, 116, 139, 0.12)',
+          border: '1px solid rgba(148, 163, 184, 0.3)',
+          borderRadius: '8px',
+          padding: '10px 14px',
+          marginBottom: '1rem',
+          display: 'flex',
+          gap: '10px',
+          fontSize: '0.8rem',
+          color: '#cbd5e1'
+        }}>
+          <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 2 }} />
+          <div><strong>UNAVAILABLE:</strong> No source-qualified Phase-2 product ranking is available for this parent category. No fallback products or values were inserted.</div>
         </div>
       )}
 
@@ -357,12 +400,12 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
         </div>
       )}
 
-      {/* SEBI Risk-O-Meter */}
+      {/* Parent-category suitability gauge; not a product Risk-o-Meter. */}
       <div className="risk-meter-container">
         <div className="risk-meter-header">
           <Shield size={14} style={{ color: risk.color }} />
-          <span>SEBI Risk-O-Meter</span>
-          <span className="risk-meter-sebi-tag">SEBI Mandate</span>
+          <span>Parent Category Risk</span>
+          <span className="risk-meter-sebi-tag">Suitability Filter</span>
         </div>
         <div className="risk-meter-gauge">
           <svg viewBox="0 0 280 155" className="risk-meter-svg">
@@ -479,43 +522,31 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
       </div>
 
       <div className="wti-grid">
-        {products.map((product, idx) => (
-          <div key={idx} className={`wti-item ${isEvidenceRanked && idx === 0 ? 'wti-item--featured' : ''}`}>
-            <div className="wti-rank" title={isEvidenceRanked ? `Rank ${idx + 1}` : `Reference listing position ${idx + 1}`}>{idx + 1}</div>
+        {products.map((product) => (
+          <div key={product.id} className={`wti-item ${isEvidenceRanked && product.rank === 1 && rankingResult.ranking?.hasUniqueLeader ? 'wti-item--featured' : ''}`}>
+            <div className="wti-rank" title={isEvidenceRanked ? `Evidence rank ${product.rank}` : 'Comparable option; display position is not a rank'}>{isEvidenceRanked ? product.rank : '='}</div>
             <div className="wti-card-body">
               <div className="wti-card-top">
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                     <h4 className="wti-name">{product.name}</h4>
-                    {product.badge && <span className="wti-badge">{product.badge}</span>}
-                    {product.sharpeRatioEst !== undefined && product.sharpeRatioEst > 0 && (
-                      <span className="wti-badge" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc', borderColor: 'rgba(168, 85, 247, 0.35)' }} title="Sharpe Ratio Risk-Adjusted Efficiency">
-                        Sharpe {product.sharpeRatioEst}
-                      </span>
-                    )}
-                    {product.profileMatchTag && (
-                      <span className="wti-badge" style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#4ade80', borderColor: 'rgba(34, 197, 94, 0.4)' }}>
-                        {product.profileMatchTag.replace(/^[⚡✓📍]\s*/u, '')}
-                      </span>
-                    )}
-                    {product.investmentRoute && (
-                      <span className="wti-badge" style={{ background: 'rgba(56, 189, 248, 0.12)', color: '#38bdf8', borderColor: 'rgba(56, 189, 248, 0.3)' }}>
-                        {product.investmentRoute.replace(/^[⚡✓📍]\s*/u, '')}
-                      </span>
-                    )}
+                    <span className="wti-badge" style={{ background: isEvidenceRanked ? 'rgba(34, 197, 94, 0.15)' : 'rgba(56, 189, 248, 0.12)', color: isEvidenceRanked ? '#4ade80' : '#38bdf8', borderColor: isEvidenceRanked ? 'rgba(34, 197, 94, 0.4)' : 'rgba(56, 189, 248, 0.3)' }}>
+                      {product.presentationStatus?.replaceAll('_', ' ') || 'UNAVAILABLE'}
+                    </span>
+                    {product.tiedRank && <span className="wti-badge">TIED RANK</span>}
                   </div>
-                  <span className="wti-provider">{product.provider}</span>
+                  <span className="wti-provider">{product.provider || 'Provider unavailable'} · {product.source?.provider || 'Source unavailable'}</span>
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-                  <div className="wti-rate-chip">{product.rate}</div>
-                  {product.postTaxYieldStr && product.postTaxYieldStr !== product.rate && (
-                    <span style={{ fontSize: '0.72rem', color: '#38bdf8', fontWeight: 700, background: 'rgba(56, 189, 248, 0.1)', padding: '2px 6px', borderRadius: '4px' }}>
-                      {product.postTaxYieldStr}
-                    </span>
-                  )}
+                  <span style={{ fontSize: '0.68rem', color: '#94a3b8', fontWeight: 700 }}>{product.displayMetricLabel}</span>
+                  <div className="wti-rate-chip">{product.displayMetric}</div>
                 </div>
               </div>
-              <p className="wti-highlights">{product.highlight}</p>
+              <p className="wti-highlights">
+                {isEvidenceRanked
+                  ? 'Ranked within the exact AMFI category by verified one-year historical NAV return. Historical performance is not an expected return.'
+                  : 'Verified AMFI category and fresh NAV. No defensible merit order is claimed for this comparable option.'}
+              </p>
 
               {product.taxSavingsNote && (
                 <div style={{ fontSize: '0.75rem', color: product.taxSavingsNote.startsWith('⚠') ? '#f59e0b' : '#4ade80', fontWeight: 600, margin: '6px 0 4px 0', display: 'flex', alignItems: 'center', gap: 6, background: product.taxSavingsNote.startsWith('⚠') ? 'rgba(245, 158, 11, 0.08)' : 'rgba(34, 197, 94, 0.08)', padding: '4px 8px', borderRadius: '6px', border: `1px solid ${product.taxSavingsNote.startsWith('⚠') ? 'rgba(245, 158, 11, 0.2)' : 'rgba(34, 197, 94, 0.2)'}` }}>
@@ -532,10 +563,15 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
               )}
 
               <div className="wti-meta-footer">
-                <div className="meta-box"><Building2 size={12} /> {product.platform}</div>
-                {product.minInvestment && <div className="meta-box"><Wallet size={12} /> Min: {product.minInvestment}</div>}
-                {product.tenure && <div className="meta-box"><HistoryIcon size={12} /> {product.tenure}</div>}
-                {isEvidenceRanked && idx === 0 && <div className="meta-box meta-box--pick"><Star size={12} /> Top Pick</div>}
+                <div className="meta-box"><Building2 size={12} /> Source: {product.source?.provider || 'UNAVAILABLE'}</div>
+                <div className="meta-box"><Wallet size={12} /> NAV: {Number.isFinite(nullableMarketNumber(product.nav?.value)) ? `₹${nullableMarketNumber(product.nav.value).toLocaleString('en-IN')}` : 'UNAVAILABLE'}</div>
+                <div className="meta-box"><HistoryIcon size={12} /> Valuation: {product.valuationDate || 'UNAVAILABLE'}</div>
+                <div className="meta-box"><Activity size={12} /> Freshness: {product.freshness?.status || 'UNAVAILABLE'}</div>
+                <div className="meta-box">Eligibility: {product.productEligibility?.status?.replaceAll('_', ' ') || 'UNAVAILABLE'}</div>
+                <div className="meta-box">Plan: {product.plan || 'UNAVAILABLE'}</div>
+                <div className="meta-box">Option: {product.option || 'UNAVAILABLE'}</div>
+                {product.historicalReturn && <div className="meta-box"><HistoryIcon size={12} /> History: {product.historicalReturn.startDate} → {product.historicalReturn.endDate}</div>}
+                {isEvidenceRanked && product.rank === 1 && rankingResult.ranking?.hasUniqueLeader && <div className="meta-box meta-box--pick"><Star size={12} /> Top Pick by Historical Evidence</div>}
               </div>
             </div>
           </div>

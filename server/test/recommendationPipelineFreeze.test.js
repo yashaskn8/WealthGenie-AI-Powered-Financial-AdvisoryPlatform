@@ -122,28 +122,18 @@ test('pipeline output is backend-owned, pre-tax nominal, suitable, and capacity-
   assert.deepEqual(forbiddenNoise, output, 'forbidden profile fields cannot change ranking or allocation');
 });
 
-test('WTI reference metadata passes suitability without pretending catalog order is a ranking', () => {
-  const products = rankWhereToInvestBackend(canonicalProfile(), { parentInstrumentId: 'index_mf' });
-  assert.equal(products.length, 5);
-  assert.equal(products[0].parentInstrumentId, 'index_mf');
-  assert.equal(products[0].listingPosition, 1);
-  assert.equal(products[0].returnBasis, null);
-  assert.equal(products[0].nominalReturn, null);
-  assert.equal(products[0].effectiveYield, null);
-  assert.equal(products[0].expenseRatio, null);
-  assert.equal(products[0].postTaxReturn, null);
-  assert.equal(products[0].rankingBasis, 'REFERENCE_METADATA_ONLY_NOT_RANKED');
-  assert.equal(products[0].badge, null);
-  assert.equal(typeof products[0].platform, 'string');
-  assert.equal(products[0].minInvestment, null);
+test('WTI unsupported categories fail closed while preserving parent suitability', async () => {
+  const products = await rankWhereToInvestBackend(canonicalProfile(), { parentInstrumentId: 'index_mf' });
+  assert.equal(products.length, 0);
   assert.equal(products.metadata.catalog.title.length > 0, true);
-  assert.equal(products.metadata.ranking.status, 'NOT_RANKED');
-  assert.equal(products.metadata.ranking.authority, 'REFERENCE_METADATA_ONLY');
-  assert.equal('annualIncome' in products[0], false);
-  const unknown = rankWhereToInvestBackend(canonicalProfile(), { parentInstrumentId: 'missing' });
+  assert.equal(products.metadata.catalog.dataClass, 'REFERENCE_METADATA');
+  assert.equal(products.metadata.ranking.status, 'UNAVAILABLE');
+  assert.equal(products.metadata.ranking.authority, 'NONE');
+  assert.deepEqual(products.metadata.ranking.reasonCodes, ['PRODUCT_CLASS_NOT_SUPPORTED_PHASE_2']);
+  const unknown = await rankWhereToInvestBackend(canonicalProfile(), { parentInstrumentId: 'missing' });
   assert.equal(unknown.length, 0);
   assert.equal(unknown.metadata.excluded[0].reasonCode, 'CATALOG_INSTRUMENT_NOT_ESTABLISHED');
-  const excessiveRisk = rankWhereToInvestBackend(
+  const excessiveRisk = await rankWhereToInvestBackend(
     canonicalProfile({ riskTolerance: 'Conservative' }),
     { parentInstrumentId: 'smallcap_mf' },
   );
@@ -151,7 +141,7 @@ test('WTI reference metadata passes suitability without pretending catalog order
   assert.equal(excessiveRisk.metadata.excluded[0].reasonCode, 'RISK_EXCEEDS_FINAL_SUITABILITY');
 });
 
-test('WTI catalog covers every parent instrument with exactly five complete, distinct placements', () => {
+test('WTI legacy catalog exports reference text only and cannot expose product or financial authority', () => {
   const instrumentIds = investmentDatabase.map(instrument => instrument.id);
   assert.equal(instrumentIds.length, 155);
   assert.deepEqual(Object.keys(whereToInvestCatalog).sort(), [...instrumentIds].sort());
@@ -159,27 +149,11 @@ test('WTI catalog covers every parent instrument with exactly five complete, dis
   for (const instrumentId of instrumentIds) {
     const entry = whereToInvestCatalog[instrumentId];
     assert.equal(typeof entry.title, 'string', `${instrumentId} must have a title`);
-    assert.equal(typeof entry.note, 'string', `${instrumentId} must have a note`);
     assert.equal(typeof entry.howToStart, 'string', `${instrumentId} must explain how to start`);
-    assert.equal(entry.products.length, 5, `${instrumentId} must expose exactly five providers`);
-    for (const product of entry.products) {
-      for (const field of ['name', 'provider', 'highlight', 'platform', 'minInvestment']) {
-        assert.equal(
-          typeof product[field] === 'string' && product[field].trim().length > 0,
-          true,
-          `${instrumentId} provider ${field} must be a non-empty string`,
-        );
-      }
-    }
-    assert.equal(
-      new Set(entry.products.map(product => (
-        [product.name, product.provider, product.platform]
-          .map(value => value.trim().toLowerCase())
-          .join('::')
-      ))).size,
-      5,
-      `${instrumentId} must expose five distinct product/provider/platform placements`,
-    );
+    assert.deepEqual(Object.keys(entry).sort(), ['howToStart', 'title']);
+    assert.equal('products' in entry, false);
+    assert.equal('rate' in entry, false);
+    assert.equal('riskLevel' in entry, false);
   }
 });
 

@@ -2,11 +2,15 @@
  * WealthGenie Market Data Cron Jobs
  * Refreshes live market data on a schedule.
  *
- * - AMFI NAVs: one bounded official-report refresh daily
+ * - AMFI NAVs: current universe plus one bounded seven-day historical window daily
  * - Upstox benchmark quotes: one two-instrument request every 2 hours
  */
 
-import { fetchAmfiProductSnapshot, fetchBenchmarkQuotes } from '../services/marketDataService.js';
+import {
+  fetchAmfiHistoricalNavSnapshot,
+  fetchAmfiProductSnapshot,
+  fetchBenchmarkQuotes,
+} from '../services/marketDataService.js';
 
 let activeJobStopper = null;
 
@@ -20,8 +24,11 @@ export function startMarketDataRefreshJobs() {
   // Daily AMFI NAV refresh at 23:30 IST (18:00 UTC)
   // AMFI publishes updated NAVs around 23:00 IST
   cancellations.push(scheduleJob('0 18 * * *', 'AMFI NAV Refresh', async () => {
-    const result = await fetchAmfiProductSnapshot({ forceRefresh: true });
-    console.info(`[CRON] AMFI: ${result.productCount} products, status ${result.status}`);
+    const [current, historical] = await Promise.all([
+      fetchAmfiProductSnapshot({ forceRefresh: true }),
+      fetchAmfiHistoricalNavSnapshot({ forceRefresh: true }),
+    ]);
+    console.info(`[CRON] AMFI: ${current.productCount} current products (${current.status}), ${historical.productCount} historical observations (${historical.status})`);
   }));
 
   // A single batched request refreshes NIFTY 50 and India VIX every 2 hours.

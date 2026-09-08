@@ -4,6 +4,7 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import { validateQuery, marketNavQuerySchema } from '../validation/schemas.js';
 import {
   fetchAmfiProductSnapshot,
+  fetchAmfiHistoricalNavSnapshot,
   fetchBenchmarkQuotes,
   getLiveInstrumentParams,
   getMarketDataSummary,
@@ -43,11 +44,12 @@ router.get('/params', asyncHandler(async (_req, res) => {
 router.post('/refresh', verifyJWT, asyncHandler(async (_req, res) => {
   Promise.allSettled([
     fetchAmfiProductSnapshot({ forceRefresh: true }),
+    fetchAmfiHistoricalNavSnapshot({ forceRefresh: true }),
     fetchBenchmarkQuotes({ forceRefresh: true }),
   ]).catch(() => {});
   res.status(202).json({
     status: 'REFRESH_INITIATED',
-    sources: ['AMFI', 'UPSTOX'],
+    sources: ['AMFI_CURRENT_NAV', 'AMFI_HISTORICAL_NAV', 'UPSTOX'],
     message: 'A bounded refresh was queued. Provider failures remain explicitly unavailable.',
   });
 }));

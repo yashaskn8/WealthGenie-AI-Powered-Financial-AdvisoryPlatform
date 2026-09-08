@@ -74,8 +74,8 @@ import { rankWhereToInvestBackend } from '../services/RecommendationPipeline.js'
 
 /**
  * POST /api/instruments/rank-wti [Protected]
- * Returns suitability-filtered reference access metadata. Phase 1 explicitly
- * does not represent catalog position as a personalized provider ranking.
+ * Returns a suitability-filtered, source-qualified product comparison. Phase 2
+ * supports exact AMFI mutual-fund categories and fails closed for other classes.
  */
 router.post('/rank-wti', verifyJWT, validateStrict(rankWtiProfileSchema), asyncHandler(async (req, res) => {
   const { profileId, parentInstrumentId } = req.body;
@@ -84,7 +84,7 @@ router.post('/rank-wti', verifyJWT, validateStrict(rankWtiProfileSchema), asyncH
     return sendError(req, res, 404, 'Profile not found or access denied', 'PROFILE_NOT_FOUND');
   }
   const canonicalProfile = buildRecommendationProfile(profile);
-  const ranked = rankWhereToInvestBackend(canonicalProfile, { parentInstrumentId });
+  const ranked = await rankWhereToInvestBackend(canonicalProfile, { parentInstrumentId });
   res.json({
     success: true,
     total: ranked.length,
@@ -93,6 +93,7 @@ router.post('/rank-wti', verifyJWT, validateStrict(rankWtiProfileSchema), asyncH
     suitability: ranked.metadata?.riskReconciliation || null,
     catalog: ranked.metadata?.catalog || null,
     ranking: ranked.metadata?.ranking || null,
+    comparisonUniverse: ranked.metadata?.comparisonUniverse || null,
   });
 }));
 
