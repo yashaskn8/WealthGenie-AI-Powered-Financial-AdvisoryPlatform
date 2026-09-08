@@ -1,223 +1,183 @@
 /**
- * WealthGenie Live Market Data Service
- * Fetches real-time data from AMFI, Yahoo Finance, and RBI
- * to replace hardcoded instrument parameters.
+ * Provider-neutral market-data facade.
  *
- * All data is cached in Redis with appropriate TTLs.
+ * Phase 1 deliberately separates verified observations from simulation/model
+ * assumptions. A failed or unconfigured provider never receives a numeric
+ * fallback and is never reported as successful live data.
  */
 
-import axios from 'axios';
-import { getCache, setCache } from '../config/redis.js';
-import { INSTRUMENT_PARAMS, updateLiveParam } from './instrumentConstants.js';
+import { INSTRUMENT_PARAMS } from './instrumentConstants.js';
+import AmfiNavProvider from './marketData/AmfiNavProvider.js';
+import UpstoxMarketDataProvider, {
+  DEFAULT_BENCHMARK_INSTRUMENT_KEYS,
+} from './marketData/UpstoxMarketDataProvider.js';
+import {
+  AVAILABILITY,
+  MARKET_DATA_SCHEMA_VERSION,
+} from './marketData/contracts.js';
+import { persistVerifiedMarketSnapshot } from './marketData/MarketDataRepository.js';
 
-const CACHE_TTL = {
-  MF_NAV: 86400,       // 24 hours — AMFI updates daily
-  INDEX_DATA: 3600,    // 1 hour — Yahoo Finance
-  FD_RATES: 86400,     // 24 hours
-  LIVE_PARAMS: 3600,   // 1 hour
-};
-export const MARKET_PARAMETER_SCHEMA_VERSION = 'market-parameters-2.0.0';
+const amfiProvider = new AmfiNavProvider();
+const upstoxProvider = new UpstoxMarketDataProvider();
+
+export const MARKET_PARAMETER_SCHEMA_VERSION = 'simulation-assumptions-3.0.0';
 export const MARKET_PARAMETER_CACHE_KEY = `mc:instrument:params:${MARKET_PARAMETER_SCHEMA_VERSION}`;
 
-// ─── FUNCTION 1: Fetch and parse AMFI NAV data ──────────────────────
-/**
- * Fetches the complete NAV dataset from AMFI India's public API.
- * Returns a map of scheme_code → { scheme_name, nav, nav_date }
- *
- * Source: https://www.amfiindia.com/spages/NAVAll.txt
- * Updates daily at ~23:00 IST
- */
-export async function fetchMutualFundNAVs() {
-  const cacheKey = 'mf:navs:all';
-  const cached = await getCache(cacheKey);
-  if (cached) return { ...cached, cached: true };
+const LEGACY_SYMBOL_TO_UPSTOX_KEY = Object.freeze({
+  '^NSEI': 'NSE_INDEX|Nifty 50',
+  '^INDIAVIX': 'NSE_INDEX|India VIX',
+});
 
+async function persistFreshSnapshot(snapshot) {
+  if (snapshot?.cache?.hit || ![AVAILABILITY.AVAILABLE, AVAILABILITY.PARTIAL].includes(snapshot?.status)) {
+    return { status: 'NOT_PERSISTED', productWrites: 0, observationWrites: 0 };
+  }
   try {
-    const response = await axios.get(
-      'https://www.amfiindia.com/spages/NAVAll.txt',
-      { timeout: 15000 }
-    );
-
-    // Parse pipe-delimited format
-    // Line format: SchemeCode;ISINDiv;ISINGrowth;SchemeName;NAV;Date
-    const lines = response.data.split('\n').filter(l => l.includes(';'));
-    const navMap = {};
-    let count = 0;
-
-    for (const line of lines) {
-      const parts = line.split(';');
-      if (parts.length >= 6 && !isNaN(parseFloat(parts[4]))) {
-        navMap[parts[0].trim()] = {
-          scheme_code: parts[0].trim(),
-          isin: parts[1].trim(),
-          scheme_name: parts[3].trim(),
-          nav: parseFloat(parts[4]),
-          nav_date: parts[5].trim(),
-        };
-        count++;
-      }
-    }
-
-    const result = { navMap, count, fetched_at: new Date().toISOString() };
-    await setCache(cacheKey, result, CACHE_TTL.MF_NAV);
-    return { ...result, cached: false };
-  } catch (err) {
-    console.error('[MarketData] AMFI fetch failed:', err.message);
-    return { navMap: {}, count: 0, error: err.message, cached: false };
+    return await persistVerifiedMarketSnapshot(snapshot);
+  } catch (error) {
+    return {
+      status: 'PERSISTENCE_ERROR',
+      productWrites: 0,
+      observationWrites: 0,
+      error: { code: 'MARKET_PERSISTENCE_FAILED', message: error?.message || 'Persistence failed.' },
+    };
   }
 }
 
-// ─── FUNCTION 2: Compute live index statistics ──────────────────────
+export async function fetchAmfiProductSnapshot({ forceRefresh = false, persist = true } = {}) {
+  const snapshot = await amfiProvider.getSnapshot({ forceRefresh });
+  const persistence = persist ? await persistFreshSnapshot(snapshot) : { status: 'NOT_REQUESTED' };
+  return { ...snapshot, persistence };
+}
+
 /**
- * Fetches monthly price data from Yahoo Finance and computes:
- * - Annualised return (geometric)
- * - Annualised volatility (std dev of monthly returns × √12)
- *
- * @param {string} symbol - e.g. '^NSEI' for Nifty, '^BSESN' for Sensex
+ * Compatibility DTO for existing callers. NAV remains a NAV observation only;
+ * it is not converted into an expected return, price, or post-tax value.
  */
-export async function fetchIndexStatistics(symbol = '^NSEI') {
-  const cacheKey = `index:stats:${symbol}`;
-  const cached = await getCache(cacheKey);
-  if (cached) return { ...cached, cached: true };
-
-  try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`
-      + `?interval=1mo&range=3y`;
-
-    const response = await axios.get(url, {
-      timeout: 10000,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WealthGenie/2.0)' },
-    });
-
-    const prices = (response.data?.chart?.result?.[0]?.indicators?.quote?.[0]?.close || [])
-      .map(Number)
-      .filter(p => Number.isFinite(p) && p > 0);
-
-    if (prices.length < 13) {
-      // Need at least 13 data points to compute 12 monthly returns for meaningful volatility
-      throw new Error(`Insufficient price data (${prices.length} points, need 13+) for volatility computation`);
-    }
-
-    // Compute monthly returns
-    const monthlyReturns = [];
-    for (let i = 1; i < prices.length; i++) {
-      monthlyReturns.push((prices[i] - prices[i - 1]) / prices[i - 1]);
-    }
-
-    // Annualise: geometric mean for return, sample std dev for volatility
-    const meanMonthly = monthlyReturns.reduce((a, b) => a + b, 0) / monthlyReturns.length;
-    // Bessel's correction: divide by (N-1) for unbiased sample variance
-    const variance = monthlyReturns.reduce(
-      (acc, r) => acc + Math.pow(r - meanMonthly, 2), 0
-    ) / (monthlyReturns.length - 1);
-
-    const stats = {
-      symbol,
-      annualised_return: parseFloat(((Math.pow(1 + meanMonthly, 12) - 1)).toFixed(4)),
-      annualised_volatility: parseFloat((Math.sqrt(variance * 12)).toFixed(4)),
-      data_points: prices.length,
-      latest_price: prices[prices.length - 1],
-      computed_at: new Date().toISOString(),
-      data_source: 'Yahoo Finance',
+export async function fetchMutualFundNAVs(options = {}) {
+  const snapshot = await fetchAmfiProductSnapshot(options);
+  const factsByProduct = new Map((snapshot.facts || []).map(fact => [fact.canonicalProductId, fact]));
+  const navMap = {};
+  for (const product of snapshot.products || []) {
+    const fact = factsByProduct.get(product.canonicalProductId);
+    const schemeCode = product.externalIds?.find(item => item.source === 'AMFI_SCHEME_CODE')?.value;
+    if (!schemeCode) continue;
+    navMap[schemeCode] = {
+      scheme_code: schemeCode,
+      isin: product.externalIds?.find(item => item.source === 'ISIN')?.value || null,
+      scheme_name: product.name,
+      plan: product.plan,
+      option: product.option,
+      nav: fact?.value ?? null,
+      nav_date: fact?.observedDate ?? null,
+      observed_at: fact?.observedAt ?? null,
+      availability_status: fact?.availabilityStatus ?? AVAILABILITY.UNAVAILABLE,
+      freshness: fact?.freshness ?? null,
+      data_source: 'AMFI',
     };
+  }
+  return {
+    schema_version: MARKET_DATA_SCHEMA_VERSION,
+    provider: snapshot.provider,
+    status: snapshot.status,
+    navMap,
+    count: snapshot.productCount ?? 0,
+    available_count: snapshot.availableFactCount ?? 0,
+    fetched_at: snapshot.fetchedAt,
+    cached: snapshot.cache?.hit === true,
+    cache: snapshot.cache,
+    persistence: snapshot.persistence,
+    error: snapshot.error,
+  };
+}
 
-    await setCache(cacheKey, stats, CACHE_TTL.INDEX_DATA);
-    return { ...stats, cached: false };
-  } catch (err) {
-    console.error(`[MarketData] Index ${symbol} fetch failed:`, err.message);
+export async function fetchBenchmarkQuotes({ forceRefresh = false, persist = true } = {}) {
+  const snapshot = await upstoxProvider.getQuotes(DEFAULT_BENCHMARK_INSTRUMENT_KEYS, { forceRefresh });
+  const persistence = persist ? await persistFreshSnapshot(snapshot) : { status: 'NOT_REQUESTED' };
+  return { ...snapshot, persistence };
+}
+
+/**
+ * Compatibility boundary for old index callers. Phase 1 exposes the verified
+ * quote when available, but does not invent annualised return or volatility
+ * from a single quote. Historical feature computation belongs to Phase 3.
+ */
+export async function fetchIndexStatistics(symbol = '^NSEI', options = {}) {
+  const instrumentKey = LEGACY_SYMBOL_TO_UPSTOX_KEY[symbol];
+  if (!instrumentKey) {
     return {
       symbol,
+      status: AVAILABILITY.UNAVAILABLE,
       available: false,
+      latest_price: null,
       annualised_return: null,
       annualised_volatility: null,
       data_points: 0,
-      latest_price: null,
-      computed_at: new Date().toISOString(),
-      data_source: 'unavailable',
-      error: err.message,
-      cached: false,
+      observed_at: null,
+      data_source: null,
+      error: { code: 'UNSUPPORTED_INDEX_SYMBOL', message: 'No qualified provider identity exists.' },
     };
   }
+  const snapshot = await upstoxProvider.getQuotes([instrumentKey], options);
+  const fact = snapshot.facts?.[0] || null;
+  return {
+    symbol,
+    instrument_key: instrumentKey,
+    status: snapshot.status,
+    available: fact?.availabilityStatus === AVAILABILITY.AVAILABLE,
+    latest_price: fact?.value ?? null,
+    annualised_return: null,
+    annualised_volatility: null,
+    data_points: fact ? 1 : 0,
+    observed_at: fact?.observedAt ?? null,
+    fetched_at: snapshot.fetchedAt,
+    freshness: fact?.freshness ?? null,
+    data_source: snapshot.provider,
+    source_url: fact?.source?.url ?? null,
+    error: snapshot.error,
+    cached: snapshot.cache?.hit === true,
+  };
 }
 
-// ─── FUNCTION 3: Build live INSTRUMENT_PARAMS for Monte Carlo ───────
 /**
- * Constructs Monte Carlo parameters from live index data.
- * Uses the frozen nominal catalog explicitly when verified live index data is unavailable.
- * @returns {Object} instrument → { mean, stdDev }
+ * Existing Monte Carlo callers still require explicit model assumptions until
+ * Phase 5. These are now labelled as assumptions and are never described as
+ * live/verified observations or altered by an external quote.
  */
 export async function getLiveInstrumentParams() {
-  const cached = await getCache(MARKET_PARAMETER_CACHE_KEY);
-  if (cached?.schema_version === MARKET_PARAMETER_SCHEMA_VERSION && cached.params) {
-    for (const [key, val] of Object.entries(cached.params)) {
-      if (INSTRUMENT_PARAMS[key] && val.mean !== undefined) {
-        const nominalRate = parseFloat((val.mean * 100).toFixed(2));
-        updateLiveParam(key, nominalRate, val.stdDev);
-      }
-    }
-    return { ...cached, cached: true };
-  }
-
-  const niftyStats = await fetchIndexStatistics('^NSEI');
   const params = Object.fromEntries(Object.entries(INSTRUMENT_PARAMS).map(([key, value]) => [key, {
     mean: value.nominalRate / 100,
     stdDev: value.volatility,
-    source: 'frozen-catalog',
+    source: 'FROZEN_MODEL_ASSUMPTION',
+    dataClass: 'MODEL_ASSUMPTION_NOT_MARKET_FACT',
   }]));
-
-  const liveReturn = Number(niftyStats.annualised_return);
-  const liveVolatility = Number(niftyStats.annualised_volatility);
-  const liveUsable = niftyStats.available !== false
-    && Number(niftyStats.data_points) >= 13
-    && Number.isFinite(liveReturn) && liveReturn > -1 && liveReturn <= 1
-    && Number.isFinite(liveVolatility) && liveVolatility >= 0 && liveVolatility <= 0.60;
-
-  if (liveUsable) {
-    const equityMean = liveReturn * 0.8;
-    const candidates = {
-      ELSS:       { mean: equityMean * 0.95, stdDev: liveVolatility },
-      Equity_MF:  { mean: equityMean * 0.95, stdDev: liveVolatility },
-      ETF:        { mean: equityMean * 0.98, stdDev: liveVolatility * 0.95 },
-      NPS:        { mean: equityMean * 0.85, stdDev: liveVolatility * 0.7 },
-      Hybrid_MF:  { mean: equityMean * 0.92, stdDev: liveVolatility * 0.55 },
-      Index_MF:   { mean: equityMean * 0.98, stdDev: liveVolatility * 0.95 },
-      Midcap_MF:  { mean: equityMean * 1.35, stdDev: liveVolatility * 1.22 },
-      Smallcap_MF:{ mean: equityMean * 1.50, stdDev: liveVolatility * 1.55 },
-    };
-    for (const [key, candidate] of Object.entries(candidates)) {
-      if (candidate.mean > -1 && candidate.mean <= 1 && candidate.stdDev >= 0 && candidate.stdDev <= 0.60) {
-        params[key] = { ...candidate, source: 'verified-index-derived' };
-      }
-    }
-  }
-
-  // Apply the live rates dynamically via updateLiveParam
-  for (const [key, val] of Object.entries(params)) {
-    if (INSTRUMENT_PARAMS[key]) {
-      const nominalRate = parseFloat((val.mean * 100).toFixed(2));
-      updateLiveParam(key, nominalRate, val.stdDev);
-    }
-  }
-
-  const result = {
+  return {
     schema_version: MARKET_PARAMETER_SCHEMA_VERSION,
+    status: 'MODEL_ASSUMPTIONS_ONLY',
     params,
-    computed_at: new Date().toISOString(),
-    live_index_used: liveUsable,
-    live_index_reason: liveUsable ? 'verified_3_year_monthly_series' : 'unavailable_or_outside_supported_bounds',
-    nifty_stats: niftyStats,
+    computed_at: null,
+    live_index_used: false,
+    live_index_reason: 'PHASE_1_DOES_NOT_ESTIMATE_EXPECTED_RETURNS_FROM_QUOTES',
+    cached: false,
   };
-  await setCache(MARKET_PARAMETER_CACHE_KEY, result, CACHE_TTL.LIVE_PARAMS);
-  return { ...result, cached: false };
 }
 
-// ─── FUNCTION 4: Check FD rate staleness in MongoDB ─────────────────
-/**
- * Flags FD records in the instruments collection that haven't been
- * updated in over 30 days. Used by the admin/health endpoint.
- *
- * @param {Model} Instrument - Mongoose model
- */
+export async function getMutualFundNavsBySchemeCodes(schemeCodes, options = {}) {
+  const normalizedCodes = [...new Set((schemeCodes || []).map(value => String(value).trim()).filter(Boolean))];
+  const snapshot = await fetchAmfiProductSnapshot(options);
+  const wantedIds = new Set(normalizedCodes.map(code => `mf:amfi:${code}`));
+  return {
+    schemaVersion: MARKET_DATA_SCHEMA_VERSION,
+    provider: snapshot.provider,
+    status: snapshot.status,
+    fetchedAt: snapshot.fetchedAt,
+    products: (snapshot.products || []).filter(product => wantedIds.has(product.canonicalProductId)),
+    facts: (snapshot.facts || []).filter(fact => wantedIds.has(fact.canonicalProductId)),
+    cache: snapshot.cache,
+    error: snapshot.error,
+  };
+}
+
 export async function checkFDRateStaleness(Instrument) {
   try {
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
@@ -236,27 +196,48 @@ export async function checkFDRateStaleness(Instrument) {
         ? `${staleCount} FD rate records are older than 30 days. Update via admin panel.`
         : null,
     };
-  } catch (_) {
+  } catch {
     return { stale_count: 0, needs_refresh: false, warning: null };
   }
 }
 
-// ─── FUNCTION 5: Full market data summary ───────────────────────────
-/**
- * Returns a comprehensive market data snapshot for the /api/market/rates endpoint.
- */
-export async function getMarketDataSummary() {
-  const [nifty, sensex, navData] = await Promise.allSettled([
-    fetchIndexStatistics('^NSEI'),
-    fetchIndexStatistics('^BSESN'),
-    fetchMutualFundNAVs(),
-  ]);
-
+function sourceSummary(snapshot) {
+  const freshness = (snapshot.facts || []).reduce((counts, fact) => {
+    const status = fact?.freshness?.status || 'UNKNOWN';
+    counts[status] = (counts[status] || 0) + 1;
+    return counts;
+  }, { FRESH: 0, STALE: 0, UNKNOWN: 0 });
   return {
-    nifty: nifty.status === 'fulfilled' ? nifty.value : { error: 'unavailable' },
-    sensex: sensex.status === 'fulfilled' ? sensex.value : { error: 'unavailable' },
-    amfi_nav_count: navData.status === 'fulfilled' ? navData.value.count : 0,
-    last_refresh: new Date().toISOString(),
-    status: 'ok',
+    provider: snapshot.provider,
+    status: snapshot.status,
+    fetchedAt: snapshot.fetchedAt ?? null,
+    availableFactCount: snapshot.availableFactCount ?? 0,
+    productCount: snapshot.productCount ?? null,
+    cache: snapshot.cache ?? null,
+    freshness,
+    error: snapshot.error ?? null,
+  };
+}
+
+export async function getMarketDataSummary(options = {}) {
+  const [amfi, upstox] = await Promise.all([
+    fetchAmfiProductSnapshot(options),
+    fetchBenchmarkQuotes(options),
+  ]);
+  const statuses = [amfi.status, upstox.status];
+  const availableSources = statuses.filter(status => [AVAILABILITY.AVAILABLE, AVAILABILITY.PARTIAL].includes(status)).length;
+  const status = availableSources === statuses.length
+    ? AVAILABILITY.AVAILABLE
+    : availableSources > 0 ? AVAILABILITY.PARTIAL : AVAILABILITY.UNAVAILABLE;
+  const timestamps = [amfi.fetchedAt, upstox.fetchedAt].filter(Boolean).sort();
+  return {
+    schemaVersion: MARKET_DATA_SCHEMA_VERSION,
+    status,
+    lastRefresh: timestamps.at(-1) ?? null,
+    sources: {
+      amfi: sourceSummary(amfi),
+      upstox: sourceSummary(upstox),
+    },
+    benchmarks: upstox.facts || [],
   };
 }

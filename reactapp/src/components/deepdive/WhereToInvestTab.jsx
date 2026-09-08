@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Building2, Shield, Star, Info, Wallet, Zap, History as HistoryIcon, TrendingUp, AlertTriangle, Globe, Activity } from 'lucide-react';
 import * as api from '../../services/api';
 import SebiDisclaimer from '../SebiDisclaimer';
+import { nullableMarketNumber } from '../../utils/marketDataDisplay';
 
 const RISK_LEVELS = [
   { label: 'Low', color: '#22c55e', desc: 'Lower relative risk. Any guarantee or insurance depends on the specific product terms.' },
@@ -71,6 +72,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
     products: [],
     catalog: null,
     suitability: null,
+    ranking: null,
     error: null,
   });
   const wtiData = useMemo(() => rankingResult.catalog || ({
@@ -138,15 +140,19 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
       const ranked = Array.isArray(result?.products) ? result.products : [];
       setRankingResult({
         requestKey,
-        products: ranked.map(product => ({
-          ...product,
-          rate: Number.isFinite(Number(product.nominalReturn))
-            ? `${Number(product.nominalReturn).toFixed(1)}% pre-tax nominal`
-            : 'Return unavailable',
-          profileMatchTag: Array.isArray(product.matchTags) ? product.matchTags.at(-1) : null,
-        })),
+        products: ranked.map((product) => {
+          const nominalReturn = nullableMarketNumber(product.nominalReturn);
+          return {
+            ...product,
+            rate: Number.isFinite(nominalReturn)
+              ? `${nominalReturn.toFixed(1)}% pre-tax nominal`
+              : 'Return unavailable',
+            profileMatchTag: Array.isArray(product.matchTags) ? product.matchTags.at(-1) : null,
+          };
+        }),
         catalog: result?.catalog || null,
         suitability: result?.suitability || null,
+        ranking: result?.ranking || null,
         error: null,
       });
     }).catch((error) => {
@@ -156,6 +162,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
         products: [],
         catalog: null,
         suitability: null,
+        ranking: null,
         error: 'Authoritative product ranking is temporarily unavailable. No personalized ranking has been generated.',
       });
     });
@@ -186,13 +193,15 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
     ? (rankingResult.error ? 'error' : 'ready')
     : 'loading';
   const products = rankingStatus === 'ready' ? rankingResult.products : [];
+  const isEvidenceRanked = rankingResult.ranking?.status === 'EVIDENCE_RANKED';
   const rankingError = missingRankingInput
     ? 'A saved Financial Profile and authoritative parent instrument are required. No provider ranking is shown.'
     : rankingStatus === 'error' ? rankingResult.error : null;
-  const isTop5 = products.length >= 5;
   const headerLabel = rankingStatus === 'loading'
-    ? 'Loading Authoritative Product Ranking…'
-    : (isTop5 ? 'Execution Pathway & Top 5 Recommendations' : `Execution Pathway (${products.length} Recommended Option${products.length > 1 ? 's' : ''})`);
+    ? 'Loading Investment Access Data…'
+    : isEvidenceRanked
+      ? `Execution Pathway (${products.length} Ranked Option${products.length === 1 ? '' : 's'})`
+      : `Execution Pathway (${products.length} Reference Option${products.length === 1 ? '' : 's'})`;
 
   return (
     <div className="tab-fade-in">
@@ -203,7 +212,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'rgba(15, 23, 42, 0.7)', padding: '4px 8px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.08)' }}>
           <span style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 600, marginRight: 2 }}>Sort:</span>
           {[
-            { id: 'score', label: 'Profile Match' },
+            { id: 'score', label: isEvidenceRanked ? 'Profile Match' : 'Reference Order' },
             { id: 'postTaxYield', label: 'Post-Tax Yield' },
             { id: 'expense', label: 'Low Expense Ratio' }
           ].map(mode => (
@@ -211,7 +220,9 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
               key={mode.id}
               type="button"
               disabled={mode.id !== 'score'}
-              title={mode.id === 'score' ? 'Server-authoritative provider order' : 'Unavailable without established provider-specific data'}
+              title={mode.id === 'score'
+                ? (isEvidenceRanked ? 'Evidence-ranked server order' : 'Reference listing only; not a personalized ranking')
+                : 'Unavailable without established provider-specific data'}
               onClick={() => mode.id === 'score' && setSortBy(mode.id)}
               style={{
                 padding: '4px 10px',
@@ -469,8 +480,8 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
 
       <div className="wti-grid">
         {products.map((product, idx) => (
-          <div key={idx} className={`wti-item ${idx === 0 ? 'wti-item--featured' : ''}`}>
-            <div className="wti-rank">{idx + 1}</div>
+          <div key={idx} className={`wti-item ${isEvidenceRanked && idx === 0 ? 'wti-item--featured' : ''}`}>
+            <div className="wti-rank" title={isEvidenceRanked ? `Rank ${idx + 1}` : `Reference listing position ${idx + 1}`}>{idx + 1}</div>
             <div className="wti-card-body">
               <div className="wti-card-top">
                 <div>
@@ -522,9 +533,9 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
 
               <div className="wti-meta-footer">
                 <div className="meta-box"><Building2 size={12} /> {product.platform}</div>
-                <div className="meta-box"><Wallet size={12} /> Min: {product.minInvestment}</div>
+                {product.minInvestment && <div className="meta-box"><Wallet size={12} /> Min: {product.minInvestment}</div>}
                 {product.tenure && <div className="meta-box"><HistoryIcon size={12} /> {product.tenure}</div>}
-                {idx === 0 && <div className="meta-box meta-box--pick"><Star size={12} /> Top Pick</div>}
+                {isEvidenceRanked && idx === 0 && <div className="meta-box meta-box--pick"><Star size={12} /> Top Pick</div>}
               </div>
             </div>
           </div>

@@ -181,7 +181,6 @@ export const investmentDatabase = masterCatalog.instruments.map(inst => {
     cons: inst.staticData.cons,
     faq: inst.staticData.faq,
     taxation: inst.staticData.taxation,
-    whereToInvest: inst.staticData.whereToInvest,
     suitability: inst.staticData.suitability,
     trustBadge: inst.staticData.trustBadge,
     alternatives: inst.staticData.alternatives,

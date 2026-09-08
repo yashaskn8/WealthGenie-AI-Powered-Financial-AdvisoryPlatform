@@ -108,17 +108,13 @@ test('instrumentConstants exposes immutable rates and live override path', (t) =
   assert.equal(buildRateLookup().FD, 6.8);
 });
 
-test('marketDataService parses mocked AMFI and Yahoo responses without network', async (t) => {
+test('marketDataService parses current AMFI schema and fails closed when Upstox is unconfigured', async (t) => {
   const originalGet = axios.get;
   axios.get = async (url) => {
     if (url.includes('NAVAll.txt')) {
-      return { data: 'Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;Scheme Name;Net Asset Value;Date\n123;INF;INF;Example Fund;12.34;01-Jan-2026\n' };
+      return { data: 'Scheme Code;ISIN Div Payout/ ISIN Growth;ISIN Div Reinvestment;Scheme Name;Plan;Option;Net Asset Value;Date\n123;INF000A01010;;Example Fund;Direct;Growth;12.34;01-Jan-2026\n' };
     }
-    return {
-      data: {
-        chart: { result: [{ indicators: { quote: [{ close: [100, 102, 104, 103, 106, 108, 110, 111, 115, 117, 119, 121, 123, 126] }] } }] }
-      }
-    };
+    throw new Error(`Unexpected network request: ${url}`);
   };
   t.after(() => { axios.get = originalGet; });
 
@@ -127,9 +123,12 @@ test('marketDataService parses mocked AMFI and Yahoo responses without network',
 
   assert.equal(navs.count, 1);
   assert.equal(navs.navMap['123'].nav, 12.34);
+  assert.equal(navs.navMap['123'].plan, 'Direct');
   assert.equal(stats.symbol, '^NSEI');
-  assert.ok(Number.isFinite(stats.annualised_return));
-  assert.ok(Number.isFinite(stats.annualised_volatility));
+  assert.equal(stats.status, 'PROVIDER_NOT_CONFIGURED');
+  assert.equal(stats.latest_price, null);
+  assert.equal(stats.annualised_return, null);
+  assert.equal(stats.annualised_volatility, null);
 });
 
 test('marketDataService FD staleness handles stale counts and model failures', async () => {

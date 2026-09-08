@@ -74,7 +74,8 @@ import { rankWhereToInvestBackend } from '../services/RecommendationPipeline.js'
 
 /**
  * POST /api/instruments/rank-wti [Protected]
- * Returns the server-owned top-five provider catalog after parent-instrument suitability.
+ * Returns suitability-filtered reference access metadata. Phase 1 explicitly
+ * does not represent catalog position as a personalized provider ranking.
  */
 router.post('/rank-wti', verifyJWT, validateStrict(rankWtiProfileSchema), asyncHandler(async (req, res) => {
   const { profileId, parentInstrumentId } = req.body;
@@ -91,6 +92,7 @@ router.post('/rank-wti', verifyJWT, validateStrict(rankWtiProfileSchema), asyncH
     excluded: ranked.metadata?.excluded || [],
     suitability: ranked.metadata?.riskReconciliation || null,
     catalog: ranked.metadata?.catalog || null,
+    ranking: ranked.metadata?.ranking || null,
   });
 }));
 

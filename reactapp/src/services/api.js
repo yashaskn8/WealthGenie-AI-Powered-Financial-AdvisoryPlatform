@@ -346,7 +346,24 @@ export async function updateProfile(profileId, profile, requestOptions = {}) {
 }
 // ─── RECOMMENDATIONS ─────────────────────────────────────
 export async function getRecommendations(profileId, options = {}) {
-  return request('POST', '/recommend', { profileId }, options);
+  // Recommendation generation can include a cold ML-service prediction and an
+  // audited MongoDB transaction. Keep the UI request alive for the same bounded
+  // window used by the real-dependency browser contract instead of aborting at
+  // the generic 20-second API timeout and leaving every dashboard panel empty.
+  return request('POST', '/recommend', { profileId }, { timeoutMs: 90000, ...options });
+}
+
+// ─── VERIFIED MARKET DATA (PHASE 1) ──────────────────────
+export async function getBenchmarkMarketFacts(options = {}) {
+  return request('GET', '/market/benchmarks', null, options);
+}
+
+export async function getMutualFundNavFacts(schemeCodes, options = {}) {
+  const normalized = [...new Set((schemeCodes || []).map(value => String(value).trim()).filter(Boolean))];
+  if (normalized.length === 0 || normalized.length > 50 || normalized.some(code => !/^\d+$/.test(code))) {
+    throw new TypeError('schemeCodes must contain 1-50 AMFI numeric scheme codes.');
+  }
+  return request('GET', `/market/mutual-funds/nav?schemeCodes=${encodeURIComponent(normalized.join(','))}`, null, options);
 }
 
 // ─── INSTRUMENTS ─────────────────────────────────────────
@@ -464,8 +481,8 @@ export async function healthCheck(options = {}) {
 }
 
 // ─── MARKET DATA ─────────────────────────────────────────
-export async function getMarketRates() {
-  return request('GET', '/market/rates');
+export async function getMarketRates(options = {}) {
+  return request('GET', '/market/rates', null, options);
 }
 
 export async function refreshMarketRates() {
@@ -567,7 +584,7 @@ const api = {
   setUserInfo, getUserInfo,
   buildProfile, getCurrentProfile, getFinancialHealthScore, updateProfile, getRecommendations, getInstruments, rankInvestmentCandidates, getProjections, calculateStepUpProjection, calculateAllocationSplit, compareInvestmentProjection, getCustomPortfolioProjection, runInstrumentStressTest,
   runMonteCarlo, runPortfolioMonteCarlo, createGoal, getGoals, updateGoal, simulateGoal, deleteGoal, healthCheck,
-  getMarketRates, refreshMarketRates,
+  getMarketRates, getBenchmarkMarketFacts, getMutualFundNavFacts, refreshMarketRates,
   sendChatMessage, getChatHistory, clearChatSession, rebalancePortfolio,
   updateRecommendationWeights, optimisePortfolio,
   computeTax, compareTax, getCurrentMacroRegime, simulateMacroRegimeAdjustment, computePostTaxReturn, computePostTaxReturnBatch,

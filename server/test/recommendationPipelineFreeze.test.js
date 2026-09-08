@@ -122,17 +122,23 @@ test('pipeline output is backend-owned, pre-tax nominal, suitable, and capacity-
   assert.deepEqual(forbiddenNoise, output, 'forbidden profile fields cannot change ranking or allocation');
 });
 
-test('WTI owns its provider universe and order and inherits the authoritative parent decision', () => {
+test('WTI reference metadata passes suitability without pretending catalog order is a ranking', () => {
   const products = rankWhereToInvestBackend(canonicalProfile(), { parentInstrumentId: 'index_mf' });
   assert.equal(products.length, 5);
   assert.equal(products[0].parentInstrumentId, 'index_mf');
-  assert.equal(products[0].providerRank, 1);
-  assert.equal(products[0].returnBasis, 'PRE_TAX_NOMINAL');
+  assert.equal(products[0].listingPosition, 1);
+  assert.equal(products[0].returnBasis, null);
+  assert.equal(products[0].nominalReturn, null);
+  assert.equal(products[0].effectiveYield, null);
+  assert.equal(products[0].expenseRatio, null);
   assert.equal(products[0].postTaxReturn, null);
-  assert.equal(products[0].rankingBasis, 'AUTHORITATIVE_SERVER_CATALOG_ORDER_WITH_PARENT_SUITABILITY');
+  assert.equal(products[0].rankingBasis, 'REFERENCE_METADATA_ONLY_NOT_RANKED');
+  assert.equal(products[0].badge, null);
   assert.equal(typeof products[0].platform, 'string');
-  assert.equal(typeof products[0].minInvestment, 'string');
+  assert.equal(products[0].minInvestment, null);
   assert.equal(products.metadata.catalog.title.length > 0, true);
+  assert.equal(products.metadata.ranking.status, 'NOT_RANKED');
+  assert.equal(products.metadata.ranking.authority, 'REFERENCE_METADATA_ONLY');
   assert.equal('annualIncome' in products[0], false);
   const unknown = rankWhereToInvestBackend(canonicalProfile(), { parentInstrumentId: 'missing' });
   assert.equal(unknown.length, 0);

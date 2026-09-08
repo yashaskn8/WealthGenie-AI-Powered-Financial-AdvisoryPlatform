@@ -43,6 +43,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
 
   // Stable serialized key - changes ONLY when profile data changes, not on every render
   const profileKey = useMemo(() => financialProfileKey(userProfile), [userProfile]);
+  const profileId = userProfile.profileId;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -52,7 +53,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
         setIsLoading(true);
         setBackendRecs(null); // Clear stale data immediately
         setBackendFallback(null);
-        const activeProfileId = userProfile.profileId;
+        const activeProfileId = profileId;
         if (!activeProfileId) {
           throw new Error('Backend profile creation did not return a profileId.');
         }
@@ -80,7 +81,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
       cancelled = true;
       controller.abort();
     };
-  }, [profileKey, userProfile, onProfileUpdate]);
+  }, [profileId, profileKey]);
 
   const handleLogout = async () => {
     try {

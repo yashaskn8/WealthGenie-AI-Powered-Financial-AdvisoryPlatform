@@ -2,11 +2,11 @@
  * WealthGenie Market Data Cron Jobs
  * Refreshes live market data on a schedule.
  *
- * - AMFI NAVs: daily at 23:30 IST (18:00 UTC)
- * - Index statistics: every 2 hours during market hours
+ * - AMFI NAVs: one bounded official-report refresh daily
+ * - Upstox benchmark quotes: one two-instrument request every 2 hours
  */
 
-import { fetchMutualFundNAVs, fetchIndexStatistics } from '../services/marketDataService.js';
+import { fetchAmfiProductSnapshot, fetchBenchmarkQuotes } from '../services/marketDataService.js';
 
 let activeJobStopper = null;
 
@@ -20,17 +20,14 @@ export function startMarketDataRefreshJobs() {
   // Daily AMFI NAV refresh at 23:30 IST (18:00 UTC)
   // AMFI publishes updated NAVs around 23:00 IST
   cancellations.push(scheduleJob('0 18 * * *', 'AMFI NAV Refresh', async () => {
-    const result = await fetchMutualFundNAVs();
-    console.info(`[CRON] AMFI: ${result.count} schemes fetched`);
+    const result = await fetchAmfiProductSnapshot({ forceRefresh: true });
+    console.info(`[CRON] AMFI: ${result.productCount} products, status ${result.status}`);
   }));
 
-  // Index statistics refresh every 2 hours
-  cancellations.push(scheduleJob('0 */2 * * *', 'Index Statistics', async () => {
-    const [nifty, sensex] = await Promise.allSettled([
-      fetchIndexStatistics('^NSEI'),
-      fetchIndexStatistics('^BSESN'),
-    ]);
-    console.info(`[CRON] Nifty: ${nifty.status}, Sensex: ${sensex.status}`);
+  // A single batched request refreshes NIFTY 50 and India VIX every 2 hours.
+  cancellations.push(scheduleJob('0 */2 * * *', 'Upstox Benchmark Quotes', async () => {
+    const result = await fetchBenchmarkQuotes({ forceRefresh: true });
+    console.info(`[CRON] Upstox benchmarks: ${result.availableFactCount} available, status ${result.status}`);
   }));
 
   console.info('[CRON] Market data refresh jobs scheduled');

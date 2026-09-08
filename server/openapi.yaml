@@ -250,6 +250,19 @@ paths:
 
   /api/market/rates:
     get: { operationId: getMarketRates, tags: [Market], security: [], responses: { '200': { $ref: '#/components/responses/Object' } } }
+  /api/market/benchmarks:
+    get: { operationId: getMarketBenchmarks, tags: [Market], security: [], responses: { '200': { $ref: '#/components/responses/Object' } } }
+  /api/market/mutual-funds/nav:
+    get:
+      operationId: getMutualFundNavFacts
+      tags: [Market]
+      security: []
+      parameters:
+        - name: schemeCodes
+          in: query
+          required: true
+          schema: { type: string, pattern: '^\d+(,\d+){0,49}$', maxLength: 600 }
+      responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' } }
   /api/market/params:
     get: { operationId: getMarketParameters, tags: [Market], security: [], responses: { '200': { $ref: '#/components/responses/Object' } } }
   /api/market/refresh:

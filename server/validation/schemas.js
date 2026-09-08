@@ -105,6 +105,14 @@ export const regimeTiltsQuerySchema = Joi.object({
   regime: Joi.string().valid(...macroRegimeKeys).required(),
 }).unknown(false);
 
+export const marketNavQuerySchema = Joi.object({
+  schemeCodes: Joi.string()
+    .trim()
+    .pattern(/^\d+(,\d+){0,49}$/)
+    .max(600)
+    .required(),
+}).unknown(false);
+
 export const regimeAdjustSchema = Joi.object({
   baseWeights: Joi.object()
     .pattern(Joi.string().pattern(/^[A-Za-z0-9_-]{1,50}$/), Joi.number().min(0).max(1))
