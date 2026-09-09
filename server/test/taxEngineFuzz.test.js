@@ -1,7 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fc from 'fast-check';
-import { computeTax, calculateTaxableIncome, compareTaxRegimes } from '../services/taxEngine.js';
+import {
+  computeTax as computeTaxForFiscalYear,
+  compareTaxRegimes as compareTaxRegimesForFiscalYear,
+} from '../services/taxEngine.js';
+
+const computeTax = (income, regime, deductions, incomeSource) =>
+  computeTaxForFiscalYear(income, regime, deductions, incomeSource, 'FY2026-27');
+const compareTaxRegimes = (income, deductions, incomeSource) =>
+  compareTaxRegimesForFiscalYear(income, deductions, incomeSource, 'FY2026-27');
 
 test('PHASE 1.1 — Property-Based Adversarial Fuzzing of Tax Engine', async (t) => {
 

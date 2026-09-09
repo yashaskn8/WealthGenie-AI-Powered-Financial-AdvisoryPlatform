@@ -22,6 +22,7 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
           incomeSource: 'salary',
           monthlySIP: 10000,
           userAge: 30,
+          fiscalYear: 'FY2026-27',
         }),
       });
 
@@ -46,6 +47,7 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
           incomeSource: 'salary',
           userAge: 30,
           inflationRate: 0.06,
+          fiscalYear: 'FY2026-27',
         }),
       });
 

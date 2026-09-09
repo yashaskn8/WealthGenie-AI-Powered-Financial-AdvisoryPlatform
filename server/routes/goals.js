@@ -15,6 +15,11 @@ import {
 } from '../services/recommendationProfile.js';
 import { assessSuitabilityRisk } from '../services/riskProfiler.js';
 import { idempotency } from '../middleware/idempotency.js';
+import {
+  PROJECTION_ASSUMPTION_DATA_CLASS,
+  PROJECTION_ASSUMPTION_SOURCE,
+  PROJECTION_ASSUMPTION_VERSION,
+} from '../services/instrumentConstants.js';
 
 const router = Router();
 const GOAL_INFLATION_ASSUMPTION = 0.05;
@@ -96,6 +101,9 @@ export async function _getBlendedPortfolioMetrics(userId, profileId, profile = u
     volatility,
     primaryInstrument: instruments[0].type,
     returnBasis: 'PRE_TAX_NOMINAL',
+    returnDataClass: PROJECTION_ASSUMPTION_DATA_CLASS,
+    returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+    returnAssumptionSource: PROJECTION_ASSUMPTION_SOURCE,
   };
 }
 
@@ -211,6 +219,11 @@ router.post('/create', verifyJWT, idempotency(), validateStrict(customGoalSchema
     years_remaining: plan.yearsRemaining,
     simulation_classification: 'PROFILE_GROUNDED_GOAL_PLAN',
     return_basis: plan.metrics.returnBasis,
+    return_data_class: plan.metrics.returnDataClass,
+    return_assumption_version: plan.metrics.returnAssumptionVersion,
+    return_assumption_source: plan.metrics.returnAssumptionSource,
+    observed_market_fact: false,
+    provider_forecast: false,
     inflation_assumption: GOAL_INFLATION_ASSUMPTION,
   };
   data.gemini_advice = await generateGoalAdvice(data, profile);
@@ -281,6 +294,11 @@ router.post('/:goalId/simulate', verifyJWT, validateStrict(goalSimulationSchema)
     },
     simulation_classification: 'NON_RECOMMENDATION_GOAL_WHAT_IF',
     return_basis: metrics.returnBasis,
+    return_data_class: metrics.returnDataClass,
+    return_assumption_version: metrics.returnAssumptionVersion,
+    return_assumption_source: metrics.returnAssumptionSource,
+    observed_market_fact: false,
+    provider_forecast: false,
     inflation_assumption: GOAL_INFLATION_ASSUMPTION,
   });
 }));
@@ -331,6 +349,11 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
     goal.years_remaining = plan.yearsRemaining;
     goal.simulation_classification = 'PROFILE_GROUNDED_GOAL_PLAN';
     goal.return_basis = plan.metrics.returnBasis;
+    goal.return_data_class = plan.metrics.returnDataClass;
+    goal.return_assumption_version = plan.metrics.returnAssumptionVersion;
+    goal.return_assumption_source = plan.metrics.returnAssumptionSource;
+    goal.observed_market_fact = false;
+    goal.provider_forecast = false;
     goal.inflation_assumption = GOAL_INFLATION_ASSUMPTION;
     goal.gemini_advice = await generateGoalAdvice(goal, profile);
   }

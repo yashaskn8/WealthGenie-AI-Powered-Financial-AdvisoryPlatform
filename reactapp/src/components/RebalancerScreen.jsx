@@ -931,35 +931,35 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                 
-                {/* Weak Market */}
+                {/* Simulated 10th percentile */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(239, 68, 68, 0.03)', border: '1px solid rgba(239, 68, 68, 0.08)', borderRadius: '12px', padding: '12px 16px' }}>
                   <div>
                     <div style={{ fontSize: '0.85rem', fontWeight: 700, color: '#fca5a5' }}>
-                      <JargonTooltip term="P10">Weak Market (P10)</JargonTooltip>
+                      <JargonTooltip term="P10">Simulated 10th Percentile (P10)</JargonTooltip>
                     </div>
-                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>90% chance of exceeding this</div>
+                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>90% of modeled paths ended above this value</div>
                   </div>
                   <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#f8fafc' }}><AnimatedCurrency value={scenarioResults.p10} /></div>
                 </div>
 
-                {/* Typical Market */}
+                {/* Simulated median */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(56, 189, 248, 0.03)', border: '1px solid rgba(56, 189, 248, 0.08)', borderRadius: '12px', padding: '12px 16px' }}>
                   <div>
                     <div style={{ fontSize: '0.85rem', fontWeight: 700, color: '#38bdf8' }}>
-                      <JargonTooltip term="P50">Typical Market (P50)</JargonTooltip>
+                      <JargonTooltip term="P50">Simulated Median (P50)</JargonTooltip>
                     </div>
-                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>50% chance of exceeding this</div>
+                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>50% of modeled paths ended above this value</div>
                   </div>
                   <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#f8fafc' }}><AnimatedCurrency value={scenarioResults.p50} /></div>
                 </div>
 
-                {/* Strong Market */}
+                {/* Simulated 90th percentile */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(16, 185, 129, 0.03)', border: '1px solid rgba(16, 185, 129, 0.08)', borderRadius: '12px', padding: '12px 16px' }}>
                   <div>
                     <div style={{ fontSize: '0.85rem', fontWeight: 700, color: '#6ee7b7' }}>
-                      <JargonTooltip term="P90">Strong Market (P90)</JargonTooltip>
+                      <JargonTooltip term="P90">Simulated 90th Percentile (P90)</JargonTooltip>
                     </div>
-                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>10% chance of exceeding this</div>
+                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>10% of modeled paths ended above this value</div>
                   </div>
                   <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#f8fafc' }}><AnimatedCurrency value={scenarioResults.p90} /></div>
                 </div>

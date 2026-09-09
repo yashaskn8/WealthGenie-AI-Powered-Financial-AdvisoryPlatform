@@ -6,7 +6,15 @@ import FinancialProfile from '../models/FinancialProfile.js';
 import { generateAdvisory, getGoalAdvisory } from '../services/geminiService.js';
 import { processChat } from '../services/geminiChatService.js';
 import { buildSystemPrompt } from '../services/genieChatSystemPrompt.js';
-import { INSTRUMENT_PARAMS, buildRateLookup, getNominalRate, getVolatility, toMonthlyRate, updateLiveParam } from '../services/instrumentConstants.js';
+import {
+  INSTRUMENT_PARAMS,
+  PROJECTION_ASSUMPTION_DATA_CLASS,
+  PROJECTION_ASSUMPTION_VERSION,
+  buildRateLookup,
+  getNominalRate,
+  getVolatility,
+  toMonthlyRate,
+} from '../services/instrumentConstants.js';
 import { fetchIndexStatistics, fetchMutualFundNAVs, checkFDRateStaleness, resolvePrimaryMarketProvider } from '../services/marketDataService.js';
 import { checkMLHealth, getMLPrediction, getRuleBasedFallback } from '../services/mlClient.js';
 import { queryRAG } from '../services/ragClient.js';
@@ -93,19 +101,20 @@ test('genieChatSystemPrompt grounds prompt only in canonical profile, recommenda
   assert.doesNotMatch(authoritativeSections, /annual income|tax slab/i);
 });
 
-test('instrumentConstants exposes immutable rates and live override path', (t) => {
-  t.after(() => updateLiveParam('FD', 7.5, 0.005));
+test('instrumentConstants exposes immutable, versioned model assumptions', () => {
   assert.equal(getNominalRate('FD'), 7.5);
   assert.equal(getVolatility('FD'), 0.005);
   assert.equal(getNominalRate('UNKNOWN'), null);
   assert.equal(getVolatility('UNKNOWN'), null);
   assert.equal(toMonthlyRate(0.12), 0.01);
   assert.ok(toMonthlyRate(0.12, true) > 0.009);
-  assert.throws(() => { INSTRUMENT_PARAMS.FD = {}; }, /immutable/i);
+  assert.throws(() => { INSTRUMENT_PARAMS.FD = {}; }, /read only|immutable/i);
 
-  updateLiveParam('FD', 6.8, 0.006);
-  assert.equal(INSTRUMENT_PARAMS.FD.nominalRate, 6.8);
-  assert.equal(buildRateLookup().FD, 6.8);
+  assert.equal(INSTRUMENT_PARAMS.FD.dataClass, PROJECTION_ASSUMPTION_DATA_CLASS);
+  assert.equal(INSTRUMENT_PARAMS.FD.assumptionVersion, PROJECTION_ASSUMPTION_VERSION);
+  assert.equal(INSTRUMENT_PARAMS.FD.observedMarketFact, false);
+  assert.equal(INSTRUMENT_PARAMS.FD.providerForecast, false);
+  assert.equal(buildRateLookup().FD, 7.5);
 });
 
 test('marketDataService parses AMFI and uses NSE as the no-account primary market provider', async (t) => {
@@ -369,8 +378,8 @@ test('riskProfiler classifies profiles and encodes categories', () => {
 });
 
 test('postTaxCalculator respects EEE exemptions and taxable instruments', () => {
-  const ppf = calculatePostTaxReturn('PPF', 0.071, 1200000, 15, 'new', 10000, 35, 'salary');
-  const fd = calculatePostTaxReturnSafe('FD', 0.07, 3000000, 3, 'new', 10000, 35, 'salary');
+  const ppf = calculatePostTaxReturn('PPF', 0.071, 1200000, 15, 'new', 10000, 35, 'salary', true, 'FY2026-27');
+  const fd = calculatePostTaxReturnSafe('FD', 0.07, 3000000, 3, 'new', 10000, 35, 'salary', true, 'FY2026-27');
 
   assert.equal(ppf.taxRate, 0);
   assert.equal(ppf.postTaxReturn, 0.071);

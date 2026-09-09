@@ -22,87 +22,92 @@ const formatCatalogHorizon = horizon => (
     : 'Unavailable'
 );
 
+const neutralizeUnverifiedReferenceClaim = value => {
+  if (typeof value !== 'string') return value;
+  return /(?:\d+(?:\.\d+)?\s*%|guarantee|risk[ -]?free|dicgc|tax[ -]?free|highest|best\b)/i.test(value)
+    ? 'Unavailable until this exact product claim is source-qualified.'
+    : value;
+};
+
 const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
   // ─── Category-Specific Parameters ───
   const categoryParams = (() => {
     const cat = (inv.category || '').toLowerCase();
     const id = (inv.id || '');
     const horizon = inv.idealHorizon || inv.dynamicData?.idealHorizon || null;
-    const expRatio = inv.expenseRatio ?? inv.dynamicData?.expenseRatio;
-    const liqType = inv.dynamicData?.liquidity?.type || 'Unavailable';
 
     if (cat.includes('etf')) {
       return [
-        { label: 'Expense Ratio', value: expRatio != null ? `${(expRatio * 100).toFixed(2)}%` : '—' },
-        { label: 'Risk Category', value: inv.riskLabel || inv.risk_level || 'Unavailable' },
-        { label: 'Ideal Horizon', value: formatCatalogHorizon(horizon) },
-        { label: 'Settlement', value: liqType },
-        { label: 'Exchange', value: 'NSE & BSE' },
-        { label: 'Demat Required', value: 'Yes' },
+        { label: 'Expense Ratio', value: 'Unavailable — verify exact product' },
+        { label: 'Model Risk Category', value: inv.riskLabel || inv.risk_level || 'Unavailable' },
+        { label: 'Model Horizon Assumption', value: formatCatalogHorizon(horizon) },
+        { label: 'Settlement', value: 'Unavailable — verify exact product' },
+        { label: 'Exchange', value: 'Unavailable — verify exact product' },
+        { label: 'Demat Requirement', value: 'Unavailable — verify exact product' },
       ];
     }
     if (cat.includes('mutual') || cat.includes('hybrid')) {
       return [
-        { label: 'Expense Ratio', value: expRatio != null ? `${(expRatio * 100).toFixed(2)}%` : '—' },
-        { label: 'Risk Category', value: inv.riskLabel || inv.risk_level || 'Unavailable' },
-        { label: 'Ideal Horizon', value: formatCatalogHorizon(horizon) },
-        { label: 'Settlement', value: liqType },
-        { label: 'SIP Available', value: 'Yes' },
-        { label: 'Demat Required', value: 'No (Direct MF allowed)' },
+        { label: 'Expense Ratio', value: 'Unavailable — verify exact product' },
+        { label: 'Model Risk Category', value: inv.riskLabel || inv.risk_level || 'Unavailable' },
+        { label: 'Model Horizon Assumption', value: formatCatalogHorizon(horizon) },
+        { label: 'Settlement', value: 'Unavailable — verify exact product' },
+        { label: 'SIP Availability', value: 'Unavailable — verify exact product' },
+        { label: 'Demat Requirement', value: 'Unavailable — verify exact product' },
       ];
     }
     if (cat.includes('bond') || cat.includes('debenture')) {
       return [
-        { label: 'Coupon / Interest', value: formatCatalogRate(inv.rate ?? inv.expectedReturn) },
-        { label: 'Credit Quality', value: inv.trustBadge?.body || inv.staticData?.trustBadge?.body || 'Rated' },
-        { label: 'Ideal Horizon', value: formatCatalogHorizon(horizon) },
-        { label: 'Settlement', value: liqType },
-        { label: 'Demat Required', value: 'Yes' },
+        { label: 'Model Return Assumption', value: formatCatalogRate(inv.expectedReturn) },
+        { label: 'Credit Quality', value: 'Unavailable — verify exact product' },
+        { label: 'Model Horizon Assumption', value: formatCatalogHorizon(horizon) },
+        { label: 'Settlement', value: 'Unavailable — verify exact product' },
+        { label: 'Demat Requirement', value: 'Unavailable — verify exact product' },
       ];
     }
     if (cat.includes('government') || inv.assetClass === 'Sovereign') {
       return [
-        { label: 'Interest Rate', value: formatCatalogRate(inv.expectedReturn ?? inv.rate) },
-        { label: 'Lock-in Period', value: inv.lock_in_years > 0 ? `${inv.lock_in_years} years` : 'None' },
-        { label: 'Sovereign Guarantee', value: 'Yes — Govt. of India' },
-        { label: 'Tax Section', value: inv.taxation?.section || inv.staticData?.taxation?.section || '—' },
-        { label: 'Max Investment', value: inv.maxAnnualInvestment ? `₹${(inv.maxAnnualInvestment / 100000).toFixed(1)}L / year` : 'Unavailable' },
+        { label: 'Model Return Assumption', value: formatCatalogRate(inv.expectedReturn) },
+        { label: 'Lock-in Period', value: 'Unavailable here — see verified product facts' },
+        { label: 'Backing / Guarantee', value: 'Unavailable here — verify exact scheme terms' },
+        { label: 'Tax Treatment', value: 'Requires explicit Tax view inputs and classification' },
+        { label: 'Contribution Limit', value: 'Unavailable here — verify exact scheme terms' },
       ];
     }
     if (cat.includes('reit') || cat.includes('invit')) {
       return [
-        { label: 'Dividend Yield', value: formatCatalogRate(inv.expectedReturn ?? inv.rate) },
-        { label: 'Risk Category', value: inv.riskLabel || inv.risk_level || 'Unavailable' },
-        { label: 'Distribution', value: '90%+ net cash flow (SEBI mandated)' },
-        { label: 'Settlement', value: liqType },
-        { label: 'Exchange', value: 'NSE & BSE' },
-        { label: 'Demat Required', value: 'Yes' },
+        { label: 'Model Return Assumption', value: formatCatalogRate(inv.expectedReturn) },
+        { label: 'Model Risk Category', value: inv.riskLabel || inv.risk_level || 'Unavailable' },
+        { label: 'Distribution Terms', value: 'Unavailable — verify exact product' },
+        { label: 'Settlement', value: 'Unavailable — verify exact product' },
+        { label: 'Exchange', value: 'Unavailable — verify exact product' },
+        { label: 'Demat Requirement', value: 'Unavailable — verify exact product' },
       ];
     }
     if (cat.includes('gold') || id.includes('gold') || id === 'sgb') {
       return [
         { label: 'Asset Type', value: 'Gold / Precious Metal' },
-        { label: 'Interest', value: id === 'sgb' ? '2.5% p.a. on issue price' : 'N/A (capital appreciation)' },
-        { label: 'Ideal Horizon', value: formatCatalogHorizon(horizon) },
-        { label: 'Settlement', value: liqType },
-        { label: 'Inflation Hedge', value: 'Yes — historically correlated' },
+        { label: 'Coupon / Interest', value: 'Unavailable — verify exact product or issue' },
+        { label: 'Model Horizon Assumption', value: formatCatalogHorizon(horizon) },
+        { label: 'Settlement', value: 'Unavailable — verify exact product' },
+        { label: 'Inflation Hedge', value: 'Not guaranteed; outcomes depend on product and market' },
       ];
     }
     if (cat.includes('deposit') || id.endsWith('_fd')) {
       return [
-        { label: 'Interest Rate', value: formatCatalogRate(inv.expectedReturn ?? inv.rate) },
-        { label: 'DICGC Insurance', value: 'Up to ₹5 Lakhs' },
-        { label: 'Ideal Tenure', value: formatCatalogHorizon(horizon) },
-        { label: 'Premature Withdrawal', value: 'Allowed (with penalty)' },
-        { label: 'Compounding', value: 'Quarterly' },
+        { label: 'Model Return Assumption', value: formatCatalogRate(inv.expectedReturn) },
+        { label: 'Deposit Insurance', value: 'Unavailable here — verify provider and ownership scope' },
+        { label: 'Model Tenure Assumption', value: formatCatalogHorizon(horizon) },
+        { label: 'Premature Withdrawal', value: 'Unavailable — verify exact product' },
+        { label: 'Compounding', value: 'Unavailable — verify exact product' },
       ];
     }
     // Fallback for Direct Equity, Insurance, Retirement, Other
     return [
-      { label: 'Catalog Return Assumption', value: formatCatalogRate(inv.expectedReturn ?? inv.rate) },
+      { label: 'Catalog Return Assumption', value: formatCatalogRate(inv.expectedReturn) },
       { label: 'Risk Category', value: inv.riskLabel || inv.risk_level || 'Unavailable' },
       { label: 'Ideal Horizon', value: formatCatalogHorizon(horizon) },
-      { label: 'Settlement', value: liqType },
+      { label: 'Settlement', value: 'Unavailable — verify exact product' },
     ];
   })();
 
@@ -126,7 +131,10 @@ const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
     <div className="tab-fade-in">
       <div className="ddm-section-header">Asset Intelligence</div>
       <div className="ddm-desc-card">
-        <p>{inv.description}</p>
+        <p>{neutralizeUnverifiedReferenceClaim(inv.description)}</p>
+        <p style={{ color: '#94a3b8', fontSize: '0.78rem', marginTop: '8px' }}>
+          REFERENCE METADATA only. Current source-backed rates and product facts appear in Where to Invest; numerical return ranges here are versioned model assumptions.
+        </p>
       </div>
 
       {/* Category-Specific Asset Parameters */}
@@ -146,7 +154,7 @@ const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
           <div className="pc-title" style={{ color: '#22c55e' }}><Shield size={20} /> Strategic Advantages</div>
           <ul className="pc-list">
             {pros.map((pro, idx) => (
-              <li key={idx} className="pc-item"><Zap size={14} className="pc-icon" /> {pro}</li>
+              <li key={idx} className="pc-item"><Zap size={14} className="pc-icon" /> {neutralizeUnverifiedReferenceClaim(pro)}</li>
             ))}
           </ul>
         </div>
@@ -154,7 +162,7 @@ const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
           <div className="pc-title" style={{ color: '#f59e0b' }}><AlertCircle size={20} /> Risk Considerations</div>
           <ul className="pc-list">
             {cons.map((con, idx) => (
-              <li key={idx} className="pc-item"><BarChart3 size={14} className="pc-icon" /> {con}</li>
+              <li key={idx} className="pc-item"><BarChart3 size={14} className="pc-icon" /> {neutralizeUnverifiedReferenceClaim(con)}</li>
             ))}
           </ul>
         </div>
@@ -177,16 +185,16 @@ const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
                   {isSovereign ? <Landmark size={22} /> : <ShieldCheck size={22} />}
                 </div>
                 <div className="ddm-trust-titles">
-                  <span className="ddm-trust-label" style={{ color: accentColor }}>{trustInfo.label}</span>
-                  <span className="ddm-trust-body">{trustInfo.body}</span>
+                  <span className="ddm-trust-label" style={{ color: accentColor }}>Reference Safety Metadata</span>
+                  <span className="ddm-trust-body">Unavailable until source-qualified for the exact product.</span>
                 </div>
               </div>
-              <p className="ddm-trust-desc">{trustInfo.desc}</p>
+              <p className="ddm-trust-desc">The legacy catalog badge is not current provider evidence. Verify current backing, insurance, limits, issuer risk, and product terms from an official source.</p>
               <div className="ddm-trust-footer">
                 <span className="ddm-trust-chip"><Lock size={11} /> Catalog disclosure</span>
                 <span className="ddm-trust-chip"><ShieldCheck size={11} /> Verify current terms</span>
-                {isSovereign && <span className="ddm-trust-chip"><Landmark size={11} /> Sovereign backing disclosed</span>}
-                {isInsured && <span className="ddm-trust-chip"><Shield size={11} /> Insurance terms disclosed</span>}
+                {isSovereign && <span className="ddm-trust-chip"><Landmark size={11} /> Exact backing unverified here</span>}
+                {isInsured && <span className="ddm-trust-chip"><Shield size={11} /> Exact insurance scope unverified here</span>}
               </div>
             </div>
           </>
@@ -221,7 +229,7 @@ const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
                 </div>
                 <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '6px' }}>{alt.category}</div>
                 <div style={{ display: 'flex', gap: '12px', fontSize: '0.75rem' }}>
-                  <span style={{ color: '#22c55e' }}>{formatCatalogRate(alt.expectedReturn ?? alt.rate)}</span>
+                  <span style={{ color: '#22c55e' }}>Model assumption: {formatCatalogRate(alt.expectedReturn)}</span>
                   <span style={{ color: alt.riskLabel?.includes?.('High') ? '#f43f5e' : '#94a3b8' }}>{alt.riskLabel || 'Unavailable'}</span>
                 </div>
               </button>
@@ -230,7 +238,7 @@ const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
         </>
       )}
 
-      <div className="ddm-section-header">Performance Indexing</div>
+      <div className="ddm-section-header">Model Assumption Comparison</div>
       <div className="ddm-chart-container">
         <ResponsiveContainer width="100%" height={360}>
           <BarChart data={comparisonData} margin={{ top: 20, right: 20, left: -10, bottom: 30 }}>
@@ -257,7 +265,7 @@ const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
             <XAxis dataKey="name" tick={{ fill: '#cbd5e1', fontSize: 11, fontWeight: 600 }} axisLine={{ stroke: 'rgba(255,255,255,0.1)' }} tickLine={false} dy={16} />
             <YAxis tick={{ fill: '#94a3b8', fontSize: 10, fontWeight: 600 }} axisLine={false} tickLine={false} dx={-10} />
             <Tooltip cursor={{ fill: 'url(#cursorGrad)' }} contentStyle={{ background: 'rgba(15, 23, 42, 0.9)', backdropFilter: 'blur(24px)', border: '1px solid rgba(56, 189, 248, 0.3)', borderRadius: 16, boxShadow: '0 16px 32px rgba(0,0,0,0.8), 0 0 20px rgba(56, 189, 248, 0.15)', color: '#f8fafc', fontWeight: 600, padding: '16px' }} itemStyle={{ color: '#38bdf8', fontWeight: 800, fontSize: '1.1rem' }} labelStyle={{ color: '#cbd5e1', marginBottom: '8px', borderBottom: '1px solid rgba(255,255,255,0.1)', paddingBottom: '8px' }} />
-            <Bar dataKey="returnMax" name="Upside Potential %" radius={[6, 6, 0, 0]} barSize={32}>
+            <Bar dataKey="returnMax" name="Model Return Assumption %" radius={[6, 6, 0, 0]} barSize={32}>
               {comparisonData.map((entry, idx) => (
                 <Cell key={idx} fill={entry.isThis ? 'url(#barGrad)' : 'url(#barGradMuted)'} filter={entry.isThis ? 'url(#barGlow)' : 'none'} style={{ transition: 'all 0.4s cubic-bezier(0.16, 1, 0.3, 1)' }} />
               ))}
@@ -278,7 +286,8 @@ const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
             <div><span style={{ color: '#64748b' }}>Last Updated:</span> <span style={{ color: '#94a3b8', fontWeight: 600 }}>{metadata.lastUpdated}</span></div>
             <div><span style={{ color: '#64748b' }}>Reviewed By:</span> <span style={{ color: '#94a3b8', fontWeight: 600 }}>{metadata.reviewedBy}</span></div>
             <div><span style={{ color: '#64748b' }}>Confidence:</span> <span style={{ color: metadata.sourceConfidence === 'High' ? '#22c55e' : '#f59e0b', fontWeight: 600 }}>{metadata.sourceConfidence}</span></div>
-            {returnSource && <div style={{ gridColumn: '1 / -1' }}><span style={{ color: '#64748b' }}>Return Source:</span> <span style={{ color: '#94a3b8', fontWeight: 600 }}>{returnSource} ({returnLastUpdated})</span></div>}
+            <div style={{ gridColumn: '1 / -1' }}><span style={{ color: '#64748b' }}>Return Classification:</span> <span style={{ color: '#94a3b8', fontWeight: 600 }}>MODEL_ASSUMPTION · {inv.returnAssumptionVersion || 'wealthgenie-projection-assumptions-1.0.0'} · not an observed market fact or provider forecast</span></div>
+            {returnSource && <div style={{ gridColumn: '1 / -1' }}><span style={{ color: '#64748b' }}>Legacy Catalog Citation:</span> <span style={{ color: '#94a3b8', fontWeight: 600 }}>{returnSource} ({returnLastUpdated}) — reference metadata only</span></div>}
           </div>
         </div>
       )}

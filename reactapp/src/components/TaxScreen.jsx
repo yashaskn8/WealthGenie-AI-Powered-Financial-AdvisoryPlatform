@@ -10,7 +10,8 @@ import './TaxScreen.css';
 const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
   const [annualIncome, setAnnualIncome] = useState(0);
   const [incomeSource, setIncomeSource] = useState('');
-  const [regime, setRegime] = useState('new');
+  const [fiscalYear, setFiscalYear] = useState('');
+  const [regime, setRegime] = useState('');
   const [existing80C, setExisting80C] = useState('');
   const [existing80CCD, setExisting80CCD] = useState('');
   const [existingHRA, setExistingHRA] = useState('');
@@ -28,7 +29,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
 
   // ── Debounced API Synchronisation ──
   useEffect(() => {
-    if (!incomeSource) return undefined;
+    if (!incomeSource || !fiscalYear) return undefined;
     let active = true;
     setIsLoading(true);
     setApiError(null);
@@ -46,6 +47,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
           parents_senior: existing80DParents === '' ? undefined : parentsSenior,
           age: profile?.age,
           incomeSource,
+          fiscalYear,
         };
         const response = await api.compareTax(annualIncome, payload);
         if (active) {
@@ -68,7 +70,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
       active = false;
       clearTimeout(timer);
     };
-  }, [annualIncome, incomeSource, existing80C, existing80CCD, existingHRA, existingHomeLoan, existingOther, existing80DSelf, existing80DParents, parentsSenior, profile?.age]);
+  }, [annualIncome, fiscalYear, incomeSource, existing80C, existing80CCD, existingHRA, existingHomeLoan, existingOther, existing80DSelf, existing80DParents, parentsSenior, profile?.age]);
 
   const section80CLimit = serverTaxData?.deduction_limits?.section80C ?? null;
   const section80CCDLimit = serverTaxData?.deduction_limits?.section80CCD1B ?? null;
@@ -81,10 +83,11 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
     return recommendations
       .filter(item => item.goalTags?.includes('Tax Saving'))
       .map(item => {
-        const isNps = item.id === 'nps';
         return {
           ...item,
-          section: isNps ? '80CCD(1B)' : '80C',
+          taxClassification: item.taxClassification?.dataClass === 'VERIFIED_PRODUCT_FACT'
+            ? item.taxClassification
+            : null,
           suggestedAmount: Number(item.monthly_allocation) * 12,
           expected_return_min: Number(item.nominalReturn),
           expected_return_max: Number(item.nominalReturn),
@@ -93,23 +96,23 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
   }, [recommendations]);
 
   // Authoritative financial values always come from the backend.
-  const totalTax = serverTaxData
+  const totalTax = serverTaxData && regime
     ? (regime === 'new' ? serverTaxData.new_regime.tax : serverTaxData.old_regime.tax)
     : null;
 
-  const taxableIncome = serverTaxData
+  const taxableIncome = serverTaxData && regime
     ? (regime === 'new' ? serverTaxData.new_regime.taxable_income : serverTaxData.old_regime.taxable_income)
     : null;
 
-  const effectiveRate = serverTaxData
+  const effectiveRate = serverTaxData && regime
     ? (regime === 'new' ? serverTaxData.new_regime.effective_rate : serverTaxData.old_regime.effective_rate)
     : null;
 
-  const standardDeduction = serverTaxData
+  const standardDeduction = serverTaxData && regime
     ? (regime === 'new' ? serverTaxData.new_regime.standard_deduction : serverTaxData.old_regime.standard_deduction)
     : null;
 
-  const potentialSaving = serverTaxData
+  const potentialSaving = serverTaxData && regime
     ? (regime === 'old' ? serverTaxData.potential_tax_saving : 0)
     : null;
 
@@ -123,7 +126,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
   const newRegimeSlabs = serverTaxData?.new_regime?.slab_breakdown ?? [];
   const oldRegimeSlabs = serverTaxData?.old_regime?.slab_breakdown ?? [];
 
-  const activeSlabs = regime === 'new' ? newRegimeSlabs : oldRegimeSlabs;
+  const activeSlabs = regime === 'new' ? newRegimeSlabs : regime === 'old' ? oldRegimeSlabs : [];
 
   // Crossover breakpoint
   const crossoverBreakpoint = serverTaxData?.crossover_breakpoint ?? null;
@@ -198,8 +201,8 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
         <div>
           <h2 className="tax-verdict-title">Our Recommendation</h2>
           <p className="tax-verdict-text">
-            {!incomeSource ? (
-              <span>Select your income source below to run an explicit, server-verified tax comparison.</span>
+            {!incomeSource || !fiscalYear ? (
+              <span>Select your income source and fiscal year below to run an explicit, server-verified tax comparison.</span>
             ) : apiError ? (
               <span>Authoritative tax results are unavailable. No local fallback calculation is being shown.</span>
             ) : !serverTaxData ? (
@@ -245,7 +248,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
 
       {/* Celebration Banner for Zero Tax */}
       <AnimatePresence>
-        {serverTaxData && totalTax === 0 && (
+        {serverTaxData && regime && totalTax === 0 && (
           <motion.div 
             className="tax-zero-banner"
             initial={{ opacity: 0, scale: 0.95 }}
@@ -297,7 +300,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
           <div className="tax-income-sub">
             <span>Monthly Salary: {formatINR(Math.round(annualIncome / 12))}</span>
             <span className="tax-income-badge">
-              {serverTaxData?.fiscal_year ? `${serverTaxData.fiscal_year} · Verified Server Rules` : 'Select income source to calculate'}
+              {serverTaxData?.fiscal_year ? `${serverTaxData.fiscal_year} · Verified Server Rules` : 'Select income source and fiscal year to calculate'}
             </span>
           </div>
           <label className="tax-input-label" htmlFor="tax-income-source" style={{ marginTop: 16 }}>
@@ -319,6 +322,23 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
             <option value="family_pension">Family pension</option>
             <option value="business">Business or profession</option>
             <option value="other">Other income</option>
+          </select>
+          <label className="tax-input-label" htmlFor="tax-fiscal-year" style={{ marginTop: 12 }}>
+            Fiscal year
+          </label>
+          <select
+            id="tax-fiscal-year"
+            className="tax-input"
+            value={fiscalYear}
+            onChange={(event) => {
+              setFiscalYear(event.target.value);
+              if (!event.target.value) setServerTaxData(null);
+            }}
+            aria-label="Fiscal year for tax calculation"
+          >
+            <option value="">Select fiscal year</option>
+            <option value="FY2026-27">FY2026-27</option>
+            <option value="FY2025-26">FY2025-26</option>
           </select>
         </div>
 
@@ -344,17 +364,22 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
               New Regime
             </button>
           </div>
-          {betterRegime !== 'Either' ? (
+          {!regime ? (
+            <div className="tax-better-badge tax-better-badge--info">
+              <Info size={14} style={{ marginRight: 6, flexShrink: 0 }} />
+              <span>Select a regime to view its calculation. The comparison itself evaluates both.</span>
+            </div>
+          ) : serverTaxData && betterRegime !== 'Either' ? (
             <div className="tax-better-badge">
               <CheckCircle2 size={14} style={{ marginRight: 6, flexShrink: 0 }} />
               <span><strong>Tip:</strong> The {betterRegime} Regime saves you <strong>{formatINR(betterRegimeSavings)}</strong></span>
             </div>
-          ) : (
+          ) : serverTaxData ? (
             <div className="tax-better-badge tax-better-badge--info">
               <Info size={14} style={{ marginRight: 6, flexShrink: 0 }} />
               <span>Both systems charge the same tax. You can pick either one.</span>
             </div>
-          )}
+          ) : null}
         </div>
 
         {/* Tax-Saving Deductions Panel (Old Regime Only) */}
@@ -372,7 +397,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                   <JargonTooltip term="Section 80C">Tax-Saving Investments (80C)</JargonTooltip>
                 </label>
                 <div className="tax-input-subtext">
-                  PPF, ELSS, Life Insurance, Tax-saver FD, etc.
+                  Enter only deductions you have independently established as eligible.
                 </div>
                 <div className="tax-input-wrapper">
                   <span className="tax-input-prefix">₹</span>
@@ -396,7 +421,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                   <JargonTooltip term="NPS">Pension (NPS) Savings</JargonTooltip>
                 </label>
                 <div className="tax-input-subtext">
-                  Extra ₹50K deduction for NPS contributions
+                  Enter only a contribution eligible under the selected fiscal-year policy.
                 </div>
                 <div className="tax-input-wrapper">
                   <span className="tax-input-prefix">₹</span>
@@ -458,7 +483,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                     placeholder="0"
                   />
                 </div>
-                <div className="tax-input-hint">Yearly interest limit: {formatINR(200000)}</div>
+                <div className="tax-input-hint">The backend applies the selected fiscal-year policy limit.</div>
               </div>
 
               {/* Medical Insurance 80D - Self/Family */}
@@ -689,8 +714,8 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
               {activeSlabs.some(s => s.isRebateRow) && (
                 <div className="tax-rebate-explainer">
                   <strong style={{ color: '#34d399' }}>What does this mean?</strong><br/>
-                  The government gives a <strong>tax rebate</strong> (a full discount) to people earning up to {regime === 'new' ? '₹12 Lakh' : '₹5 Lakh'} in taxable income.
-                  Even though your income falls into taxable ranges, the government waives all the tax — so <strong>you pay ₹0 in tax!</strong>
+                  The selected server policy applied a <strong>tax rebate</strong> to this explicit taxable-income result.
+                  The threshold and value shown in the table come from the versioned backend calculation for {fiscalYear}.
                 </div>
               )}
             </div>
@@ -705,9 +730,9 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                 <div className="tax-insight-item">
                   <div className="tax-insight-icon tax-insight-icon-blue"><IndianRupee size={16} /></div>
                   <div>
-                    <div className="tax-insight-title">Monthly Tax from Salary</div>
+                    <div className="tax-insight-title">Monthly Equivalent of Estimated Tax</div>
                     <div className="tax-insight-desc">
-                      About {formatINR(totalTax === null ? null : Math.round(totalTax / 12))}/month will be deducted from your salary as <JargonTooltip term="TDS">TDS</JargonTooltip>.
+                      About {formatINR(totalTax === null ? null : Math.round(totalTax / 12))}/month when the annual server estimate is divided by 12. This is not a prediction of payroll <JargonTooltip term="TDS">TDS</JargonTooltip>.
                     </div>
                   </div>
                 </div>
@@ -715,9 +740,9 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                 <div className="tax-insight-item">
                   <div className="tax-insight-icon tax-insight-icon-purple"><TrendingDown size={16} /></div>
                   <div>
-                    <div className="tax-insight-title">What You Take Home</div>
+                    <div className="tax-insight-title">Income Net of Estimated Tax Only</div>
                     <div className="tax-insight-desc">
-                      About {formatINR(totalTax === null ? null : Math.round((annualIncome - totalTax) / 12))}/month in your bank account after tax.
+                      About {formatINR(totalTax === null ? null : Math.round((annualIncome - totalTax) / 12))}/month after estimated tax only; payroll deductions and other cash flows are not modeled.
                     </div>
                   </div>
                 </div>
@@ -729,7 +754,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                     <div className="tax-insight-desc">
                       {serverTaxData?.new_regime.marginal_relief_applied || serverTaxData?.old_regime.marginal_relief_applied 
                         ? `Marginal relief has been dynamically applied by server: ${formatINR(serverTaxData?.new_regime.marginal_relief_applied ? serverTaxData.new_regime.marginal_relief_amount : serverTaxData.old_regime.marginal_relief_amount)} saved.`
-                        : "A small 4% extra charge (called 'cess') is added on top of your tax - it funds healthcare and education."}
+                        : 'The selected server policy includes applicable surcharge and cess in the displayed total.'}
                     </div>
                   </div>
                 </div>
@@ -737,9 +762,9 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                 <div className="tax-insight-item">
                   <div className="tax-insight-icon tax-insight-icon-yellow"><HelpCircle size={16} /></div>
                   <div>
-                    <div className="tax-insight-title">Automatic Tax-Free Amount</div>
+                    <div className="tax-insight-title">Server-Applied Standard Deduction</div>
                     <div className="tax-insight-desc">
-                      The government automatically exempts <strong>{formatINR(standardDeduction)}</strong> of your income from tax - no paperwork needed!
+                      The versioned server policy applied <strong>{formatINR(standardDeduction)}</strong> for the supplied income source and regime.
                     </div>
                   </div>
                 </div>
@@ -863,7 +888,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
         >
           <h2 style={{ fontSize: '1.25rem', fontWeight: 800, color: '#fff', marginBottom: 24, display: 'flex', alignItems: 'center', gap: 8 }}>
             <PiggyBank size={22} color="#34d399" />
-            Smart Ways to Save on Taxes
+            Recommended Allocations — Tax Classification Required
           </h2>
           <div className="tax-recs-grid">
             {taxSavingRecs.map((rec, i) => {
@@ -879,7 +904,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
 
               return (
                 <motion.div 
-                  key={rec.id + rec.section} 
+                  key={rec.id}
                   className="tax-rec-card"
                   initial={{ opacity: 0, scale: 0.9 }}
                   animate={{ opacity: 1, scale: 1 }}
@@ -894,7 +919,9 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                       {getInstrumentIcon(rec.name)}
                     </div>
                     <span className="tax-rec-badge">
-                      Section {rec.section}
+                      {rec.taxClassification?.section
+                        ? `Verified ${rec.taxClassification.section}`
+                        : 'TAX CLASSIFICATION UNAVAILABLE'}
                     </span>
                   </div>
                   

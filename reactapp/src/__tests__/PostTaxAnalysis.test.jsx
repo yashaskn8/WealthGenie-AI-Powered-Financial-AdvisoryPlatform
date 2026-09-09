@@ -45,11 +45,12 @@ describe('PostTaxAnalysis separate tax what-if', () => {
     fireEvent.change(screen.getByLabelText(/Gross annual taxable income/i), { target: { value: '1000000' } });
     fireEvent.change(screen.getByLabelText(/Income source/i), { target: { value: 'salary' } });
     fireEvent.change(screen.getByLabelText(/Tax regime/i), { target: { value: 'new' } });
+    fireEvent.change(screen.getByLabelText(/Fiscal year/i), { target: { value: 'FY2026-27' } });
     fireEvent.change(screen.getByLabelText(/Inflation assumption/i), { target: { value: '6' } });
     fireEvent.click(screen.getByRole('button', { name: /calculate explicit tax what-if/i }));
     await waitFor(() => expect(apiModule.computePostTaxReturnBatch).toHaveBeenCalledWith(
       [{ instrumentType: 'FD', nominalRate: 0.07, holdingYears: 3, monthlySIP: 10000 }],
-      1000000, 'new', 30, 'salary', 0.06,
+      1000000, 'new', 30, 'salary', 0.06, 'FY2026-27',
     ));
     expect((await screen.findAllByText('7.0%')).length).toBeGreaterThan(0);
     expect(screen.getByText(/SEPARATE_TAX_WHAT_IF/i)).toBeInTheDocument();

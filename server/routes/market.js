@@ -6,7 +6,9 @@ import {
   fetchAmfiProductSnapshot,
   fetchAmfiHistoricalNavSnapshot,
   fetchBenchmarkQuotes,
-  getLiveInstrumentParams,
+  fetchGovernmentSavingsSnapshot,
+  fetchSbiTermDepositSnapshot,
+  getInstrumentModelAssumptions,
   getMarketDataSummary,
   getMutualFundNavsBySchemeCodes,
   PRIMARY_MARKET_PROVIDER,
@@ -34,12 +36,22 @@ router.get('/mutual-funds/nav', validateQuery(marketNavQuerySchema), asyncHandle
   res.json(await getMutualFundNavsBySchemeCodes(schemeCodes));
 }));
 
+/** Official quarterly India Post small-savings facts. */
+router.get('/government-schemes', asyncHandler(async (_req, res) => {
+  res.json(await fetchGovernmentSavingsSnapshot());
+}));
+
+/** Qualified SBI retail domestic term-deposit card rates only. */
+router.get('/fixed-deposits/sbi', asyncHandler(async (_req, res) => {
+  res.json(await fetchSbiTermDepositSnapshot());
+}));
+
 /**
  * Legacy simulation assumptions endpoint. Values are explicitly classified as
  * model assumptions, not live market observations.
  */
 router.get('/params', asyncHandler(async (_req, res) => {
-  res.json(await getLiveInstrumentParams());
+  res.json(await getInstrumentModelAssumptions());
 }));
 
 /** Refreshes the bounded official source snapshots without widening scope. */
@@ -47,11 +59,13 @@ router.post('/refresh', verifyJWT, asyncHandler(async (_req, res) => {
   Promise.allSettled([
     fetchAmfiProductSnapshot({ forceRefresh: true }),
     fetchAmfiHistoricalNavSnapshot({ forceRefresh: true }),
+    fetchGovernmentSavingsSnapshot({ forceRefresh: true }),
+    fetchSbiTermDepositSnapshot({ forceRefresh: true }),
     getLiveMarketContext({ forceQuoteRefresh: true, forceHistoryRefresh: true }),
   ]).catch(() => {});
   res.status(202).json({
     status: 'REFRESH_INITIATED',
-    sources: ['AMFI_CURRENT_NAV', 'AMFI_HISTORICAL_NAV', `${PRIMARY_MARKET_PROVIDER}_MARKET_CONTEXT`],
+    sources: ['AMFI_CURRENT_NAV', 'AMFI_HISTORICAL_NAV', 'GOVERNMENT_SMALL_SAVINGS', 'SBI_TERM_DEPOSITS', `${PRIMARY_MARKET_PROVIDER}_MARKET_CONTEXT`],
     message: 'A bounded refresh was queued. Provider failures remain explicitly unavailable.',
   });
 }));

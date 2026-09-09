@@ -11,6 +11,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
   const [grossAnnualIncome, setGrossAnnualIncome] = useState('');
   const [incomeSource, setIncomeSource] = useState('');
   const [regime, setRegime] = useState('');
+  const [fiscalYear, setFiscalYear] = useState('');
   const [inflationRate, setInflationRate] = useState('');
   const [backendPostTaxData, setBackendPostTaxData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -24,8 +25,8 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
     const explicitInflationRate = Number(inflationRate);
     const horizon = Number(profile?.investment_horizon_years);
     const age = Number(profile?.age);
-    if (!Number.isFinite(annualIncome) || annualIncome < 0 || !incomeSource || !regime) {
-      setError('Enter gross annual taxable income, income source, and tax regime explicitly.');
+    if (!Number.isFinite(annualIncome) || annualIncome < 0 || !incomeSource || !regime || !fiscalYear) {
+      setError('Enter gross annual taxable income, income source, tax regime, and fiscal year explicitly.');
       return;
     }
     if (!Number.isFinite(explicitInflationRate) || inflationRate === '' || explicitInflationRate < 0 || explicitInflationRate > 100) {
@@ -56,6 +57,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
         age,
         incomeSource,
         explicitInflationRate / 100,
+        fiscalYear,
       );
       const requiredResultFields = [
         'effectiveTaxPercent', 'postTaxGain', 'taxDragWealth', 'taxDragCAGR',
@@ -124,7 +126,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
       <div className="pta-empty-state">
         <div className="pta-empty-icon"><Target size={48} /></div>
         <h3>No Recommendations Yet</h3>
-        <p>Set up your financial profile to see your actual returns after tax and inflation.</p>
+        <p>Set up your financial profile to run an estimated tax and inflation what-if.</p>
       </div>
     );
   }
@@ -176,7 +178,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
           Modeled Post-Tax Returns Summary
         </h1>
         <p className="pta-header-subtitle">
-          Your true growth after Indian tax laws and your explicit inflation assumption
+          Estimated growth under a versioned tax policy and your explicit inflation assumption
         </p>
       </motion.header>
 
@@ -224,6 +226,14 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
           </select>
         </label>
         <label style={{ display: 'grid', gap: 7, color: '#cbd5e1', fontSize: '0.8rem', fontWeight: 700 }}>
+          Fiscal year
+          <select aria-label="Fiscal year" value={fiscalYear} onChange={event => setFiscalYear(event.target.value)} className="tax-input">
+            <option value="">Choose explicitly</option>
+            <option value="FY2026-27">FY2026-27</option>
+            <option value="FY2025-26">FY2025-26</option>
+          </select>
+        </label>
+        <label style={{ display: 'grid', gap: 7, color: '#cbd5e1', fontSize: '0.8rem', fontWeight: 700 }}>
           Inflation assumption (%)
           <input
             aria-label="Inflation assumption"
@@ -243,6 +253,18 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
         <small style={{ gridColumn: '1 / -1', color: '#64748b', lineHeight: 1.5 }}>
           SEPARATE_TAX_WHAT_IF: these inputs are not stored in or inferred from your Financial Profile and do not alter suitability.
         </small>
+        {backendPostTaxData?.policyVersion && (
+          <small style={{ gridColumn: '1 / -1', color: '#94a3b8', lineHeight: 1.5 }}>
+            Estimated under {backendPostTaxData.fiscalYear} policy ({backendPostTaxData.policyVersion}) using only the supplied tax inputs.
+            {' '}
+            {(backendPostTaxData.sourceReferences || []).map((source, index) => (
+              <React.Fragment key={source.url}>
+                {index > 0 ? ' · ' : ''}
+                <a href={source.url} target="_blank" rel="noreferrer" style={{ color: '#38bdf8' }}>{source.authority}</a>
+              </React.Fragment>
+            ))}
+          </small>
+        )}
         {error && <p role="alert" style={{ gridColumn: '1 / -1', color: '#fda4af', margin: 0 }}>{error}</p>}
       </motion.form>
 
@@ -304,7 +326,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
             <div className="pta-card-header">
               <div>
                 <h3 className="pta-card-title">Return Drag Comparison</h3>
-                <p className="pta-card-subtitle">Before Tax → After Tax → Real (inflation-adjusted)</p>
+                <p className="pta-card-subtitle">Model assumption → estimated after tax → inflation-adjusted estimate</p>
               </div>
             </div>
 
@@ -334,8 +356,8 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
                     formatter={(value, name) => [`${Number(value).toFixed(1)}%`, name]}
                   />
                   <Legend verticalAlign="top" height={40} iconType="circle" iconSize={8} wrapperStyle={{ fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8', letterSpacing: '0.3px' }}/>
-                  <Bar dataKey="nominalReturn" name="Before Tax" fill="url(#gradNominal)" radius={[6,6,0,0]} barSize={22} />
-                  <Bar dataKey="postTaxReturn" name="After Tax" fill="url(#gradPostTax)" radius={[6,6,0,0]} barSize={22} />
+                  <Bar dataKey="nominalReturn" name="Model assumption (pre-tax)" fill="url(#gradNominal)" radius={[6,6,0,0]} barSize={22} />
+                  <Bar dataKey="postTaxReturn" name="Estimated after tax" fill="url(#gradPostTax)" radius={[6,6,0,0]} barSize={22} />
                   <Bar dataKey="realReturn" name="Real Return" fill="url(#gradReal)" radius={[6,6,0,0]} barSize={22} />
                 </BarChart>
               </ResponsiveContainer>

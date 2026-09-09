@@ -266,7 +266,7 @@ test('projection, Monte Carlo, and parameter helpers reject missing assumptions'
 
 test('post-tax calculation requires a complete, separate tax context', () => {
   assert.throws(() => calculatePostTaxReturn('FD', 0.07, 1000000, 3, 'new', 10000, 35), /incomeSource/);
-  assert.throws(() => calculatePostTaxReturn('UNKNOWN', 0.07, 1000000, 3, 'new', 10000, 35, 'salary'), /Unsupported instrument/);
+  assert.throws(() => calculatePostTaxReturn('UNKNOWN', 0.07, 1000000, 3, 'new', 10000, 35, 'salary', true, 'FY2026-27'), /Unsupported instrument/);
 });
 
 test('agent tools label what-if calculations and enforce profile caps', async () => {
@@ -282,7 +282,7 @@ test('agent tools label what-if calculations and enforce profile caps', async ()
   assert.equal(rejected.success, false);
   assert.match(rejected.error, /exceeds Financial Profile capacity/);
   const tax = await FinancialToolRegistry.executeTool('tax_calculator', {
-    income: 1000000, incomeSource: 'salary', age: 35, regime: 'new', section80C: 0,
+    income: 1000000, incomeSource: 'salary', fiscalYear: 'FY2026-27', age: 35, regime: 'new', section80C: 0,
     nps80CCD1B: 0, section80D_self: 0, section80D_parents: 0,
     parentsSenior: false, hra: 0,
   });

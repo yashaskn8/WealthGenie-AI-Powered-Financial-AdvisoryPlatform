@@ -253,6 +253,10 @@ paths:
     get: { operationId: getMarketRates, tags: [Market], security: [], responses: { '200': { $ref: '#/components/responses/Object' } } }
   /api/market/benchmarks:
     get: { operationId: getMarketBenchmarks, tags: [Market], security: [], responses: { '200': { $ref: '#/components/responses/Object' } } }
+  /api/market/government-schemes:
+    get: { operationId: getGovernmentSchemeFacts, tags: [Market], security: [], responses: { '200': { $ref: '#/components/responses/Object' } } }
+  /api/market/fixed-deposits/sbi:
+    get: { operationId: getSbiFixedDepositFacts, tags: [Market], security: [], responses: { '200': { $ref: '#/components/responses/Object' } } }
   /api/market/mutual-funds/nav:
     get:
       operationId: getMutualFundNavFacts
@@ -385,7 +389,7 @@ components:
     GoalId: { name: goalId, in: path, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{24}$' } }
     Income: { name: income, in: query, required: true, schema: { type: number, minimum: 0, maximum: 1000000000 } }
     IncomeSource: { name: incomeSource, in: query, required: true, schema: { type: string, enum: [salary, pension, family_pension, business, other] } }
-    FiscalYear: { name: fiscalYear, in: query, required: false, schema: { type: string, enum: [FY2025-26, FY2026-27] } }
+    FiscalYear: { name: fiscalYear, in: query, required: true, schema: { type: string, enum: [FY2025-26, FY2026-27] } }
   requestBodies:
     Register: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RegisterRequest' } } } }
     Login: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } } }
@@ -557,8 +561,8 @@ components:
     TaxCalculation: { type: object, properties: { regime: { type: string }, tax: { type: number }, effectiveRate: { type: number } }, additionalProperties: true }
     TaxComparison: { type: object, properties: { old: { $ref: '#/components/schemas/TaxCalculation' }, new: { $ref: '#/components/schemas/TaxCalculation' }, recommendedRegime: { type: string, enum: [old, new] } }, additionalProperties: true }
     PostTaxInstrument: { type: object, additionalProperties: false, required: [instrumentType, nominalRate, holdingYears, monthlySIP], properties: { instrumentType: { type: string, maxLength: 50 }, nominalRate: { type: number, minimum: 0, maximum: 1 }, holdingYears: { type: number, minimum: 0.01, maximum: 100 }, monthlySIP: { type: number, minimum: 0, maximum: 100000000 } } }
-    PostTaxReturnRequest: { allOf: [{ $ref: '#/components/schemas/PostTaxInstrument' }, { type: object, required: [annualIncome, regime, userAge, incomeSource], properties: { annualIncome: { type: number, minimum: 0, maximum: 1000000000 }, regime: { type: string, enum: [new, old] }, userAge: { type: integer, minimum: 0, maximum: 120 }, incomeSource: { type: string, enum: [salary, pension, family_pension, business, other] } } }], unevaluatedProperties: false }
-    PostTaxReturnBatchRequest: { type: object, additionalProperties: false, required: [instruments, annualIncome, regime, userAge, incomeSource], properties: { instruments: { type: array, minItems: 1, maxItems: 50, items: { $ref: '#/components/schemas/PostTaxInstrument' } }, annualIncome: { type: number, minimum: 0, maximum: 1000000000 }, regime: { type: string, enum: [new, old] }, userAge: { type: integer, minimum: 0, maximum: 120 }, incomeSource: { type: string, enum: [salary, pension, family_pension, business, other] } } }
+    PostTaxReturnRequest: { allOf: [{ $ref: '#/components/schemas/PostTaxInstrument' }, { type: object, required: [annualIncome, regime, userAge, incomeSource, fiscalYear], properties: { annualIncome: { type: number, minimum: 0, maximum: 1000000000 }, regime: { type: string, enum: [new, old] }, userAge: { type: integer, minimum: 0, maximum: 120 }, incomeSource: { type: string, enum: [salary, pension, family_pension, business, other] }, fiscalYear: { type: string, enum: [FY2025-26, FY2026-27] } } }], unevaluatedProperties: false }
+    PostTaxReturnBatchRequest: { type: object, additionalProperties: false, required: [instruments, annualIncome, regime, userAge, incomeSource, inflationRate, fiscalYear], properties: { instruments: { type: array, minItems: 1, maxItems: 50, items: { $ref: '#/components/schemas/PostTaxInstrument' } }, annualIncome: { type: number, minimum: 0, maximum: 1000000000 }, regime: { type: string, enum: [new, old] }, userAge: { type: integer, minimum: 0, maximum: 120 }, incomeSource: { type: string, enum: [salary, pension, family_pension, business, other] }, inflationRate: { type: number, minimum: 0, maximum: 1 }, fiscalYear: { type: string, enum: [FY2025-26, FY2026-27] } } }
     PortfolioOptimiseRequest: { type: object, additionalProperties: false, required: [profileId, assets, strategy], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, assets: { type: array, minItems: 2, maxItems: 20, uniqueItems: true, items: { type: string, maxLength: 50 } }, strategy: { type: string, enum: [min_variance, max_sharpe, risk_parity, max_return] } } }
     RebalanceRequest: { type: object, additionalProperties: false, required: [profileId, current_allocation, target_allocation, threshold, partial_ratio, holding_months], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, current_allocation: { type: object, minProperties: 1, maxProperties: 30, additionalProperties: { type: number, minimum: 0, maximum: 1000000000 } }, target_allocation: { type: object, minProperties: 1, maxProperties: 30, additionalProperties: { type: number, minimum: 0, maximum: 100 }, description: Weights must sum to exactly 100. }, threshold: { type: number, minimum: 0, maximum: 50 }, partial_ratio: { type: number, minimum: 0.1, maximum: 1 }, holding_months: { type: number, minimum: 0, maximum: 600 } } }
     PortfolioResult: { type: object, properties: { weights: { type: object, additionalProperties: { type: number } }, trades: { type: array, items: { type: object, additionalProperties: true } } }, additionalProperties: true }

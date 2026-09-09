@@ -13,9 +13,8 @@ export function getCurrentFiscalYear() {
     return `FY${startYear}-${endYear.toString().slice(-2)}`;
 }
 export const CURRENT_FY = getCurrentFiscalYear();
-export const REGULATORY_RULE_VERSION = 'FY2025-26-v1.0';
 const defineSlabs = (slabs) => Object.freeze(slabs.map(slab => Object.freeze({ ...slab })));
-const STANDARD_NEW_SLABS = defineSlabs([
+const FY2025_26_NEW_SLABS = defineSlabs([
     { min: 0, max: 400000, rate: 0 },
     { min: 400000, max: 800000, rate: 0.05 },
     { min: 800000, max: 1200000, rate: 0.10 },
@@ -24,12 +23,49 @@ const STANDARD_NEW_SLABS = defineSlabs([
     { min: 2000000, max: 2400000, rate: 0.25 },
     { min: 2400000, max: Infinity, rate: 0.30 },
 ]);
-const STANDARD_OLD_SLABS = defineSlabs([
+const FY2026_27_NEW_SLABS = defineSlabs([
+    { min: 0, max: 400000, rate: 0 },
+    { min: 400000, max: 800000, rate: 0.05 },
+    { min: 800000, max: 1200000, rate: 0.10 },
+    { min: 1200000, max: 1600000, rate: 0.15 },
+    { min: 1600000, max: 2000000, rate: 0.20 },
+    { min: 2000000, max: 2400000, rate: 0.25 },
+    { min: 2400000, max: Infinity, rate: 0.30 },
+]);
+const FY2025_26_OLD_SLABS = defineSlabs([
     { min: 0, max: 250000, rate: 0 },
     { min: 250000, max: 500000, rate: 0.05 },
     { min: 500000, max: 1000000, rate: 0.20 },
     { min: 1000000, max: Infinity, rate: 0.30 },
 ]);
+const FY2026_27_OLD_SLABS = defineSlabs([
+    { min: 0, max: 250000, rate: 0 },
+    { min: 250000, max: 500000, rate: 0.05 },
+    { min: 500000, max: 1000000, rate: 0.20 },
+    { min: 1000000, max: Infinity, rate: 0.30 },
+]);
+
+const TAX_SOURCES = Object.freeze({
+    'FY2025-26': Object.freeze([
+        Object.freeze({
+            authority: 'Government of India — Union Budget',
+            title: 'Finance Bill 2025 Memorandum',
+            url: 'https://www.indiabudget.gov.in/budget2025-26/doc/memo.pdf',
+        }),
+    ]),
+    'FY2026-27': Object.freeze([
+        Object.freeze({
+            authority: 'Government of India — Union Budget',
+            title: 'Finance Bill 2026 Memorandum',
+            url: 'https://www.indiabudget.gov.in/doc/memo.pdf',
+        }),
+        Object.freeze({
+            authority: 'Income Tax Department',
+            title: 'Individual return applicability and tax regime guidance',
+            url: 'https://www.incometax.gov.in/iec/foportal/help/individual/return-applicable-1?fromCampaign=true',
+        }),
+    ]),
+});
 
 export const TAX_DEDUCTION_LIMITS = Object.freeze({
     section80C: 150000,
@@ -42,18 +78,32 @@ export const TAX_DEDUCTION_LIMITS = Object.freeze({
 
 export const TAX_SLABS_BY_FY = Object.freeze({
     'FY2025-26': Object.freeze({
-        verified: true, // Confirmed against Finance Act 2023 / Union Budget 2024.
-        new: STANDARD_NEW_SLABS,
-        old: STANDARD_OLD_SLABS,
+        verified: true,
+        policyVersion: 'tax-policy-FY2025-26-v1',
+        sourceReferences: TAX_SOURCES['FY2025-26'],
+        new: FY2025_26_NEW_SLABS,
+        old: FY2025_26_OLD_SLABS,
     }),
     'FY2026-27': Object.freeze({
-        // FY2026-27: Union Budget 2025 confirmed same slab rates as FY2025-26. verified=true.
         verified: true,
-        new: STANDARD_NEW_SLABS,
-        old: STANDARD_OLD_SLABS,
+        policyVersion: 'tax-policy-FY2026-27-v1',
+        sourceReferences: TAX_SOURCES['FY2026-27'],
+        new: FY2026_27_NEW_SLABS,
+        old: FY2026_27_OLD_SLABS,
     }),
 });
-export function getTaxSlabsForFY(fiscalYear = CURRENT_FY) {
+export const REGULATORY_RULE_VERSION = TAX_SLABS_BY_FY[CURRENT_FY]?.policyVersion ?? null;
+
+export function getTaxPolicyMetadata(fiscalYear) {
+    const policy = getTaxSlabsForFY(fiscalYear);
+    return {
+        policyVersion: policy.policyVersion,
+        fiscalYear,
+        verified: true,
+        sourceReferences: policy.sourceReferences.map(source => ({ ...source })),
+    };
+}
+export function getTaxSlabsForFY(fiscalYear) {
     const slabs = TAX_SLABS_BY_FY[fiscalYear];
     if (!slabs || slabs.verified !== true) {
         throw new RangeError(`Verified tax slabs are unavailable for ${fiscalYear}`);
@@ -64,11 +114,11 @@ export function getTaxSlabsForFY(fiscalYear = CURRENT_FY) {
  * Check whether the tax slabs for a given fiscal year have been verified
  * against an official gazette/Union Budget source.
  */
-export function isFYVerified(fiscalYear = CURRENT_FY) {
+export function isFYVerified(fiscalYear) {
     const entry = TAX_SLABS_BY_FY[fiscalYear];
     return entry ? entry.verified === true : false;
 }
-function getRegimeSlabs(regime, fiscalYear = CURRENT_FY) {
+function getRegimeSlabs(regime, fiscalYear) {
     const slabs = getTaxSlabsForFY(fiscalYear);
     return regime === 'old' ? slabs.old : slabs.new;
 }
@@ -116,7 +166,7 @@ function computeSurcharge(taxBeforeSurcharge, taxableIncome, regime) {
 /**
  * Compute surcharge WITH marginal relief.
  */
-function computeMarginalRelief(baseTax, surcharge, taxableIncome, regime, fiscalYear = CURRENT_FY) {
+function computeMarginalRelief(baseTax, surcharge, taxableIncome, regime, fiscalYear) {
     if (taxableIncome <= 5000000)
         return 0;
     const SURCHARGE_THRESHOLDS = regime === 'new'
@@ -239,7 +289,7 @@ export function calculateTaxableIncome(annualIncome, regime, deductions = {}, in
 /**
  * Compute full tax breakdown for a given annual income.
  */
-export function computeTax(annualIncome, regime, deductions = {}, incomeSource, fiscalYear = CURRENT_FY) {
+export function computeTax(annualIncome, regime, deductions = {}, incomeSource, fiscalYear) {
     validateTaxContext(annualIncome, regime, incomeSource);
     const slabs = getRegimeSlabs(regime, fiscalYear);
     const { standardDeduction, oldRegimeDeductions, taxableIncome, nps80CCD2, allowed80D } = calculateTaxableIncome(annualIncome, regime, deductions, incomeSource);
@@ -271,6 +321,7 @@ export function computeTax(annualIncome, regime, deductions = {}, incomeSource, 
     const effectiveRate = annualIncome > 0
         ? parseFloat(((taxAmount / annualIncome) * 100).toFixed(2))
         : 0;
+    const policy = getTaxPolicyMetadata(fiscalYear);
     return {
         taxAmount: Math.round(taxAmount),
         effectiveRate,
@@ -289,18 +340,36 @@ export function computeTax(annualIncome, regime, deductions = {}, incomeSource, 
         nps80CCD2,
         allowed80D,
         fiscalYear,
+        policyVersion: policy.policyVersion,
+        sourceReferences: policy.sourceReferences,
+        inputsUsed: {
+            annualIncome,
+            regime,
+            incomeSource,
+            fiscalYear,
+            deductions: { ...deductions },
+        },
+        rulesApplied: [
+            `${regime.toUpperCase()}_REGIME_SLABS`,
+            rebateApplied ? 'SECTION_87A_REBATE' : null,
+            (marginalReliefApplied || relief > 0) ? 'MARGINAL_RELIEF' : null,
+            surcharge > 0 ? 'SURCHARGE' : null,
+            'HEALTH_AND_EDUCATION_CESS',
+        ].filter(Boolean),
+        assumptions: [],
+        unavailableReasons: [],
     };
 }
 /**
  * Compute tax with deductions (convenience wrapper/alias).
  */
-export function computeTaxWithDeductions(annualIncome, regime, deductions = {}, incomeSource, fiscalYear = CURRENT_FY) {
+export function computeTaxWithDeductions(annualIncome, regime, deductions = {}, incomeSource, fiscalYear) {
     return computeTax(annualIncome, regime, deductions, incomeSource, fiscalYear);
 }
 /**
  * Get the marginal (highest applicable) tax slab percentage.
  */
-export function getTaxSlab(annualIncome, regime, deductions = {}, incomeSource, fiscalYear = CURRENT_FY) {
+export function getTaxSlab(annualIncome, regime, deductions = {}, incomeSource, fiscalYear) {
     validateTaxContext(annualIncome, regime, incomeSource);
     const { taxableIncome } = calculateTaxableIncome(annualIncome, regime, deductions, incomeSource);
     const slabs = getRegimeSlabs(regime, fiscalYear);
@@ -315,7 +384,7 @@ export function getTaxSlab(annualIncome, regime, deductions = {}, incomeSource, 
 /**
  * Compare both regimes and return the better one.
  */
-export function compareTaxRegimes(annualIncome, deductions = {}, incomeSource, fiscalYear = CURRENT_FY) {
+export function compareTaxRegimes(annualIncome, deductions = {}, incomeSource, fiscalYear) {
     if (!Number.isFinite(annualIncome) || annualIncome < 0) {
         throw new TypeError('annualIncome must be an explicit non-negative finite number');
     }
@@ -342,7 +411,7 @@ function formatSlabLabel(slab) {
  * computed liability used by computeTax. This prevents the browser from
  * maintaining a second, potentially stale tax engine.
  */
-export function buildTaxSlabBreakdown(computation, fiscalYear = CURRENT_FY) {
+export function buildTaxSlabBreakdown(computation, fiscalYear) {
     if (!computation || !Number.isFinite(computation.taxableIncome)) {
         throw new TypeError('A completed tax computation is required');
     }
@@ -388,7 +457,7 @@ export function buildTaxSlabBreakdown(computation, fiscalYear = CURRENT_FY) {
  * Computes the old-regime outcome after filling only the remaining 80C and
  * 80CCD(1B) room. No product or suitability recommendation is made here.
  */
-export function analyzeTaxOptimization(annualIncome, deductions = {}, incomeSource, fiscalYear = CURRENT_FY) {
+export function analyzeTaxOptimization(annualIncome, deductions = {}, incomeSource, fiscalYear) {
     validateTaxContext(annualIncome, 'old', incomeSource);
     const section80C = Math.min(Number(deductions.section80C) || 0, TAX_DEDUCTION_LIMITS.section80C);
     const nps80CCD1B = Math.min(Number(deductions.nps80CCD1B ?? deductions.section80CCD) || 0, TAX_DEDUCTION_LIMITS.section80CCD1B);
@@ -455,7 +524,7 @@ export function analyzeTaxOptimization(annualIncome, deductions = {}, incomeSour
  * Get the effective marginal tax rate (slab + surcharge + cess) for a given income level.
  * Useful for post-tax drag adjustments on future returns.
  */
-export function getEffectiveMarginalRate(annualIncome, regime, deductions = {}, incomeSource, fiscalYear = CURRENT_FY) {
+export function getEffectiveMarginalRate(annualIncome, regime, deductions = {}, incomeSource, fiscalYear) {
     validateTaxContext(annualIncome, regime, incomeSource);
     // WG-040: If actual liability at this income is already ₹0 (inside a Section 87A
     // rebate zone), report 0 directly. A finite-difference window straddling the rebate

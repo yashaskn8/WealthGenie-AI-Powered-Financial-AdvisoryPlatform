@@ -35,7 +35,7 @@ const PortfolioChart = ({ projectionData = [], horizon }) => {
     <div className="projection-chart-wrapper">
       <div style={{ marginBottom: '24px' }}>
         <h3 className="card-title" style={{ fontSize: '1.4rem' }}>Trajectory of your Portfolio</h3>
-        <p className="dashboard-subtitle">Backend-generated pre-tax nominal portfolio trajectory over {horizon} years.</p>
+        <p className="dashboard-subtitle">Backend-generated model projection over {horizon} years — simulated from pre-tax nominal assumptions, not a provider forecast.</p>
       </div>
 
       <div style={{ width: '100%', height: 400 }}>

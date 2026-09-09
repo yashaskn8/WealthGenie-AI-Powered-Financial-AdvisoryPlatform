@@ -81,7 +81,7 @@ const CalculatorTab = ({
         boxShadow: '0 8px 24px -8px rgba(56,189,248,0.1)'
       }}>
         <Info size={18} style={{ flexShrink: 0, color: '#7dd3fc' }} />
-        <span>Sliders use the catalog range for <strong style={{ color: '#f8fafc', fontWeight: 800 }}>{inv.name}</strong>. Assumed Return: <strong style={{ color: '#38bdf8' }}>{calcBounds.returnMin}%–{calcBounds.returnMax}%</strong> | Tenure: <strong style={{ color: '#38bdf8' }}>{calcBounds.yearMin}–{calcBounds.yearMax} yrs</strong></span>
+        <span>Sliders use the versioned model-policy range for <strong style={{ color: '#f8fafc', fontWeight: 800 }}>{inv.name}</strong>. Model Return Assumption: <strong style={{ color: '#38bdf8' }}>{calcBounds.returnMin}%–{calcBounds.returnMax}%</strong> | Tenure: <strong style={{ color: '#38bdf8' }}>{calcBounds.yearMin}–{calcBounds.yearMax} yrs</strong>. This is not an observed market fact or provider forecast.</span>
       </div>
 
       {(projectionLoading || projectionError) && (

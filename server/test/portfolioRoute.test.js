@@ -63,7 +63,10 @@ test('portfolio optimise route responds for all frontend-exposed strategies', as
     const body = await response.json();
     assert.equal(response.status, 200, `${strategy}: ${JSON.stringify(body)}`);
     assert.equal(body.strategy, strategy);
-    assert.ok(Number.isFinite(body.expected_return), `${strategy} expected_return`);
+    assert.ok(Number.isFinite(body.portfolio_return_assumption), `${strategy} portfolio_return_assumption`);
+    assert.equal(body.return_data_class, 'MODEL_ASSUMPTION');
+    assert.equal(body.observed_market_fact, false);
+    assert.equal(body.provider_forecast, false);
     assert.ok(Number.isFinite(body.volatility), `${strategy} volatility`);
     assert.ok(Number.isFinite(body.sharpe_ratio), `${strategy} sharpe_ratio`);
     assert.ok(Math.abs(Object.values(body.weights).reduce((sum, value) => sum + value, 0) - 1) < 0.00001);

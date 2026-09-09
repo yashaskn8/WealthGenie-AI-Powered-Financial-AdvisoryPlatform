@@ -333,6 +333,7 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
                         arguments: JSON.stringify({
                           income: 2000000,
                           incomeSource: 'salary',
+                          fiscalYear: 'FY2026-27',
                           age: 35,
                           regime: 'new',
                           section80C: 0,

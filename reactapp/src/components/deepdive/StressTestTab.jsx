@@ -21,7 +21,7 @@ import api from '../../services/api';
 import { formatINR } from '../../utils/indianNumberFormat';
 
 const ICONS_BY_PROFILE = {
-  guaranteed: <ShieldCheck size={20} color="#10b981" />,
+  capital_protection_reference: <ShieldCheck size={20} color="#10b981" />,
   liquid_debt: <Compass size={20} color="#14b8a6" />,
   long_debt: <Percent size={20} color="#06b6d4" />,
   gold: <Zap size={20} color="#eab308" />,

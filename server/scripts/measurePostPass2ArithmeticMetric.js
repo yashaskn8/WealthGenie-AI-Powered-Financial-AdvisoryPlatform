@@ -135,6 +135,7 @@ async function runFalsifiableMetricMeasurement() {
                               args: {
                                 income: 1800000,
                                 incomeSource: 'salary',
+                                fiscalYear: 'FY2026-27',
                                 age: 32,
                                 regime: 'new',
                                 section80C: 0,

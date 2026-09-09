@@ -6,7 +6,13 @@ import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import { generateAllocationSplit, generatePortfolioProjection, generateProjectionComparison, generateProjections, sipFV, stepUpSipFV } from '../services/projectionEngine.js';
 import { computeXIRR, computeSIPXIRR } from '../services/xirrCalculator.js';
-import { getNominalRate, INSTRUMENT_PARAMS } from '../services/instrumentConstants.js';
+import {
+  getNominalRate,
+  INSTRUMENT_PARAMS,
+  PROJECTION_ASSUMPTION_DATA_CLASS,
+  PROJECTION_ASSUMPTION_SOURCE,
+  PROJECTION_ASSUMPTION_VERSION,
+} from '../services/instrumentConstants.js';
 import { buildRecommendationProfile, buildProfileGroundedSimulation, buildRecommendationProfileHash } from '../services/recommendationProfile.js';
 import { assertPortfolioSuitable, resolveConcentrationCap } from '../services/RecommendationPipeline.js';
 import { resolveAssetKey } from '../services/portfolioEngine.js';
@@ -16,6 +22,13 @@ const router = Router();
 
 const PROJECTION_INFLATION_ASSUMPTION = 0.05;
 const PERSONALIZED_CONTRIBUTION_STEP_UP = 0;
+const MODEL_ASSUMPTION_METADATA = Object.freeze({
+  return_data_class: PROJECTION_ASSUMPTION_DATA_CLASS,
+  return_assumption_version: PROJECTION_ASSUMPTION_VERSION,
+  return_assumption_source: PROJECTION_ASSUMPTION_SOURCE,
+  observed_market_fact: false,
+  provider_forecast: false,
+});
 
 const RISK_LEVEL_SCORE = Object.freeze({
   'Very Low': 1, Low: 1.5, 'Low-Medium': 2, 'Medium-Low': 2.5,
@@ -146,7 +159,8 @@ router.post('/custom-portfolio', verifyJWT, validateStrict(customPortfolioProjec
   res.json({
     ...projection,
     simulation_classification: simulation.classification,
-    portfolio_nominal_return: Number(portfolioNominalReturn.toFixed(2)),
+    portfolio_nominal_return_assumption: Number(portfolioNominalReturn.toFixed(2)),
+    ...MODEL_ASSUMPTION_METADATA,
     portfolio_risk_score: Number(portfolioRiskScore.toFixed(2)),
     recommendation_match_pct: recommendationMatchPct,
     allocation_match_pct: recommendationMatchPct,
@@ -163,7 +177,13 @@ router.post('/custom-portfolio', verifyJWT, validateStrict(customPortfolioProjec
 }));
 
 router.post('/compare', verifyJWT, validateStrict(projectionComparisonSchema), asyncHandler(async (req, res) => {
-  res.json(generateProjectionComparison(req.body));
+  res.json({
+    ...generateProjectionComparison(req.body),
+    return_data_class: 'USER_INPUT',
+    return_assumption_source: 'USER_SUPPLIED_WHAT_IF',
+    observed_market_fact: false,
+    provider_forecast: false,
+  });
 }));
 
 router.post('/allocation-split', verifyJWT, validateStrict(allocationSplitSchema), asyncHandler(async (req, res) => {
@@ -190,6 +210,10 @@ router.post('/step-up', verifyJWT, validateStrict(stepUpProjectionSchema), async
   res.json({
     calculation_classification: 'NON_RECOMMENDATION_STEP_UP_CALCULATION',
     return_basis: 'PRE_TAX_NOMINAL',
+    return_data_class: 'USER_INPUT',
+    return_assumption_source: 'USER_SUPPLIED_WHAT_IF',
+    observed_market_fact: false,
+    provider_forecast: false,
     assumptions: { monthlyInvestment, annualReturnRate, years, annualStepUpRate },
     chartData,
     flatFinal: last.flatSIP,
@@ -250,6 +274,7 @@ router.post('/', verifyJWT, validateStrict(personalizedProjectionSchema), asyncH
     ...projections,
     simulation_classification: simulation.classification,
     return_basis: 'PRE_TAX_NOMINAL',
+    ...MODEL_ASSUMPTION_METADATA,
     initial_capital: simulation.initialCapital,
     monthly_contribution: simulation.monthlyContribution,
     final_suitability_risk: suitability.finalRisk,

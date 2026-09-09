@@ -1,9 +1,9 @@
 /**
- * WealthGenie Instrument Constants — Single Source of Truth
+ * WealthGenie Projection Model Assumptions — Single Source of Truth
  *
- * ALL nominal rates, volatility parameters, and metadata for every instrument
- * must be defined HERE and imported everywhere else. This eliminates the #1
- * production risk: rate drift between projection, recommendation, and MC modules.
+ * These values are frozen policy assumptions used only for model-based projections,
+ * recommendation scoring and simulation. They are not observed market facts,
+ * provider forecasts, official product rates, or promises of future performance.
  *
  * DO NOT duplicate these values in any other file.
  *
@@ -23,72 +23,17 @@
  *      resembles a jagged mountain range. This is modeled stochastically in our Monte Carlo simulator.
  */
 
-export const CESS_RATE = 0.04; // 4% Health & Education Cess — FY2025-26
-
-import { getCache, setCache, redisAvailable } from '../config/redis.js';
-
-// ARCHITECTURE: Write-through cache pattern.
-// Source of truth: Redis key 'mc:instrument:params:live'
-// Local _liveCache: synchronous read-through cache, populated by:
-//   1. updateLiveParam() — writes locally AND to Redis
-//   2. refreshLiveParams() — periodic sync from Redis for cross-instance consistency
-// On restart, cache starts empty → reads from Redis on first refresh.
-// This is a CACHE, not authoritative state. Redis is the single source of truth.
-const _liveCache = {};
-
-const REDIS_LIVE_KEY = 'instrument-params:live-overrides:1';
-
-/**
- * Update live parameters dynamically (used by marketDataService).
- * Synchronously updates local cache, then async-writes to Redis.
- *
- * @param {string} key - Instrument key (e.g. 'FD', 'Equity_MF')
- * @param {number} [nominalRate] - Live nominal return rate (percentage, e.g. 6.5)
- * @param {number} [volatility] - Live annualised volatility (decimal, e.g. 0.18)
- */
-export function updateLiveParam(key, nominalRate, volatility) {
-  // Synchronous local cache update (enables immediate reads via Proxy)
-  if (!_liveCache[key]) _liveCache[key] = {};
-  if (nominalRate !== undefined) _liveCache[key].nominalRate = nominalRate;
-  if (volatility !== undefined) _liveCache[key].volatility = volatility;
-
-  // Async write-through to Redis (fire-and-forget for callers that don't await)
-  _persistToRedis().catch(err => {
-    console.warn('[InstrumentConstants] Failed to persist live params to Redis:', err.message);
-  });
-}
-
-async function _persistToRedis() {
-  if (!redisAvailable) return;
-  await setCache(REDIS_LIVE_KEY, { ..._liveCache }, 86400);
-}
-
-/**
- * Refresh local cache from Redis. Call periodically for cross-instance consistency.
- * Safe to call at startup — if Redis is empty, local cache stays as-is.
- */
-export async function refreshLiveParams() {
-  if (!redisAvailable) return;
-  try {
-    const remote = await getCache(REDIS_LIVE_KEY);
-    if (remote && typeof remote === 'object') {
-      for (const [k, v] of Object.entries(remote)) {
-        _liveCache[k] = { ...(_liveCache[k] || {}), ...v };
-      }
-    }
-  } catch (err) {
-    console.warn('[InstrumentConstants] Failed to refresh live params from Redis:', err.message);
-  }
-}
+export const CESS_RATE = 0.04;
+export const PROJECTION_ASSUMPTION_VERSION = 'wealthgenie-projection-assumptions-1.0.0';
+export const PROJECTION_ASSUMPTION_SOURCE = 'WEALTHGENIE_MODEL_POLICY';
+export const PROJECTION_ASSUMPTION_DATA_CLASS = 'MODEL_ASSUMPTION';
 
 // ACCURACY NOTE: nominalRate for Mutual Funds/ETFs is already net of Total Expense Ratio (TER).
 // expenseRatio is documented here for transparency and used in risk/Sharpe adjustments.
-const staticParams = {
-  // Rates reconciled with authoritative catalog investment_master.json
-  // Methodology: Computed as the average expectedReturn across all catalog instruments mapping
-  // to each backendType category via resolveBackendType() (Reconciliation Date: August 2026).
-  // DO NOT manually edit these values without running drift-detection test suite.
-  FD:           { nominalRate: 7.5,   volatility: 0.005,  expenseRatio: 0.0,    riskLevel: 'Low',        lockIn: 0,  name: 'Bank Fixed Deposit',       tags: ['Guaranteed', 'DICGC Insured'] },
+const rawModelAssumptions = {
+  // Versioned scenario inputs. Any future recalibration requires a new assumption
+  // version and regression evidence; provider observations must never mutate them.
+  FD:           { nominalRate: 7.5,   volatility: 0.005,  expenseRatio: 0.0,    riskLevel: 'Low',        lockIn: 0,  name: 'Bank Fixed Deposit',       tags: ['Model Assumption', 'Verify Bank Terms'] },
   ELSS:         { nominalRate: 14.4,  volatility: 0.18,   expenseRatio: 0.015,  riskLevel: 'High',       lockIn: 3,  name: 'ELSS Mutual Fund',         tags: ['Tax Saving', '80C'] },
   Equity_MF:    { nominalRate: 15.0,  volatility: 0.18,   expenseRatio: 0.015,  riskLevel: 'High',       lockIn: 0,  name: 'Equity Mutual Fund',       tags: ['Wealth Growth'] },
   ETF:          { nominalRate: 14.5,  volatility: 0.16,   expenseRatio: 0.001,  riskLevel: 'Medium',     lockIn: 0,  name: 'Nifty 50 ETF',             tags: ['Passive', 'Low Cost'] },
@@ -109,34 +54,16 @@ const staticParams = {
   SSY:          { nominalRate: 8.2,   volatility: 0.002,  expenseRatio: 0.0,    riskLevel: 'Very Low',   lockIn: 21, name: 'Sukanya Samriddhi',        tags: ['EEE', 'Girl Child'] },
 };
 
-export const INSTRUMENT_PARAMS = new Proxy(staticParams, {
-  get(target, prop) {
-    if (prop === '__isProxy') return true;
-    if (prop in target) {
-      const base = target[prop];
-      // Merge live cache on top of static defaults (write-through cache pattern)
-      const live = _liveCache[prop];
-      if (live) {
-        return Object.freeze({ ...base, ...live });
-      }
-      return Object.freeze(base);
-    }
-    return undefined;
-  },
-  set(target, prop, value) {
-    throw new TypeError('INSTRUMENT_PARAMS is immutable. Use updateLiveParam to update live market data.');
-  },
-  ownKeys(target) {
-    return Reflect.ownKeys(target);
-  },
-  getOwnPropertyDescriptor(target, prop) {
-    const desc = Reflect.getOwnPropertyDescriptor(target, prop);
-    if (desc) {
-      desc.value = this.get(target, prop);
-    }
-    return desc;
-  }
-});
+export const INSTRUMENT_PARAMS = Object.freeze(Object.fromEntries(
+  Object.entries(rawModelAssumptions).map(([key, value]) => [key, Object.freeze({
+    ...value,
+    dataClass: PROJECTION_ASSUMPTION_DATA_CLASS,
+    assumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+    source: PROJECTION_ASSUMPTION_SOURCE,
+    observedMarketFact: false,
+    providerForecast: false,
+  })]),
+));
 
 /**
  * Get nominal rate for an instrument key (as percentage, e.g. 12.5).
@@ -165,7 +92,7 @@ export function buildRateLookup() {
   return lookup;
 }
 
-/** Risk-free rate benchmark (FD post-tax approximation) */
+/** Versioned policy benchmark used only by model scoring; not an observed risk-free product rate. */
 export const RISK_FREE_RATE = 0.05;
 
 /** SEBI disclaimer */

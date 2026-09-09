@@ -189,6 +189,11 @@ export const investmentDatabase = masterCatalog.instruments.map(inst => {
     
     // Dynamic fields flattened
     expectedReturn: inst.dynamicData.expectedReturn.avg,
+    returnDataClass: 'MODEL_ASSUMPTION',
+    returnAssumptionVersion: 'wealthgenie-projection-assumptions-1.0.0',
+    returnSource: 'WEALTHGENIE_MODEL_POLICY',
+    observedMarketFact: false,
+    providerForecast: false,
     rate: inst.dynamicData.interestRates,
     returnRange: {
       min: inst.dynamicData.expectedReturn.min,

@@ -9,7 +9,7 @@ export function buildSystemPrompt(user, profileInput, recommendation, _marketDat
   const suitability = assessSuitabilityRisk(profile);
   const context = buildLlmFinancialContext(profile, suitability);
   const recommendations = (recommendation?.instruments || []).slice(0, 8).map(instrument =>
-    `${instrument.name} (${instrument.type}): ${instrument.nominalReturn}% pre-tax nominal, ${(instrument.allocationWeight * 100).toFixed(1)}% allocation`
+    `${instrument.name} (${instrument.type}): ${instrument.nominalReturn}% pre-tax nominal model assumption (not a provider forecast), ${(instrument.allocationWeight * 100).toFixed(1)}% allocation`
   ).join('\n');
   const planningGoals = customGoals.slice(0, 10).map(goal =>
     `${goal.goal_name}: target ₹${Number(goal.target_amount).toLocaleString('en-IN')} by ${new Date(goal.target_date).getFullYear()}`

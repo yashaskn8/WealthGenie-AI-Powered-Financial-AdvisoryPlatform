@@ -23,11 +23,11 @@ const CustomTooltip = ({ active, payload }) => {
         Simulation Year {d.year}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '6px 16px' }}>
-        <span style={{ color: '#94a3b8' }}>90th %ile (Bull):</span><span style={{ fontWeight: 700, color: '#10b981' }}>{formatINR(d.p90)}</span>
+        <span style={{ color: '#94a3b8' }}>Simulated 90th %ile:</span><span style={{ fontWeight: 700, color: '#10b981' }}>{formatINR(d.p90)}</span>
         <span style={{ color: '#94a3b8' }}>75th %ile:</span><span style={{ fontWeight: 600, color: '#38bdf8' }}>{formatINR(d.p75)}</span>
-        <span style={{ color: '#38bdf8', fontWeight: 800 }}>Median Scenario:</span><span style={{ fontWeight: 900, color: '#38bdf8' }}>{formatINR(d.p50)}</span>
+        <span style={{ color: '#38bdf8', fontWeight: 800 }}>Simulated median:</span><span style={{ fontWeight: 900, color: '#38bdf8' }}>{formatINR(d.p50)}</span>
         <span style={{ color: '#94a3b8' }}>25th %ile:</span><span style={{ fontWeight: 600, color: '#cbd5e1' }}>{formatINR(d.p25)}</span>
-        <span style={{ color: '#94a3b8' }}>10th %ile (Bear):</span><span style={{ fontWeight: 600, color: '#f43f5e' }}>{formatINR(d.p10)}</span>
+        <span style={{ color: '#94a3b8' }}>Simulated 10th %ile:</span><span style={{ fontWeight: 600, color: '#f43f5e' }}>{formatINR(d.p10)}</span>
       </div>
     </div>
   );
@@ -78,7 +78,7 @@ const ProjectionBand = ({ chartData, targetAmount, goalProbability, instrumentNa
               {Math.round(goalProbability * 100)}%
             </div>
             <div style={{ fontSize: '0.62rem', color: '#94a3b8', marginTop: 3, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-              Target Feasibility
+              Simulated Goal Reach Rate
             </div>
           </div>
         )}

@@ -564,15 +564,15 @@ export async function optimisePortfolio(profileId, assets, strategy) {
 }
 
 // ─── POST-TAX RETURN (WG-038: backend single source of truth) ────
-export async function computePostTaxReturn(instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource, options = {}) {
+export async function computePostTaxReturn(instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource, fiscalYear, options = {}) {
   return request('POST', '/tax/post-tax-return', {
-    instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource,
+    instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource, fiscalYear,
   }, options);
 }
 
-export async function computePostTaxReturnBatch(instruments, annualIncome, regime, userAge, incomeSource, inflationRate) {
+export async function computePostTaxReturnBatch(instruments, annualIncome, regime, userAge, incomeSource, inflationRate, fiscalYear) {
   return request('POST', '/tax/post-tax-return/batch', {
-    instruments, annualIncome, regime, userAge, incomeSource, inflationRate,
+    instruments, annualIncome, regime, userAge, incomeSource, inflationRate, fiscalYear,
   });
 }
 

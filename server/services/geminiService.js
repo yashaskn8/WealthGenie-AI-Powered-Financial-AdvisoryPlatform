@@ -53,7 +53,7 @@ export async function generateAdvisory(userContext) {
   // Check Redis cache (1 hour TTL)
   const cached = await getCache(cacheKey);
   if (cached) return cached;
-  const instrumentList = (instruments || []).map(i => `${i.name} (${i.type}) - nominal expected return: ${i.nominalReturn}% - allocation: ${(i.allocationWeight * 100).toFixed(1)}%`).join('\n  ');
+  const instrumentList = (instruments || []).map(i => `${i.name} (${i.type}) - WealthGenie pre-tax nominal model assumption: ${i.nominalReturn}% (not a provider forecast) - allocation: ${(i.allocationWeight * 100).toFixed(1)}%`).join('\n  ');
 
   // Build SHAP context block if available
   let shapContext = '';
@@ -166,7 +166,7 @@ Use simple English. Reference specific numbers from the profile. Do not infer an
 function getFallbackAdvisory({ profile, instruments }) {
   const safeInstruments = Array.isArray(instruments) ? instruments : [];
   const topInst = safeInstruments[0]?.name || 'diversified instruments';
-  return `Based on your approved profile as a ${profile.age}-year-old investor with ${profile.suitabilityRisk} final suitability, ${topInst} aligns with your selected goals and ${profile.investmentHorizonYears}-year horizon. Expected returns shown are pre-tax nominal estimates because taxable income and deductions are not part of the Financial Profile.\n\nKey risks include market volatility, interest-rate changes, liquidity constraints, and inflation. The allocation is kept within your stated preference and measured capacity, but actual returns can differ materially from estimates.\n\nAs an immediate next step, review the proposed allocation and start only an amount within your ₹${profile.monthlySavings.toLocaleString('en-IN')} monthly savings capacity.`;
+  return `Based on your approved profile as a ${profile.age}-year-old investor with ${profile.suitabilityRisk} final suitability, ${topInst} aligns with your selected goals and ${profile.investmentHorizonYears}-year horizon. Projection returns are versioned WealthGenie model assumptions on a pre-tax nominal basis, not provider forecasts; taxable income and deductions are outside the Financial Profile.\n\nKey risks include market volatility, interest-rate changes, liquidity constraints, and inflation. The allocation is kept within your stated preference and measured capacity, but actual returns can differ materially from model-based simulations.\n\nAs an immediate next step, review the proposed allocation and start only an amount within your ₹${profile.monthlySavings.toLocaleString('en-IN')} monthly savings capacity.`;
 }
 
 export async function getGoalAdvisory(message, profileContext) {

@@ -4,11 +4,15 @@ export const PROVIDERS = Object.freeze({
   AMFI: 'AMFI',
   NSE: 'NSE',
   UPSTOX: 'UPSTOX',
+  GOVERNMENT_OF_INDIA: 'GOVERNMENT_OF_INDIA',
+  SBI: 'SBI',
 });
 
 export const FACT_KINDS = Object.freeze({
   MUTUAL_FUND_NAV: 'MUTUAL_FUND_NAV',
   MARKET_QUOTE: 'MARKET_QUOTE',
+  SCHEME_INTEREST_RATE: 'SCHEME_INTEREST_RATE',
+  TERM_DEPOSIT_RATE: 'TERM_DEPOSIT_RATE',
 });
 
 export const AVAILABILITY = Object.freeze({
@@ -77,6 +81,9 @@ export function createMarketFact({
   maxAgeSeconds,
   providerTimestamp = null,
   effectiveTradingDate = null,
+  effectiveFrom = null,
+  effectiveTo = null,
+  publicationDate = null,
   dataClass = null,
   metrics = {},
   now = new Date(),
@@ -102,6 +109,9 @@ export function createMarketFact({
     observedAt: normalizedObservedAt,
     providerTimestamp: normalizeTimestamp(providerTimestamp),
     effectiveTradingDate: effectiveTradingDate || null,
+    effectiveFrom: effectiveFrom || null,
+    effectiveTo: effectiveTo || null,
+    publicationDate: publicationDate || null,
     fetchedAt: normalizedFetchedAt,
     dataClass,
     availabilityStatus,

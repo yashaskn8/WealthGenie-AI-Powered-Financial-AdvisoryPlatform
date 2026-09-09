@@ -44,7 +44,7 @@ describe('CLAIM 2 — Autonomous Agentic Tool Loops Hardened Verification Suite'
             toolCalls: [{
               tool: 'tax_calculator',
               arguments: {
-                income: correction, incomeSource: 'salary', age: 35, regime: 'new',
+                income: correction, incomeSource: 'salary', fiscalYear: 'FY2026-27', age: 35, regime: 'new',
                 section80C: 0, nps80CCD1B: 0, section80D_self: 0,
                 section80D_parents: 0, parentsSenior: false, hra: 0,
               },
@@ -93,7 +93,7 @@ describe('CLAIM 2 — Autonomous Agentic Tool Loops Hardened Verification Suite'
           return {
             responseText: `Hop 2: High drift (₹${correction}). Calculating tax.`,
             toolCalls: [{ tool: 'tax_calculator', arguments: {
-              income: correction, incomeSource: 'salary', age: 35, regime: 'new',
+              income: correction, incomeSource: 'salary', fiscalYear: 'FY2026-27', age: 35, regime: 'new',
               section80C: 0, nps80CCD1B: 0, section80D_self: 0,
               section80D_parents: 0, parentsSenior: false, hra: 0,
             } }],
@@ -223,7 +223,7 @@ describe('CLAIM 2 — Autonomous Agentic Tool Loops Hardened Verification Suite'
       const args = (hopIndex % 2 === 1)
         ? { monthlyInvestment: 10000, annualRate: 0.12, years: 10 }
         : {
-          income: 500000, incomeSource: 'salary', age: 35, regime: 'new',
+          income: 500000, incomeSource: 'salary', fiscalYear: 'FY2026-27', age: 35, regime: 'new',
           section80C: 0, nps80CCD1B: 0, section80D_self: 0,
           section80D_parents: 0, parentsSenior: false, hra: 0,
         };

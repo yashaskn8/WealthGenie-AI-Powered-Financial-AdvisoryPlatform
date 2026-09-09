@@ -344,6 +344,9 @@ const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRec
           <div className="ddm-header-top">
             <span className="premium-badge">{inv.category}</span>
             <h2 id="deepdive-modal-title" className="ddm-title">{inv.name}</h2>
+            <span style={{ color: '#94a3b8', fontSize: '0.72rem', letterSpacing: '0.04em' }}>
+              {inv.returnDataClass || 'MODEL_ASSUMPTION'} · {inv.returnAssumptionVersion || 'wealthgenie-projection-assumptions-1.0.0'} · not an observed market fact or provider forecast
+            </span>
           </div>
 
           <div className="ddm-quick-metrics">
@@ -354,7 +357,7 @@ const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRec
               </span>
             </div>
             <div className="metric-item">
-              <span className="metric-label"><JargonTooltip term="Return Potential">Pre-tax Nominal Range</JargonTooltip></span>
+              <span className="metric-label"><JargonTooltip term="Return Potential">Model Return Assumption</JargonTooltip></span>
               <span className="metric-value" style={{ color: '#22c55e' }}>
                 {hasReturnRange
                   ? `${returnMin.toFixed(1).replace(/\.0$/, '')}% – ${returnMax.toFixed(1).replace(/\.0$/, '')}%`
@@ -366,8 +369,8 @@ const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRec
               <span className="metric-value">{inv.lock_in_years === null ? 'Unavailable' : inv.lock_in_years > 0 ? `${inv.lock_in_years} Years` : 'None'}</span>
             </div>
             <div className="metric-item">
-              <span className="metric-label"><JargonTooltip term="Tax Benefit">Tax Benefit</JargonTooltip></span>
-              <span className="metric-value">{inv.tax_benefit === null ? 'Unavailable' : inv.tax_benefit ? `Section ${inv.tax_section}` : 'None'}</span>
+              <span className="metric-label"><JargonTooltip term="Tax Benefit">Reference Tax Tag</JargonTooltip></span>
+              <span className="metric-value">Unavailable — use Tax tab</span>
             </div>
           </div>
 

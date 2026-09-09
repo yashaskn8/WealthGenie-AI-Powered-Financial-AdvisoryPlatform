@@ -6,7 +6,12 @@
  * fallback and is never reported as successful live data.
  */
 
-import { INSTRUMENT_PARAMS } from './instrumentConstants.js';
+import {
+  INSTRUMENT_PARAMS,
+  PROJECTION_ASSUMPTION_DATA_CLASS,
+  PROJECTION_ASSUMPTION_SOURCE,
+  PROJECTION_ASSUMPTION_VERSION,
+} from './instrumentConstants.js';
 import AmfiNavProvider from './marketData/AmfiNavProvider.js';
 import AmfiNavHistoryProvider from './marketData/AmfiNavHistoryProvider.js';
 import UpstoxMarketDataProvider, {
@@ -17,6 +22,8 @@ import UpstoxHistoricalCandleProvider, {
 } from './marketData/UpstoxHistoricalCandleProvider.js';
 import NseMarketDataProvider from './marketData/NseMarketDataProvider.js';
 import NseHistoricalDataProvider from './marketData/NseHistoricalDataProvider.js';
+import GovernmentSmallSavingsProvider from './marketData/GovernmentSmallSavingsProvider.js';
+import SbiTermDepositProvider from './marketData/SbiTermDepositProvider.js';
 import {
   DEFAULT_BENCHMARK_IDS,
   MARKET_BENCHMARKS,
@@ -33,6 +40,8 @@ const upstoxProvider = new UpstoxMarketDataProvider();
 const upstoxHistoryProvider = new UpstoxHistoricalCandleProvider();
 const nseProvider = new NseMarketDataProvider();
 const nseHistoryProvider = new NseHistoricalDataProvider();
+const governmentSavingsProvider = new GovernmentSmallSavingsProvider();
+const sbiTermDepositProvider = new SbiTermDepositProvider();
 
 export const SUPPORTED_PRIMARY_MARKET_PROVIDERS = Object.freeze(['NSE', 'UPSTOX']);
 
@@ -88,6 +97,18 @@ export async function fetchAmfiHistoricalNavSnapshot({
     targetDate: target.toISOString().slice(0, 10),
     forceRefresh,
   });
+  const persistence = persist ? await persistFreshSnapshot(snapshot) : { status: 'NOT_REQUESTED' };
+  return { ...snapshot, persistence };
+}
+
+export async function fetchGovernmentSavingsSnapshot({ forceRefresh = false, persist = true } = {}) {
+  const snapshot = await governmentSavingsProvider.getSnapshot({ forceRefresh });
+  const persistence = persist ? await persistFreshSnapshot(snapshot) : { status: 'NOT_REQUESTED' };
+  return { ...snapshot, persistence };
+}
+
+export async function fetchSbiTermDepositSnapshot({ forceRefresh = false, persist = true } = {}) {
+  const snapshot = await sbiTermDepositProvider.getSnapshot({ forceRefresh });
   const persistence = persist ? await persistFreshSnapshot(snapshot) : { status: 'NOT_REQUESTED' };
   return { ...snapshot, persistence };
 }
@@ -222,12 +243,15 @@ export async function fetchIndexStatistics(symbol = '^NSEI', options = {}) {
  * Phase 5. These are now labelled as assumptions and are never described as
  * live/verified observations or altered by an external quote.
  */
-export async function getLiveInstrumentParams() {
+export async function getInstrumentModelAssumptions() {
   const params = Object.fromEntries(Object.entries(INSTRUMENT_PARAMS).map(([key, value]) => [key, {
     mean: value.nominalRate / 100,
     stdDev: value.volatility,
-    source: 'FROZEN_MODEL_ASSUMPTION',
-    dataClass: 'MODEL_ASSUMPTION_NOT_MARKET_FACT',
+    source: PROJECTION_ASSUMPTION_SOURCE,
+    dataClass: PROJECTION_ASSUMPTION_DATA_CLASS,
+    assumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+    observedMarketFact: false,
+    providerForecast: false,
   }]));
   return {
     schema_version: MARKET_PARAMETER_SCHEMA_VERSION,
@@ -236,9 +260,17 @@ export async function getLiveInstrumentParams() {
     computed_at: null,
     live_index_used: false,
     live_index_reason: 'PHASE_1_DOES_NOT_ESTIMATE_EXPECTED_RETURNS_FROM_QUOTES',
+    data_class: PROJECTION_ASSUMPTION_DATA_CLASS,
+    assumption_version: PROJECTION_ASSUMPTION_VERSION,
+    source: PROJECTION_ASSUMPTION_SOURCE,
+    observed_market_fact: false,
+    provider_forecast: false,
     cached: false,
   };
 }
+
+// Compatibility alias. The response itself is explicitly MODEL_ASSUMPTIONS_ONLY.
+export const getLiveInstrumentParams = getInstrumentModelAssumptions;
 
 export async function getMutualFundNavsBySchemeCodes(schemeCodes, options = {}) {
   const normalizedCodes = [...new Set((schemeCodes || []).map(value => String(value).trim()).filter(Boolean))];
@@ -298,11 +330,13 @@ function sourceSummary(snapshot) {
 }
 
 export async function getMarketDataSummary(options = {}) {
-  const [amfi, market] = await Promise.all([
+  const [amfi, market, government, sbi] = await Promise.all([
     fetchAmfiProductSnapshot(options),
     fetchBenchmarkQuotes(options),
+    fetchGovernmentSavingsSnapshot(options),
+    fetchSbiTermDepositSnapshot(options),
   ]);
-  const statuses = [amfi.status, market.status];
+  const statuses = [amfi.status, market.status, government.status, sbi.status];
   const availableSources = statuses.filter(status => [AVAILABILITY.AVAILABLE, AVAILABILITY.PARTIAL].includes(status)).length;
   const status = availableSources === statuses.length
     ? AVAILABILITY.AVAILABLE
@@ -316,6 +350,8 @@ export async function getMarketDataSummary(options = {}) {
     sources: {
       amfi: sourceSummary(amfi),
       [marketSourceKey]: sourceSummary(market),
+      governmentSmallSavings: sourceSummary(government),
+      sbiTermDeposits: sourceSummary(sbi),
     },
     primaryMarketProvider: PRIMARY_MARKET_PROVIDER,
     benchmarks: market.facts || [],

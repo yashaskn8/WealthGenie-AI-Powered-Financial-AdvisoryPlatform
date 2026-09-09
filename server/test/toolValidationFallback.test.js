@@ -106,6 +106,7 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
     const result = await FinancialToolRegistry.executeTool('tax_calculator', {
       income: 1500000,
       incomeSource: 'salary',
+      fiscalYear: 'FY2026-27',
       age: 35,
       regime: 'new',
       section80C: 0,

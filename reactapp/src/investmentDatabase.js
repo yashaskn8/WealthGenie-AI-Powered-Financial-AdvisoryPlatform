@@ -12,34 +12,21 @@
 
 import masterCatalog from './data/investment_master.json' with { type: 'json' };
 
-// ─── TAX INFO LOOKUP ──────────────────────────────────────────────
-export const TAX_INFO = {
-  eee: {
-    label: "EEE — Exempt-Exempt-Exempt",
-    desc: "Investment, growth, and withdrawal are all 100% tax-free. Best possible tax treatment."
-  },
-  slab: {
-    label: "Taxed at Income Slab Rate",
-    desc: "Interest/gains added to taxable income and taxed at your marginal income tax rate.",
-    debtNote: "Post Finance Act 2023: debt MF gains are taxed at slab rates regardless of holding period. Indexation and 20% LTCG benefits no longer apply."
-  },
-  ltcg: {
-    label: "LTCG — 12.5% on gains above ₹1.25L",
-    desc: "Long-term capital gains above ₹1.25 lakh taxed at 12.5%. Gains below threshold are tax-free."
-  },
-  elss: {
-    label: "ELSS — 80C + LTCG",
-    desc: "Investment qualifies for ₹1.5L deduction under 80C. Gains taxed as LTCG at 12.5% above ₹1.25L."
-  },
-  nps: {
-    label: "NPS — 80CCD(1B) Extra Deduction",
-    desc: "Additional ₹50,000 deduction under 80CCD(1B) beyond the ₹1.5L 80C limit. 60% lump sum at retirement is tax-free."
-  },
-  sgb: {
-    label: "2.5% Interest Taxable · Gains Tax-Free",
-    desc: "2.5% annual interest is taxed at your slab rate. All capital gains at 8-year maturity are fully tax-free under Section 47(viic). Most tax-efficient gold option."
-  }
-};
+// Legacy keys are retained for UI compatibility, but no current tax conclusion is
+// embedded in this presentation catalog. Authoritative tax output requires the
+// user's explicit fiscal year, regime, income and product classification.
+const UNAVAILABLE_TAX_REFERENCE = Object.freeze({
+  label: 'Reference tax tag',
+  desc: 'Unavailable here. Use the Tax view with explicit inputs and current versioned rules.',
+});
+export const TAX_INFO = Object.freeze({
+  eee: UNAVAILABLE_TAX_REFERENCE,
+  slab: UNAVAILABLE_TAX_REFERENCE,
+  ltcg: UNAVAILABLE_TAX_REFERENCE,
+  elss: UNAVAILABLE_TAX_REFERENCE,
+  nps: UNAVAILABLE_TAX_REFERENCE,
+  sgb: UNAVAILABLE_TAX_REFERENCE,
+});
 
 // ─── RISK COLORS ──────────────────────────────────────────────────
 export const RISK_COLORS = {
@@ -112,6 +99,11 @@ export const investmentDatabase = masterCatalog.instruments.map(inst => {
     
     // Dynamic fields flattened
     expectedReturn: inst.dynamicData.expectedReturn.avg,
+    returnDataClass: 'MODEL_ASSUMPTION',
+    returnAssumptionVersion: 'wealthgenie-projection-assumptions-1.0.0',
+    returnSource: 'WEALTHGENIE_MODEL_POLICY',
+    observedMarketFact: false,
+    providerForecast: false,
     rate: inst.dynamicData.interestRates,
     returnRange: {
       min: inst.dynamicData.expectedReturn.min,

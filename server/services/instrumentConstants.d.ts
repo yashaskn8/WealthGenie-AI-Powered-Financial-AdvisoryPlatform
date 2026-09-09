@@ -1,11 +1,6 @@
-/**
- * Update live parameters dynamically (used by marketDataService).
- *
- * @param {string} key - Instrument key (e.g. 'FD', 'Equity_MF')
- * @param {number} [nominalRate] - Live nominal return rate (percentage, e.g. 6.5)
- * @param {number} [volatility] - Live annualised volatility (decimal, e.g. 0.18)
- */
-export function updateLiveParam(key: string, nominalRate?: number, volatility?: number): void;
+export const PROJECTION_ASSUMPTION_VERSION: string;
+export const PROJECTION_ASSUMPTION_SOURCE: 'WEALTHGENIE_MODEL_POLICY';
+export const PROJECTION_ASSUMPTION_DATA_CLASS: 'MODEL_ASSUMPTION';
 /**
  * Get nominal rate for an instrument key (as percentage, e.g. 12.5).
  * Returns null when the instrument is unknown.

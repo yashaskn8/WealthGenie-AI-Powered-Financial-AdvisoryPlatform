@@ -12,7 +12,7 @@ import {
   computeTax,
   compareTaxRegimes,
   isFYVerified,
-  CURRENT_FY,
+  getTaxPolicyMetadata,
   buildTaxSlabBreakdown,
   analyzeTaxOptimization,
 } from '../services/taxEngine.js';
@@ -54,7 +54,7 @@ router.get('/compute', validateQuery(taxComputeSchema), asyncHandler(async (req,
   // Joi coerces query strings to numbers via taxComputeSchema
   const income = Number(req.query.income);
   const regime = req.query.regime;
-  const fiscalYear = req.query.fiscalYear || CURRENT_FY;
+  const { fiscalYear } = req.query;
 
   if (!Number.isFinite(income) || income < 0) {
     return sendError(req, res, 400, 'Income must be a valid positive number.', 'INCOME_INVALID');
@@ -66,7 +66,7 @@ router.get('/compute', validateQuery(taxComputeSchema), asyncHandler(async (req,
 
   const deductions = _parseTaxDeductionsFromQuery(req.query);
   const result = computeTax(income, regime, deductions, req.query.incomeSource, fiscalYear);
-  res.json({ ...result, fiscal_year: fiscalYear, verified: true });
+  res.json({ ...result, fiscal_year: fiscalYear, ...getTaxPolicyMetadata(fiscalYear) });
 }));
 
 /**
@@ -75,7 +75,7 @@ router.get('/compute', validateQuery(taxComputeSchema), asyncHandler(async (req,
  */
 router.get('/compare', validateQuery(taxCompareSchema), asyncHandler(async (req, res) => {
   const income = Number(req.query.income);
-  const fiscalYear = req.query.fiscalYear || CURRENT_FY;
+  const { fiscalYear } = req.query;
 
   if (!Number.isFinite(income) || income < 0) {
     return sendError(req, res, 400, 'Income must be a valid positive number.', 'INCOME_INVALID');
@@ -94,6 +94,16 @@ router.get('/compare', validateQuery(taxCompareSchema), asyncHandler(async (req,
     income,
     fiscal_year: fiscalYear,
     verified: true,
+    ...getTaxPolicyMetadata(fiscalYear),
+    inputsUsed: {
+      annualIncome: income,
+      incomeSource: req.query.incomeSource,
+      fiscalYear,
+      deductions,
+    },
+    rulesApplied: ['COMPARE_VERIFIED_NEW_AND_OLD_REGIMES'],
+    assumptions: [],
+    unavailableReasons: [],
     new_regime: {
       tax: newRegime.taxAmount,
       effective_rate: newRegime.effectiveRate,
@@ -149,6 +159,10 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
   const {
     instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource,
   } = req.body;
+  const { fiscalYear } = req.body;
+  if (!isFYVerified(fiscalYear)) {
+    return sendError(req, res, 422, `Verified tax rules are unavailable for ${fiscalYear}.`, 'FISCAL_YEAR_UNSUPPORTED');
+  }
 
   const result = calculatePostTaxReturnSafe(
     instrumentType,
@@ -159,6 +173,8 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
     monthlySIP,
     userAge,
     incomeSource,
+    true,
+    fiscalYear,
   );
 
   const whatIfPrincipal = 100000;
@@ -171,6 +187,14 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
     what_if_nominal_gain: nominalGain,
     what_if_estimated_tax: Math.max(0, nominalGain - netGain),
     what_if_net_gain: netGain,
+    ...getTaxPolicyMetadata(fiscalYear),
+    inputsUsed: {
+      annualIncome, incomeSource, regime, fiscalYear, holdingYears, monthlySIP, userAge,
+      nominalRate,
+    },
+    rulesApplied: [result.taxType],
+    assumptions: ['NOMINAL_RATE_IS_CALLER_SUPPLIED; ITS EVIDENCE CLASS MUST BE ESTABLISHED BY THE CALLER'],
+    unavailableReasons: [],
   });
 }));
 
@@ -181,6 +205,10 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
  */
 router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncHandler(async (req, res) => {
   const { instruments, annualIncome, regime, userAge, incomeSource, inflationRate } = req.body;
+  const { fiscalYear } = req.body;
+  if (!isFYVerified(fiscalYear)) {
+    return sendError(req, res, 422, `Verified tax rules are unavailable for ${fiscalYear}.`, 'FISCAL_YEAR_UNSUPPORTED');
+  }
 
   const results = instruments.map(inv => {
     const taxResult = calculatePostTaxReturnSafe(
@@ -192,6 +220,8 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
       inv.monthlySIP,
       userAge,
       incomeSource,
+      true,
+      fiscalYear,
     );
     return {
       instrumentType: inv.instrumentType,
@@ -235,15 +265,23 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
 
   res.json({
     calculation_classification: 'SEPARATE_TAX_WHAT_IF',
+    ...getTaxPolicyMetadata(fiscalYear),
     assumptions: {
       annualIncome,
       incomeSource,
       regime,
       userAge,
       inflationRate,
+      fiscalYear,
       deductions: 0,
       contributionGrowthRate: 0,
     },
+    inputsUsed: {
+      annualIncome, incomeSource, regime, userAge, inflationRate, fiscalYear,
+      instruments: instruments.map(instrument => ({ ...instrument })),
+    },
+    rulesApplied: [...new Set(results.map(result => result.taxType))],
+    unavailableReasons: [],
     results,
     summary: {
       totalTaxDrag,

@@ -1,6 +1,6 @@
 const SCENARIO_PROFILES = Object.freeze({
-  guaranteed: Object.freeze({
-    title: 'Principal-Protected Sovereign / Deposit Asset',
+  capital_protection_reference: Object.freeze({
+    title: 'Sovereign / Deposit Reference Scenario',
     badgeColor: '#10b981',
     description: 'These instruments avoid ordinary market drawdowns, but remain exposed to inflation, liquidity restrictions, and product-specific protection limits.',
     insight: 'Nominal capital protection does not eliminate purchasing-power or liquidity risk. Confirm the issuer, withdrawal terms, and any applicable deposit-insurance limit before investing.',
@@ -91,7 +91,7 @@ const SCENARIO_PROFILES = Object.freeze({
   }),
 });
 
-const GUARANTEED_TYPES = new Set(['PPF', 'FD', 'RD', 'RBI_Bond', 'G-Sec', 'SCSS', 'SSY', 'NSC', 'KVP', 'POMIS', 'MSSC', 'APY']);
+const CAPITAL_REFERENCE_TYPES = new Set(['PPF', 'FD', 'RD', 'RBI_Bond', 'G-Sec', 'SCSS', 'SSY', 'NSC', 'KVP', 'POMIS', 'MSSC', 'APY']);
 const LIQUID_TYPES = new Set(['Liquid_MF', 'Arbitrage_MF', 'Overnight_MF']);
 const LONG_DEBT_TYPES = new Set(['Debt_MF', 'Corporate_Bond', 'Gilt_MF', 'Bond']);
 const GOLD_TYPES = new Set(['SGB', 'Gold', 'Gold_ETF']);
@@ -108,7 +108,7 @@ export function classifyStressInstrument(instrument) {
   const name = normalize(instrument.name);
   const assetClass = normalize(instrument.assetClass);
 
-  if (GUARANTEED_TYPES.has(type) || /(^|[_-])(ppf|fd|rd|scss|ssy|nsc|kvp|pomis|mssc|apy)([_-]|$)/.test(id)) return 'guaranteed';
+  if (CAPITAL_REFERENCE_TYPES.has(type) || /(^|[_-])(ppf|fd|rd|scss|ssy|nsc|kvp|pomis|mssc|apy)([_-]|$)/.test(id)) return 'capital_protection_reference';
   if (LIQUID_TYPES.has(type) || id.includes('liquid') || id.includes('overnight') || name.includes('liquid fund')) return 'liquid_debt';
   if (GOLD_TYPES.has(type) || assetClass === 'gold' || id.includes('gold') || name.includes('gold')) return 'gold';
   if (REIT_TYPES.has(type) || assetClass === 'real estate' || id.includes('reit') || id.includes('invit')) return 'reit';

@@ -13,6 +13,7 @@ vi.mock('../../services/api', () => ({
     products: Array.from({ length: 2 }, (_, index) => ({
       id: `mf:amfi:${index + 1}`,
       name: `Verified Fund ${index + 1}`,
+      productType: 'MUTUAL_FUND',
       provider: `Verified AMC ${index + 1}`,
       source: { provider: 'AMFI', instrumentId: String(index + 1) },
       nav: { value: 12.34 + index },

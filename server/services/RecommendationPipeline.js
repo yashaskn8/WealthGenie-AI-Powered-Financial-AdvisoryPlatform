@@ -1,13 +1,29 @@
 import { investmentDatabase, CONCENTRATION_CAPS } from '../data/investmentDatabase.js';
 import whereToInvestCatalog from '../data/whereToInvestCatalog.js';
-import { INSTRUMENT_PARAMS } from './instrumentConstants.js';
+import {
+  INSTRUMENT_PARAMS,
+  PROJECTION_ASSUMPTION_DATA_CLASS,
+  PROJECTION_ASSUMPTION_SOURCE,
+  PROJECTION_ASSUMPTION_VERSION,
+} from './instrumentConstants.js';
 import { buildRecommendationProfile } from './recommendationProfile.js';
 import { assessSuitabilityRisk } from './riskProfiler.js';
-import { fetchAmfiHistoricalNavSnapshot, fetchAmfiProductSnapshot } from './marketDataService.js';
+import {
+  fetchAmfiHistoricalNavSnapshot,
+  fetchAmfiProductSnapshot,
+  fetchGovernmentSavingsSnapshot,
+  fetchSbiTermDepositSnapshot,
+} from './marketDataService.js';
 import {
   rankVerifiedMutualFundProducts,
   supportsAmfiParentCategory,
 } from './mutualFundProductRanking.js';
+import {
+  compareVerifiedFixedIncomeProducts,
+  fixedIncomeProviderForParent,
+  supportsFixedIncomeParentCategory,
+} from './fixedIncomeProductRanking.js';
+import { PROVIDERS } from './marketData/contracts.js';
 
 export const PIPELINE_CONFIG = Object.freeze({
   version: 'recommendation-pipeline-4.0.0',
@@ -386,6 +402,11 @@ function presentationInstrument(row) {
     effectiveYield: nominalReturn,
     postTaxReturn: null,
     returnBasis: 'PRE_TAX_NOMINAL',
+    returnDataClass: PROJECTION_ASSUMPTION_DATA_CLASS,
+    returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+    returnSource: PROJECTION_ASSUMPTION_SOURCE,
+    observedMarketFact: false,
+    providerForecast: false,
     expenseRatio: Number(instrument.expenseRatio ?? instrument.dynamicData?.expenseRatio),
     riskLevel: instrument.riskLabel || instrument.dynamicData?.risk?.level || `Risk ${riskScore}`,
     riskScore,
@@ -440,8 +461,8 @@ function historicalTargetDate(snapshot) {
 function referenceMetadata(parent, entry) {
   return {
     dataClass: 'REFERENCE_METADATA',
-    title: entry?.title || `Where to invest in ${parent.name}`,
-    note: 'Product names, NAVs, historical returns, eligibility, and ordering come only from the qualified market-data response. This reference text is not ranking evidence.',
+    title: `Where to invest in ${parent.name}`,
+    note: 'Only the qualified provider response supplies products, rates, NAVs, historical returns, eligibility facts, and ordering. Legacy catalog copy is non-financial reference metadata and is not evidence.',
     howToStart: entry?.howToStart || null,
     riskLevel: parent.riskScore,
   };
@@ -472,6 +493,26 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
 
   const parent = { name: catalog.name, riskScore: getInstrumentRisk(catalog) };
   const catalogMetadata = referenceMetadata(parent, whereToInvestCatalog[catalog.id]);
+  if (supportsFixedIncomeParentCategory(catalog.id)) {
+    const provider = fixedIncomeProviderForParent(catalog.id);
+    const fetchSnapshot = provider === PROVIDERS.GOVERNMENT_OF_INDIA
+      ? (dependencies.fetchGovernmentSavingsSnapshot || fetchGovernmentSavingsSnapshot)
+      : (dependencies.fetchSbiTermDepositSnapshot || fetchSbiTermDepositSnapshot);
+    const snapshot = await fetchSnapshot();
+    const result = compareVerifiedFixedIncomeProducts({
+      parentInstrumentId: catalog.id,
+      snapshot,
+      profile: canonical,
+    });
+    return attachWtiMetadata(result.products, {
+      excluded,
+      riskReconciliation,
+      catalog: catalogMetadata,
+      ranking: result.ranking,
+      comparisonUniverse: result.comparisonUniverse,
+    });
+  }
+
   if (!supportsAmfiParentCategory(catalog.id)) {
     const result = rankVerifiedMutualFundProducts({
       parentInstrumentId: catalog.id,

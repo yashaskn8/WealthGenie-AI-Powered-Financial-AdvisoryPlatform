@@ -72,7 +72,7 @@ const AllocationPlanner = ({ profile, recommendations = [], recommendationMeta }
     });
   }, [recommendations]);
 
-  const blendedReturn = Number(recommendationMeta?.portfolio_expected_return);
+  const blendedReturn = Number(recommendationMeta?.portfolio_return_assumption);
 
   // KPI exposures
   const equityExposure = useMemo(() =>
@@ -339,7 +339,7 @@ const AllocationPlanner = ({ profile, recommendations = [], recommendationMeta }
                     <span className="metric-val text-sky">₹{a.monthlyAmount?.toLocaleString("en-IN")}</span>
                   </div>
                   <div className="metric-pill">
-                    <span className="metric-label">Return (pre-tax nominal)</span>
+                    <span className="metric-label">Model return assumption</span>
                     <span className="metric-val text-green">{a.nominalRate}%/yr</span>
                   </div>
                   <div className="metric-pill">
@@ -370,12 +370,12 @@ const AllocationPlanner = ({ profile, recommendations = [], recommendationMeta }
       >
         <div className="ap-blended-bar">
           <div className="blended-left">
-            <div className="blended-label">ESTIMATED ANNUAL RETURN (PRE-TAX NOMINAL)</div>
+            <div className="blended-label">PORTFOLIO MODEL RETURN ASSUMPTION</div>
             <div className="blended-value">
               {Number.isFinite(blendedReturn) ? `${blendedReturn.toFixed(1)}%` : 'N/A'} <span className="per-year">per year</span>
             </div>
             <div className="blended-sub">
-              Backend-weighted estimate from the authoritative recommendation. Tax is calculated separately with explicit tax inputs.
+              Backend-weighted, pre-tax nominal model assumption — not a provider forecast. Tax is calculated separately with explicit tax inputs.
             </div>
           </div>
           <div className="blended-right">

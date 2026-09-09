@@ -56,7 +56,7 @@ const InvestmentCard = ({ investment, horizon, onLearnMore }) => {
 
       <div className="card-metrics">
         <div className="metric-block">
-          <span className="metric-label"><JargonTooltip term="Expected Return">Pre-tax Nominal Range</JargonTooltip></span>
+          <span className="metric-label"><JargonTooltip term="Expected Return">Model Assumption (Pre-tax)</JargonTooltip></span>
           <span className="metric-val">{expected_return_min}% – {expected_return_max}%</span>
         </div>
         <div className="metric-block">
@@ -67,7 +67,7 @@ const InvestmentCard = ({ investment, horizon, onLearnMore }) => {
 
       {tax_benefit && (
         <div className="tax-badge" style={{marginBottom: '8px'}}>
-          <ShieldAlert size={14} style={{marginRight:'4px'}} /> Tax Benefit Applicable
+          <ShieldAlert size={14} style={{marginRight:'4px'}} /> Catalog tax reference — verify in Tax view
         </div>
       )}
 
@@ -81,7 +81,7 @@ const InvestmentCard = ({ investment, horizon, onLearnMore }) => {
           fontSize: '0.6rem', fontWeight: 700, letterSpacing: '0.4px',
           marginBottom: '16px', whiteSpace: 'nowrap',
         }}>
-          {TRUST_ICON_MAP[trustInfo.type]} {trustInfo.label}
+          {TRUST_ICON_MAP[trustInfo.type]} Safety metadata unavailable — verify exact product
         </div>
       )}
 

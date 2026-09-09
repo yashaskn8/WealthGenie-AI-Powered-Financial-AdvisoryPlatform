@@ -1,7 +1,7 @@
 /**
  * WealthGenie Post-Tax Return Calculator
- * Applies Indian taxation rules per instrument type for FY2025-26.
- * All rates sourced from Finance Act 2023 and Budget 2024 amendments.
+ * Applies the explicitly selected, versioned Indian fiscal-year policy.
+ * The active policy and official references are owned by taxEngine.js.
  *
  * IMPORTANT: This module uses getTaxSlab() from taxEngine.js as the
  * single source of truth for marginal rate computation. There is NO
@@ -38,7 +38,8 @@ import { realReturn, sipFV } from './projectionEngine.js';
 // 
 // 4. TDS (Tax Deducted at Source):
 //    - When you earn Fixed Deposit (FD) interest, the bank doesn't wait for you to file
-//      taxes. If your annual interest exceeds ₹40,000 (₹50,000 for senior citizens), the bank
+//      taxes. For the supported fiscal years, if bank-deposit interest exceeds ₹50,000
+//      (₹1,00,000 for senior citizens), the bank
 //      automatically deducts 10% tax (TDS) and pays it to the government on your behalf.
 //      You must account for this when filing your taxes.
 // =========================================================================
@@ -182,7 +183,9 @@ export function estimateEquityLTCGTaxRate(nominalRate, monthlySIP, holdingYears)
  */
 function _calculateFDPostTax(nominalRate, marginalRate, monthlySIP, userAge, instrumentType) {
   const annualInterest = (monthlySIP * 12) * nominalRate;
-  const TDS_THRESHOLD = userAge >= 60 ? 50000 : 40000;
+  // Finance Act 2025 thresholds applicable from 1 April 2025. This calculator
+  // supports FY2025-26 and FY2026-27 only, for which the same threshold applies.
+  const TDS_THRESHOLD = userAge >= 60 ? 100000 : 50000;
   const tdsApplies = annualInterest > TDS_THRESHOLD;
 
   const postTax = nominalRate * (1 - marginalRate);
@@ -330,7 +333,7 @@ function _calculateHybridPostTax(nominalRate, marginalRate, holdingYears, monthl
  */
 export function calculatePostTaxReturn(
   instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource,
-  isSgbRedeemedWithRBI = true
+  isSgbRedeemedWithRBI = true, fiscalYear
 ) {
   if (typeof instrumentType !== 'string' || !instrumentType) throw new TypeError('instrumentType is required');
   if (!Number.isFinite(nominalRate) || nominalRate < 0 || nominalRate > 1) throw new RangeError('nominalRate must be from 0 to 1');
@@ -342,8 +345,11 @@ export function calculatePostTaxReturn(
   if (!['salary', 'pension', 'family_pension', 'business', 'other'].includes(incomeSource)) {
     throw new TypeError('incomeSource must be explicitly provided');
   }
+  if (typeof fiscalYear !== 'string' || !fiscalYear) {
+    throw new TypeError('fiscalYear must be explicitly provided');
+  }
 
-  const marginalRate = getEffectiveMarginalRate(annualIncome, regime, {}, incomeSource);
+  const marginalRate = getEffectiveMarginalRate(annualIncome, regime, {}, incomeSource, fiscalYear);
 
   switch (instrumentType) {
     case 'SCSS':
@@ -382,7 +388,7 @@ export function calculatePostTaxReturn(
         effectiveYield: round4(postTax * 100),
         taxType: `Partial EET: 60% lump sum exempt, 40% annuity at ${(marginalRate*100).toFixed(0)}%`,
         taxRate: round4(blendedDrag),
-        notes: '80CCD(1B) deduction of ₹50,000 is available under old regime only. However, Section 80CCD(2) (employer\'s contribution) is available under both old and new regimes. Note: 60% lump sum withdrawal is tax-free up to a maximum exemption of ₹25L.',
+        notes: '80CCD(1B) deduction of ₹50,000 is available under the old regime only. Section 80CCD(2) employer contribution may be available under both regimes, subject to applicable limits. The 60% lump-sum withdrawal treatment is modeled as exempt; annuity income is modeled at the selected slab rate.',
       }, nominalRate, 'NPS');
     }
 

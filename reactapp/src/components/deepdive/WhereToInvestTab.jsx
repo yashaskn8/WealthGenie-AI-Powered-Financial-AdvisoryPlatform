@@ -148,12 +148,19 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
         products: ranked.map((product) => {
           const historicalReturn = nullableMarketNumber(product.historicalReturn?.valuePct);
           const nav = nullableMarketNumber(product.nav?.value);
+          const officialRate = nullableMarketNumber(product.officialRate?.value);
+          const officialRateLabel = product.officialRate?.dataClass === 'OFFICIAL_BANK_PUBLISHED_RATE'
+            ? 'Official bank-published rate'
+            : 'Official current rate';
           return {
             ...product,
-            displayMetricLabel: Number.isFinite(historicalReturn) ? 'Historical 1Y return' : 'Current NAV',
+            displayMetricLabel: Number.isFinite(officialRate)
+              ? officialRateLabel
+              : Number.isFinite(historicalReturn) ? 'Historical 1Y return' : 'Current NAV',
             displayMetric: Number.isFinite(historicalReturn)
               ? `${historicalReturn.toFixed(2)}% historical`
-              : Number.isFinite(nav) ? `₹${nav.toLocaleString('en-IN')}` : 'Unavailable',
+              : Number.isFinite(officialRate) ? `${officialRate.toFixed(2)}% p.a.`
+                : Number.isFinite(nav) ? `₹${nav.toLocaleString('en-IN')}` : 'Unavailable',
           };
         }),
         catalog: result?.catalog || null,
@@ -234,8 +241,8 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
           <span style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 600, marginRight: 2 }}>Sort:</span>
           {[
             { id: 'score', label: isEvidenceRanked ? 'Historical Evidence' : 'Comparable Set' },
-            { id: 'postTaxYield', label: 'Post-Tax Yield' },
-            { id: 'expense', label: 'Low Expense Ratio' }
+            { id: 'postTaxYield', label: 'Post-Tax Needs Inputs' },
+            { id: 'expense', label: 'Expense Ratio Unavailable' }
           ].map(mode => (
             <button
               key={mode.id}
@@ -276,7 +283,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 8 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <Globe size={18} style={{ color: contextColor }} />
-              <span style={{ fontSize: '0.9rem', fontWeight: '700', color: '#f8fafc' }}>Verified Live Market Context</span>
+              <span style={{ fontSize: '0.9rem', fontWeight: '700', color: '#f8fafc' }}>Verified Market Context</span>
             </div>
             <span style={{
               fontSize: '0.72rem',
@@ -363,7 +370,9 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
           <p>
             <strong>{isEvidenceRanked ? 'VERIFIED RANKING UNIVERSE' : 'VERIFIED COMPARISON UNIVERSE'}:</strong>{' '}
             {rankingResult.comparisonUniverse.disclosure}{' '}
-            Source-qualified: {rankingResult.comparisonUniverse.verifiedCategoryProductCount ?? 0}; fresh NAVs: {rankingResult.comparisonUniverse.freshNavProductCount ?? 0}; explicit Direct plans: {rankingResult.comparisonUniverse.sourceEstablishedDirectPlanProductCount ?? 0}; historical evidence: {rankingResult.comparisonUniverse.historicalEvidenceProductCount ?? 0}.
+            {(rankingResult.comparisonUniverse.provider === 'AMFI' || rankingResult.comparisonUniverse.sourceProvider === 'AMFI') && (
+              <>Source-qualified: {rankingResult.comparisonUniverse.verifiedCategoryProductCount ?? 0}; fresh NAVs: {rankingResult.comparisonUniverse.freshNavProductCount ?? 0}; explicit Direct plans: {rankingResult.comparisonUniverse.sourceEstablishedDirectPlanProductCount ?? 0}; historical evidence: {rankingResult.comparisonUniverse.historicalEvidenceProductCount ?? 0}.</>
+            )}
           </p>
         </div>
       )}
@@ -388,7 +397,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
           color: '#cbd5e1'
         }}>
           <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 2 }} />
-          <div><strong>UNAVAILABLE:</strong> No source-qualified Phase-2 product ranking is available for this parent category. No fallback products or values were inserted.</div>
+          <div><strong>UNAVAILABLE:</strong> No current source-qualified product comparison is available for this parent category. No fallback products or financial values were inserted.</div>
         </div>
       )}
 
@@ -577,7 +586,11 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                 </div>
               </div>
               <p className="wti-highlights">
-                {isEvidenceRanked
+                {product.officialRate
+                  ? product.officialRate.dataClass === 'QUARTERLY_OFFICIAL_RATE'
+                    ? `Official Government of India rate effective ${product.officialRate.effectiveFrom || 'UNAVAILABLE'} to ${product.officialRate.effectiveTo || 'UNAVAILABLE'}. This is an official interval fact, not a live market price or expected return.`
+                    : `Official bank-published card rate effective from ${product.officialRate.effectiveFrom || 'UNAVAILABLE'} for ${product.tenure?.label || 'the source-established tenure'} and ${product.depositorType?.replaceAll('_', ' ') || 'the source-established depositor class'}. No best-FD claim is made.`
+                  : isEvidenceRanked
                   ? 'Ranked only among explicitly sourced Direct Growth options in the exact AMFI category by verified one-year historical NAV return. Historical performance is not an expected return.'
                   : 'Verified AMFI category and fresh NAV. No defensible merit order is claimed for this comparable option.'}
               </p>
@@ -598,12 +611,14 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
 
               <div className="wti-meta-footer">
                 <div className="meta-box"><Building2 size={12} /> Source: {product.source?.provider || 'UNAVAILABLE'}</div>
-                <div className="meta-box"><Wallet size={12} /> NAV: {Number.isFinite(nullableMarketNumber(product.nav?.value)) ? `₹${nullableMarketNumber(product.nav.value).toLocaleString('en-IN')}` : 'UNAVAILABLE'}</div>
-                <div className="meta-box"><HistoryIcon size={12} /> Valuation: {product.valuationDate || 'UNAVAILABLE'}</div>
+                {product.nav && <div className="meta-box"><Wallet size={12} /> NAV: {Number.isFinite(nullableMarketNumber(product.nav?.value)) ? `₹${nullableMarketNumber(product.nav.value).toLocaleString('en-IN')}` : 'UNAVAILABLE'}</div>}
+                {product.nav && <div className="meta-box"><HistoryIcon size={12} /> Valuation: {product.valuationDate || 'UNAVAILABLE'}</div>}
+                {product.officialRate && <div className="meta-box"><Wallet size={12} /> Rate class: {product.officialRate.dataClass?.replaceAll('_', ' ') || 'UNAVAILABLE'}</div>}
+                {product.officialRate && <div className="meta-box"><HistoryIcon size={12} /> Effective: {product.officialRate.effectiveFrom || 'UNAVAILABLE'} → {product.officialRate.effectiveTo || 'until revised'}</div>}
                 <div className="meta-box"><Activity size={12} /> Freshness: {product.freshness?.status || 'UNAVAILABLE'}</div>
                 <div className="meta-box">Eligibility: {product.productEligibility?.status?.replaceAll('_', ' ') || 'UNAVAILABLE'}</div>
-                <div className="meta-box">Plan: {product.plan || 'UNAVAILABLE'}</div>
-                <div className="meta-box">Option: {product.option || 'UNAVAILABLE'}</div>
+                {product.productType === 'MUTUAL_FUND' && <div className="meta-box">Plan: {product.plan || 'UNAVAILABLE'}</div>}
+                {product.productType === 'MUTUAL_FUND' && <div className="meta-box">Option: {product.option || 'UNAVAILABLE'}</div>}
                 {product.historicalReturn && <div className="meta-box"><HistoryIcon size={12} /> History: {product.historicalReturn.startDate} → {product.historicalReturn.endDate}</div>}
                 {isEvidenceRanked && product.rank === 1 && rankingResult.ranking?.hasUniqueLeader && <div className="meta-box meta-box--pick"><Star size={12} /> Rank #1 by 1Y Historical NAV Return</div>}
               </div>

@@ -8,7 +8,7 @@ const InsightsScreen = ({ profile, recommendations, recommendationMeta }) => {
   const activeRecs = (recommendations || []).filter(recommendation => Number(recommendation.monthly_allocation) > 0);
   const assetAllocations = Object.entries(recommendationMeta?.asset_class_allocation || {});
   const reasonCodes = recommendationMeta?.suitability_reason_codes || [];
-  const expectedReturn = Number(recommendationMeta?.portfolio_expected_return);
+  const returnAssumption = Number(recommendationMeta?.portfolio_return_assumption);
   const excludedCount = (recommendationMeta?.excluded_due_to_eligibility || []).length;
   const representedGoals = new Set(activeRecs.flatMap(recommendation => recommendation.goalTags || [])).size;
 
@@ -33,9 +33,9 @@ const InsightsScreen = ({ profile, recommendations, recommendationMeta }) => {
       tag: 'Projection Input',
       tagColor: '#2dd4bf',
       severity: 'low',
-      body: Number.isFinite(expectedReturn)
-        ? `Your backend-weighted portfolio estimate is ${expectedReturn.toFixed(2)}% per year on a pre-tax nominal basis.`
-        : 'The recommendation service did not provide a portfolio return estimate.',
+      body: Number.isFinite(returnAssumption)
+        ? `The projection uses a backend-weighted ${returnAssumption.toFixed(2)}% annual model assumption on a pre-tax nominal basis. It is not a provider forecast.`
+        : 'The recommendation service did not provide a portfolio return assumption.',
       action: 'Tax and inflation are intentionally calculated in separate what-if tools with explicit inputs.',
       delay: 0.2
     },

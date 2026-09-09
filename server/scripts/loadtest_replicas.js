@@ -29,6 +29,7 @@ function createBenchmarkApp() {
       income,
       { section80C: 150000, section80D: 50000, age: 35 },
       'salary',
+      'FY2026-27',
     );
     res.json({
       income,
@@ -97,6 +98,7 @@ app.get('/api/tax/compare', (req, res) => {
     income,
     { section80C: 150000, section80D: 50000, age: 35 },
     'salary',
+    'FY2026-27',
   );
   res.json({ income, comparison, pid: process.pid });
 });

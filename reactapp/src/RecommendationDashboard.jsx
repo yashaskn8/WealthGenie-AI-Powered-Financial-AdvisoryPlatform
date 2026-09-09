@@ -162,7 +162,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
 
       // Table Data grouping
       if (!tableGroupMap[cat]) tableGroupMap[cat] = [];
-      const nominalReturn = Number(rec.nominalReturn ?? rec.expectedReturn);
+      const nominalReturn = Number(rec.nominalReturn);
       const projectedValue = Number(projectedByInstrument[rec.id]);
       tableGroupMap[cat].push({
         instId: rec.id,
@@ -175,8 +175,10 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
         current: (rec.monthly_allocation * 12).toLocaleString(),
         proj: Number.isFinite(projectedValue) ? projectedValue : null,
         lockIn: rec.lock_in_years ?? rec.lockIn ?? null,
-        taxBadge: rec.taxType === "eee" || rec.taxType === "elss" || rec.taxType === "nps" || rec.tax_benefit,
-        taxLabel: rec.taxType === "eee" ? "EEE" : rec.taxType === "elss" ? "80C" : rec.taxType === "nps" ? "80CCD" : rec.tax_section || null,
+        taxBadge: rec.taxClassification?.dataClass === 'VERIFIED_PRODUCT_FACT',
+        taxLabel: rec.taxClassification?.dataClass === 'VERIFIED_PRODUCT_FACT'
+          ? rec.taxClassification.section || rec.taxClassification.label || 'Verified tax class'
+          : null,
         source: rec._source || null
       });
     });
@@ -955,13 +957,13 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                    <option value="all">All Categories</option>
                    <option value="equity">Equity Only</option>
                    <option value="government">Government</option>
-                   <option value="has-tax-benefit">Tax Benefit</option>
+                   <option value="has-tax-benefit">Verified Tax Class</option>
                    <option value="low-risk-only">Low Risk</option>
                  </select>
                  <select value={sortField} onChange={e => setSortField(e.target.value)}>
                    <option value="">Sort by…</option>
                    <option value="weight_desc">Weight ↓</option>
-                   <option value="return_desc">Return ↓</option>
+                   <option value="return_desc">Model Assumption ↓</option>
                    <option value="risk_asc">Risk ↑</option>
                    <option value="projection_desc">Projection ↓</option>
                    <option value="sip_asc">SIP ↑</option>
@@ -974,11 +976,11 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
               <table className="dense-table">
                 <thead>
                   <tr>
-                    <th style={{ width: '10%', paddingLeft: 32 }}>Tax Benefit</th>
+                    <th style={{ width: '10%', paddingLeft: 32 }}>Verified Tax Class</th>
                     <th style={{ width: '22%' }}>Security Name</th>
                     <th style={{ width: '9%' }}>Match</th>
                     <th className="col-weight" style={{ width: '10%' }}>Weight %</th>
-                    <th className="col-exp-return" style={{ width: '13%' }}>Exp. Return</th>
+                    <th className="col-exp-return" style={{ width: '13%' }}>Model Assumption</th>
                     <th className="col-risk-level" style={{ width: '10%' }}>Risk Level</th>
                     <th style={{ width: '12%' }}>Monthly SIP</th>
                     <th style={{ width: '10%', whiteSpace: 'normal', paddingRight: 20, textAlign: 'right', lineHeight: 1.2 }}>Projected<br/>({horizon ? `${horizon} Yrs` : 'N/A'})</th>
@@ -1053,7 +1055,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                             {isGroupExpanded(group.id) ? <ChevronDown size={14} className="toggle-icon"/> : <ChevronRight size={14} className="toggle-icon"/>}
                             {group.class} 
                             <span style={{fontSize: '0.65rem', color: '#546178', fontWeight: 500, marginLeft: 4}}>{(group.children || []).length} instruments</span>
-                            {group.hasTax && <span className="tax-badge" style={{marginLeft: 8}}>Tax Savings</span>}
+                            {group.hasTax && <span className="tax-badge" style={{marginLeft: 8}}>Verified Tax Class</span>}
                           </div>
                         </td>
                       </tr>
@@ -1182,7 +1184,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                         <div style={{textAlign: 'right'}}>
                           <div style={{fontSize: '0.65rem', color: '#546178', textTransform: 'uppercase', letterSpacing: '1px', fontWeight: 600, marginBottom: 4}}>{horizon ? `${horizon}-Year Total` : 'Horizon Total'}</div>
                           <div style={{fontSize: '1.1rem', fontWeight: 700, color: '#e2e8f0'}}>{Number.isFinite(projectedValue) ? formatCompactINR(projectedValue) : 'N/A'}</div>
-                          <div style={{fontSize: '0.65rem', color: '#64748b', marginTop: 2}}>pre-tax nominal</div>
+                          <div style={{fontSize: '0.65rem', color: '#64748b', marginTop: 2}}>simulated from model assumptions</div>
                         </div>
                       </>
                     );
@@ -1242,8 +1244,8 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
               <div className="panel-title" style={{marginBottom: 12, fontSize: '0.6rem'}}>PORTFOLIO INSIGHTS</div>
               {(() => {
                 const recs = recommendations || [];
-                const expectedReturn = Number(recommendationMeta?.portfolio_expected_return);
-                const avgReturn = Number.isFinite(expectedReturn) ? expectedReturn.toFixed(1) : null;
+                const returnAssumption = Number(recommendationMeta?.portfolio_return_assumption);
+                const avgReturn = Number.isFinite(returnAssumption) ? returnAssumption.toFixed(1) : null;
                 const assetAllocations = Object.entries(recommendationMeta?.asset_class_allocation || {})
                   .sort((a, b) => b[1] - a[1]);
                 const primaryAsset = assetAllocations[0] || null;
@@ -1428,7 +1430,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
 
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 14 }}>
                       <div className="stat-box">
-                        <div style={{ fontSize: '0.6rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 4, fontWeight: 500 }}>Pre-Tax Nominal Return</div>
+                        <div style={{ fontSize: '0.6rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 4, fontWeight: 500 }}>Model Return Assumption</div>
                         <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#4ade80', fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.3px' }}>{Number.isFinite(Number(rec.nominalReturn)) ? `${Number(rec.nominalReturn).toFixed(1)}%` : 'N/A'}</div>
                       </div>
                       <div className="stat-box">
@@ -1844,7 +1846,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                             <div>
                               <div style={{ fontWeight: 600, fontSize: '0.9rem', color: '#e2e8f0' }}>{inv.abbr || inv.name}</div>
                               <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
-                                Pre-tax nominal: {Number.isFinite(Number(inv.nominalReturn)) ? `${Number(inv.nominalReturn).toFixed(1)}%` : 'N/A'} &bull; <span style={{ color: RISK_COLORS[inv.riskLabel] }}>{inv.riskLabel}</span>
+                                Model assumption (pre-tax): {Number.isFinite(Number(inv.nominalReturn)) ? `${Number(inv.nominalReturn).toFixed(1)}%` : 'N/A'} &bull; <span style={{ color: RISK_COLORS[inv.riskLabel] }}>{inv.riskLabel}</span>
                               </div>
                             </div>
                             <button
@@ -1923,7 +1925,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                         <div>
                           <div style={{ fontWeight: 600, fontSize: '0.9rem', color: '#e2e8f0' }}>{inv.abbr || inv.name}</div>
                           <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
-                            Pre-tax nominal: {Number.isFinite(Number(inv.nominalReturn)) ? `${Number(inv.nominalReturn).toFixed(1)}%` : 'N/A'} · <span style={{ color: RISK_COLORS[inv.riskLabel] }}>{inv.riskLabel}</span>
+                            Model assumption (pre-tax): {Number.isFinite(Number(inv.nominalReturn)) ? `${Number(inv.nominalReturn).toFixed(1)}%` : 'N/A'} · <span style={{ color: RISK_COLORS[inv.riskLabel] }}>{inv.riskLabel}</span>
                           </div>
                         </div>
                         <button
@@ -1975,7 +1977,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                         <div>
                           <div style={{ fontWeight: 600, fontSize: '0.9rem', color: '#e2e8f0' }}>{inv.abbr || inv.name}</div>
                           <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
-                            Pre-tax nominal: {Number.isFinite(Number(inv.nominalReturn)) ? `${Number(inv.nominalReturn).toFixed(1)}%` : 'N/A'} · <span style={{ color: RISK_COLORS[inv.riskLabel] }}>{inv.riskLabel}</span>
+                            Model assumption (pre-tax): {Number.isFinite(Number(inv.nominalReturn)) ? `${Number(inv.nominalReturn).toFixed(1)}%` : 'N/A'} · <span style={{ color: RISK_COLORS[inv.riskLabel] }}>{inv.riskLabel}</span>
                           </div>
                         </div>
                         <button
@@ -2027,7 +2029,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                         <div>
                           <div style={{ fontWeight: 600, fontSize: '0.9rem', color: '#e2e8f0' }}>{inv.abbr || inv.name}</div>
                           <div style={{ fontSize: '0.75rem', color: '#64748b' }}>
-                            Pre-tax nominal: {Number.isFinite(Number(inv.nominalReturn)) ? `${Number(inv.nominalReturn).toFixed(1)}%` : 'N/A'} · <span style={{ color: RISK_COLORS[inv.riskLabel] }}>{inv.riskLabel}</span>
+                            Model assumption (pre-tax): {Number.isFinite(Number(inv.nominalReturn)) ? `${Number(inv.nominalReturn).toFixed(1)}%` : 'N/A'} · <span style={{ color: RISK_COLORS[inv.riskLabel] }}>{inv.riskLabel}</span>
                           </div>
                         </div>
                         <button

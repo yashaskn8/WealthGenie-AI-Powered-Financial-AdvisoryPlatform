@@ -7,35 +7,36 @@ import { X, Shield, Info, Zap, ShieldCheck, Briefcase, History as HistoryIcon } 
 import JargonTooltip from '../JargonTooltip';
 import api from '../../services/api';
 
-/** Present the catalog tax policy attached to the backend-selected instrument. */
-function getTaxInfo(inv) {
-  const policy = inv?.taxation;
+/** Never promote legacy catalog tax tags into current tax-law facts. */
+function getTaxInfo() {
   return {
-    section: policy?.section || inv?.tax_section || 'N/A',
-    taxBenefit: Boolean(inv?.tax_benefit || policy?.section),
-    taxFreeInterest: Boolean(policy?.taxFreeInterest ?? inv?.tax_free_interest),
-    maxDeduction: policy?.section ? 'Depends on the selected tax regime and total eligible deductions' : 'N/A',
-    ltcg: policy?.ltcg || 'No verified long-term treatment is available in the instrument catalog.',
-    stcg: policy?.stcg || 'No verified short-term treatment is available in the instrument catalog.',
-    specialNote: policy?.details || inv?.taxNotes || 'Use the explicit tax what-if below for a personalized estimate.',
+    section: 'UNAVAILABLE',
+    taxBenefit: null,
+    taxFreeInterest: null,
+    maxDeduction: 'UNAVAILABLE',
+    ltcg: 'TAX_CLASSIFICATION_UNAVAILABLE. A source-qualified product tax classification and explicit holding period are required.',
+    stcg: 'TAX_CLASSIFICATION_UNAVAILABLE. A source-qualified product tax classification and explicit holding period are required.',
+    specialNote: 'Legacy catalog tax tags are reference metadata only. Use the server what-if below with an explicit fiscal year, regime, income source and income.',
   };
 }
 
 const TaxTab = ({ inv, calcAmount, calcYears, userProfile }) => {
-  const taxInfo = getTaxInfo(inv);
+  const taxInfo = getTaxInfo();
+  const taxBenefitKnown = typeof taxInfo.taxBenefit === 'boolean';
+  const taxInterestKnown = typeof taxInfo.taxFreeInterest === 'boolean';
 
   return (
     <div className="tab-fade-in">
-      <div className="ddm-section-header">Tax Compliance Framework</div>
+      <div className="ddm-section-header">Reference Tax Metadata</div>
       <div className="ddm-pc-grid" style={{ marginBottom: 32 }}>
-        <div className="tax-card-premium" style={{ borderTop: `1px solid ${taxInfo.taxBenefit ? 'rgba(34, 197, 94, 0.6)' : 'rgba(244, 63, 94, 0.6)'}` }}>
+        <div className="tax-card-premium" style={{ borderTop: `1px solid ${taxBenefitKnown ? (taxInfo.taxBenefit ? 'rgba(34, 197, 94, 0.6)' : 'rgba(244, 63, 94, 0.6)') : 'rgba(148, 163, 184, 0.45)'}` }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
             <span className="metric-label" style={{ color: '#94a3b8', fontSize: '0.85rem', letterSpacing: '1.5px', fontWeight: 700 }}><JargonTooltip term="Section 80C">SECTION 80C ELIGIBILITY</JargonTooltip></span>
-            <Shield size={20} color={taxInfo.taxBenefit ? '#22c55e' : '#f43f5e'} opacity={0.6} />
+            <Shield size={20} color={taxBenefitKnown ? (taxInfo.taxBenefit ? '#22c55e' : '#f43f5e') : '#94a3b8'} opacity={0.6} />
           </div>
           <div style={{ margin: '16px 0', flexGrow: 1 }}>
-            <span className={`tax-status-chip ${taxInfo.taxBenefit ? 'tax-status-chip--eligible' : 'tax-status-chip--not-eligible'}`} style={{ fontSize: '1.1rem', padding: '12px 20px', borderRadius: '12px', boxShadow: `0 0 24px ${taxInfo.taxBenefit ? 'rgba(34, 197, 94, 0.2)' : 'rgba(244, 63, 94, 0.2)'}` }}>
-              {taxInfo.taxBenefit ? <><ShieldCheck size={20} /> QUALIFIED</> : <><X size={20} /> NOT ELIGIBLE</>}
+            <span className={`tax-status-chip ${taxBenefitKnown ? (taxInfo.taxBenefit ? 'tax-status-chip--eligible' : 'tax-status-chip--not-eligible') : ''}`} style={{ fontSize: '1.1rem', padding: '12px 20px', borderRadius: '12px', boxShadow: `0 0 24px ${taxBenefitKnown ? (taxInfo.taxBenefit ? 'rgba(34, 197, 94, 0.2)' : 'rgba(244, 63, 94, 0.2)') : 'rgba(148, 163, 184, 0.12)'}` }}>
+              {taxBenefitKnown ? (taxInfo.taxBenefit ? <><ShieldCheck size={20} /> QUALIFIED</> : <><X size={20} /> NOT ELIGIBLE</>) : <><Info size={20} /> UNAVAILABLE</>}
             </span>
           </div>
           <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 20, marginTop: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -49,7 +50,7 @@ const TaxTab = ({ inv, calcAmount, calcYears, userProfile }) => {
             <Briefcase size={20} color="#38bdf8" opacity={0.6} />
           </div>
           <div style={{ fontSize: '2.2rem', fontWeight: 800, margin: '12px 0', color: '#f8fafc', letterSpacing: '-0.03em', flexGrow: 1, textShadow: '0 4px 24px rgba(0,0,0,0.5)' }}>
-            {taxInfo.taxFreeInterest ? <span style={{ color: '#38bdf8', textShadow: '0 0 24px rgba(56,189,248,0.5)' }}><JargonTooltip term="EEE">Tax-Free (EEE)</JargonTooltip></span> : <span style={{ color: '#f8fafc' }}>Fully Taxable</span>}
+            {!taxInterestKnown ? <span style={{ color: '#94a3b8' }}>UNAVAILABLE</span> : taxInfo.taxFreeInterest ? <span style={{ color: '#38bdf8', textShadow: '0 0 24px rgba(56,189,248,0.5)' }}><JargonTooltip term="EEE">Tax-Free (EEE)</JargonTooltip></span> : <span style={{ color: '#f8fafc' }}>Fully Taxable</span>}
           </div>
           <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 20, marginTop: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ color: '#64748b', fontSize: '0.9rem', fontWeight: 600 }}>Applicable Section</span>
@@ -103,7 +104,7 @@ const TaxTab = ({ inv, calcAmount, calcYears, userProfile }) => {
         }}>
           <Info size={16} style={{ flexShrink: 0, marginTop: 2, color: '#38bdf8' }} />
           <div>
-            <div style={{ fontSize: '0.72rem', fontWeight: 800, color: '#38bdf8', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.8px' }}>Tax Intelligence</div>
+            <div style={{ fontSize: '0.72rem', fontWeight: 800, color: '#38bdf8', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.8px' }}>Tax Data Boundary</div>
             <p style={{ color: '#cbd5e1', fontSize: '0.82rem', lineHeight: 1.6, margin: 0 }}>{taxInfo.specialNote}</p>
           </div>
         </div>
@@ -119,12 +120,13 @@ const InteractiveTaxSimulator = ({ inv, calcAmount, calcYears, userProfile }) =>
   const [annualIncome, setAnnualIncome] = React.useState('');
   const [regime, setRegime] = React.useState('');
   const [incomeSource, setIncomeSource] = React.useState('');
+  const [fiscalYear, setFiscalYear] = React.useState('');
   const [result, setResult] = React.useState(null);
   const [error, setError] = React.useState(null);
   const [loading, setLoading] = React.useState(false);
   const nominalReturn = Number(inv?.nominalReturn);
   const userAge = Number(userProfile?.age);
-  const isReady = Number(annualIncome) >= 0 && annualIncome !== '' && regime && incomeSource
+  const isReady = Number(annualIncome) >= 0 && annualIncome !== '' && regime && incomeSource && fiscalYear
     && Number.isFinite(nominalReturn) && Number.isFinite(userAge) && Number.isFinite(calcYears) && Number.isFinite(calcAmount);
 
   React.useEffect(() => {
@@ -143,6 +145,7 @@ const InteractiveTaxSimulator = ({ inv, calcAmount, calcYears, userProfile }) =>
         calcAmount,
         userAge,
         incomeSource,
+        fiscalYear,
         { signal: controller.signal },
       ).then(response => {
         if (!cancelled) setResult(response);
@@ -160,7 +163,7 @@ const InteractiveTaxSimulator = ({ inv, calcAmount, calcYears, userProfile }) =>
       clearTimeout(timer);
       controller.abort();
     };
-  }, [annualIncome, calcAmount, calcYears, incomeSource, inv.type, isReady, nominalReturn, regime, userAge]);
+  }, [annualIncome, calcAmount, calcYears, fiscalYear, incomeSource, inv.type, isReady, nominalReturn, regime, userAge]);
 
   return (
     <div style={{
@@ -215,6 +218,14 @@ const InteractiveTaxSimulator = ({ inv, calcAmount, calcYears, userProfile }) =>
             <option value="family_pension">Family pension</option>
             <option value="business">Business</option>
             <option value="other">Other</option>
+          </select>
+        </label>
+        <label style={{ color: '#94a3b8', fontSize: '0.75rem', fontWeight: 600 }}>
+          Fiscal year
+          <select value={fiscalYear} onChange={event => setFiscalYear(event.target.value)} style={{ width: '100%', marginTop: 6, padding: '9px 10px', borderRadius: 8, color: '#f8fafc', background: '#111827', border: '1px solid rgba(255,255,255,0.1)' }}>
+            <option value="">Select fiscal year</option>
+            <option value="FY2026-27">FY2026-27</option>
+            <option value="FY2025-26">FY2025-26</option>
           </select>
         </label>
       </div>

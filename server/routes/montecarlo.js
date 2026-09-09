@@ -3,7 +3,7 @@ import { verifyJWT } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
 import { personalizedMonteCarloSchema, portfolioMonteCarloSchema, validateStrict } from '../validation/financialSchemas.js';
 import { runMonteCarloWithGoal, getInstrumentVolatility } from '../services/monteCarloEngine.js';
-import { getLiveInstrumentParams } from '../services/marketDataService.js';
+import { getInstrumentModelAssumptions } from '../services/marketDataService.js';
 import {
   buildRecommendationProfile,
   buildProfileGroundedSimulation,
@@ -12,7 +12,12 @@ import {
 import { assertPortfolioSuitable, resolveConcentrationCap } from '../services/RecommendationPipeline.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import { getCache, setCache } from '../config/redis.js';
-import { INSTRUMENT_PARAMS } from '../services/instrumentConstants.js';
+import {
+  INSTRUMENT_PARAMS,
+  PROJECTION_ASSUMPTION_DATA_CLASS,
+  PROJECTION_ASSUMPTION_SOURCE,
+  PROJECTION_ASSUMPTION_VERSION,
+} from '../services/instrumentConstants.js';
 import { ASSET_KEYS, evaluatePortfolio } from '../services/portfolioEngine.js';
 
 const router = Router();
@@ -23,7 +28,7 @@ function buildMonteCarloResponse(result, context) {
   const chartData = result.years_array.map((year, index) => ({
     year,
     p10: result.p10[index], p25: result.p25[index], p50: result.p50[index],
-    p75: result.p75[index], p90: result.p90[index], mean: result.mean[index],
+    p75: result.p75[index], p90: result.p90[index], simulated_mean: result.mean[index],
     p10_real: result.p10_real?.[index], p50_real: result.p50_real?.[index],
     p90_real: result.p90_real?.[index], standard_error: result.standard_error?.[index],
   }));
@@ -34,6 +39,11 @@ function buildMonteCarloResponse(result, context) {
   return {
     ...context,
     return_basis: 'PRE_TAX_NOMINAL',
+    return_data_class: PROJECTION_ASSUMPTION_DATA_CLASS,
+    return_assumption_version: PROJECTION_ASSUMPTION_VERSION,
+    return_assumption_source: PROJECTION_ASSUMPTION_SOURCE,
+    observed_market_fact: false,
+    provider_forecast: false,
     chartData,
     goal_probability: result.goal_probability,
     target_amount: result.target_amount,
@@ -42,6 +52,10 @@ function buildMonteCarloResponse(result, context) {
     percentile_summary: {
       p10: result.p10[terminalIndex], p25: result.p25[terminalIndex], p50: result.p50[terminalIndex],
       p75: result.p75[terminalIndex], p90: result.p90[terminalIndex],
+    },
+    percentile_labels: {
+      p10: 'Simulated 10th percentile', p25: 'Simulated 25th percentile',
+      p50: 'Simulated median', p75: 'Simulated 75th percentile', p90: 'Simulated 90th percentile',
     },
     percentile_summary_real: result.p50_real ? {
       p10: result.p10_real[terminalIndex], p25: result.p25_real[terminalIndex],
@@ -93,7 +107,7 @@ router.post('/portfolio', verifyJWT, validateStrict(portfolioMonteCarloSchema), 
   const allocationKey = keys.sort().map(key => `${key}:${allocations[key].toFixed(6)}`).join(',');
   const targetKey = target_amount === undefined ? 'none' : String(Math.round(target_amount));
   const cacheKey = [
-    'portfolio-mc-v1', req.user.userId, profileId, profileHash, years,
+    'portfolio-mc-v2', req.user.userId, profileId, profileHash, years,
     simulation.monthlyContribution, simulation.initialCapital, targetKey,
     allocationKey, metrics.expectedReturn, metrics.volatility,
   ].join(':');
@@ -116,10 +130,10 @@ router.post('/portfolio', verifyJWT, validateStrict(portfolioMonteCarloSchema), 
     monthly_investment: simulation.monthlyContribution,
     initial_capital: simulation.initialCapital,
     allocations,
-    portfolio_expected_return: metrics.expectedReturn,
+    portfolio_return_assumption: metrics.expectedReturn,
     portfolio_volatility: metrics.volatility,
     portfolio_sharpe_ratio: metrics.sharpe,
-    data_source: 'central-instrument-parameters-and-covariance-matrix',
+    data_source: PROJECTION_ASSUMPTION_SOURCE,
     assumptions: {
       inflation_rate: MONTE_CARLO_INFLATION_ASSUMPTION,
       simulations: MONTE_CARLO_SIMULATIONS,
@@ -144,17 +158,17 @@ router.post('/montecarlo', verifyJWT, validateStrict(personalizedMonteCarloSchem
   });
   const suitability = assertPortfolioSuitable(profile, [instrument]);
 
-  const liveResult = await getLiveInstrumentParams();
-  const liveParams = liveResult.params[instrument] || getInstrumentVolatility(instrument);
-  if (!liveParams || !Number.isFinite(liveParams.mean) || !Number.isFinite(liveParams.stdDev)) {
+  const assumptionResult = await getInstrumentModelAssumptions();
+  const modelParams = assumptionResult.params[instrument] || getInstrumentVolatility(instrument);
+  if (!modelParams || !Number.isFinite(modelParams.mean) || !Number.isFinite(modelParams.stdDev)) {
     throw createError(422, `No simulation parameters for ${instrument}`, 'Simulation data is unavailable for this instrument.');
   }
-  const annualReturn = liveParams.mean;
-  const annualVolatility = liveParams.stdDev;
+  const annualReturn = modelParams.mean;
+  const annualVolatility = modelParams.stdDev;
   const profileHash = buildRecommendationProfileHash(profile, { modelVersion: 'monte-carlo-2.0.0' });
   const targetKey = target_amount === undefined ? 'none' : String(Math.round(target_amount));
   const cacheKey = [
-    'mc-v2', req.user.userId, profileId, profileHash, instrument, years,
+    'mc-v3', req.user.userId, profileId, profileHash, instrument, years,
     simulation.monthlyContribution, simulation.initialCapital, targetKey,
     annualReturn.toFixed(6), annualVolatility.toFixed(6),
     MONTE_CARLO_INFLATION_ASSUMPTION, MONTE_CARLO_SIMULATIONS,
@@ -175,7 +189,7 @@ router.post('/montecarlo', verifyJWT, validateStrict(personalizedMonteCarloSchem
   const chartData = result.years_array.map((year, index) => ({
     year,
     p10: result.p10[index], p25: result.p25[index], p50: result.p50[index],
-    p75: result.p75[index], p90: result.p90[index], mean: result.mean[index],
+    p75: result.p75[index], p90: result.p90[index], simulated_mean: result.mean[index],
     p10_real: result.p10_real?.[index], p50_real: result.p50_real?.[index],
     p90_real: result.p90_real?.[index], standard_error: result.standard_error?.[index],
   }));
@@ -190,6 +204,11 @@ router.post('/montecarlo', verifyJWT, validateStrict(personalizedMonteCarloSchem
     initial_capital: simulation.initialCapital,
     simulation_classification: simulation.classification,
     return_basis: 'PRE_TAX_NOMINAL',
+    return_data_class: PROJECTION_ASSUMPTION_DATA_CLASS,
+    return_assumption_version: PROJECTION_ASSUMPTION_VERSION,
+    return_assumption_source: PROJECTION_ASSUMPTION_SOURCE,
+    observed_market_fact: false,
+    provider_forecast: false,
     chartData,
     goal_probability: result.goal_probability,
     target_amount: result.target_amount,
@@ -199,14 +218,18 @@ router.post('/montecarlo', verifyJWT, validateStrict(personalizedMonteCarloSchem
       p10: result.p10[terminalIndex], p25: result.p25[terminalIndex], p50: result.p50[terminalIndex],
       p75: result.p75[terminalIndex], p90: result.p90[terminalIndex],
     },
+    percentile_labels: {
+      p10: 'Simulated 10th percentile', p25: 'Simulated 25th percentile',
+      p50: 'Simulated median', p75: 'Simulated 75th percentile', p90: 'Simulated 90th percentile',
+    },
     percentile_summary_real: result.p50_real ? {
       p10: result.p10_real[terminalIndex], p25: result.p25_real[terminalIndex],
       p50: result.p50_real[terminalIndex], p75: result.p75_real[terminalIndex],
       p90: result.p90_real[terminalIndex],
     } : null,
     confidence_interval_width: confidenceIntervalWidth,
-    data_source: liveParams.source || 'static-catalog',
-    nominal_rate_used: annualReturn,
+    data_source: PROJECTION_ASSUMPTION_SOURCE,
+    nominal_return_assumption_used: annualReturn,
     volatility_used: annualVolatility,
     sequence_of_returns_risk: result.sequence_of_returns_risk || null,
     sharpe_ratio_sensitivity: result.sharpe_ratio_sensitivity || null,

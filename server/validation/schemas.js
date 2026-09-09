@@ -44,7 +44,7 @@ const taxFields = {
   homeLoanInterest: Joi.number().min(0).max(200000).optional(),
   other: Joi.number().min(0).max(100000000).optional(),
   age: Joi.number().integer().min(18).max(120).optional(),
-  fiscalYear: Joi.string().valid('FY2025-26', 'FY2026-27').optional(),
+  fiscalYear: Joi.string().valid('FY2025-26', 'FY2026-27').required(),
 };
 
 function requireTaxDependencyFacts(value, helpers) {
@@ -81,6 +81,7 @@ export const postTaxReturnSchema = postTaxInstrumentSchema.keys({
   regime: Joi.string().valid('new', 'old').required(),
   userAge: Joi.number().integer().min(0).max(120).required(),
   incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').required(),
+  fiscalYear: Joi.string().valid('FY2025-26', 'FY2026-27').required(),
 });
 
 export const postTaxReturnBatchSchema = Joi.object({
@@ -90,6 +91,7 @@ export const postTaxReturnBatchSchema = Joi.object({
   userAge: Joi.number().integer().min(0).max(120).required(),
   incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').required(),
   inflationRate: Joi.number().min(0).max(1).required(),
+  fiscalYear: Joi.string().valid('FY2025-26', 'FY2026-27').required(),
 }).unknown(false);
 
 export const marketContextQuerySchema = Joi.object({}).unknown(false);

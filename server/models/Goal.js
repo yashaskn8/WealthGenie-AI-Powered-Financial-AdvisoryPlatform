@@ -42,6 +42,11 @@ const GoalSchema = new mongoose.Schema({
     enum: ['PROFILE_GROUNDED_GOAL_PLAN', 'NON_RECOMMENDATION_GOAL_WHAT_IF'],
   },
   return_basis: { type: String, enum: ['PRE_TAX_NOMINAL'] },
+  return_data_class: { type: String, enum: ['MODEL_ASSUMPTION'] },
+  return_assumption_version: { type: String },
+  return_assumption_source: { type: String, enum: ['WEALTHGENIE_MODEL_POLICY'] },
+  observed_market_fact: { type: Boolean, enum: [false] },
+  provider_forecast: { type: Boolean, enum: [false] },
   inflation_assumption: { type: Number, min: 0, max: 1 },
   gemini_advice: { type: String, maxlength: 2000 },
 }, { timestamps: true });

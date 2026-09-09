@@ -69,7 +69,7 @@ const HelpTourScreen = () => {
       term: 'TDS',
       fullName: 'Tax Deducted at Source',
       definition: 'Tax collected by banks directly before paying out interest or income to you.',
-      learnMore: 'If your FD interest exceeds ₹40,000 in a year (₹50,000 for senior citizens), the bank automatically deducts 10% tax. You must report this in your annual tax filings.'
+      learnMore: 'TDS thresholds and rates depend on the applicable fiscal-year rules and depositor circumstances. TDS is not necessarily the final tax liability; use the explicit server tax view.'
     },
     {
       term: 'Sharpe Ratio',
@@ -104,20 +104,20 @@ const HelpTourScreen = () => {
     {
       term: 'NPS',
       fullName: 'National Pension System',
-      definition: 'A government retirement savings scheme offering additional tax benefits.',
-      learnMore: 'NPS invests in a mix of equity and debt. Contributions are locked until age 60, and up to ₹50,000 is tax-deductible under Section 80CCD(1B) in the Old Tax Regime.'
+      definition: 'A government retirement savings system with plan-specific investment and withdrawal rules.',
+      learnMore: 'Tax eligibility, contribution limits, access rules, and withdrawal treatment depend on the selected fiscal year, regime, account, and current official policy. No tax saving is assumed here.'
     },
     {
       term: 'PPF',
       fullName: 'Public Provident Fund',
-      definition: 'A 15-year government savings scheme with guaranteed interest and EEE tax status.',
-      learnMore: 'PPF offers low-risk sovereign-backed interest. It has a mandatory 15-year lock-in with partial withdrawals permitted after 7 years, making it ideal for safe, long-term goals.'
+      definition: 'A long-term government small-savings scheme whose officially declared rate and applicable terms can change by effective period.',
+      learnMore: 'See Where to Invest for the current official administered rate and effective interval. Verify account eligibility, term, liquidity, and tax treatment from current official scheme rules.'
     },
     {
       term: 'SGB',
       fullName: 'Sovereign Gold Bonds',
-      definition: 'Government bonds denominated in gold that pay 2.5% annual interest.',
-      learnMore: 'SGBs offer a double benefit: you gain from gold price appreciation tax-free if held for 8 years, and you earn an extra 2.5% simple interest annually (taxable at slab rates).'
+      definition: 'Government-issued, gold-linked bonds with tranche-specific terms.',
+      learnMore: 'Coupon, maturity, liquidity, issue availability, and tax treatment must be verified for the exact tranche and selected fiscal year. WealthGenie does not treat a legacy catalog value as current evidence.'
     },
     {
       term: 'Cess',

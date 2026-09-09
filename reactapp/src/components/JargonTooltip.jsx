@@ -18,12 +18,12 @@ export const JARGON = {
     plain: 'The average yearly growth rate of your investment over multiple years, accounting for compounding. Think of it as the "speed" at which your money grows each year.',
   },
   'Expected Return': {
-    short: 'Projected yearly earnings',
-    plain: 'How much your investment is likely to grow per year, shown as a percentage. For example, 12% means ₹10,000 could become ₹11,200 in one year.',
+    short: 'Model return assumption',
+    plain: 'A versioned input used for model-based projections. It is not a live rate, provider forecast, historical return, or guaranteed outcome.',
   },
   'Return Potential': {
-    short: 'Projected yearly earnings',
-    plain: 'The range of growth you can expect per year. The actual return depends on market conditions, but this range is based on historical performance.',
+    short: 'Model-assumption range',
+    plain: 'A range of versioned projection inputs. It is not an observed market fact, provider forecast, or promise of future performance.',
   },
   'Alpha': {
     short: 'Extra return above the benchmark',
@@ -67,39 +67,39 @@ export const JARGON = {
   // Tax Terms
   'LTCG': {
     short: 'Long-Term Capital Gains Tax',
-    plain: 'Tax on profits when you sell an investment after holding it for a long time (usually 1+ years for equity). Currently 12.5% on gains above ₹1.25 lakh per year.',
+    plain: 'Tax treatment that may apply to gains after the legally defined holding period. The applicable classification, threshold, rate, fiscal year, and product facts must be established by the server tax policy.',
   },
   'STCG': {
     short: 'Short-Term Capital Gains Tax',
-    plain: 'Tax on profits when you sell an investment quickly (less than 1 year for equity). Currently 20% — that\'s why it\'s better to hold investments longer.',
+    plain: 'Tax treatment that may apply before the legally defined long-term holding period. The applicable classification and rate depend on the explicit product facts and fiscal-year policy.',
   },
   'Section 80C': {
-    short: 'Tax deduction up to ₹1.5 Lakh',
-    plain: 'A tax rule that lets you reduce your taxable income by up to ₹1,50,000 per year. Investments like PPF, ELSS, and tax-saver FDs qualify. Can save you up to ₹46,800 in taxes.',
+    short: 'Income-tax deduction category',
+    plain: 'A deduction category whose eligibility and limit depend on the selected fiscal-year policy, tax regime, qualifying product, and the user\'s supplied circumstances.',
   },
   'Section 80CCD(1B)': {
-    short: 'Extra ₹50,000 NPS deduction',
-    plain: 'An additional tax deduction of ₹50,000 specifically for NPS investments, on top of the ₹1.5 lakh 80C limit. Can save you an extra ₹15,600 in taxes.',
+    short: 'NPS deduction category',
+    plain: 'A deduction category for qualifying NPS contributions. The current limit and actual tax effect must come from the selected server fiscal-year policy and explicit user inputs.',
   },
   'EEE': {
     short: 'Exempt-Exempt-Exempt',
-    plain: 'The best possible tax treatment! Your investment amount, the growth, and the withdrawal are ALL completely tax-free. PPF and SSY enjoy this benefit.',
+    plain: 'A tax classification describing treatment at contribution, growth, and withdrawal stages. WealthGenie shows it only when product classification and current fiscal-year rules are established.',
   },
   'Tax Benefit': {
-    short: 'Reduces your tax bill',
-    plain: 'This investment qualifies for a tax deduction, meaning the government reduces the amount of income tax you owe. It\'s like getting a discount on your taxes.',
+    short: 'May affect taxable income',
+    plain: 'A deduction or exemption is not an investment return or guaranteed saving. Its effect requires explicit income, regime, fiscal year, eligibility, and product classification.',
   },
   'Slab Rate': {
     short: 'Your income tax bracket rate',
-    plain: 'The tax percentage based on your income level. If you earn ₹10L, you\'re in the 20% slab — meaning gains from this investment will be taxed at 20%.',
+    plain: 'A rate determined from explicit taxable income, income source, regime, deductions, and fiscal-year rules. It is calculated only by the backend tax engine.',
   },
   'TDS': {
     short: 'Tax Deducted at Source',
-    plain: 'Tax automatically deducted by the bank/institution before paying you. For example, if your FD interest is ₹50,000, the bank deducts ~₹5,000 as TDS and gives you ₹45,000.',
+    plain: 'Tax that a payer may deduct before payment under applicable rules. It is not necessarily the final tax liability; current thresholds and treatment come from the selected fiscal-year policy.',
   },
   'Indexation': {
     short: 'Inflation adjustment for tax',
-    plain: 'A method that adjusts your purchase price for inflation before calculating tax, reducing your taxable gain. Post-2023, this benefit has been removed for debt mutual funds.',
+    plain: 'A tax calculation mechanism that may adjust acquisition cost for inflation. Availability depends on current law and a verified product classification.',
   },
 
   // Investment Structure
@@ -109,15 +109,15 @@ export const JARGON = {
   },
   'Lock-in': {
     short: 'Minimum holding time',
-    plain: 'The minimum time you must keep your money invested. During this period, you cannot withdraw. Longer lock-ins often come with better returns or tax benefits.',
+    plain: 'The minimum holding restriction for a specific product. A longer lock-in does not by itself establish a better return or tax outcome.',
   },
   'SIP': {
     short: 'Systematic Investment Plan',
-    plain: 'Investing a fixed amount every month (like ₹2,000) automatically. It\'s the best way to start — you don\'t need to time the market, and it builds discipline.',
+    plain: 'A recurring investment instruction. Suitability, amount, product selection, costs, and market risk still need to be evaluated for the investor.',
   },
   'Lump Sum': {
     short: 'One-time bulk investment',
-    plain: 'Investing a large amount all at once instead of monthly. Best when you have spare cash (like a bonus) and the market hasn\'t recently peaked.',
+    plain: 'A one-time investment rather than recurring contributions. Whether it is suitable depends on liquidity needs, risk capacity, horizon, and the selected product.',
   },
   'Liquidity': {
     short: 'How quickly you can access your money',
@@ -143,11 +143,11 @@ export const JARGON = {
   },
   'Index Fund': {
     short: 'Fund that copies the market index',
-    plain: 'A fund that simply buys all the stocks in an index like Nifty 50 in the same proportion. No human bias, very low fees, and historically beats most actively managed funds.',
+    plain: 'A fund intended to track a stated index. Exact holdings, tracking difference, expense ratio, benchmark, and historical results require verified product facts.',
   },
   'Debt Fund': {
     short: 'Fund that lends money to companies/govt',
-    plain: 'A mutual fund that invests in bonds and loans instead of stocks. Much more stable than equity funds — your money grows slowly but steadily, like a safer FD alternative.',
+    plain: 'A mutual fund investing primarily in debt instruments. Credit, duration, liquidity, interest-rate, and capital-loss risks depend on the exact portfolio and product.',
   },
   'Balanced Advantage Fund': {
     short: 'Auto-balancing equity + debt fund',
@@ -161,11 +161,11 @@ export const JARGON = {
   },
   'NPS': {
     short: 'National Pension System',
-    plain: 'A government pension scheme that invests your money in a mix of stocks and bonds until you turn 60. Gives an extra ₹50,000 tax deduction beyond the normal ₹1.5L limit.',
+    plain: 'A retirement system with investment, access, and tax rules that depend on the current official policy and the user\'s circumstances. No tax saving is assumed here.',
   },
   'SGB': {
     short: 'Sovereign Gold Bond',
-    plain: 'Gold bonds issued by the government. You earn 2.5% interest plus gold price gains, and if you hold for 8 years, all gains are completely tax-free. Better than buying physical gold.',
+    plain: 'A government-issued gold-linked bond. Coupon, maturity, liquidity, issue availability, and tax treatment must be verified for the exact tranche and fiscal year.',
   },
   'SCSS': {
     short: 'Senior Citizens Savings Scheme',
@@ -226,28 +226,28 @@ export const JARGON = {
     plain: 'How you divide your total money among different categories (like stocks, bonds, and gold) to balance risk and growth potential.',
   },
   'Success Probability': {
-    short: 'Likelihood of achieving your goal',
-    plain: 'The percentage chance of meeting your target amount by the deadline, calculated using thousands of simulated market paths.',
+    short: 'Share of simulated paths reaching the goal',
+    plain: 'A model result calculated from simulated paths and versioned assumptions. It is not an observed probability, guarantee, or provider forecast.',
   },
   'P10': {
-    short: 'Weak Market Scenario',
-    plain: 'A conservative estimate showing what your portfolio value could be in a poor market environment. There is a 90% chance your actual wealth will exceed this amount.',
+    short: 'Simulated 10th percentile',
+    plain: 'Ten percent of modeled terminal values are at or below this amount under the supplied simulation assumptions. It is not a worst-case prediction.',
   },
   'P50': {
-    short: 'Typical Market Scenario',
-    plain: 'The median estimate showing your projected wealth in a normal, average market environment. There is a 50% chance of exceeding or falling short of this amount.',
+    short: 'Simulated median',
+    plain: 'Half of modeled terminal values are at or below this amount under the supplied simulation assumptions. It is not a forecast of the most likely outcome.',
   },
   'P90': {
-    short: 'Strong Market Scenario',
-    plain: 'An optimistic estimate showing your wealth in a very strong bull market. There is only a 10% chance of exceeding this amount, so treat it as a best-case forecast.',
+    short: 'Simulated 90th percentile',
+    plain: 'Ninety percent of modeled terminal values are at or below this amount under the supplied simulation assumptions. It is not a best-case forecast.',
   },
   'Standard Deviation': {
     short: 'Historical volatility / typical variance',
     plain: 'A statistical measure of how much an investment\'s returns fluctuate from its average. Higher standard deviation means more dramatic ups and downs.',
   },
   'Standard Error': {
-    short: 'Forecast range uncertainty',
-    plain: 'A measure of the uncertainty in our mathematical projection. A smaller standard error means our simulations are more precise and reliable.',
+    short: 'Simulation-estimate uncertainty',
+    plain: 'A measure of sampling uncertainty in a model estimate. It does not establish that the assumptions or future outcomes are correct.',
   },
   'Monte Carlo': {
     short: 'Market simulator',

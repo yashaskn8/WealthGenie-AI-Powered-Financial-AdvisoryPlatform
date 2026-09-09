@@ -2,7 +2,12 @@ import { Router } from 'express';
 import { verifyJWT } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
 import { optimisePortfolio, computeRebalance, evaluatePortfolio } from '../services/portfolioEngine.js';
-import { INSTRUMENT_PARAMS } from '../services/instrumentConstants.js';
+import {
+  INSTRUMENT_PARAMS,
+  PROJECTION_ASSUMPTION_DATA_CLASS,
+  PROJECTION_ASSUMPTION_SOURCE,
+  PROJECTION_ASSUMPTION_VERSION,
+} from '../services/instrumentConstants.js';
 import {
   assertPortfolioSuitable,
   enforceAllocationTargets,
@@ -68,11 +73,16 @@ router.post('/optimise', verifyJWT, validateStrict(personalizedOptimiseSchema), 
   res.json({
     strategy: rawResult.strategy,
     weights,
-    expected_return: metrics.expectedReturn,
+    portfolio_return_assumption: metrics.expectedReturn,
     volatility: metrics.volatility,
     sharpe_ratio: metrics.sharpe,
     risk_contributions: metrics.riskContributions,
     return_basis: 'PRE_TAX_NOMINAL',
+    return_data_class: PROJECTION_ASSUMPTION_DATA_CLASS,
+    return_assumption_version: PROJECTION_ASSUMPTION_VERSION,
+    return_assumption_source: PROJECTION_ASSUMPTION_SOURCE,
+    observed_market_fact: false,
+    provider_forecast: false,
     simulation_classification: 'PROFILE_GROUNDED',
     final_suitability_risk: suitability.finalRisk,
     suitability_reason_codes: suitability.reasonCodes,

@@ -185,7 +185,12 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
         return {
           ...prev,
           instruments: response.instruments,
-          portfolio_expected_return: response.portfolio_expected_return,
+          portfolio_return_assumption: response.portfolio_return_assumption,
+          return_data_class: response.return_data_class,
+          return_assumption_version: response.return_assumption_version,
+          return_assumption_source: response.return_assumption_source,
+          observed_market_fact: response.observed_market_fact,
+          provider_forecast: response.provider_forecast,
           asset_class_allocation: response.asset_class_allocation,
           dashboard_projection: response.dashboard_projection,
         };

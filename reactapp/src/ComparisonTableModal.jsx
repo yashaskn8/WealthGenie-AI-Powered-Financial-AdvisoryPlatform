@@ -151,10 +151,10 @@ const ComparisonDetailPanel = ({ selectedInvestments, onBack }) => {
 
   const metrics = [
     { key: 'matchScore', label: 'Match Score', fmt: v => v === null ? 'Not assessed' : `${v}%`, icon: <Sparkles size={14}/>, higher: true },
-    { key: 'rate', label: 'Return Rate', fmt: v => Number.isFinite(v) ? `${v}%` : 'Unavailable', icon: <TrendingUp size={14}/>, higher: true },
+    { key: 'rate', label: 'Model Return Assumption', fmt: v => Number.isFinite(v) ? `${v}%` : 'Unavailable', icon: <TrendingUp size={14}/>, higher: true },
     { key: 'riskLabel', label: 'Risk Level', fmt: v => v, icon: <Shield size={14}/> },
     { key: 'lockIn', label: 'Lock-in (yrs)', fmt: v => v === 0 ? 'None' : Number.isFinite(v) ? `${v} yrs` : 'Unavailable', icon: <Lock size={14}/>, higher: false },
-    { key: 'taxType', label: 'Tax Treatment', fmt: v => v?.toUpperCase() || 'Slab', icon: <Zap size={14}/> },
+    { key: 'taxType', label: 'Reference Tax Tag', fmt: v => v?.toUpperCase() || 'Unavailable', icon: <Zap size={14}/> },
     { key: 'minMonthlyInvestment', label: 'Min Investment', fmt: v => formatINR(v), icon: <BarChart3 size={14}/>, higher: false },
   ];
   const finiteRates = selectedInvestments.map(instrument => Number(instrument.rate)).filter(Number.isFinite);
@@ -199,7 +199,7 @@ const ComparisonDetailPanel = ({ selectedInvestments, onBack }) => {
               return (
                 <div key={inv.id} className={`detail-cell detail-value-cell ${isBest ? 'best-value' : ''}`}>
                   {m.fmt(val)}
-                  {isBest && m.higher !== undefined && <span className="best-badge" style={m.key === 'matchScore' ? { background: '#10b981', color: '#fff' } : {}}>Best</span>}
+                  {isBest && m.higher !== undefined && <span className="best-badge" style={m.key === 'matchScore' ? { background: '#10b981', color: '#fff' } : {}}>{m.key === 'rate' ? 'Highest assumption' : 'Best'}</span>}
                 </div>
               );
             })}
@@ -212,7 +212,7 @@ const ComparisonDetailPanel = ({ selectedInvestments, onBack }) => {
           return (
             <div key={inv.id} className={`detail-cell detail-value-cell ${isWinner ? 'verdict-winner' : ''}`}>
               {isWinner ? (
-                <span className="winner-badge"><ArrowUpRight size={12}/> AI Top Pick</span>
+                <span className="winner-badge"><ArrowUpRight size={12}/> Highest Suitability Score</span>
               ) : (
                 <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>
                   {inv.matchScore === null ? 'Catalog only' : 'Suitable Option'}
@@ -236,7 +236,7 @@ const categoryInfo = [
   {
     key: 'Debt',
     title: 'Debt (Savings & Bonds)',
-    desc: 'Lend money for stable interest. Safe and steady income.',
+    desc: 'Debt instruments with product-specific credit, duration, liquidity, and interest-rate risks.',
     color: '#2dd4bf'
   },
   {
@@ -342,7 +342,7 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
       .sort((a, b) => getRiskPercent(a) - getRiskPercent(b));
     const lockIns = categoryItems.map(instrument => Number(instrument.lockIn)).filter(value => Number.isFinite(value) && value >= 0);
     const growth = rates.length
-      ? `${Math.min(...rates).toFixed(1)}% – ${Math.max(...rates).toFixed(1)}% catalog range`
+      ? `${Math.min(...rates).toFixed(1)}% – ${Math.max(...rates).toFixed(1)}% model-assumption range`
       : 'Unavailable';
     const risk = riskLabels.length
       ? riskLabels.length === 1 ? riskLabels[0] : `${riskLabels[0]} – ${riskLabels.at(-1)}`
@@ -396,7 +396,7 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
             </div>
             
             <div className="toggle-group" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>Only Show Tax Beneficial</span>
+              <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>Filter by Reference Tax Tag</span>
               <label className="switch">
                 <input type="checkbox" checked={filterTax} onChange={e => setFilterTax(e.target.checked)} />
                 <span className="slider"></span>
@@ -493,7 +493,7 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
                   <div className="card-cat-tags">
                     <span className="cat-tag" style={{ border: `1px solid ${cat.color}30`, background: `${cat.color}05` }}>
                       <TrendingUp size={11} style={{ marginRight: 4 }} />
-                      Growth: {cat.growth}
+                      Model assumptions: {cat.growth}
                     </span>
                     <span className="cat-tag" style={{ border: `1px solid ${cat.color}30`, background: `${cat.color}05` }}>
                       <Shield size={11} style={{ marginRight: 4 }} />
@@ -542,11 +542,11 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
               <thead>
                 <tr>
                   <th>INVESTMENT NAME</th>
-                  <th>AI SUITABILITY</th>
-                  <th>PRE-TAX NOMINAL</th>
+                  <th>SERVER SUITABILITY</th>
+                  <th>MODEL RETURN ASSUMPTION</th>
                   <th>RISK & LIQUIDITY</th>
                   <th>LOCK-IN <span style={{fontSize: '0.6rem'}}>(YRS)</span></th>
-                  <th>TAX TREATMENT</th>
+                  <th>REFERENCE TAX TAG</th>
                   <th>MIN. INV.</th>
                   <th>SELECT</th>
                 </tr>
@@ -566,7 +566,7 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
                   const isSelected = selectedIds.includes(invId);
                   const matchScore = inv.matchScore;
 
-                  const defaultTaxText = inv.taxType?.toUpperCase() || inv.tax_section || 'Not specified';
+                  const defaultTaxText = inv.taxType?.toUpperCase() || inv.tax_section || 'Unavailable';
 
                   const matchColor = matchScore >= 85 ? '#10b981' : matchScore >= 60 ? '#38bdf8' : '#64748b';
                   const matchBg = matchScore >= 85 ? 'rgba(16,185,129,0.12)' : matchScore >= 60 ? 'rgba(56,189,248,0.12)' : 'rgba(100,116,139,0.12)';
@@ -697,7 +697,7 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
 
                     <div className="simple-card-metrics">
                       <div className="simple-card-metric">
-                        <span className="metric-label">Expected Growth</span>
+                        <span className="metric-label">Model Return Assumption</span>
                         <span className="metric-value highlight">{Number.isFinite(rate) ? `${rate}%` : '—'}</span>
                       </div>
                       <div className="simple-card-metric">

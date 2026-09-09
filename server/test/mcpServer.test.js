@@ -62,6 +62,7 @@ describe('Phase 1: WealthGenie MCP Server Core & Schema Parity Tests', () => {
     const payload = {
       income: 1500000,
       incomeSource: 'salary',
+      fiscalYear: 'FY2026-27',
       age: 35,
       regime: 'new',
       section80C: 0,

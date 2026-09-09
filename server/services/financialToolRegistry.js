@@ -276,12 +276,13 @@ class ToolRegistry {
 
     // 4. Tax Calculator Tool
     this.registerTool('tax_calculator', {
-      description: 'Computes income tax liability under current Indian tax slabs (FY 2025-26).',
-      version: '2.1.0',
+      description: 'Computes income tax liability under an explicitly selected supported fiscal-year policy.',
+      version: '2.2.0',
       schema: Joi.object({
         income: Joi.number().min(0).max(1000000000).required(),
         basicSalary: Joi.number().min(0).max(1000000000).optional(),
         incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').required(),
+        fiscalYear: Joi.string().valid('FY2025-26', 'FY2026-27').required(),
         age: Joi.number().integer().min(18).max(120).required(),
         regime: Joi.string().valid('new', 'old').required(),
         section80C: Joi.number().min(0).max(150000).required(),
@@ -291,12 +292,12 @@ class ToolRegistry {
         parentsSenior: Joi.boolean().required(),
         hra: Joi.number().min(0).max(100000000).required(),
       }),
-      executor: async ({ income, basicSalary, incomeSource, age, regime, section80C, nps80CCD1B, section80D_self, section80D_parents, parentsSenior, hra }) => {
+      executor: async ({ income, basicSalary, incomeSource, fiscalYear, age, regime, section80C, nps80CCD1B, section80D_self, section80D_parents, parentsSenior, hra }) => {
         const deductions = {
           basicSalary, age, section80C, nps80CCD1B, section80D_self,
           section80D_parents, parents_senior: parentsSenior, hra,
         };
-        const taxResult = computeTax(income, regime, deductions, incomeSource);
+        const taxResult = computeTax(income, regime, deductions, incomeSource, fiscalYear);
         return { ...taxResult, classification: 'SEPARATE_TAX_WHAT_IF' };
       },
     });

@@ -94,7 +94,7 @@ const ProbabilityGauge = ({ probability }) => {
           fontSize: '0.58rem', color: '#94a3b8', textTransform: 'uppercase',
           letterSpacing: '1.2px', fontWeight: 800, marginTop: 4, display: 'flex', alignItems: 'center', gap: 3
         }}>
-          <Activity size={10} color={color} /> {hasProbability ? 'SUCCESS' : 'UNAVAILABLE'}
+          <Activity size={10} color={color} /> {hasProbability ? 'SIMULATED' : 'UNAVAILABLE'}
         </span>
       </div>
     </div>
@@ -536,7 +536,7 @@ export const GoalDetailPane = ({
           {/* Dynamic Probability Bar */}
           <div style={{ marginTop: 18, padding: '14px 18px', borderRadius: 14, background: 'rgba(15, 23, 42, 0.5)', border: '1px solid rgba(255,255,255,0.05)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-              <span style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.8px' }}>Projected Success Probability</span>
+              <span style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.8px' }}>Simulated Goal Reach Rate</span>
               <motion.span
                 key={probPct}
                 initial={{ scale: 1.3 }}

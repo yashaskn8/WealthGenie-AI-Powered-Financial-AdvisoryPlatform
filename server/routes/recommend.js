@@ -34,7 +34,13 @@ import { assessSuitabilityRisk, RISK_CAPACITY_POLICY } from '../services/riskPro
 import { claimAdvisoryIdempotency, releaseAdvisoryIdempotency } from '../middleware/idempotency.js';
 import { persistAdvisoryAtomically } from '../services/advisoryPersistence.js';
 import { setCache, delCache } from '../config/redis.js';
-import { RISK_FREE_RATE, DISCLAIMER } from '../services/instrumentConstants.js';
+import {
+  RISK_FREE_RATE,
+  DISCLAIMER,
+  PROJECTION_ASSUMPTION_DATA_CLASS,
+  PROJECTION_ASSUMPTION_SOURCE,
+  PROJECTION_ASSUMPTION_VERSION,
+} from '../services/instrumentConstants.js';
 import { verifyAuditChain } from '../services/auditChain.js';
 import { generatePortfolioProjection } from '../services/projectionEngine.js';
 
@@ -74,7 +80,7 @@ function canonicalAuditInputs(profile, suitability, modelVersion) {
   };
 }
 
-function buildPortfolioExpectedReturn(instruments) {
+function buildPortfolioReturnAssumption(instruments) {
   return Number(instruments.reduce(
     (sum, instrument) => sum + Number(instrument.nominalReturn) * Number(instrument.allocationWeight),
     0,
@@ -137,7 +143,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       throw createError(422, 'No instruments passed the suitability boundary', 'No suitable instruments were found for this profile.');
     }
 
-    const portfolioExpectedReturn = buildPortfolioExpectedReturn(instruments);
+    const portfolioReturnAssumption = buildPortfolioReturnAssumption(instruments);
     const assetClassAllocation = buildAssetClassAllocation(instruments);
     const dashboardProjection = buildDashboardProjection(profile, instruments);
     const advisory = await generateAdvisory({
@@ -185,7 +191,8 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       recommendations: {
         instruments,
         confidenceScores,
-        portfolioExpectedReturn,
+        portfolioReturnAssumption,
+        returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
         modelVersion,
         recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
         advisorySummary: advisory.text ? advisory.text.slice(0, 500) : '',
@@ -208,7 +215,12 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       model_version: modelVersion,
       recommendation_policy_version: RECOMMENDATION_POLICY_VERSION,
       financial_profile_schema_version: FINANCIAL_PROFILE_SCHEMA_VERSION,
-      portfolio_expected_return: portfolioExpectedReturn,
+      portfolio_return_assumption: portfolioReturnAssumption,
+      return_data_class: PROJECTION_ASSUMPTION_DATA_CLASS,
+      return_assumption_version: PROJECTION_ASSUMPTION_VERSION,
+      return_assumption_source: PROJECTION_ASSUMPTION_SOURCE,
+      observed_market_fact: false,
+      provider_forecast: false,
       asset_class_allocation: assetClassAllocation,
       dashboard_projection: dashboardProjection,
       return_basis: 'PRE_TAX_NOMINAL',
@@ -317,7 +329,12 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
     status: 'success',
     message: 'Recommendation weights updated.',
     instruments: updatedInstruments,
-    portfolio_expected_return: buildPortfolioExpectedReturn(updatedInstruments),
+    portfolio_return_assumption: buildPortfolioReturnAssumption(updatedInstruments),
+    return_data_class: PROJECTION_ASSUMPTION_DATA_CLASS,
+    return_assumption_version: PROJECTION_ASSUMPTION_VERSION,
+    return_assumption_source: PROJECTION_ASSUMPTION_SOURCE,
+    observed_market_fact: false,
+    provider_forecast: false,
     asset_class_allocation: buildAssetClassAllocation(updatedInstruments),
     dashboard_projection: buildDashboardProjection(profile, updatedInstruments),
   });

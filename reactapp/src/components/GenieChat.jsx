@@ -61,6 +61,7 @@ const GenieChat = ({ profile, onNavigate }) => {
   // Tax Optimizer parameters
   const [taxGrossIncome, setTaxGrossIncome] = useState(300000);
   const [taxIncomeSource, setTaxIncomeSource] = useState('');
+  const [taxFiscalYear, setTaxFiscalYear] = useState('');
   const [tax80C, setTax80C] = useState(0);
   const [taxNPS, setTaxNPS] = useState(0);
   const [taxComparison, setTaxComparison] = useState(null);
@@ -134,11 +135,11 @@ const GenieChat = ({ profile, onNavigate }) => {
   }, [activeWorkspace, sipMonthlyAmount, sipReturnRate, sipHorizon, sipStepUpPercent]);
 
   useEffect(() => {
-    if (activeWorkspace !== 'tax-optimizer' || !taxIncomeSource) return undefined;
+    if (activeWorkspace !== 'tax-optimizer' || !taxIncomeSource || !taxFiscalYear) return undefined;
     let cancelled = false;
     const timer = setTimeout(() => {
       setTaxComparisonError(null);
-      api.compareTax(taxGrossIncome, { section80C: tax80C, nps80CCD1B: taxNPS, incomeSource: taxIncomeSource })
+      api.compareTax(taxGrossIncome, { section80C: tax80C, nps80CCD1B: taxNPS, incomeSource: taxIncomeSource, fiscalYear: taxFiscalYear })
         .then(result => {
           if (cancelled) return;
           setTaxComparison({
@@ -149,6 +150,9 @@ const GenieChat = ({ profile, onNavigate }) => {
             standardDeductionNew: result.new_regime.standard_deduction,
             standardDeductionOld: result.old_regime.standard_deduction,
             oldRegimeDeductions: result.old_regime.old_regime_deductions,
+            deductionLimits: result.deduction_limits,
+            policyVersion: result.policyVersion,
+            fiscalYear: result.fiscalYear,
           });
         })
         .catch(error => {
@@ -162,7 +166,7 @@ const GenieChat = ({ profile, onNavigate }) => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [activeWorkspace, taxGrossIncome, taxIncomeSource, tax80C, taxNPS]);
+  }, [activeWorkspace, taxFiscalYear, taxGrossIncome, taxIncomeSource, tax80C, taxNPS]);
 
   const lastUserMessage = messages.filter(m => m.role === 'user').slice(-1)[0]?.content || '';
   const lastAssistantMsg = messages.filter(m => m.role === 'assistant').slice(-1)[0];
@@ -377,7 +381,7 @@ const GenieChat = ({ profile, onNavigate }) => {
                     <div className="workspace-title">
                       {activeWorkspace === 'rebalancer' && <span>Investment Mix Planner</span>}
                       {activeWorkspace === 'sip-planner' && <span>SIP Growth Calculator</span>}
-                      {activeWorkspace === 'tax-optimizer' && 'Tax Savings Helper'}
+                      {activeWorkspace === 'tax-optimizer' && 'Tax What-If Helper'}
                     </div>
                     <div className="workspace-subtitle">Try it out — play with the numbers below!</div>
                   </div>
@@ -562,6 +566,8 @@ const GenieChat = ({ profile, onNavigate }) => {
 
                 {activeWorkspace === 'tax-optimizer' && (() => {
                   const taxes = taxComparison;
+                  const section80CLimit = Number(taxes?.deductionLimits?.section80C);
+                  const npsLimit = Number(taxes?.deductionLimits?.section80CCD1B);
 
                   return (
                     <div className="workspace-sandbox">
@@ -584,9 +590,20 @@ const GenieChat = ({ profile, onNavigate }) => {
                         </select>
                       </div>
 
+                      <div className="sandbox-group">
+                        <div className="sandbox-label-row">
+                          <span className="sandbox-label"><Coins size={14} /> Fiscal Year</span>
+                        </div>
+                        <select value={taxFiscalYear} onChange={e => setTaxFiscalYear(e.target.value)} className="genie-input" aria-label="Tax fiscal year">
+                          <option value="">Choose explicitly</option>
+                          <option value="FY2026-27">FY2026-27</option>
+                          <option value="FY2025-26">FY2025-26</option>
+                        </select>
+                      </div>
+
                       {!taxes && (
                         <div role="status" className="sandbox-intro">
-                          {!taxIncomeSource ? 'Choose an income source to calculate without assumptions.' : (taxComparisonError ? `Tax service unavailable: ${taxComparisonError}` : 'Calculating with the authoritative tax service...')}
+                          {!taxIncomeSource || !taxFiscalYear ? 'Choose an income source and fiscal year to calculate without assumptions.' : (taxComparisonError ? `Tax service unavailable: ${taxComparisonError}` : 'Calculating with the authoritative tax service...')}
                         </div>
                       )}
 
@@ -601,20 +618,20 @@ const GenieChat = ({ profile, onNavigate }) => {
 
                       <div className="sandbox-group">
                         <div className="sandbox-label-row">
-                          <span className="sandbox-label"><Percent size={14} /> <JargonTooltip term="Section 80C">80C Tax Savings</JargonTooltip> (PPF, ELSS, LIC etc.)</span>
+                          <span className="sandbox-label"><Percent size={14} /> <JargonTooltip term="Section 80C">80C Deduction Input</JargonTooltip></span>
                           <span className="sandbox-val text-orange">{formatFullINR(tax80C)}</span>
                         </div>
-                        <input type="range" min="0" max="150000" step="5000" value={tax80C} onChange={e => setTax80C(Number(e.target.value))} className="sandbox-slider" />
-                        <div className="slider-limits"><span>₹0</span><span>₹1.5L Max</span></div>
+                        <input type="range" min="0" max={Number.isFinite(section80CLimit) ? section80CLimit : 0} step="5000" value={tax80C} onChange={e => setTax80C(Number(e.target.value))} className="sandbox-slider" disabled={!Number.isFinite(section80CLimit)} />
+                        <div className="slider-limits"><span>₹0</span><span>{Number.isFinite(section80CLimit) ? `${formatFullINR(section80CLimit)} server-policy limit` : 'Awaiting server policy'}</span></div>
                       </div>
 
                       <div className="sandbox-group">
                         <div className="sandbox-label-row">
-                          <span className="sandbox-label"><Coins size={14} /> Extra <JargonTooltip term="NPS">NPS</JargonTooltip> Tax Benefit (₹50K max)</span>
+                          <span className="sandbox-label"><Coins size={14} /> <JargonTooltip term="NPS">NPS</JargonTooltip> Deduction Input</span>
                           <span className="sandbox-val text-orange">{formatFullINR(taxNPS)}</span>
                         </div>
-                        <input type="range" min="0" max="50000" step="5000" value={taxNPS} onChange={e => setTaxNPS(Number(e.target.value))} className="sandbox-slider" />
-                        <div className="slider-limits"><span>₹0</span><span>₹50K Max</span></div>
+                        <input type="range" min="0" max={Number.isFinite(npsLimit) ? npsLimit : 0} step="5000" value={taxNPS} onChange={e => setTaxNPS(Number(e.target.value))} className="sandbox-slider" disabled={!Number.isFinite(npsLimit)} />
+                        <div className="slider-limits"><span>₹0</span><span>{Number.isFinite(npsLimit) ? `${formatFullINR(npsLimit)} server-policy limit` : 'Awaiting server policy'}</span></div>
                       </div>
 
                       {/* Side-by-side Comparative Table */}
@@ -643,6 +660,10 @@ const GenieChat = ({ profile, onNavigate }) => {
                           <div className="tax-td">Tax You Pay</div>
                           <div className="tax-td text-center text-sky">{formatFullINR(taxes.taxNew)}</div>
                           <div className="tax-td text-center text-purple">{formatFullINR(taxes.taxOld)}</div>
+                        </div>
+                        <div className="tax-table-row">
+                          <div className="tax-td">Policy evidence</div>
+                          <div className="tax-td text-center" style={{ gridColumn: 'span 2' }}>{taxes.fiscalYear} · {taxes.policyVersion}</div>
                         </div>
                       </div>}
 

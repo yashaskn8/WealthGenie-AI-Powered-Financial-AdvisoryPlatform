@@ -271,7 +271,7 @@ const GoalPlanner = ({ profile }) => {
               My Goal Planner
             </h1>
             <p style={{ fontSize: '0.98rem', color: '#94a3b8', marginTop: 6, fontWeight: 500 }}>
-              AI-simulated targets, dynamic risk profile matching, and real-time Monte Carlo wealth forecasting.
+              Server-owned, model-based goal simulations using explicit assumptions; results are not provider forecasts or guaranteed outcomes.
             </p>
           </div>
         </div>
@@ -349,7 +349,7 @@ const GoalPlanner = ({ profile }) => {
               <ArrowUpRight size={22} color="#8b5cf6" />
             </div>
             <div>
-              <div style={{ fontSize: '0.68rem', color: '#64748b', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.8px' }}>PORTFOLIO SUCCESS PROBABILITY</div>
+              <div style={{ fontSize: '0.68rem', color: '#64748b', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.8px' }}>SIMULATED GOAL REACH RATE</div>
               <div style={{ fontSize: '1.25rem', fontWeight: 900, color: avgProb === null ? '#64748b' : avgProb >= 0.65 ? '#10b981' : '#f59e0b', marginTop: 2 }}>{avgProb === null ? '—' : `${Math.round(avgProb * 100)}%`}</div>
             </div>
           </motion.div>
@@ -606,9 +606,9 @@ const GoalPlanner = ({ profile }) => {
                         }} />
                       </div>
                       
-                      {/* Quant Forecast meter */}
+                      {/* Model-based simulation meter */}
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem', color: '#64748b', marginBottom: 4 }}>
-                        <span>Quant Success Forecast</span>
+                        <span>Simulated Goal Reach Rate</span>
                         <span style={{ fontWeight: 700, color: probColor }}>{hasProbability ? `${probPct}%` : 'Unavailable'}</span>
                       </div>
                       <div style={{ height: 6, background: 'rgba(255,255,255,0.05)', borderRadius: 3, overflow: 'hidden' }}>

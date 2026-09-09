@@ -3,16 +3,32 @@ import assert from 'node:assert/strict';
 import {
   CURRENT_FY,
   calculateTaxableIncome,
-  computeTax,
-  computeTaxWithDeductions,
-  getTaxSlab,
+  computeTax as computeTaxForFiscalYear,
+  computeTaxWithDeductions as computeTaxWithDeductionsForFiscalYear,
+  getTaxSlab as getTaxSlabForFiscalYear,
   getTaxSlabsForFY,
   isFYVerified,
-  compareTaxRegimes,
-  getEffectiveMarginalRate,
-  buildTaxSlabBreakdown,
-  analyzeTaxOptimization,
+  compareTaxRegimes as compareTaxRegimesForFiscalYear,
+  getEffectiveMarginalRate as getEffectiveMarginalRateForFiscalYear,
+  buildTaxSlabBreakdown as buildTaxSlabBreakdownForFiscalYear,
+  analyzeTaxOptimization as analyzeTaxOptimizationForFiscalYear,
 } from '../services/taxEngine.js';
+
+const TEST_FISCAL_YEAR = 'FY2026-27';
+const computeTax = (income, regime, deductions, incomeSource, fiscalYear = TEST_FISCAL_YEAR) =>
+  computeTaxForFiscalYear(income, regime, deductions, incomeSource, fiscalYear);
+const computeTaxWithDeductions = (income, regime, deductions, incomeSource, fiscalYear = TEST_FISCAL_YEAR) =>
+  computeTaxWithDeductionsForFiscalYear(income, regime, deductions, incomeSource, fiscalYear);
+const getTaxSlab = (income, regime, deductions, incomeSource, fiscalYear = TEST_FISCAL_YEAR) =>
+  getTaxSlabForFiscalYear(income, regime, deductions, incomeSource, fiscalYear);
+const compareTaxRegimes = (income, deductions, incomeSource, fiscalYear = TEST_FISCAL_YEAR) =>
+  compareTaxRegimesForFiscalYear(income, deductions, incomeSource, fiscalYear);
+const getEffectiveMarginalRate = (income, regime, deductions, incomeSource, fiscalYear = TEST_FISCAL_YEAR) =>
+  getEffectiveMarginalRateForFiscalYear(income, regime, deductions, incomeSource, fiscalYear);
+const buildTaxSlabBreakdown = (computation, fiscalYear = TEST_FISCAL_YEAR) =>
+  buildTaxSlabBreakdownForFiscalYear(computation, fiscalYear);
+const analyzeTaxOptimization = (income, deductions, incomeSource, fiscalYear = TEST_FISCAL_YEAR) =>
+  analyzeTaxOptimizationForFiscalYear(income, deductions, incomeSource, fiscalYear);
 
 test('new regime Section 87A rebate zeros tax at the FY2025-26 threshold', () => {
   const result = computeTax(1_275_000, 'new', {}, 'salary');
