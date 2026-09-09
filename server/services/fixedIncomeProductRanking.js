@@ -14,10 +14,12 @@ const GOVERNMENT_PARENT_SCHEMES = Object.freeze({
 });
 
 const SBI_PARENT_IDS = new Set(['fd', 'sbi_fd']);
+const RBI_PARENT_IDS = new Set(['rbi_bonds']);
 
 export function fixedIncomeProviderForParent(parentInstrumentId) {
   if (Object.hasOwn(GOVERNMENT_PARENT_SCHEMES, parentInstrumentId)) return PROVIDERS.GOVERNMENT_OF_INDIA;
   if (SBI_PARENT_IDS.has(parentInstrumentId)) return PROVIDERS.SBI;
+  if (RBI_PARENT_IDS.has(parentInstrumentId)) return PROVIDERS.RBI;
   return null;
 }
 
@@ -140,6 +142,13 @@ function selectComparableSbiProduct(profile, snapshot) {
   return product && isUsableFact(fact) ? { product, fact } : null;
 }
 
+function selectRbiProduct(snapshot) {
+  const canonicalId = 'government:rbi:frsb-2020-taxable';
+  const product = (snapshot?.products || []).find(item => item.canonicalProductId === canonicalId);
+  const fact = selectCurrentEffectiveFact(snapshot?.facts, canonicalId);
+  return product && isUsableFact(fact) ? { product, fact } : null;
+}
+
 export function compareVerifiedFixedIncomeProducts({ parentInstrumentId, snapshot, profile }) {
   const provider = fixedIncomeProviderForParent(parentInstrumentId);
   if (!provider) {
@@ -157,17 +166,28 @@ export function compareVerifiedFixedIncomeProducts({ parentInstrumentId, snapsho
     );
   }
 
-  const selected = provider === PROVIDERS.GOVERNMENT_OF_INDIA
-    ? selectGovernmentProduct(parentInstrumentId, snapshot)
-    : selectComparableSbiProduct(profile, snapshot);
+  let selected = null;
+  if (provider === PROVIDERS.GOVERNMENT_OF_INDIA) {
+    selected = selectGovernmentProduct(parentInstrumentId, snapshot);
+  } else if (provider === PROVIDERS.SBI) {
+    selected = selectComparableSbiProduct(profile, snapshot);
+  } else if (provider === PROVIDERS.RBI) {
+    selected = selectRbiProduct(snapshot);
+  }
+
   if (!selected) {
-    const reason = provider === PROVIDERS.SBI
-      ? 'NO_SAME_TENURE_AND_DEPOSITOR_CLASS_PRODUCT'
-      : 'CURRENT_EFFECTIVE_SCHEME_RATE_UNAVAILABLE';
+    let reason = 'CURRENT_EFFECTIVE_SCHEME_RATE_UNAVAILABLE';
+    if (provider === PROVIDERS.SBI) {
+      reason = 'NO_SAME_TENURE_AND_DEPOSITOR_CLASS_PRODUCT';
+    } else if (provider === PROVIDERS.RBI) {
+      reason = snapshot?.error?.code || 'RBI_FRSB_COUPON_UNAVAILABLE';
+    }
     return unavailable(
       [reason],
       provider,
-      'No source-qualified product matches the exact scheme or comparable tenure and depositor class.',
+      provider === PROVIDERS.RBI
+        ? 'The official RBI floating coupon or reference NSC rate could not be verified. No static rate was substituted.'
+        : 'No source-qualified product matches the exact scheme or comparable tenure and depositor class.',
     );
   }
 
@@ -175,7 +195,7 @@ export function compareVerifiedFixedIncomeProducts({ parentInstrumentId, snapsho
   if (provider === PROVIDERS.GOVERNMENT_OF_INDIA) {
     dto.compoundingBasis = selected.fact.compoundingBasis ?? null;
     dto.tenureMonths = selected.product.tenureMonths ?? null;
-  } else {
+  } else if (provider === PROVIDERS.SBI) {
     dto.tenure = {
       label: selected.product.tenureLabel,
       minDays: selected.product.tenureMinDays,
@@ -185,7 +205,22 @@ export function compareVerifiedFixedIncomeProducts({ parentInstrumentId, snapsho
     dto.depositType = selected.product.depositType;
     dto.callability = selected.product.callability;
     dto.riskQuality = null;
+  } else if (provider === PROVIDERS.RBI) {
+    dto.tenureMonths = selected.product.tenureMonths ?? 84;
+    dto.couponResetFrequency = selected.product.couponResetFrequency ?? 'SEMI_ANNUAL';
+    dto.interestPaymentFrequency = selected.product.interestPaymentFrequency ?? 'SEMI_ANNUAL';
+    dto.referenceRate = selected.product.referenceRate ?? 'NSC';
+    dto.spreadBps = selected.product.spreadBps ?? 35;
+    dto.rankingReasonCodes = [
+      'OFFICIAL_SOURCE_FACT_VERIFIED',
+      'SINGLE_CANONICAL_PRODUCT',
+      'MERIT_RANKING_NOT_CLAIMED',
+    ];
   }
+
+  const rankingReasonCodes = provider === PROVIDERS.RBI
+    ? ['OFFICIAL_SOURCE_FACT_VERIFIED', 'SINGLE_CANONICAL_PRODUCT', 'MERIT_RANKING_NOT_CLAIMED']
+    : ['OFFICIAL_SOURCE_FACT_VERIFIED', 'MERIT_RANKING_NOT_CLAIMED'];
 
   return {
     products: [dto],
@@ -193,7 +228,7 @@ export function compareVerifiedFixedIncomeProducts({ parentInstrumentId, snapsho
       version: FIXED_INCOME_RANKING_VERSION,
       status: 'VERIFIED_COMPARABLE_OPTIONS',
       provider,
-      reasonCodes: ['OFFICIAL_SOURCE_FACT_VERIFIED', 'MERIT_RANKING_NOT_CLAIMED'],
+      reasonCodes: rankingReasonCodes,
       arbitraryWeightedScoreUsed: false,
       forcedResultCount: false,
       hasUniqueLeader: false,
@@ -206,7 +241,9 @@ export function compareVerifiedFixedIncomeProducts({ parentInstrumentId, snapsho
       effectiveTo: selected.fact.effectiveTo,
       disclosure: provider === PROVIDERS.SBI
         ? 'One SBI card-rate option matching the profile horizon and source-established depositor class. Different tenures and depositor classes are excluded; no best-FD claim is made.'
-        : 'The exact India Post government scheme within the already suitable parent category. Its official interval rate is shown without a cross-scheme merit ranking.',
+        : provider === PROVIDERS.RBI
+          ? 'The single canonical Floating Rate Savings Bond (Taxable) issued by Government of India / RBI. Coupon is officially linked to the prevailing NSC rate plus 35 bps reset semi-annually.'
+          : 'The exact India Post government scheme within the already suitable parent category. Its official interval rate is shown without a cross-scheme merit ranking.',
     },
   };
 }

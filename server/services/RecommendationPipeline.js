@@ -13,6 +13,7 @@ import {
   fetchAmfiProductSnapshot,
   fetchGovernmentSavingsSnapshot,
   fetchSbiTermDepositSnapshot,
+  fetchRbiFloatingRateSavingsBondSnapshot,
 } from './marketDataService.js';
 import {
   rankVerifiedMutualFundProducts,
@@ -505,9 +506,30 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
   const catalogMetadata = referenceMetadata(parent, whereToInvestCatalog[catalog.id]);
   if (supportsFixedIncomeParentCategory(catalog.id)) {
     const provider = fixedIncomeProviderForParent(catalog.id);
-    const fetchSnapshot = provider === PROVIDERS.GOVERNMENT_OF_INDIA
-      ? (dependencies.fetchGovernmentSavingsSnapshot || fetchGovernmentSavingsSnapshot)
-      : (dependencies.fetchSbiTermDepositSnapshot || fetchSbiTermDepositSnapshot);
+    let fetchSnapshot = null;
+    if (provider === PROVIDERS.GOVERNMENT_OF_INDIA) {
+      fetchSnapshot = dependencies.fetchGovernmentSavingsSnapshot || fetchGovernmentSavingsSnapshot;
+    } else if (provider === PROVIDERS.SBI) {
+      fetchSnapshot = dependencies.fetchSbiTermDepositSnapshot || fetchSbiTermDepositSnapshot;
+    } else if (provider === PROVIDERS.RBI) {
+      fetchSnapshot = dependencies.fetchRbiFloatingRateSavingsBondSnapshot || fetchRbiFloatingRateSavingsBondSnapshot;
+    }
+
+    if (!fetchSnapshot) {
+      const result = compareVerifiedFixedIncomeProducts({
+        parentInstrumentId: catalog.id,
+        snapshot: null,
+        profile: canonical,
+      });
+      return attachWtiMetadata(result.products, {
+        excluded,
+        riskReconciliation,
+        catalog: catalogMetadata,
+        ranking: result.ranking,
+        comparisonUniverse: result.comparisonUniverse,
+      });
+    }
+
     const snapshot = await fetchSnapshot();
     const result = compareVerifiedFixedIncomeProducts({
       parentInstrumentId: catalog.id,

@@ -6,6 +6,7 @@ export const PROVIDERS = Object.freeze({
   UPSTOX: 'UPSTOX',
   GOVERNMENT_OF_INDIA: 'GOVERNMENT_OF_INDIA',
   SBI: 'SBI',
+  RBI: 'RBI',
 });
 
 export const FACT_KINDS = Object.freeze({

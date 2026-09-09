@@ -24,6 +24,7 @@ import NseMarketDataProvider from './marketData/NseMarketDataProvider.js';
 import NseHistoricalDataProvider from './marketData/NseHistoricalDataProvider.js';
 import GovernmentSmallSavingsProvider from './marketData/GovernmentSmallSavingsProvider.js';
 import SbiTermDepositProvider from './marketData/SbiTermDepositProvider.js';
+import RbiFloatingRateSavingsBondProvider from './marketData/RbiFloatingRateSavingsBondProvider.js';
 import {
   DEFAULT_BENCHMARK_IDS,
   MARKET_BENCHMARKS,
@@ -42,6 +43,9 @@ const nseProvider = new NseMarketDataProvider();
 const nseHistoryProvider = new NseHistoricalDataProvider();
 const governmentSavingsProvider = new GovernmentSmallSavingsProvider();
 const sbiTermDepositProvider = new SbiTermDepositProvider();
+const rbiProvider = new RbiFloatingRateSavingsBondProvider({
+  getGovernmentSnapshot: (opts) => governmentSavingsProvider.getSnapshot(opts),
+});
 
 export const SUPPORTED_PRIMARY_MARKET_PROVIDERS = Object.freeze(['NSE', 'UPSTOX']);
 
@@ -109,6 +113,12 @@ export async function fetchGovernmentSavingsSnapshot({ forceRefresh = false, per
 
 export async function fetchSbiTermDepositSnapshot({ forceRefresh = false, persist = true } = {}) {
   const snapshot = await sbiTermDepositProvider.getSnapshot({ forceRefresh });
+  const persistence = persist ? await persistFreshSnapshot(snapshot) : { status: 'NOT_REQUESTED' };
+  return { ...snapshot, persistence };
+}
+
+export async function fetchRbiFloatingRateSavingsBondSnapshot({ forceRefresh = false, persist = true } = {}) {
+  const snapshot = await rbiProvider.getSnapshot({ forceRefresh });
   const persistence = persist ? await persistFreshSnapshot(snapshot) : { status: 'NOT_REQUESTED' };
   return { ...snapshot, persistence };
 }

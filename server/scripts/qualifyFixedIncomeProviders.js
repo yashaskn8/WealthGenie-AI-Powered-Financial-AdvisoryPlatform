@@ -1,5 +1,6 @@
 import GovernmentSmallSavingsProvider from '../services/marketData/GovernmentSmallSavingsProvider.js';
 import SbiTermDepositProvider from '../services/marketData/SbiTermDepositProvider.js';
+import RbiFloatingRateSavingsBondProvider from '../services/marketData/RbiFloatingRateSavingsBondProvider.js';
 
 function assertAvailableSnapshot(snapshot, expectedProvider, minimumProducts) {
   if (snapshot?.provider !== expectedProvider) throw new Error(`${expectedProvider}: unexpected provider identity`);
@@ -51,11 +52,38 @@ function summarizeDeposits(snapshot) {
   });
 }
 
+function summarizeRbi(snapshot) {
+  return snapshot.products.map(product => {
+    const fact = snapshot.facts.find(candidate => candidate.canonicalProductId === product.canonicalProductId);
+    return {
+      provider: snapshot.provider,
+      product: product.name,
+      couponRatePercentPerAnnum: fact.value,
+      effectiveFrom: fact.effectiveFrom,
+      effectiveTo: fact.effectiveTo,
+      rateBasis: fact.rateBasis,
+      referenceRate: fact.referenceRate,
+      referenceRateValue: fact.referenceRateValue,
+      spreadBps: fact.spreadBps,
+      source: fact.source?.url,
+      referenceSource: fact.referenceSource,
+      fetchedAt: fact.fetchedAt,
+      freshness: fact.freshness?.status,
+    };
+  });
+}
+
 const government = await new GovernmentSmallSavingsProvider().getSnapshot({ forceRefresh: true });
 assertAvailableSnapshot(government, 'GOVERNMENT_OF_INDIA', 10);
 
 const deposits = await new SbiTermDepositProvider().getSnapshot({ forceRefresh: true });
 assertAvailableSnapshot(deposits, 'SBI', 16);
+
+const rbiProvider = new RbiFloatingRateSavingsBondProvider({
+  getGovernmentSnapshot: () => Promise.resolve(government),
+});
+const rbi = await rbiProvider.getSnapshot({ forceRefresh: true });
+assertAvailableSnapshot(rbi, 'RBI', 1);
 
 console.log(JSON.stringify({
   qualification: 'PASS',
@@ -68,5 +96,10 @@ console.log(JSON.stringify({
     provider: deposits.provider,
     dataClass: deposits.dataClass,
     products: summarizeDeposits(deposits),
+  },
+  rbiBonds: {
+    provider: rbi.provider,
+    dataClass: rbi.dataClass,
+    products: summarizeRbi(rbi),
   },
 }, null, 2));
