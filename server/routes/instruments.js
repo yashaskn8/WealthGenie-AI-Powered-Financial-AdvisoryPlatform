@@ -78,13 +78,13 @@ import { rankWhereToInvestBackend } from '../services/RecommendationPipeline.js'
  * supports exact AMFI mutual-fund categories and fails closed for other classes.
  */
 router.post('/rank-wti', verifyJWT, validateStrict(rankWtiProfileSchema), asyncHandler(async (req, res) => {
-  const { profileId, parentInstrumentId } = req.body;
+  const { profileId, parentInstrumentId, taxCalculationContext } = req.body;
   const profile = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
   if (!profile) {
     return sendError(req, res, 404, 'Profile not found or access denied', 'PROFILE_NOT_FOUND');
   }
   const canonicalProfile = buildRecommendationProfile(profile);
-  const ranked = await rankWhereToInvestBackend(canonicalProfile, { parentInstrumentId });
+  const ranked = await rankWhereToInvestBackend(canonicalProfile, { parentInstrumentId, taxCalculationContext });
   res.json({
     success: true,
     total: ranked.length,

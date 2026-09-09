@@ -24,6 +24,7 @@ import {
   fixedIncomeProviderForParent,
   supportsFixedIncomeParentCategory,
 } from './fixedIncomeProductRanking.js';
+import { enrichProductsWithPostTaxAndSuitability } from './productPostTaxCalculator.js';
 import { PROVIDERS } from './marketData/contracts.js';
 
 export const PIPELINE_CONFIG = Object.freeze({
@@ -504,6 +505,15 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
 
   const parent = { name: catalog.name, riskScore: getInstrumentRisk(catalog) };
   const catalogMetadata = referenceMetadata(parent, whereToInvestCatalog[catalog.id]);
+  const formatOutput = (resultProducts, metadata) => {
+    const enriched = enrichProductsWithPostTaxAndSuitability(resultProducts, {
+      profile: canonical,
+      parentCatalog: catalog,
+      taxCalculationContext: options.taxCalculationContext,
+    });
+    return attachWtiMetadata(enriched, metadata);
+  };
+
   if (supportsFixedIncomeParentCategory(catalog.id)) {
     const provider = fixedIncomeProviderForParent(catalog.id);
     let fetchSnapshot = null;
@@ -521,7 +531,7 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
         snapshot: null,
         profile: canonical,
       });
-      return attachWtiMetadata(result.products, {
+      return formatOutput(result.products, {
         excluded,
         riskReconciliation,
         catalog: catalogMetadata,
@@ -536,7 +546,7 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
       snapshot,
       profile: canonical,
     });
-    return attachWtiMetadata(result.products, {
+    return formatOutput(result.products, {
       excluded,
       riskReconciliation,
       catalog: catalogMetadata,
@@ -551,7 +561,7 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
       currentSnapshot: null,
       historicalSnapshot: null,
     });
-    return attachWtiMetadata(result.products, {
+    return formatOutput(result.products, {
       excluded,
       riskReconciliation,
       catalog: catalogMetadata,
@@ -572,7 +582,7 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
     currentSnapshot,
     historicalSnapshot,
   });
-  return attachWtiMetadata(result.products, {
+  return formatOutput(result.products, {
     excluded,
     riskReconciliation,
     catalog: catalogMetadata,

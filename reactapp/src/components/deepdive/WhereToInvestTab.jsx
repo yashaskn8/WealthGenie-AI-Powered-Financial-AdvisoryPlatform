@@ -1,5 +1,22 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Building2, Shield, Star, Info, Wallet, Zap, History as HistoryIcon, TrendingUp, AlertTriangle, Globe, Activity } from 'lucide-react';
+import {
+  Building2,
+  Shield,
+  Star,
+  Info,
+  Wallet,
+  Zap,
+  History as HistoryIcon,
+  TrendingUp,
+  AlertTriangle,
+  Globe,
+  Activity,
+  Sparkles,
+  ChevronDown,
+  ChevronUp,
+  Calculator,
+  IndianRupee,
+} from 'lucide-react';
 import * as api from '../../services/api';
 import SebiDisclaimer from '../SebiDisclaimer';
 import { nullableMarketNumber } from '../../utils/marketDataDisplay';
@@ -13,7 +30,6 @@ const RISK_LEVELS = [
   { label: 'Very High', color: '#dc2626', desc: 'The highest catalog risk tier; large and prolonged losses are possible.' },
 ];
 
-// Human-readable labels for sub-category tabs (professional typography)
 const SUB_TAB_LABELS = {
   sovereign_gsec: 'Sovereign G-Sec',
   aaa_corporate: 'AAA Corporate',
@@ -47,26 +63,44 @@ const SUB_TAB_LABELS = {
   defence_manufacturing: 'Defence & Mfg',
   energy_metals: 'Energy & Metals',
   consumption_fmcg: 'Consumption & FMCG',
-  // midcap/smallcap MF strategy sub-tabs
   growth_momentum: 'Growth & Momentum',
   diversified_core: 'Diversified Core',
   value_quality: 'Value & Quality',
   aggressive_alpha: 'Aggressive Alpha',
   diversified_broad: 'Diversified Broad',
   quality_defensive: 'Quality Defensive',
-  // direct equity sector sub-tabs
   energy_industrial: 'Energy & Industrial',
   fmcg_consumer: 'FMCG & Consumer',
-  // REIT sub-tabs
   office_reits: 'Office REITs',
   retail_reits: 'Retail REITs',
   infrastructure_invits: 'Infrastructure InvITs',
 };
 
+const ILLUSTRATIVE_PRINCIPALS = [5000, 10000, 25000, 50000, 100000];
+
+const MARKET_CONTEXT_DESCRIPTIONS = {
+  NORMAL: 'Market conditions look normal.',
+  CAUTIOUS: 'Markets have been weaker recently, so your plan is being a little more careful.',
+  HIGH_VOLATILITY: 'Markets are moving more sharply than usual.',
+  RISK_OFF: 'Market risk is elevated, so your plan applies the strongest allowed risk reduction while staying within your suitability limits.',
+  UNAVAILABLE: 'Live market information is temporarily unavailable. Your personal suitability rules are still active.',
+};
+
+function getRiskTierColor(tier) {
+  switch (tier) {
+    case 'Very Low Risk': return { color: '#22c55e', bg: 'rgba(34, 197, 94, 0.1)', border: 'rgba(34, 197, 94, 0.3)' };
+    case 'Low Risk': return { color: '#84cc16', bg: 'rgba(132, 204, 22, 0.1)', border: 'rgba(132, 204, 22, 0.3)' };
+    case 'Moderate Risk': return { color: '#eab308', bg: 'rgba(234, 179, 8, 0.1)', border: 'rgba(234, 179, 8, 0.3)' };
+    case 'High Risk': return { color: '#ef4444', bg: 'rgba(239, 68, 68, 0.1)', border: 'rgba(239, 68, 68, 0.3)' };
+    default: return { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.1)', border: 'rgba(56, 189, 248, 0.3)' };
+  }
+}
+
 const WhereToInvestTab = ({ inv, userProfile }) => {
   const profileId = userProfile?.profileId;
   const parentInstrumentId = inv?.id;
   const requestKey = `${profileId || 'missing-profile'}:${parentInstrumentId || 'missing-instrument'}`;
+
   const [rankingResult, setRankingResult] = useState({
     requestKey: null,
     products: [],
@@ -76,11 +110,13 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
     comparisonUniverse: null,
     error: null,
   });
+
   const wtiData = useMemo(() => rankingResult.catalog || ({
     riskLevel: inv?.riskScore ?? inv?.risk ?? null,
     note: null,
     howToStart: null,
   }), [inv, rankingResult.catalog]);
+
   const subCategoryMap = wtiData?.sectors || wtiData?.subCategories || null;
   const subKeys = subCategoryMap ? Object.keys(subCategoryMap) : [];
 
@@ -92,6 +128,17 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
   const [marketContextError, setMarketContextError] = useState(null);
   const [sortBy, setSortBy] = useState('score');
 
+  // Illustrative principal & tax context state
+  const [illustrativePrincipal, setIllustrativePrincipal] = useState(10000);
+  const [showTaxDrawer, setShowTaxDrawer] = useState(false);
+  const [taxAnnualIncome, setTaxAnnualIncome] = useState(
+    userProfile?.monthly_take_home ? String(userProfile.monthly_take_home * 12) : ''
+  );
+  const [taxRegime, setTaxRegime] = useState('new');
+  const [taxFiscalYear, setTaxFiscalYear] = useState('FY2025-26');
+  const [activeTaxContext, setActiveTaxContext] = useState(null);
+
+  // Fetch live market context on mount
   useEffect(() => {
     const controller = new AbortController();
     api.getCurrentMarketContext({ signal: controller.signal })
@@ -99,7 +146,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
         setMarketContext(result);
         setMarketContextError(null);
       })
-      .catch(error => {
+      .catch((error) => {
         if (error?.code !== 'REQUEST_ABORTED') {
           setMarketContext(null);
           setMarketContextError(error.message || 'Live market context request failed.');
@@ -135,68 +182,99 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
     }
   };
 
+  // Fetch products whenever instrument, profile, or activeTaxContext changes
   useEffect(() => {
     const controller = new AbortController();
     if (!profileId || !parentInstrumentId) {
       return () => controller.abort();
     }
 
-    api.rankInvestmentCandidates(profileId, parentInstrumentId, { signal: controller.signal }).then((result) => {
-      const ranked = Array.isArray(result?.products) ? result.products : [];
-      setRankingResult({
-        requestKey,
-        products: ranked.map((product) => {
-          const historicalReturn = nullableMarketNumber(product.historicalReturn?.valuePct);
-          const nav = nullableMarketNumber(product.nav?.value);
-          const officialRate = nullableMarketNumber(product.officialRate?.value);
-          const officialRateLabel = product.officialRate?.dataClass === 'OFFICIAL_BANK_PUBLISHED_RATE'
-            ? 'Official bank-published rate'
-            : 'Official current rate';
-          return {
-            ...product,
-            displayMetricLabel: Number.isFinite(officialRate)
-              ? officialRateLabel
-              : Number.isFinite(historicalReturn) ? 'Historical 1Y return' : 'Current NAV',
-            displayMetric: Number.isFinite(historicalReturn)
-              ? `${historicalReturn.toFixed(2)}% historical`
-              : Number.isFinite(officialRate) ? `${officialRate.toFixed(2)}% p.a.`
-                : Number.isFinite(nav) ? `₹${nav.toLocaleString('en-IN')}` : 'Unavailable',
-          };
-        }),
-        catalog: result?.catalog || null,
-        suitability: result?.suitability || null,
-        ranking: result?.ranking || null,
-        comparisonUniverse: result?.comparisonUniverse || null,
-        error: null,
+    const currentTaxContext = activeTaxContext ? {
+      ...activeTaxContext,
+      illustrativePrincipal,
+    } : {
+      illustrativePrincipal,
+    };
+
+    api.rankInvestmentCandidates(profileId, parentInstrumentId, currentTaxContext, { signal: controller.signal })
+      .then((result) => {
+        const ranked = Array.isArray(result?.products) ? result.products : [];
+        setRankingResult({
+          requestKey,
+          products: ranked.map((product) => {
+            const historicalReturn = nullableMarketNumber(product.historicalReturn?.valuePct);
+            const nav = nullableMarketNumber(product.nav?.value);
+            const officialRate = nullableMarketNumber(product.officialRate?.value);
+            const officialRateLabel = product.officialRate?.dataClass === 'OFFICIAL_BANK_PUBLISHED_RATE'
+              ? 'Current official bank rate'
+              : product.parentInstrumentId === 'rbi_bonds'
+                ? 'Current RBI bond coupon'
+                : 'Current official rate';
+
+            return {
+              ...product,
+              displayMetricLabel: Number.isFinite(officialRate)
+                ? officialRateLabel
+                : Number.isFinite(historicalReturn) ? 'Historical 1Y return' : 'Current NAV',
+              displayMetric: Number.isFinite(historicalReturn)
+                ? `${historicalReturn.toFixed(2)}% historical`
+                : Number.isFinite(officialRate) ? `${officialRate.toFixed(2)}% p.a.`
+                  : Number.isFinite(nav) ? `₹${nav.toLocaleString('en-IN')}` : 'Unavailable',
+            };
+          }),
+          catalog: result?.catalog || null,
+          suitability: result?.suitability || null,
+          ranking: result?.ranking || null,
+          comparisonUniverse: result?.comparisonUniverse || null,
+          error: null,
+        });
+      })
+      .catch((error) => {
+        if (error?.code === 'REQUEST_ABORTED') return;
+        setRankingResult({
+          requestKey,
+          products: [],
+          catalog: null,
+          suitability: null,
+          ranking: null,
+          comparisonUniverse: null,
+          error: 'Authoritative product ranking is temporarily unavailable. No personalized ranking has been generated.',
+        });
       });
-    }).catch((error) => {
-      if (error?.code === 'REQUEST_ABORTED') return;
-      setRankingResult({
-        requestKey,
-        products: [],
-        catalog: null,
-        suitability: null,
-        ranking: null,
-        comparisonUniverse: null,
-        error: 'Authoritative product ranking is temporarily unavailable. No personalized ranking has been generated.',
-      });
-    });
 
     return () => controller.abort();
-  }, [parentInstrumentId, profileId, requestKey]);
+  }, [parentInstrumentId, profileId, requestKey, activeTaxContext, illustrativePrincipal]);
 
-  if (!wtiData) return (
-    <div style={{ textAlign: 'center', padding: '80px 0' }}>
-      <Building2 size={48} color="var(--ddm-text-muted)" />
-      <p style={{ color: 'var(--ddm-text-muted)', marginTop: 16, fontSize: '0.9rem' }}>No product data available for this instrument.</p>
-    </div>
-  );
+  const handleApplyTaxInputs = (e) => {
+    e.preventDefault();
+    const incomeNum = Number(taxAnnualIncome);
+    if (!Number.isFinite(incomeNum) || incomeNum < 0) return;
+    setActiveTaxContext({
+      annualGrossIncome: incomeNum,
+      regime: taxRegime,
+      fiscalYear: taxFiscalYear,
+      incomeSource: 'salary',
+      illustrativePrincipal,
+    });
+  };
+
+  if (!wtiData) {
+    return (
+      <div style={{ textAlign: 'center', padding: '80px 0' }}>
+        <Building2 size={48} color="var(--ddm-text-muted)" />
+        <p style={{ color: 'var(--ddm-text-muted)', marginTop: 16, fontSize: '0.9rem' }}>
+          No product data available for this instrument.
+        </p>
+      </div>
+    );
+  }
 
   const riskLevel = Number(wtiData.riskLevel);
   const level = Number.isFinite(riskLevel) ? Math.max(0, Math.min(5, riskLevel - 1)) : null;
   const risk = level === null
     ? { label: 'Not available', color: '#64748b', desc: 'The backend did not provide a parent-category suitability risk classification.' }
     : { ...RISK_LEVELS[level], desc: `${RISK_LEVELS[level].desc} This is the parent-category suitability tier, not a verified product Risk-o-Meter.` };
+
   const CX = 140, CY = 125, R = 90, r2 = 62;
   const totalAngle = Math.PI;
   const segGap = 0.025;
@@ -211,9 +289,11 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
   const isEvidenceRanked = rankingResult.ranking?.status === 'EVIDENCE_RANKED';
   const isComparableSet = rankingResult.ranking?.status === 'VERIFIED_COMPARABLE_OPTIONS';
   const isUnavailable = rankingStatus === 'ready' && rankingResult.ranking?.status === 'UNAVAILABLE';
+
   const rankingError = missingRankingInput
     ? 'A saved Financial Profile and authoritative parent instrument are required. No provider ranking is shown.'
     : rankingStatus === 'error' ? rankingResult.error : null;
+
   const headerLabel = rankingStatus === 'loading'
     ? 'Loading Verified Product Data…'
     : isEvidenceRanked
@@ -221,10 +301,28 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
       : isComparableSet
         ? `Verified Products (${products.length} Comparable Option${products.length === 1 ? '' : 's'})`
         : 'Verified Products Unavailable';
+
   const contextAvailable = marketContext?.status === 'MARKET_CONTEXT_AVAILABLE';
-  const contextColor = contextAvailable ? '#38bdf8' : '#f59e0b';
+  const contextRawState = contextAvailable ? marketContext.context : 'MARKET_CONTEXT_UNAVAILABLE';
+  const beginnerMarketState = contextAvailable ? marketContext.context : 'UNAVAILABLE';
+  const beginnerMarketText = MARKET_CONTEXT_DESCRIPTIONS[beginnerMarketState] || MARKET_CONTEXT_DESCRIPTIONS.UNAVAILABLE;
+
+  let marketBadgeColor = '#38bdf8';
+  let marketBadgeBg = 'rgba(56, 189, 248, 0.15)';
+  if (beginnerMarketState === 'NORMAL') {
+    marketBadgeColor = '#22c55e';
+    marketBadgeBg = 'rgba(34, 197, 94, 0.15)';
+  } else if (beginnerMarketState === 'CAUTIOUS') {
+    marketBadgeColor = '#f59e0b';
+    marketBadgeBg = 'rgba(245, 158, 11, 0.15)';
+  } else if (beginnerMarketState === 'HIGH_VOLATILITY' || beginnerMarketState === 'RISK_OFF') {
+    marketBadgeColor = '#ef4444';
+    marketBadgeBg = 'rgba(239, 68, 68, 0.15)';
+  }
+
   const contextSignals = Object.entries(marketContext?.signals || {});
   const contextReasonCodes = marketContext?.reasonCodes || (marketContextError ? ['MARKET_CONTEXT_REQUEST_FAILED'] : []);
+
   const formatSignal = (item) => {
     if (!item?.available || !Number.isFinite(item.value)) return 'UNAVAILABLE';
     const value = Number(item.value).toLocaleString('en-IN', { maximumFractionDigits: 2 });
@@ -233,16 +331,224 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
 
   return (
     <div className="tab-fade-in">
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: '1rem' }}>
-        <div className="ddm-section-header" style={{ marginBottom: 0 }}>{headerLabel}</div>
-        
-        {/* Interactive Sorting Controls */}
+      {/* ─── Beginner-First Market Summary Card ─── */}
+      <section className="wti-beginner-market-card" aria-label="Market conditions overview">
+        <div className="wti-beginner-market-header">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Globe size={18} style={{ color: marketBadgeColor }} />
+            <span style={{ fontSize: '1rem', fontWeight: 800, color: '#f8fafc', letterSpacing: '-0.01em' }}>
+              Market today
+            </span>
+          </div>
+          <span
+            className="wti-beginner-market-badge"
+            style={{
+              color: marketBadgeColor,
+              background: marketBadgeBg,
+              border: `1px solid ${marketBadgeColor}50`,
+            }}
+          >
+            {marketContext === null && !marketContextError ? 'LOADING' : contextRawState}
+          </span>
+        </div>
+
+        <p className="wti-beginner-market-text">{beginnerMarketText}</p>
+
+        <div className="wti-beginner-meaning">
+          <strong>What this means for you:</strong> Your plan may become slightly more careful, but it will only adjust investments that already fit your profile.
+        </div>
+
+        {/* Technical Details Accordion — Collapsed by Default */}
+        <details className="wti-tech-accordion">
+          <summary className="wti-tech-summary">
+            <Activity size={13} />
+            <span>View technical details</span>
+          </summary>
+
+          <div
+            data-testid="market-context-panel"
+            style={{
+              marginTop: 12,
+              background: 'rgba(2, 6, 23, 0.75)',
+              border: `1px solid ${marketBadgeColor}35`,
+              borderRadius: '8px',
+              padding: '12px 14px',
+            }}
+          >
+            <p style={{ fontSize: '0.78rem', lineHeight: 1.5, color: '#94a3b8', margin: '0 0 8px 0' }}>
+              {contextAvailable
+                ? `${marketContext.classification} · ${marketContext.policyVersion} · confidence: unavailable (deterministic policy, not ML)`
+                : marketContextError || 'No usable live context is published unless NIFTY 50, India VIX, and sufficient fresh history are all verified.'}
+            </p>
+
+            {contextSignals.length > 0 && (
+              <div
+                data-testid="market-context-signals"
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
+                  gap: 6,
+                  marginBottom: 8,
+                }}
+              >
+                {contextSignals.map(([key, item]) => (
+                  <div key={key} style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 5, padding: '5px 8px' }}>
+                    <div style={{ color: '#64748b', fontSize: '0.62rem' }}>{key.replace(/([A-Z])/g, ' $1').trim()}</div>
+                    <div style={{ color: item?.available ? '#e2e8f0' : '#fbbf24', fontSize: '0.74rem', fontWeight: 650 }}>
+                      {formatSignal(item)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div style={{ fontSize: '0.68rem', lineHeight: 1.5, color: '#94a3b8', marginBottom: 8 }}>
+              <div>
+                Observed: {marketContext?.observedAt || 'UNAVAILABLE'} · Evaluated: {marketContext?.evaluatedAt || 'UNAVAILABLE'} · Freshness: {marketContext?.freshness?.status || 'UNAVAILABLE'}
+              </div>
+              <div>
+                Sources:{' '}
+                {marketContext?.sources?.length
+                  ? marketContext.sources.map(source => `${source.provider || 'UNAVAILABLE'} (${source.instrumentId || 'benchmark history'} · ${source.dataClass || 'UNAVAILABLE'})`).join(', ')
+                  : 'UNAVAILABLE'}
+              </div>
+              <div>Reason codes: {contextReasonCodes.length ? contextReasonCodes.join(', ') : 'UNAVAILABLE'}</div>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+              <span style={{ fontSize: '0.72rem', fontStyle: 'italic', color: '#64748b' }}>
+                Context can only reduce risk within the already eligible recommendation. It cannot add products, override suitability, or execute trades.
+              </span>
+              <button
+                type="button"
+                onClick={toggleContextPreview}
+                disabled={contextPreviewLoading || !contextAvailable || !profileId}
+                style={{
+                  padding: '5px 12px',
+                  borderRadius: '5px',
+                  border: 'none',
+                  background: contextPreview ? '#22c55e' : marketBadgeColor,
+                  color: '#020617',
+                  fontSize: '0.72rem',
+                  fontWeight: 700,
+                  cursor: contextAvailable && profileId ? 'pointer' : 'not-allowed',
+                  opacity: contextAvailable && profileId ? 1 : 0.55,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                }}
+              >
+                <Activity size={13} />
+                {contextPreviewLoading ? 'Running Server Preview…' : contextPreview ? 'Adjustment Preview Ready ✓' : 'Preview Profile-Safe Adjustment'}
+              </button>
+            </div>
+            {contextPreview && (
+              <p style={{ fontSize: '0.7rem', color: '#94a3b8', margin: '8px 0 0' }}>
+                Server preview {contextPreview.applied ? 'applied' : 'did not apply'} a bounded {contextPreview.actualTotalTiltPct ?? 0}% total tilt across {contextPreview.explanations?.length ?? 0} allocation change{contextPreview.explanations?.length === 1 ? '' : 's'}. It is not persisted and does not execute trades.
+              </p>
+            )}
+            {contextPreviewError && <p role="alert" style={{ fontSize: '0.7rem', color: '#fca5a5', margin: '8px 0 0' }}>{contextPreviewError}</p>}
+          </div>
+        </details>
+      </section>
+
+      {/* ─── Illustrative Investment & Tax Controls Bar ─── */}
+      <div className="wti-controls-bar">
+        <div className="wti-illustrative-group">
+          <span className="wti-illustrative-label">Illustrative example:</span>
+          {ILLUSTRATIVE_PRINCIPALS.map((amount) => (
+            <button
+              key={amount}
+              type="button"
+              className={`wti-amount-btn ${illustrativePrincipal === amount ? 'wti-amount-btn--active' : ''}`}
+              onClick={() => setIllustrativePrincipal(amount)}
+              title={`View illustrative ₹${amount.toLocaleString('en-IN')} investment outcome`}
+            >
+              ₹{amount.toLocaleString('en-IN')}
+            </button>
+          ))}
+        </div>
+
+        <button
+          type="button"
+          className="wti-tax-toggle-btn"
+          onClick={() => setShowTaxDrawer(!showTaxDrawer)}
+          title="Add or update income and tax regime details for personalized after-tax returns"
+        >
+          <Calculator size={14} />
+          <span>{activeTaxContext ? 'Update Tax Details' : 'Calculate after tax'}</span>
+          {showTaxDrawer ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        </button>
+      </div>
+
+      {/* ─── Expandable Tax Inputs Drawer ─── */}
+      {showTaxDrawer && (
+        <form className="wti-tax-drawer" onSubmit={handleApplyTaxInputs}>
+          <div className="wti-tax-input-group">
+            <label htmlFor="wti-annual-income">Annual Gross Income (₹)</label>
+            <input
+              id="wti-annual-income"
+              type="number"
+              min="0"
+              max="1000000000"
+              step="10000"
+              className="wti-tax-input"
+              placeholder="e.g. 1200000"
+              value={taxAnnualIncome}
+              onChange={(e) => setTaxAnnualIncome(e.target.value)}
+              required
+            />
+          </div>
+
+          <div className="wti-tax-input-group">
+            <label htmlFor="wti-tax-regime">Tax Regime</label>
+            <select
+              id="wti-tax-regime"
+              className="wti-tax-input"
+              value={taxRegime}
+              onChange={(e) => setTaxRegime(e.target.value)}
+            >
+              <option value="new">New Tax Regime (Default)</option>
+              <option value="old">Old Tax Regime</option>
+            </select>
+          </div>
+
+          <div className="wti-tax-input-group">
+            <label htmlFor="wti-fiscal-year">Fiscal Year</label>
+            <select
+              id="wti-fiscal-year"
+              className="wti-tax-input"
+              value={taxFiscalYear}
+              onChange={(e) => setTaxFiscalYear(e.target.value)}
+            >
+              <option value="FY2025-26">FY 2025-26</option>
+              <option value="FY2026-27">FY 2026-27</option>
+            </select>
+          </div>
+
+          <button type="submit" className="wti-apply-tax-btn">
+            Apply & Calculate
+          </button>
+        </form>
+      )}
+
+      {/* ─── Section Header & Sorting ─── */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: '0.75rem' }}>
+        <div>
+          <h3 className="ddm-section-header" style={{ margin: 0 }}>Top verified choices in this category</h3>
+          <p style={{ fontSize: '0.8rem', color: '#94a3b8', margin: '4px 0 0' }}>
+            Up to 5 source-verified Direct-plan options ranked using verified historical NAV evidence.{' '}
+            <span style={{ fontSize: '0.72rem', opacity: 0.85 }}>({headerLabel})</span>
+          </p>
+        </div>
+
+        {/* Sorting Controls */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'rgba(15, 23, 42, 0.7)', padding: '4px 8px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.08)' }}>
           <span style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 600, marginRight: 2 }}>Sort:</span>
           {[
             { id: 'score', label: isEvidenceRanked ? 'Historical Evidence' : 'Comparable Set' },
-            { id: 'postTaxYield', label: 'Post-Tax Needs Inputs' },
-            { id: 'expense', label: 'Expense Ratio Unavailable' }
+            { id: 'postTaxYield', label: activeTaxContext ? 'Post-Tax Calculated' : 'Post-Tax Needs Inputs' },
+            { id: 'expense', label: 'Expense Ratio Unavailable' },
           ].map(mode => (
             <button
               key={mode.id}
@@ -262,7 +568,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                 fontWeight: 600,
                 cursor: mode.id === 'score' ? 'pointer' : 'not-allowed',
                 opacity: mode.id === 'score' ? 1 : 0.55,
-                transition: 'all 0.2s ease'
+                transition: 'all 0.2s ease',
               }}
             >
               {mode.label}
@@ -270,92 +576,6 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
           ))}
         </div>
       </div>
-
-      {/* Verified live market context. It is never replaced with a static regime. */}
-      <div data-testid="market-context-panel" style={{
-          background: 'rgba(15, 23, 42, 0.85)',
-          border: `1px solid ${contextColor}`,
-          borderRadius: '12px',
-          padding: '14px 18px',
-          marginBottom: '1.25rem',
-          boxShadow: '0 4px 20px rgba(0,0,0,0.3)'
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 8 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Globe size={18} style={{ color: contextColor }} />
-              <span style={{ fontSize: '0.9rem', fontWeight: '700', color: '#f8fafc' }}>Verified Market Context</span>
-            </div>
-            <span style={{
-              fontSize: '0.72rem',
-              fontWeight: '700',
-              padding: '4px 10px',
-              borderRadius: '12px',
-              background: 'rgba(255,255,255,0.08)',
-              color: contextColor,
-              border: `1px solid ${contextColor}`
-            }}>
-              {marketContext === null && !marketContextError
-                ? 'LOADING'
-                : contextAvailable ? marketContext.context : 'MARKET_CONTEXT_UNAVAILABLE'}
-            </span>
-          </div>
-          <p style={{ fontSize: '0.82rem', lineHeight: '1.5', color: '#cbd5e1', margin: '0 0 10px 0' }}>
-            {contextAvailable
-              ? `${marketContext.classification} · ${marketContext.policyVersion} · confidence: unavailable (deterministic policy, not ML)`
-              : marketContextError || 'No usable live context is published unless NIFTY 50, India VIX, and sufficient fresh history are all verified.'}
-          </p>
-          {contextSignals.length > 0 && (
-            <div data-testid="market-context-signals" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 6, marginBottom: 10 }}>
-              {contextSignals.map(([key, item]) => (
-                <div key={key} style={{ background: 'rgba(255,255,255,0.035)', borderRadius: 6, padding: '6px 8px' }}>
-                  <div style={{ color: '#64748b', fontSize: '0.64rem' }}>{key.replace(/([A-Z])/g, ' $1').trim()}</div>
-                  <div style={{ color: item?.available ? '#e2e8f0' : '#fbbf24', fontSize: '0.76rem', fontWeight: 650 }}>{formatSignal(item)}</div>
-                </div>
-              ))}
-            </div>
-          )}
-          <div style={{ fontSize: '0.7rem', lineHeight: 1.55, color: '#94a3b8', marginBottom: 8 }}>
-            <div>Observed: {marketContext?.observedAt || 'UNAVAILABLE'} · Evaluated: {marketContext?.evaluatedAt || 'UNAVAILABLE'} · Freshness: {marketContext?.freshness?.status || 'UNAVAILABLE'}</div>
-            <div>Sources: {marketContext?.sources?.length
-              ? marketContext.sources.map(source => `${source.provider || 'UNAVAILABLE'} (${source.instrumentId || 'benchmark history'} · ${source.dataClass || 'UNAVAILABLE'})`).join(', ')
-              : 'UNAVAILABLE'}</div>
-            <div>Reason codes: {contextReasonCodes.length ? contextReasonCodes.join(', ') : 'UNAVAILABLE'}</div>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.08)' }}>
-            <span style={{ fontSize: '0.75rem', fontStyle: 'italic', color: '#94a3b8' }}>
-              Context can only reduce risk within the already eligible recommendation. It cannot add products, override suitability, or execute trades.
-            </span>
-            <button
-              type="button"
-              onClick={toggleContextPreview}
-              disabled={contextPreviewLoading || !contextAvailable || !profileId}
-              style={{
-                padding: '6px 14px',
-                borderRadius: '6px',
-                border: 'none',
-                background: contextPreview ? '#22c55e' : contextColor,
-                color: '#020617',
-                fontSize: '0.75rem',
-                fontWeight: '700',
-                cursor: contextAvailable && profileId ? 'pointer' : 'not-allowed',
-                opacity: contextAvailable && profileId ? 1 : 0.55,
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                transition: 'all 0.3s ease'
-              }}
-            >
-              <Activity size={14} />
-              {contextPreviewLoading ? 'Running Server Preview…' : contextPreview ? 'Adjustment Preview Ready ✓' : 'Preview Profile-Safe Adjustment'}
-            </button>
-          </div>
-          {contextPreview && (
-            <p style={{ fontSize: '0.72rem', color: '#94a3b8', margin: '10px 0 0' }}>
-              Server preview {contextPreview.applied ? 'applied' : 'did not apply'} a bounded {contextPreview.actualTotalTiltPct ?? 0}% total transfer across {contextPreview.explanations?.length ?? 0} allocation change{contextPreview.explanations?.length === 1 ? '' : 's'}. It is not persisted and does not execute trades.
-            </p>
-          )}
-          {contextPreviewError && <p role="alert" style={{ fontSize: '0.72rem', color: '#fca5a5', margin: '10px 0 0' }}>{contextPreviewError}</p>}
-        </div>
 
       {wtiData.note && (
         <div className="wti-note-banner">
@@ -394,7 +614,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
           display: 'flex',
           gap: '10px',
           fontSize: '0.8rem',
-          color: '#cbd5e1'
+          color: '#cbd5e1',
         }}>
           <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 2 }} />
           <div><strong>UNAVAILABLE:</strong> No current source-qualified product comparison is available for this parent category. No fallback products or financial values were inserted.</div>
@@ -407,6 +627,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
           {subKeys.map(key => (
             <button
               key={key}
+              type="button"
               onClick={() => setActiveSubTab(key)}
               style={{
                 padding: '6px 14px',
@@ -417,7 +638,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                 fontSize: '0.8rem',
                 fontWeight: '600',
                 cursor: 'pointer',
-                textTransform: 'capitalize'
+                textTransform: 'capitalize',
               }}
             >
               {SUB_TAB_LABELS[key] || key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
@@ -436,14 +657,14 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
           display: 'flex',
           gap: '10px',
           fontSize: '0.8rem',
-          color: '#fecaca'
+          color: '#fecaca',
         }}>
           <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 2, color: '#ef4444' }} />
           <div>{rankingError}</div>
         </div>
       )}
 
-      {/* Parent-category suitability gauge; not a product Risk-o-Meter. */}
+      {/* Parent-Category Suitability Gauge */}
       <div className="risk-meter-container">
         <div className="risk-meter-header">
           <Shield size={14} style={{ color: risk.color }} />
@@ -529,8 +750,8 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
               return <line key={i} x1={t1} y1={u1} x2={t2} y2={u2} stroke="rgba(255,255,255,0.12)" strokeWidth="1" />;
             })}
 
-             {level !== null && (() => {
-               const needleAngle = Math.PI - ((level + 0.5) / 6) * totalAngle;
+            {level !== null && (() => {
+              const needleAngle = Math.PI - ((level + 0.5) / 6) * totalAngle;
               const needleLen = r2 - 6;
               const tipX = CX + needleLen * Math.cos(needleAngle);
               const tipY = CY - needleLen * Math.sin(needleAngle);
@@ -564,67 +785,201 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
         </div>
       </div>
 
+      {/* ─── Beginner Product Comparison Cards Grid ─── */}
       <div className="wti-grid">
-        {products.map((product) => (
-          <div key={product.id} className={`wti-item ${isEvidenceRanked && product.rank === 1 && rankingResult.ranking?.hasUniqueLeader ? 'wti-item--featured' : ''}`}>
-            <div className="wti-rank" title={isEvidenceRanked ? `Evidence rank ${product.rank}` : 'Comparable option; display position is not a rank'}>{isEvidenceRanked ? product.rank : '='}</div>
-            <div className="wti-card-body">
-              <div className="wti-card-top">
-                <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                    <h4 className="wti-name">{product.name}</h4>
-                    <span className="wti-badge" style={{ background: isEvidenceRanked ? 'rgba(34, 197, 94, 0.15)' : 'rgba(56, 189, 248, 0.12)', color: isEvidenceRanked ? '#4ade80' : '#38bdf8', borderColor: isEvidenceRanked ? 'rgba(34, 197, 94, 0.4)' : 'rgba(56, 189, 248, 0.3)' }}>
-                      {product.presentationStatus?.replaceAll('_', ' ') || 'UNAVAILABLE'}
-                    </span>
-                    {product.tiedRank && <span className="wti-badge">TIED RANK</span>}
-                  </div>
-                  <span className="wti-provider">{product.provider || 'Provider unavailable'} · {product.source?.provider || 'Source unavailable'}</span>
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-                  <span style={{ fontSize: '0.68rem', color: '#94a3b8', fontWeight: 700 }}>{product.displayMetricLabel}</span>
-                  <div className="wti-rate-chip">{product.displayMetric}</div>
-                </div>
+        {products.map((product) => {
+          const riskStyle = getRiskTierColor(product.beginnerSuitability?.riskTier);
+          const postTax = product.postTaxAnalysis;
+
+          return (
+            <div
+              key={product.id}
+              className={`wti-item ${isEvidenceRanked && product.rank === 1 && rankingResult.ranking?.hasUniqueLeader ? 'wti-item--featured' : ''}`}
+            >
+              <div
+                className="wti-rank"
+                title={isEvidenceRanked ? `Evidence rank ${product.rank}` : 'Comparable option; display position is not a rank'}
+              >
+                {isEvidenceRanked ? product.rank : '='}
               </div>
-              <p className="wti-highlights">
-                {product.officialRate
-                  ? product.officialRate.dataClass === 'QUARTERLY_OFFICIAL_RATE'
-                    ? `Official Government of India rate effective ${product.officialRate.effectiveFrom || 'UNAVAILABLE'} to ${product.officialRate.effectiveTo || 'UNAVAILABLE'}. This is an official interval fact, not a live market price or expected return.`
-                    : `Official bank-published card rate effective from ${product.officialRate.effectiveFrom || 'UNAVAILABLE'} for ${product.tenure?.label || 'the source-established tenure'} and ${product.depositorType?.replaceAll('_', ' ') || 'the source-established depositor class'}. No best-FD claim is made.`
-                  : isEvidenceRanked
-                  ? 'Ranked only among explicitly sourced Direct Growth options in the exact AMFI category by verified one-year historical NAV return. Historical performance is not an expected return.'
-                  : 'Verified AMFI category and fresh NAV. No defensible merit order is claimed for this comparable option.'}
-              </p>
 
-              {product.taxSavingsNote && (
-                <div style={{ fontSize: '0.75rem', color: product.taxSavingsNote.startsWith('⚠') ? '#f59e0b' : '#4ade80', fontWeight: 600, margin: '6px 0 4px 0', display: 'flex', alignItems: 'center', gap: 6, background: product.taxSavingsNote.startsWith('⚠') ? 'rgba(245, 158, 11, 0.08)' : 'rgba(34, 197, 94, 0.08)', padding: '4px 8px', borderRadius: '6px', border: `1px solid ${product.taxSavingsNote.startsWith('⚠') ? 'rgba(245, 158, 11, 0.2)' : 'rgba(34, 197, 94, 0.2)'}` }}>
-                  <Zap size={12} style={{ color: product.taxSavingsNote.startsWith('⚠') ? '#f59e0b' : '#4ade80', flexShrink: 0 }} />
-                  <span>{product.taxSavingsNote}</span>
+              <div className="wti-card-body">
+                {/* Card Top: Product Name, Chips, Metric */}
+                <div className="wti-card-top">
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      <h4 className="wti-name">{product.name}</h4>
+                      <span
+                        className="wti-badge"
+                        style={{
+                          background: isEvidenceRanked ? 'rgba(34, 197, 94, 0.15)' : 'rgba(56, 189, 248, 0.12)',
+                          color: isEvidenceRanked ? '#4ade80' : '#38bdf8',
+                          borderColor: isEvidenceRanked ? 'rgba(34, 197, 94, 0.4)' : 'rgba(56, 189, 248, 0.3)',
+                        }}
+                      >
+                        {product.presentationStatus?.replaceAll('_', ' ') || 'UNAVAILABLE'}
+                      </span>
+                      {product.tiedRank && <span className="wti-badge">TIED RANK</span>}
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginTop: 4 }}>
+                      <span className="wti-provider">
+                        {product.provider || 'Provider unavailable'} · {product.source?.provider || 'Source unavailable'}
+                      </span>
+                    </div>
+
+                    {/* Risk & Access Chips */}
+                    <div className="wti-card-chips">
+                      <span
+                        className="wti-risk-chip"
+                        style={{
+                          color: riskStyle.color,
+                          background: riskStyle.bg,
+                          borderColor: riskStyle.border,
+                        }}
+                      >
+                        {product.beginnerSuitability?.riskTier || 'Moderate Risk'}
+                      </span>
+                      <span className="wti-access-chip">
+                        {product.beginnerSuitability?.accessToMoney || 'Easy access'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Fact Metric Display */}
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+                    <span style={{ fontSize: '0.68rem', color: '#94a3b8', fontWeight: 700 }}>
+                      {product.displayMetricLabel}
+                    </span>
+                    <div className="wti-rate-chip">{product.displayMetric}</div>
+                  </div>
                 </div>
-              )}
 
-              {product.realReturnWarning && (
-                <div style={{ fontSize: '0.72rem', color: product.realReturnVal < 0 ? '#ef4444' : '#f59e0b', fontWeight: 600, margin: '4px 0 8px 0', display: 'flex', alignItems: 'center', gap: 6, background: product.realReturnVal < 0 ? 'rgba(239, 68, 68, 0.08)' : 'rgba(245, 158, 11, 0.08)', padding: '4px 8px', borderRadius: '6px', border: `1px solid ${product.realReturnVal < 0 ? 'rgba(239, 68, 68, 0.2)' : 'rgba(245, 158, 11, 0.2)'}` }}>
-                  <AlertTriangle size={11} style={{ color: product.realReturnVal < 0 ? '#ef4444' : '#f59e0b', flexShrink: 0 }} />
-                  <span>{product.realReturnWarning}</span>
-                </div>
-              )}
+                {/* Plain-English "Why This Fits You" */}
+                {product.beginnerSuitability?.whyThisFitsYou && (
+                  <div className="wti-why-fits">
+                    <span className="wti-why-fits-label">
+                      <Sparkles size={12} />
+                      Why this fits you
+                    </span>
+                    <p className="wti-why-fits-text">{product.beginnerSuitability.whyThisFitsYou}</p>
+                  </div>
+                )}
 
-              <div className="wti-meta-footer">
-                <div className="meta-box"><Building2 size={12} /> Source: {product.source?.provider || 'UNAVAILABLE'}</div>
-                {product.nav && <div className="meta-box"><Wallet size={12} /> NAV: {Number.isFinite(nullableMarketNumber(product.nav?.value)) ? `₹${nullableMarketNumber(product.nav.value).toLocaleString('en-IN')}` : 'UNAVAILABLE'}</div>}
-                {product.nav && <div className="meta-box"><HistoryIcon size={12} /> Valuation: {product.valuationDate || 'UNAVAILABLE'}</div>}
-                {product.officialRate && <div className="meta-box"><Wallet size={12} /> Rate class: {product.officialRate.dataClass?.replaceAll('_', ' ') || 'UNAVAILABLE'}</div>}
-                {product.officialRate && <div className="meta-box"><HistoryIcon size={12} /> Effective: {product.officialRate.effectiveFrom || 'UNAVAILABLE'} → {product.officialRate.effectiveTo || 'until revised'}</div>}
-                <div className="meta-box"><Activity size={12} /> Freshness: {product.freshness?.status || 'UNAVAILABLE'}</div>
-                <div className="meta-box">Eligibility: {product.productEligibility?.status?.replaceAll('_', ' ') || 'UNAVAILABLE'}</div>
-                {product.productType === 'MUTUAL_FUND' && <div className="meta-box">Plan: {product.plan || 'UNAVAILABLE'}</div>}
-                {product.productType === 'MUTUAL_FUND' && <div className="meta-box">Option: {product.option || 'UNAVAILABLE'}</div>}
-                {product.historicalReturn && <div className="meta-box"><HistoryIcon size={12} /> History: {product.historicalReturn.startDate} → {product.historicalReturn.endDate}</div>}
-                {isEvidenceRanked && product.rank === 1 && rankingResult.ranking?.hasUniqueLeader && <div className="meta-box meta-box--pick"><Star size={12} /> Rank #1 by 1Y Historical NAV Return</div>}
+                {/* Defensible Post-Tax Calculation & Illustrative Outcome Box */}
+                {postTax && postTax.status === 'CALCULATED' && (
+                  <div className="wti-post-tax-box">
+                    <div className="wti-post-tax-header">
+                      <span className="wti-post-tax-title">
+                        {postTax.metricLabel}:{' '}
+                        <strong>{postTax.postTaxRatePct !== null ? `${postTax.postTaxRatePct}%` : 'Calculated'}</strong>
+                      </span>
+                      <span
+                        style={{
+                          fontSize: '0.68rem',
+                          fontWeight: 700,
+                          padding: '2px 8px',
+                          borderRadius: '10px',
+                          background: 'rgba(52, 211, 153, 0.15)',
+                          color: '#34d399',
+                          border: '1px solid rgba(52, 211, 153, 0.3)',
+                        }}
+                      >
+                        Defensible Post-Tax
+                      </span>
+                    </div>
+
+                    <div className="wti-illustrative-grid">
+                      <div>
+                        <span>You invest</span>
+                        <strong>₹{postTax.illustrativePrincipal.toLocaleString('en-IN')}</strong>
+                      </div>
+                      <div>
+                        <span>Gross return</span>
+                        <strong>₹{postTax.grossGain !== null ? postTax.grossGain.toLocaleString('en-IN') : '—'}</strong>
+                      </div>
+                      <div>
+                        <span>Tax on gain</span>
+                        <strong>₹{postTax.incrementalTax !== null ? postTax.incrementalTax.toLocaleString('en-IN') : '0'}</strong>
+                      </div>
+                      <div className="wti-keep-highlight">
+                        <span>You keep</span>
+                        <strong>₹{postTax.netGain !== null ? postTax.netGain.toLocaleString('en-IN') : '—'}</strong>
+                      </div>
+                    </div>
+
+                    <div className="wti-post-tax-disclosure">
+                      {postTax.disclosure}
+                    </div>
+                  </div>
+                )}
+
+                {/* If Post-Tax Requires Inputs */}
+                {postTax && postTax.status === 'REQUIRES_TAX_INPUTS' && (
+                  <div className="wti-post-tax-cta-box">
+                    <span>After tax: Add tax details to calculate your return</span>
+                    <button
+                      type="button"
+                      onClick={() => setShowTaxDrawer(true)}
+                      className="wti-calc-tax-btn"
+                    >
+                      Calculate after tax
+                    </button>
+                  </div>
+                )}
+
+                {/* Existing Highlights & Warnings */}
+                <p className="wti-highlights" style={{ margin: '8px 0 12px' }}>
+                  {product.officialRate
+                    ? product.officialRate.dataClass === 'QUARTERLY_OFFICIAL_RATE'
+                      ? `Official Government of India rate effective ${product.officialRate.effectiveFrom || 'UNAVAILABLE'} to ${product.officialRate.effectiveTo || 'UNAVAILABLE'}. This is an official interval fact, not a live market price or expected return.`
+                      : `Official bank-published card rate effective from ${product.officialRate.effectiveFrom || 'UNAVAILABLE'} for ${product.tenure?.label || 'the source-established tenure'} and ${product.depositorType?.replaceAll('_', ' ') || 'the source-established depositor class'}. No best-FD claim is made.`
+                    : isEvidenceRanked
+                    ? 'Ranked only among explicitly sourced Direct Growth options in the exact AMFI category by verified one-year historical NAV return. Historical performance is not an expected return.'
+                    : 'Verified AMFI category and fresh NAV. No defensible merit order is claimed for this comparable option.'}
+                </p>
+
+                {product.taxSavingsNote && (
+                  <div style={{ fontSize: '0.75rem', color: product.taxSavingsNote.startsWith('⚠') ? '#f59e0b' : '#4ade80', fontWeight: 600, margin: '6px 0 4px 0', display: 'flex', alignItems: 'center', gap: 6, background: product.taxSavingsNote.startsWith('⚠') ? 'rgba(245, 158, 11, 0.08)' : 'rgba(34, 197, 94, 0.08)', padding: '4px 8px', borderRadius: '6px', border: `1px solid ${product.taxSavingsNote.startsWith('⚠') ? 'rgba(245, 158, 11, 0.2)' : 'rgba(34, 197, 94, 0.2)'}` }}>
+                    <Zap size={12} style={{ color: product.taxSavingsNote.startsWith('⚠') ? '#f59e0b' : '#4ade80', flexShrink: 0 }} />
+                    <span>{product.taxSavingsNote}</span>
+                  </div>
+                )}
+
+                {product.realReturnWarning && (
+                  <div style={{ fontSize: '0.72rem', color: product.realReturnVal < 0 ? '#ef4444' : '#f59e0b', fontWeight: 600, margin: '4px 0 8px 0', display: 'flex', alignItems: 'center', gap: 6, background: product.realReturnVal < 0 ? 'rgba(239, 68, 68, 0.08)' : 'rgba(245, 158, 11, 0.08)', padding: '4px 8px', borderRadius: '6px', border: `1px solid ${product.realReturnVal < 0 ? 'rgba(239, 68, 68, 0.2)' : 'rgba(245, 158, 11, 0.2)'}` }}>
+                    <AlertTriangle size={11} style={{ color: product.realReturnVal < 0 ? '#ef4444' : '#f59e0b', flexShrink: 0 }} />
+                    <span>{product.realReturnWarning}</span>
+                  </div>
+                )}
+
+                {/* Progressive Disclosure: Technical Details & Provenance */}
+                <details className="wti-card-tech-details">
+                  <summary className="wti-tech-summary">
+                    <Info size={12} />
+                    <span>View technical details & provenance</span>
+                  </summary>
+
+                  <div className="wti-meta-footer">
+                    <div className="meta-box"><Building2 size={12} /> Source: {product.source?.provider || 'UNAVAILABLE'}</div>
+                    {product.nav && <div className="meta-box"><Wallet size={12} /> NAV: {Number.isFinite(nullableMarketNumber(product.nav?.value)) ? `₹${nullableMarketNumber(product.nav.value).toLocaleString('en-IN')}` : 'UNAVAILABLE'}</div>}
+                    {product.nav && <div className="meta-box"><HistoryIcon size={12} /> Valuation: {product.valuationDate || 'UNAVAILABLE'}</div>}
+                    {product.officialRate && <div className="meta-box"><Wallet size={12} /> Rate class: {product.officialRate.dataClass?.replaceAll('_', ' ') || 'UNAVAILABLE'}</div>}
+                    {product.officialRate && <div className="meta-box"><HistoryIcon size={12} /> Effective: {product.officialRate.effectiveFrom || 'UNAVAILABLE'} → {product.officialRate.effectiveTo || 'until revised'}</div>}
+                    <div className="meta-box"><Activity size={12} /> Freshness: {product.freshness?.status || 'UNAVAILABLE'}</div>
+                    <div className="meta-box">Eligibility: {product.productEligibility?.status?.replaceAll('_', ' ') || 'UNAVAILABLE'}</div>
+                    {product.productType === 'MUTUAL_FUND' && <div className="meta-box">Plan: {product.plan || 'UNAVAILABLE'}</div>}
+                    {product.productType === 'MUTUAL_FUND' && <div className="meta-box">Option: {product.option || 'UNAVAILABLE'}</div>}
+                    {product.historicalReturn && <div className="meta-box"><HistoryIcon size={12} /> History: {product.historicalReturn.startDate} → {product.historicalReturn.endDate}</div>}
+                    {isEvidenceRanked && product.rank === 1 && rankingResult.ranking?.hasUniqueLeader && (
+                      <div className="meta-box meta-box--pick"><Star size={12} /> Rank #1 by 1Y Historical NAV Return</div>
+                    )}
+                  </div>
+                </details>
               </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {wtiData.howToStart && (

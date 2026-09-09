@@ -59,6 +59,15 @@ export const financialProfileUpdateSchema = financialProfileSchema.keys({
 export const rankWtiProfileSchema = Joi.object({
   profileId: objectId.required(),
   parentInstrumentId: Joi.string().trim().max(50).required(),
+  taxCalculationContext: Joi.object({
+    fiscalYear: Joi.string().valid('FY2025-26', 'FY2026-27').optional(),
+    incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').optional(),
+    annualGrossIncome: Joi.number().min(0).max(1000000000).optional(),
+    regime: Joi.string().valid('new', 'old').optional(),
+    userAge: Joi.number().integer().min(0).max(120).optional(),
+    deductions: Joi.object().optional(),
+    illustrativePrincipal: Joi.number().valid(5000, 10000, 25000, 50000, 100000).optional(),
+  }).optional(),
 }).unknown(false);
 
 export const personalizedProjectionSchema = Joi.object({

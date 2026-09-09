@@ -380,11 +380,25 @@ export async function getInstruments(type, sort = 'rate', order = 'desc', limit 
   return request('GET', `/instruments?${params.toString()}`);
 }
 
-export async function rankInvestmentCandidates(profileId, parentInstrumentId, requestOptions = {}) {
-  return request('POST', '/instruments/rank-wti', {
+export async function rankInvestmentCandidates(profileId, parentInstrumentId, taxCalculationContext = null, requestOptions = {}) {
+  let actualTaxContext = null;
+  let actualOptions = requestOptions;
+  if (taxCalculationContext && !taxCalculationContext.signal && !taxCalculationContext.timeoutMs && !taxCalculationContext.headers) {
+    actualTaxContext = taxCalculationContext;
+  } else if (taxCalculationContext && (taxCalculationContext.signal || taxCalculationContext.timeoutMs || taxCalculationContext.headers)) {
+    actualOptions = taxCalculationContext;
+    actualTaxContext = null;
+  }
+
+  const payload = {
     profileId,
     parentInstrumentId,
-  }, { timeoutMs: 90000, ...requestOptions });
+  };
+  if (actualTaxContext) {
+    payload.taxCalculationContext = actualTaxContext;
+  }
+
+  return request('POST', '/instruments/rank-wti', payload, { timeoutMs: 90000, ...actualOptions });
 }
 
 // ─── PROJECTIONS ─────────────────────────────────────────
