@@ -67,6 +67,16 @@ export function resolveBackendType(instrument = {}) {
   return null;
 }
 
+export function resolveInstrumentModelKey(input) {
+  const key = String(input || '').trim();
+  if (!key) return null;
+
+  const exactCatalog = investmentDatabase.find(instrument => instrument.id === key);
+  if (exactCatalog) return resolveBackendType(exactCatalog);
+
+  return INSTRUMENT_PARAMS[key] ? key : null;
+}
+
 function supportedGoalTags(instrument = {}) {
   const tags = instrument.goalTags ?? instrument.dynamicData?.goalTags;
   if (!Array.isArray(tags)) throw new TypeError('Instrument goal classification is not established');

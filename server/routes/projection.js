@@ -14,7 +14,11 @@ import {
   PROJECTION_ASSUMPTION_VERSION,
 } from '../services/instrumentConstants.js';
 import { buildRecommendationProfile, buildProfileGroundedSimulation, buildRecommendationProfileHash } from '../services/recommendationProfile.js';
-import { assertPortfolioSuitable, resolveConcentrationCap } from '../services/RecommendationPipeline.js';
+import {
+  assertPortfolioSuitable,
+  resolveConcentrationCap,
+  resolveInstrumentModelKey,
+} from '../services/RecommendationPipeline.js';
 import { resolveAssetKey } from '../services/portfolioEngine.js';
 import { buildStressScenarioReport } from '../services/stressScenarioEngine.js';
 
@@ -247,8 +251,10 @@ router.post('/', verifyJWT, validateStrict(personalizedProjectionSchema), asyncH
   });
   const suitability = assertPortfolioSuitable(profile, instruments);
 
-  // Use authoritative pre-tax nominal rates. A tax profile is not inferred.
-  const instKeys = instruments;
+  // Suitability is evaluated against the exact catalog identities above. Only
+  // after that hard gate do we resolve those identities to versioned model-
+  // assumption keys for projection math.
+  const instKeys = instruments.map(resolveInstrumentModelKey);
   const instList = instKeys.map(key => {
     const nominalRate = getNominalRate(key);
     if (nominalRate === null) {

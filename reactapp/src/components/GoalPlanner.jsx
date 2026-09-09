@@ -127,7 +127,10 @@ const GoalPlanner = ({ profile }) => {
   const handleSubmitGoal = async (goalData) => {
     setLoading(true);
     try {
-      const res = await submitGoal(api, goalData);
+      const res = await submitGoal(api, {
+        ...goalData,
+        profileId: profile?.profileId || profile?._id,
+      });
 
       if (res.success && res.goal) {
         setGoals(prev => [...prev, res.goal]);

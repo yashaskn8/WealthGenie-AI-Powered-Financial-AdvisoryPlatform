@@ -111,7 +111,7 @@ jobs:
           cd server
           npm run typecheck
 
-      - name: Run Backend Unit Tests & Coverage (No MongoDB Required)
+      - name: Run Backend Unit Tests (No MongoDB Required)
         run: |
           $JWT_SECRET = "${{ secrets.CI_JWT_SECRET }}"
           if (-not $JWT_SECRET) {
@@ -119,14 +119,10 @@ jobs:
           }
           $env:JWT_SECRET = $JWT_SECRET
           cd server
-          npm run test:coverage:unit
-
-      - name: Upload Backend Coverage Artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: backend-coverage-windows-node${{ matrix.node-version }}
-          path: server/reports/
+          # Coverage is already collected by both Linux/Mongo integration jobs.
+          # Running the identical suite under c8 again on the slower Windows
+          # runner adds instrumentation cost without adding coverage evidence.
+          npm run test:unit
 
   frontend-quality-matrix:
     name: Frontend (Node ${{ matrix.node-version }}, ${{ matrix.os }})

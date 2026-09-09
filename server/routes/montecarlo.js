@@ -9,7 +9,11 @@ import {
   buildProfileGroundedSimulation,
   buildRecommendationProfileHash,
 } from '../services/recommendationProfile.js';
-import { assertPortfolioSuitable, resolveConcentrationCap } from '../services/RecommendationPipeline.js';
+import {
+  assertPortfolioSuitable,
+  resolveConcentrationCap,
+  resolveInstrumentModelKey,
+} from '../services/RecommendationPipeline.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import { getCache, setCache } from '../config/redis.js';
 import {
@@ -157,9 +161,10 @@ router.post('/montecarlo', verifyJWT, validateStrict(personalizedMonteCarloSchem
     years,
   });
   const suitability = assertPortfolioSuitable(profile, [instrument]);
+  const instrumentKey = resolveInstrumentModelKey(instrument);
 
   const assumptionResult = await getInstrumentModelAssumptions();
-  const modelParams = assumptionResult.params[instrument] || getInstrumentVolatility(instrument);
+  const modelParams = assumptionResult.params[instrumentKey] || getInstrumentVolatility(instrumentKey);
   if (!modelParams || !Number.isFinite(modelParams.mean) || !Number.isFinite(modelParams.stdDev)) {
     throw createError(422, `No simulation parameters for ${instrument}`, 'Simulation data is unavailable for this instrument.');
   }
@@ -168,7 +173,7 @@ router.post('/montecarlo', verifyJWT, validateStrict(personalizedMonteCarloSchem
   const profileHash = buildRecommendationProfileHash(profile, { modelVersion: 'monte-carlo-2.0.0' });
   const targetKey = target_amount === undefined ? 'none' : String(Math.round(target_amount));
   const cacheKey = [
-    'mc-v3', req.user.userId, profileId, profileHash, instrument, years,
+    'mc-v3', req.user.userId, profileId, profileHash, instrumentKey, years,
     simulation.monthlyContribution, simulation.initialCapital, targetKey,
     annualReturn.toFixed(6), annualVolatility.toFixed(6),
     MONTE_CARLO_INFLATION_ASSUMPTION, MONTE_CARLO_SIMULATIONS,
@@ -199,6 +204,7 @@ router.post('/montecarlo', verifyJWT, validateStrict(personalizedMonteCarloSchem
     : null;
   const response = {
     instrument,
+    model_assumption_instrument_key: instrumentKey,
     years: simulation.years,
     monthly_investment: simulation.monthlyContribution,
     initial_capital: simulation.initialCapital,

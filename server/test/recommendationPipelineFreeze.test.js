@@ -11,6 +11,7 @@ import {
   rankWhereToInvestBackend,
   reconcileRisk,
   resolveBackendType,
+  resolveInstrumentModelKey,
   runPipeline,
 } from '../services/RecommendationPipeline.js';
 import { investmentDatabase } from '../data/investmentDatabase.js';
@@ -25,6 +26,16 @@ test('instrument mapping and risk classification return explicit unknown states'
   assert.equal(getInstrumentRisk({}), null);
   assert.equal(instrumentRiskTier({}), 'UNKNOWN');
   assert.equal(instrumentRiskTier({ riskLevel: 5 }), 'HIGH');
+});
+
+test('projection model keys resolve exact catalog identities without bypassing unknowns', () => {
+  assert.equal(resolveInstrumentModelKey('liquid_mf'), 'Liquid_MF');
+  assert.equal(resolveInstrumentModelKey('liquid_etf'), 'Liquid_MF');
+  assert.equal(resolveInstrumentModelKey('ppf'), 'PPF');
+  assert.equal(resolveInstrumentModelKey('sbi_fd'), 'FD');
+  assert.equal(resolveInstrumentModelKey('FD'), 'FD');
+  assert.equal(resolveInstrumentModelKey('unknown-product'), null);
+  assert.equal(resolveInstrumentModelKey(''), null);
 });
 
 test('eligibility fails closed and recognizes a fully established eligible instrument', () => {

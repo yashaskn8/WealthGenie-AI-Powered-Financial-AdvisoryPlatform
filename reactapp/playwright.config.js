@@ -10,9 +10,11 @@ export default defineConfig({
   },
   fullyParallel: false,
   workers: 1,
-  reporter: 'list',
+  reporter: env.CI ? [['list'], ['github']] : 'list',
   use: {
     baseURL: env.PLAYWRIGHT_BASE_URL || 'http://127.0.0.1:5173',
+    actionTimeout: 20_000,
+    navigationTimeout: 30_000,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     headless: true,
