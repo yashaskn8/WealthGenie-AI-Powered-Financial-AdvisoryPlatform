@@ -30,6 +30,69 @@ const ProfilePage = lazy(() => import('./components/ProfilePage'));
 const AuthPage = lazy(() => import('./components/AuthPage'));
 const LandingPage = lazy(() => import('./LandingPage'));
 
+// ── Bounded retry helper for deferred advisory generation ──
+// eslint-disable-next-line react-refresh/only-export-components
+export const ADVISORY_RETRY_DELAYS_MS = [1000, 1500];
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function wait(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      const err = new Error('Request cancelled.');
+      err.code = 'REQUEST_ABORTED';
+      return reject(err);
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener?.('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      const err = new Error('Request cancelled.');
+      err.code = 'REQUEST_ABORTED';
+      reject(err);
+    };
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+  });
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export async function fetchDeferredAdvisoryWithBoundedRetry(
+  fetchFn,
+  recommendationId,
+  { signal, retryDelays = ADVISORY_RETRY_DELAYS_MS, onConflict } = {}
+) {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fetchFn(recommendationId, { signal });
+    } catch (err) {
+      if (err?.code === 'REQUEST_ABORTED' || err?.name === 'AbortError' || signal?.aborted) {
+        throw err;
+      }
+      if (err?.status === 409) {
+        if (typeof onConflict === 'function') {
+          onConflict();
+        }
+        if (attempt < retryDelays.length) {
+          const delayMs = retryDelays[attempt];
+          attempt += 1;
+          await wait(delayMs, signal);
+          continue;
+        }
+        // Exceeded bounded retries while status is still GENERATING.
+        // Return synthetic response with GENERATING status so UI does NOT mark FAILED.
+        return {
+          advisory_text: null,
+          advisory_explanation: { status: 'GENERATING' },
+        };
+      }
+      // Genuine terminal error
+      throw err;
+    }
+  }
+}
+
 /* ===== DASHBOARD SHELL - Sidebar + Pages + Chatbot ===== */
 const DashboardShell = ({ userProfile, onProfileUpdate }) => {
   const navigate = useNavigate();
@@ -72,31 +135,66 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
         if (recResponse?.recommendationId && (recResponse.advisory_explanation?.status === 'PENDING' || !recResponse.advisory_text)) {
           setIsAdvisoryLoading(true);
           try {
-            const advResponse = await api.fetchAdvisory(recResponse.recommendationId, { signal: controller.signal });
+            const advResponse = await fetchDeferredAdvisoryWithBoundedRetry(
+              api.fetchAdvisory,
+              recResponse.recommendationId,
+              {
+                signal: controller.signal,
+                onConflict: () => {
+                  if (!cancelled) {
+                    setBackendRecs(prev => {
+                      if (!prev || prev.recommendationId !== recResponse.recommendationId) return prev;
+                      return {
+                        ...prev,
+                        advisory_explanation: {
+                          ...(prev.advisory_explanation || {}),
+                          status: 'GENERATING',
+                        },
+                      };
+                    });
+                  }
+                },
+              }
+            );
             if (!cancelled && advResponse) {
               setBackendRecs(prev => {
                 if (!prev || prev.recommendationId !== recResponse.recommendationId) return prev;
                 return {
                   ...prev,
-                  advisory_text: advResponse.advisory_text,
-                  advisory_explanation: advResponse.advisory_explanation,
+                  advisory_text: advResponse.advisory_text ?? prev.advisory_text ?? null,
+                  advisory_explanation: advResponse.advisory_explanation || { status: 'GENERATING' },
                 };
               });
             }
           } catch (advErr) {
-            if (!cancelled && advErr?.code !== 'REQUEST_ABORTED') {
-              console.warn('Deferred advisory generation failed:', advErr);
-              setBackendRecs(prev => {
-                if (!prev || prev.recommendationId !== recResponse.recommendationId) return prev;
-                return {
-                  ...prev,
-                  advisory_explanation: {
-                    ...(prev.advisory_explanation || {}),
-                    status: 'FAILED',
-                    error: advErr.message,
-                  },
-                };
-              });
+            if (!cancelled && advErr?.code !== 'REQUEST_ABORTED' && advErr?.name !== 'AbortError') {
+              if (advErr?.status === 409) {
+                // 409 Conflict: Another request is generating the advisory.
+                // Keep advisory state as GENERATING, never mark FAILED on 409.
+                setBackendRecs(prev => {
+                  if (!prev || prev.recommendationId !== recResponse.recommendationId) return prev;
+                  return {
+                    ...prev,
+                    advisory_explanation: {
+                      ...(prev.advisory_explanation || {}),
+                      status: 'GENERATING',
+                    },
+                  };
+                });
+              } else {
+                console.warn('Deferred advisory generation failed:', advErr);
+                setBackendRecs(prev => {
+                  if (!prev || prev.recommendationId !== recResponse.recommendationId) return prev;
+                  return {
+                    ...prev,
+                    advisory_explanation: {
+                      ...(prev.advisory_explanation || {}),
+                      status: 'FAILED',
+                      error: advErr.message,
+                    },
+                  };
+                });
+              }
             }
           } finally {
             if (!cancelled) setIsAdvisoryLoading(false);
