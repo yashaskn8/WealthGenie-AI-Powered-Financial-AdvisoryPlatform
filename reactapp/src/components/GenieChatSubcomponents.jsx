@@ -33,7 +33,9 @@ export function CitationsList({ citations }) {
                 <div className="citation-title" style={{ fontWeight: 600, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span>
                     <span className="citation-idx" style={{ color: '#38bdf8', marginRight: '4px' }}>[{c.citation_id || i + 1}]</span> 
-                    {c.document_title || 'Regulatory Document'} 
+                    {c.source_url ? (
+                      <a href={c.source_url} target="_blank" rel="noreferrer">{c.document_title || 'Authoritative evidence'}</a>
+                    ) : (c.document_title || 'Authoritative evidence')}
                     <span style={{ color: '#94a3b8', fontWeight: 400, marginLeft: '6px', fontSize: '0.75rem' }}>({c.source || 'Knowledge Base'}{c.chunk_id ? ` #${c.chunk_id.split('#')[1] || c.chunk_id}` : ''})</span>
                   </span>
                   {scorePct !== null && (
@@ -221,6 +223,18 @@ export const MessageBubble = ({ msg, onAction, isLatest }) => {
         </div>
         {isAssistant && msg.citations && msg.citations.length > 0 && (
           <CitationsList citations={msg.citations} />
+        )}
+        {isAssistant && msg.grounded && (
+          <details className="grounding-details" style={{ marginTop: 6, fontSize: '0.72rem', color: '#94a3b8' }}>
+            <summary style={{ cursor: 'pointer', color: '#38bdf8' }}>Grounded by WealthGenie data</summary>
+            <div style={{ marginTop: 4 }}>
+              Provider: {msg.provider || 'Unavailable'}{msg.model ? ` · Model: ${msg.model}` : ''}
+              {msg.grounding_version ? ` · Contract: ${msg.grounding_version}` : ''}
+            </div>
+            {msg.unavailable_facts?.length > 0 && (
+              <div style={{ marginTop: 3 }}>Unavailable: {msg.unavailable_facts.join(', ')}</div>
+            )}
+          </details>
         )}
         <div className="bubble-meta">
           <span className="bubble-time">{new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>

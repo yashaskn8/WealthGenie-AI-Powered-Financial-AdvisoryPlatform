@@ -1,4 +1,4 @@
-import { test, describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import axios from 'axios';
 import { FinancialToolRegistry } from '../services/financialToolRegistry.js';
@@ -217,6 +217,8 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
   let originalGoalFind;
   let originalUserFindById;
   let originalConvFindOne;
+  let originalNvidiaKey;
+  let originalPrimaryProvider;
   let savedMessages = [];
 
   beforeEach(() => {
@@ -226,10 +228,14 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
     originalGoalFind = Goal.find;
     originalUserFindById = User.findById;
     originalConvFindOne = ConversationHistory.findOne;
+    originalNvidiaKey = process.env.NVIDIA_API_KEY;
+    originalPrimaryProvider = process.env.LLM_PRIMARY_PROVIDER;
     savedMessages = [];
 
     process.env.GEMINI_API_KEY = 'mock-gemini-key';
     process.env.GROQ_API_KEY = 'mock-groq-key';
+    process.env.NVIDIA_API_KEY = '';
+    process.env.LLM_PRIMARY_PROVIDER = 'GEMINI';
 
     ProviderManager.gemini.recordSuccess();
     ProviderManager.groq.recordSuccess();
@@ -253,9 +259,11 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
     Goal.find = originalGoalFind;
     User.findById = originalUserFindById;
     ConversationHistory.findOne = originalConvFindOne;
+    if (originalNvidiaKey === undefined) delete process.env.NVIDIA_API_KEY; else process.env.NVIDIA_API_KEY = originalNvidiaKey;
+    if (originalPrimaryProvider === undefined) delete process.env.LLM_PRIMARY_PROVIDER; else process.env.LLM_PRIMARY_PROVIDER = originalPrimaryProvider;
   });
 
-  it('processChat: LLM requests unknown tool → tool_result.success=false, Pass 2 still runs', async () => {
+  it('processChat: hostile request for an unknown financial tool is blocked before generation', async () => {
     let callCount = 0;
 
     axios.post = async (url) => {
@@ -302,16 +310,16 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
       sessionId: mockSessionId,
     });
 
-    assert.equal(callCount, 2, 'Pass 2 must still run even when tool execution fails');
+    assert.equal(callCount, 0, 'Injection guard must block external generation');
     const lastSavedModelMsg = savedMessages.filter(m => m.role === 'model').slice(-1)[0];
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs.length, 1);
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs[0].success, false, 'Unknown tool must report failure');
-    assert.match(lastSavedModelMsg.metadata.tool_outputs[0].error, /Unknown tool|not found|cryptocurrency_predictor/i);
+    assert.equal(lastSavedModelMsg.metadata.tool_outputs, undefined);
+    assert.equal(lastSavedModelMsg.metadata.prompt_injection_detected, true);
     assert.equal(result.tool_results, undefined);
-    assert.match(result.response, /could not compute|general|advice/i);
+    assert.equal(result.provider, 'DETERMINISTIC_TEMPLATE');
+    assert.doesNotMatch(result.response, /cryptocurrency|bitcoin/i);
   });
 
-  it('processChat: LLM sends invalid parameters to valid tool → graceful Joi validation error, Pass 2 still runs', async () => {
+  it('processChat: provider tool-call output is not executed and fails closed', async () => {
     let callCount = 0;
 
     axios.post = async (url) => {
@@ -362,15 +370,15 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
       sessionId: mockSessionId,
     });
 
-    assert.equal(callCount, 2, 'Pass 2 must run for grounded error recovery');
+    assert.equal(callCount, 1);
     const lastSavedModelMsg = savedMessages.filter(m => m.role === 'model').slice(-1)[0];
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs.length, 1);
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs[0].success, false);
+    assert.equal(lastSavedModelMsg.metadata.tool_outputs, undefined);
+    assert.ok(lastSavedModelMsg.metadata.validation_reason_codes.includes('EMPTY_COMPLETION'));
     assert.equal(result.tool_results, undefined);
-    assert.match(result.response, /parameter|valid|issues/i);
+    assert.equal(result.provider, 'DETERMINISTIC_TEMPLATE');
   });
 
-  it('processChat: both providers fail → local_fallback generates profile-grounded response', async () => {
+  it('processChat: all providers failing yields a deterministic profile-grounded response', async () => {
     axios.post = async () => {
       throw new Error('All providers catastrophically offline');
     };
@@ -382,13 +390,14 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
       sessionId: mockSessionId,
     });
 
-    assert.equal(result.provider, 'local_fallback');
+    assert.equal(result.provider, 'DETERMINISTIC_TEMPLATE');
+    assert.equal(result.fallback, true);
     assert.equal(result.tool_results, undefined);
     assert.ok(result.response.length > 50, 'Fallback must generate a meaningful response');
-    assert.match(result.response, /Portfolio Allocation|profile|investment/i);
+    assert.match(result.response, /authoritative backend reports/i);
   });
 
-  it('processChat: both providers fail on tax query → fallback generates tax-specific guidance', async () => {
+  it('processChat: tax stays unavailable without explicit tax-tool inputs', async () => {
     axios.post = async () => {
       throw new Error('Network completely down');
     };
@@ -400,8 +409,8 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
       sessionId: mockSessionId,
     });
 
-    assert.equal(result.provider, 'local_fallback');
-    assert.match(result.response, /Tax|Regime|tax/i);
+    assert.equal(result.provider, 'DETERMINISTIC_TEMPLATE');
+    assert.ok(result.unavailable_facts.includes('POST_TAX_RETURN_UNAVAILABLE_MISSING_TAX_INPUTS'));
     assert.equal(result.version, '3.0');
   });
 });

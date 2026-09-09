@@ -1,9 +1,8 @@
 /**
- * Phase 1 Integration Test — End-to-End RAG Wiring Test
- * Tests that factual/regulatory queries sent to POST /api/chat/message are classified
- * by IntentGate, routed to FastAPI /rag/query, and return grounded answers with real citations.
+ * Phase 6 integration coverage for the chat grounding boundary. Historical RAG
+ * content is not allowed to bypass the versioned authoritative evidence packet.
  */
-import { test, describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import mongoose from 'mongoose';
 import express from 'express';
@@ -44,6 +43,7 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
   let originalGoalFind;
   let originalConvFindOne;
   let originalUserFindById;
+  let originalEnvironment;
 
   beforeEach(() => {
     originalProfileFindOne = FinancialProfile.findOne;
@@ -51,6 +51,14 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
     originalGoalFind = Goal.find;
     originalConvFindOne = ConversationHistory.findOne;
     originalUserFindById = User.findById;
+    originalEnvironment = {
+      nvidia: process.env.NVIDIA_API_KEY,
+      gemini: process.env.GEMINI_API_KEY,
+      groq: process.env.GROQ_API_KEY,
+    };
+    process.env.NVIDIA_API_KEY = '';
+    process.env.GEMINI_API_KEY = '';
+    process.env.GROQ_API_KEY = '';
 
     FinancialProfile.findOne = (query) => ({
       sort: () => ({
@@ -88,9 +96,12 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
     Goal.find = originalGoalFind;
     ConversationHistory.findOne = originalConvFindOne;
     User.findById = originalUserFindById;
+    if (originalEnvironment.nvidia === undefined) delete process.env.NVIDIA_API_KEY; else process.env.NVIDIA_API_KEY = originalEnvironment.nvidia;
+    if (originalEnvironment.gemini === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = originalEnvironment.gemini;
+    if (originalEnvironment.groq === undefined) delete process.env.GROQ_API_KEY; else process.env.GROQ_API_KEY = originalEnvironment.groq;
   });
 
-  it('Routes factual tax question through IntentGate to RAG and returns grounded citations from seed knowledge', async () => {
+  it('keeps a factual tax question unavailable without canonical tax inputs and a tax-engine result', async () => {
     const app = buildApp();
 
     await withServer(app, async (baseUrl) => {
@@ -106,41 +117,16 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
 
       assert.equal(response.status, 200, `Expected status 200, got ${response.status}`);
 
-      // When the FastAPI RAG service is running, provider should be 'rag'.
-      // When it's offline (CI / local without ML service), the chat correctly
-      // falls back to local_fallback — which is valid graceful-degradation.
-      if (body.provider !== 'rag') {
-        console.info('[RAG TEST] FastAPI RAG service unavailable — verifying graceful fallback instead');
-        assert.ok(
-          ['local_fallback', 'groq', 'gemini'].includes(body.provider),
-          `Expected a known fallback provider, got '${body.provider}'`
-        );
-        assert.ok(body.response && body.response.length > 0, 'Fallback should still return a response');
-        return; // graceful skip — the routing logic was exercised, service just wasn't reachable
-      }
-
-      // Full RAG assertions (when ML service IS available)
-      assert.equal(body.grounded, true, 'Expected grounded response to be true');
-      assert.ok(body.response && body.response.length > 0, 'Expected non-empty response text');
-      assert.ok(Array.isArray(body.citations), 'Expected citations array in response');
-      assert.ok(body.citations.length > 0, 'Expected at least 1 citation from vector store');
-
-      console.info('\n[INTEGRATION TEST VERIFIED OUTPUT]');
-      console.info('Grounded Response Snippet:', body.response.substring(0, 120), '...');
-      console.info('Citations Count:', body.citations.length);
-      console.info('First Citation:', body.citations[0]);
-      console.info('Retrieved Chunks:', body.retrieved_chunks?.length || 0);
-
-      // Verify citation traces back to seed knowledge content
-      const citationText = JSON.stringify(body.citations) + JSON.stringify(body.retrieved_chunks);
-      assert.ok(
-        citationText.includes('80C') || citationText.includes('Tax') || citationText.includes('ELSS'),
-        'Citations must trace back to seed knowledge base tax regulations'
-      );
+      assert.equal(body.provider, 'DETERMINISTIC_TEMPLATE');
+      assert.equal(body.grounded, true);
+      assert.equal(body.fallback, true);
+      assert.ok(body.unavailable_facts.includes('POST_TAX_RETURN_UNAVAILABLE_MISSING_TAX_INPUTS'));
+      assert.equal(body.retrieved_chunks, undefined);
+      assert.equal(body.tool_results, undefined);
     });
   });
 
-  it('Routes non-factual conversational turn away from RAG to general LLM provider', async () => {
+  it('never exposes the old direct RAG provider path', async () => {
     const app = buildApp();
 
     await withServer(app, async (baseUrl) => {
@@ -155,12 +141,12 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
       });
 
       assert.equal(response.status, 200);
-      assert.notEqual(body.provider, 'rag', 'Non-factual conversational turn should NOT be routed to RAG');
+      assert.equal(body.provider, 'DETERMINISTIC_TEMPLATE');
+      assert.notEqual(body.provider, 'rag');
     });
   });
 
-  it('WG-024: ConversationHistory save succeeds for RAG response without enum ValidationError', async () => {
-    // Construct a real ConversationHistory Mongoose document instance matching geminiChatService RAG persistence
+  it('ConversationHistory accepts Phase 6 grounded-provider audit metadata', async () => {
     const doc = new ConversationHistory({
       userId: mockUserId,
       profileId: new mongoose.Types.ObjectId(),
@@ -175,14 +161,21 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
           role: 'model',
           content: '₹1.5 Lakhs limit under Section 80C.',
           timestamp: new Date(),
-          metadata: { tokens_used: 45, model_version: 'v3' },
-          // RAG path omits metadata.provider key to avoid Mongoose provider enum validation exception
+          metadata: {
+            tokens_used: 45,
+            provider: 'DETERMINISTIC_TEMPLATE',
+            grounding_version: 'grounded-financial-evidence-1.0.0',
+            prompt_version: 'grounded-financial-explanation-prompt-1.0.0',
+            evidence_ids_used: ['E_TAX_INPUT_BOUNDARY'],
+            validation_status: 'PASS',
+            fallback_used: true,
+          },
         }
       ]
     });
 
     // Validate the document directly against Mongoose schema
     const validationError = doc.validateSync();
-    assert.equal(validationError, undefined, 'RAG path message persistence must pass Mongoose schema validation without error');
+    assert.equal(validationError, undefined, 'Grounded explanation metadata must pass Mongoose validation');
   });
 });

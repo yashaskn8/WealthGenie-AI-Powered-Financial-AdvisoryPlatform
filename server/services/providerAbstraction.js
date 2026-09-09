@@ -3,7 +3,9 @@ import { PrometheusMetrics } from './metricsCollector.js';
 
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent';
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = 'openai/gpt-oss-120b';
+const GROQ_DEFAULT_MODEL = 'openai/gpt-oss-120b';
+export const NVIDIA_NIM_DEFAULT_BASE_URL = 'https://integrate.api.nvidia.com/v1';
+export const NVIDIA_NIM_DEFAULT_MODEL = 'nvidia/nemotron-3.5-lightning-30b-a3b';
 
 /**
  * Strips JSON schema fields unsupported by Google Gemini FunctionDeclarations API (e.g. additionalProperties, patternProperties).
@@ -53,25 +55,137 @@ export class BaseProviderAdapter {
   supportsTools() { return true; }
   supportsJSON() { return true; }
   supportsStreaming() { return false; }
+
+  configuredModel() { return null; }
+}
+
+function toOpenAiMessages(systemPrompt, recentHistory = []) {
+  const messages = [{ role: 'system', content: systemPrompt }];
+  for (const item of recentHistory) {
+    const text = Array.isArray(item.parts)
+      ? item.parts.filter(part => typeof part.text === 'string').map(part => part.text).join('\n')
+      : item.content;
+    if (!text) continue;
+    messages.push({ role: item.role === 'model' ? 'assistant' : item.role, content: text });
+  }
+  return messages;
+}
+
+export class NvidiaNimProviderAdapter extends BaseProviderAdapter {
+  constructor() {
+    super('nvidia_nim', 0);
+    this.lastFailureReason = null;
+  }
+
+  configuredModel() {
+    return String(process.env.NVIDIA_NIM_MODEL || NVIDIA_NIM_DEFAULT_MODEL).trim();
+  }
+
+  configuredBaseUrl() {
+    return String(process.env.NVIDIA_NIM_BASE_URL || NVIDIA_NIM_DEFAULT_BASE_URL).trim().replace(/\/+$/, '');
+  }
+
+  supportsTools() { return false; }
+
+  async generate({ systemPrompt, recentHistory, maxTokens = 1200, jsonMode = false }) {
+    this.lastFailureReason = null;
+    if (!this.isHealthy()) {
+      this.lastFailureReason = 'PROVIDER_CIRCUIT_OPEN';
+      return null;
+    }
+    const apiKey = process.env.NVIDIA_API_KEY;
+    if (!apiKey) {
+      this.lastFailureReason = 'PROVIDER_NOT_CONFIGURED';
+      return null;
+    }
+    const model = this.configuredModel();
+    const endpoint = `${this.configuredBaseUrl()}/chat/completions`;
+    const body = {
+      model,
+      messages: toOpenAiMessages(systemPrompt, recentHistory),
+      temperature: 0,
+      top_p: 1,
+      max_tokens: Math.min(Math.max(Number(maxTokens) || 1200, 128), 2048),
+      stream: false,
+      chat_template_kwargs: { enable_thinking: false },
+    };
+    if (jsonMode) body.response_format = { type: 'json_object' };
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const response = await axios.post(endpoint, body, {
+          timeout: 20000,
+          headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        });
+        const choice = response.data?.choices?.[0];
+        const text = choice?.message?.content;
+        const responseModel = response.data?.model;
+        if (!text || typeof text !== 'string') {
+          this.lastFailureReason = 'EMPTY_COMPLETION';
+          break;
+        }
+        if (responseModel !== model) {
+          this.lastFailureReason = 'PROVIDER_MODEL_METADATA_MISMATCH';
+          break;
+        }
+        this.recordSuccess();
+        PrometheusMetrics.inc('nvidia_nim_success_total');
+        return {
+          text,
+          tool_calls: [],
+          tokensUsed: Number(response.data?.usage?.total_tokens) || 0,
+          provider: this.name,
+          model: responseModel,
+          wasCompleted: choice.finish_reason === 'stop',
+          estimatedCostUSD: null,
+        };
+      } catch (error) {
+        const status = Number(error?.response?.status);
+        this.lastFailureReason = error?.code === 'ECONNABORTED'
+          ? 'PROVIDER_TIMEOUT'
+          : status === 401 || status === 403
+            ? 'PROVIDER_AUTHENTICATION_FAILED'
+            : status === 429
+              ? 'PROVIDER_RATE_LIMITED'
+              : status >= 500
+                ? 'PROVIDER_SERVER_ERROR'
+                : 'PROVIDER_REQUEST_FAILED';
+        if (attempt === 0 && (status === 429 || status >= 500)) continue;
+        break;
+      }
+    }
+    this.recordFailure();
+    PrometheusMetrics.inc('nvidia_nim_failure_total');
+    return null;
+  }
 }
 
 export class GeminiProviderAdapter extends BaseProviderAdapter {
   constructor() {
     super('gemini', 0.0004);
+    this.lastFailureReason = null;
   }
 
-  async generate({ systemPrompt, recentHistory, maxTokens = 4096, tools = null }) {
+  configuredModel() { return 'gemini-3.6-flash'; }
+
+  async generate({ systemPrompt, recentHistory, maxTokens = 4096, tools = null, jsonMode = false }) {
+    this.lastFailureReason = null;
     if (!this.isHealthy()) {
+      this.lastFailureReason = 'PROVIDER_CIRCUIT_OPEN';
       return null;
     }
     const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) return null;
+    if (!apiKey) {
+      this.lastFailureReason = 'PROVIDER_NOT_CONFIGURED';
+      return null;
+    }
 
     const payload = {
       system_instruction: { parts: [{ text: systemPrompt }] },
       contents: recentHistory,
-      generationConfig: { maxOutputTokens: maxTokens, temperature: 0.4 },
+      generationConfig: { maxOutputTokens: maxTokens, temperature: jsonMode ? 0 : 0.4 },
     };
+    if (jsonMode) payload.generationConfig.responseMimeType = 'application/json';
 
     if (tools && Array.isArray(tools) && tools.length > 0) {
       payload.tools = [
@@ -93,6 +207,7 @@ export class GeminiProviderAdapter extends BaseProviderAdapter {
 
       const candidate = res.data?.candidates?.[0];
       if (!candidate || candidate.finishReason === 'SAFETY') {
+        this.lastFailureReason = candidate?.finishReason === 'SAFETY' ? 'PROVIDER_SAFETY_REJECTION' : 'EMPTY_COMPLETION';
         this.recordFailure();
         PrometheusMetrics.inc('gemini_failure_total');
         return null;
@@ -121,10 +236,12 @@ export class GeminiProviderAdapter extends BaseProviderAdapter {
         tool_calls: toolCalls,
         tokensUsed,
         provider: this.name,
+        model: res.data?.modelVersion || this.configuredModel(),
         wasCompleted: candidate.finishReason === 'STOP' || toolCalls.length > 0,
         estimatedCostUSD: (tokensUsed / 1000) * this.costPer1kTokens,
       };
-    } catch (err) {
+    } catch {
+      this.lastFailureReason = 'PROVIDER_REQUEST_FAILED';
       this.recordFailure();
       PrometheusMetrics.inc('gemini_failure_total');
       return null;
@@ -135,14 +252,22 @@ export class GeminiProviderAdapter extends BaseProviderAdapter {
 export class GroqProviderAdapter extends BaseProviderAdapter {
   constructor() {
     super('groq', 0.0006);
+    this.lastFailureReason = null;
   }
 
-  async generate({ systemPrompt, recentHistory, maxTokens = 4096, tools = null }) {
+  configuredModel() { return String(process.env.GROQ_MODEL || GROQ_DEFAULT_MODEL).trim(); }
+
+  async generate({ systemPrompt, recentHistory, maxTokens = 4096, tools = null, jsonMode = false }) {
+    this.lastFailureReason = null;
     if (!this.isHealthy()) {
+      this.lastFailureReason = 'PROVIDER_CIRCUIT_OPEN';
       return null;
     }
     const apiKey = process.env.GROQ_API_KEY;
-    if (!apiKey) return null;
+    if (!apiKey) {
+      this.lastFailureReason = 'PROVIDER_NOT_CONFIGURED';
+      return null;
+    }
 
     const messages = [
       { role: 'system', content: systemPrompt },
@@ -194,11 +319,15 @@ export class GroqProviderAdapter extends BaseProviderAdapter {
     }
 
     const body = {
-      model: GROQ_MODEL,
+      model: this.configuredModel(),
       messages,
       max_tokens: maxTokens,
       temperature: 0.4,
     };
+    if (jsonMode) {
+      body.temperature = 0;
+      body.response_format = { type: 'json_object' };
+    }
 
     if (tools && Array.isArray(tools) && tools.length > 0) {
       body.tools = tools.map(t => ({
@@ -223,6 +352,7 @@ export class GroqProviderAdapter extends BaseProviderAdapter {
       const choice = res.data?.choices?.[0];
       const message = choice?.message;
       if (!message && !choice) {
+        this.lastFailureReason = 'EMPTY_COMPLETION';
         this.recordFailure();
         PrometheusMetrics.inc('groq_failure_total');
         return null;
@@ -238,7 +368,7 @@ export class GroqProviderAdapter extends BaseProviderAdapter {
               parsedArgs = typeof tc.function.arguments === 'string'
                 ? JSON.parse(tc.function.arguments)
                 : tc.function.arguments;
-            } catch (_) { /* default empty object */ }
+            } catch { /* default empty object */ }
             toolCalls.push({
               tool: tc.function.name,
               arguments: parsedArgs,
@@ -255,10 +385,12 @@ export class GroqProviderAdapter extends BaseProviderAdapter {
         tool_calls: toolCalls,
         tokensUsed,
         provider: this.name,
+        model: res.data?.model || this.configuredModel(),
         wasCompleted: choice?.finish_reason === 'stop' || toolCalls.length > 0,
         estimatedCostUSD: (tokensUsed / 1000) * this.costPer1kTokens,
       };
-    } catch (err) {
+    } catch {
+      this.lastFailureReason = 'PROVIDER_REQUEST_FAILED';
       this.recordFailure();
       PrometheusMetrics.inc('groq_failure_total');
       return null;
@@ -266,25 +398,8 @@ export class GroqProviderAdapter extends BaseProviderAdapter {
   }
 }
 
-export class LocalFallbackProviderAdapter extends BaseProviderAdapter {
-  constructor() {
-    super('local_fallback', 0.0);
-  }
-
-  async generate({ fallbackText }) {
-    PrometheusMetrics.inc('local_fallback_total');
-    return {
-      text: fallbackText,
-      tokensUsed: 120,
-      provider: this.name,
-      wasCompleted: true,
-      estimatedCostUSD: 0,
-    };
-  }
-}
-
 export const ProviderManager = {
+  nvidia: new NvidiaNimProviderAdapter(),
   gemini: new GeminiProviderAdapter(),
   groq: new GroqProviderAdapter(),
-  local: new LocalFallbackProviderAdapter(),
 };

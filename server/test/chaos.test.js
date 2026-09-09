@@ -253,11 +253,13 @@ test('Chaos: ML service timeout / failure returns rule-based recommendations', a
   process.env.ML_SERVICE_URL = 'http://127.0.0.1:59999';
   console.log(`[CHAOS-3] ML_SERVICE_URL set to dead port: ${process.env.ML_SERVICE_URL}`);
 
-  // Clear Gemini/Groq keys so the advisory also falls back (no external calls)
+  // Clear explanation-provider keys so this isolated test makes no external LLM calls.
   const originalGeminiKey = process.env.GEMINI_API_KEY;
   const originalGroqKey = process.env.GROQ_API_KEY;
+  const originalNvidiaKey = process.env.NVIDIA_API_KEY;
   delete process.env.GEMINI_API_KEY;
   delete process.env.GROQ_API_KEY;
+  delete process.env.NVIDIA_API_KEY;
 
   // Reset circuit breaker state by importing the module fresh isn't possible
   // in ESM, but the circuit breaker resets after 60s. We set the URL to a
@@ -268,6 +270,7 @@ test('Chaos: ML service timeout / failure returns rule-based recommendations', a
     else delete process.env.ML_SERVICE_URL;
     if (originalGeminiKey !== undefined) process.env.GEMINI_API_KEY = originalGeminiKey;
     if (originalGroqKey !== undefined) process.env.GROQ_API_KEY = originalGroqKey;
+    if (originalNvidiaKey !== undefined) process.env.NVIDIA_API_KEY = originalNvidiaKey;
     console.log(`[CHAOS-3] Environment restored`);
   });
 
@@ -299,32 +302,32 @@ test('Chaos: ML service timeout / failure returns rule-based recommendations', a
 });
 
 // ══════════════════════════════════════════════════════════════════════
-// 4. Gemini & Groq Offline — Real Code Path (No API Keys)
+// 4. Explanation providers offline — deterministic evidence fallback
 // ══════════════════════════════════════════════════════════════════════
-// METHOD: GEMINI_API_KEY and GROQ_API_KEY are deleted from process.env.
-// generateAdvisory() checks `const geminiKey = process.env.GEMINI_API_KEY`
-// → undefined → skips the Gemini POST entirely (line 65 of geminiService.js).
-// Same for Groq (line 85). Falls through to getFallbackAdvisory() (line 112).
-// This is the REAL code path that executes when both services are unconfigured,
-// not a monkey-patched axios that pretends to fail.
+// METHOD: all explanation-provider keys are removed from process.env. The
+// shared grounding service skips network calls and emits its deterministic
+// evidence template. Recommendation authority remains independently available.
 // ══════════════════════════════════════════════════════════════════════
-test('Chaos: Gemini & Groq both failing returns degraded static advisory', async (t) => {
+test('Chaos: all explanation providers offline returns grounded deterministic advisory', async (t) => {
   await ensureDb();
 
   // Remove API keys — the real code path skips the API calls entirely
   const originalGeminiKey = process.env.GEMINI_API_KEY;
   const originalGroqKey = process.env.GROQ_API_KEY;
+  const originalNvidiaKey = process.env.NVIDIA_API_KEY;
   const originalMlUrl = process.env.ML_SERVICE_URL;
   delete process.env.GEMINI_API_KEY;
   delete process.env.GROQ_API_KEY;
+  delete process.env.NVIDIA_API_KEY;
   // Also set ML to dead port so we get a consistent rule-based path
   process.env.ML_SERVICE_URL = 'http://127.0.0.1:59999';
 
-  console.log(`[CHAOS-4] API keys cleared: GEMINI_API_KEY=${process.env.GEMINI_API_KEY}, GROQ_API_KEY=${process.env.GROQ_API_KEY}`);
+  console.log('[CHAOS-4] Explanation-provider credentials cleared for isolated fallback test');
 
   t.after(() => {
     if (originalGeminiKey !== undefined) process.env.GEMINI_API_KEY = originalGeminiKey;
     if (originalGroqKey !== undefined) process.env.GROQ_API_KEY = originalGroqKey;
+    if (originalNvidiaKey !== undefined) process.env.NVIDIA_API_KEY = originalNvidiaKey;
     if (originalMlUrl !== undefined) process.env.ML_SERVICE_URL = originalMlUrl;
     else delete process.env.ML_SERVICE_URL;
     console.log(`[CHAOS-4] Environment restored`);
@@ -351,7 +354,9 @@ test('Chaos: Gemini & Groq both failing returns degraded static advisory', async
 
     console.log(`[CHAOS-4] Recommend: status=${recRes.status}, advisory_text prefix="${recBody?.advisory_text?.substring(0, 60)}..."`);
     assert.equal(recRes.status, 200);
-    assert.match(recBody.advisory_text, /Based on your approved profile/i,
-      'Should fall back to static rule-based advisory text when both LLM APIs are unconfigured');
+    assert.match(recBody.advisory_text, /authoritative backend reports/i);
+    assert.match(recBody.advisory_text, /\[E_PROFILE_RISK\]/);
+    assert.equal(recBody.advisory_explanation.provider, 'DETERMINISTIC_TEMPLATE');
+    assert.equal(recBody.advisory_explanation.status, 'GROUNDED_EXPLANATION_FALLBACK');
   });
 });

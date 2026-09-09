@@ -10,7 +10,11 @@ class MetricsCollector {
       gemini_failure_total: 0,
       groq_success_total: 0,
       groq_failure_total: 0,
-      local_fallback_total: 0,
+      nvidia_nim_success_total: 0,
+      nvidia_nim_failure_total: 0,
+      grounded_validation_success_total: 0,
+      grounded_validation_failure_total: 0,
+      grounded_fallback_total: 0,
       tool_execution_total: 0,
       tool_execution_success_total: 0,
       tool_execution_failure_total: 0,
@@ -93,7 +97,14 @@ class MetricsCollector {
     lines.push(`wealthgenie_chat_requests_total{provider="gemini",status="failure"} ${this.counters.gemini_failure_total}`);
     lines.push(`wealthgenie_chat_requests_total{provider="groq",status="success"} ${this.counters.groq_success_total}`);
     lines.push(`wealthgenie_chat_requests_total{provider="groq",status="failure"} ${this.counters.groq_failure_total}`);
-    lines.push(`wealthgenie_chat_requests_total{provider="local_fallback",status="success"} ${this.counters.local_fallback_total}`);
+    lines.push(`wealthgenie_chat_requests_total{provider="nvidia_nim",status="success"} ${this.counters.nvidia_nim_success_total}`);
+    lines.push(`wealthgenie_chat_requests_total{provider="nvidia_nim",status="failure"} ${this.counters.nvidia_nim_failure_total}`);
+    lines.push(`wealthgenie_chat_requests_total{provider="deterministic_template",status="fallback"} ${this.counters.grounded_fallback_total}`);
+
+    lines.push('\n# HELP wealthgenie_grounding_validation_total Grounding validator outcomes');
+    lines.push('# TYPE wealthgenie_grounding_validation_total counter');
+    lines.push(`wealthgenie_grounding_validation_total{status="pass"} ${this.counters.grounded_validation_success_total}`);
+    lines.push(`wealthgenie_grounding_validation_total{status="fail"} ${this.counters.grounded_validation_failure_total}`);
 
     lines.push('\n# HELP wealthgenie_tool_executions_total Total count of AI tool executions');
     lines.push('# TYPE wealthgenie_tool_executions_total counter');

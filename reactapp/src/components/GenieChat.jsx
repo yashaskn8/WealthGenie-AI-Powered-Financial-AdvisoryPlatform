@@ -175,7 +175,20 @@ const GenieChat = ({ profile, onNavigate }) => {
     try {
       const data = await api.getChatHistory(sessionId);
       if (data.conversations?.[0]?.messages) {
-        setMessages(data.conversations[0].messages.map(m => ({ role: m.role === 'model' ? 'assistant' : 'user', content: m.content, timestamp: m.timestamp || new Date().toISOString(), latency_ms: m.metadata?.latency_ms, _streamed: true })));
+        setMessages(data.conversations[0].messages.map(m => ({
+          role: m.role === 'model' ? 'assistant' : 'user',
+          content: m.content,
+          timestamp: m.timestamp || new Date().toISOString(),
+          latency_ms: m.metadata?.latency_ms,
+          grounded: m.metadata?.grounded_on_profile,
+          provider: m.metadata?.provider,
+          model: m.metadata?.model,
+          grounding_version: m.metadata?.grounding_version,
+          evidence_ids_used: m.metadata?.evidence_ids_used || [],
+          unavailable_facts: m.metadata?.unavailable_facts || [],
+          citations: m.metadata?.citations || [],
+          _streamed: true,
+        })));
       }
     } catch {
       // Graceful error handle — fallback silently to empty chat history
@@ -263,7 +276,20 @@ const GenieChat = ({ profile, onNavigate }) => {
     setIsLoading(true);
     try {
       const data = await api.sendChatMessage(messageText, sessionId);
-      setMessages(prev => [...prev, { role: 'assistant', content: data.response, timestamp: new Date().toISOString(), latency_ms: data.latency_ms, citations: data.citations || [], _streamed: false }]);
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: data.response,
+        timestamp: new Date().toISOString(),
+        latency_ms: data.latency_ms,
+        citations: data.citations || [],
+        grounded: data.grounded,
+        provider: data.provider,
+        model: data.model,
+        grounding_version: data.grounding_version,
+        evidence_ids_used: data.evidence_ids_used || [],
+        unavailable_facts: data.unavailable_facts || [],
+        _streamed: false,
+      }]);
       setRateLimit({ remaining: data.rate_limit_remaining, total: 30 });
     } catch (err) { setError(err.message || 'Genie is temporarily unavailable.'); }
     finally { setIsLoading(false); inputRef.current?.focus(); }

@@ -15,8 +15,9 @@ import {
 
 /**
  * WealthGenie Centralized Financial Tool Registry
- * Exposes canonical financial engines as executable AI tools.
- * Single source of truth for all deterministic calculations requested by LLMs.
+ * Canonical deterministic calculators for explicit backend/MCP workflows.
+ * Phase-6 grounded explanation providers are intentionally not connected to
+ * this registry; their tool allowlist is empty and they receive evidence only.
  */
 const DANGEROUS_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype', 'toString', 'valueOf']);
 

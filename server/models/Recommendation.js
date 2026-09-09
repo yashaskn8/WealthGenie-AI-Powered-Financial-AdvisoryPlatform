@@ -42,6 +42,7 @@ const recommendationSchema = new mongoose.Schema({
   profileId: { type: mongoose.Schema.Types.ObjectId, ref: 'FinancialProfile', required: true },
   instruments: [instrumentDetailSchema],
   advisoryText: { type: String },
+  advisoryMetadata: { type: mongoose.Schema.Types.Mixed, default: null },
   confidenceScores: {
     type: Map,
     of: { type: Number, min: 0, max: 1 },

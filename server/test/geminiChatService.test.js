@@ -1,13 +1,7 @@
-import { test, describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import axios from 'axios';
 import { processChat } from '../services/geminiChatService.js';
-import { validateAndSanitizeActionCards } from '../services/actionCardValidator.js';
-import { verifyAndCorrectArithmetic } from '../services/arithmeticVerifier.js';
-import { inspectPromptSecurity } from '../services/promptSecurity.js';
-import { FinancialToolRegistry } from '../services/financialToolRegistry.js';
-import { validateAndSanitizeStructuredResponse } from '../services/structuredResponseProtocol.js';
-import { PrometheusMetrics } from '../services/metricsCollector.js';
 import { AIToolOrchestrator } from '../services/aiToolOrchestrator.js';
 import { ConversationStateMachine, CONVERSATION_STATES } from '../services/conversationStateMachine.js';
 import { LayeredMemoryManager } from '../services/layeredMemoryManager.js';
@@ -42,6 +36,24 @@ const mockProfile = {
   }),
 };
 
+function groundedGeminiPayload(text = 'The final suitability ceiling is Moderate [E_PROFILE_RISK].') {
+  return {
+    data: {
+      modelVersion: 'gemini-runtime-test',
+      candidates: [{
+        content: { parts: [{ text: JSON.stringify({
+          text,
+          evidenceIdsUsed: ['E_PROFILE_RISK'],
+          claims: [{ text, evidenceIds: ['E_PROFILE_RISK'] }],
+          unavailableFacts: [],
+        }) }] },
+        finishReason: 'STOP',
+      }],
+      usageMetadata: { totalTokenCount: 50 },
+    },
+  };
+}
+
 describe('GenieChat V3 Enterprise Architecture Tests', () => {
   let originalPost;
   let originalProfileFindOne;
@@ -51,6 +63,8 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
   let originalConvFindOne;
   let originalEnvGemini;
   let originalEnvGroq;
+  let originalEnvNvidia;
+  let originalPrimaryProvider;
   let savedMessages = [];
 
   beforeEach(() => {
@@ -62,10 +76,14 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
     originalConvFindOne = ConversationHistory.findOne;
     originalEnvGemini = process.env.GEMINI_API_KEY;
     originalEnvGroq = process.env.GROQ_API_KEY;
+    originalEnvNvidia = process.env.NVIDIA_API_KEY;
+    originalPrimaryProvider = process.env.LLM_PRIMARY_PROVIDER;
     savedMessages = [];
 
     process.env.GEMINI_API_KEY = 'mock-gemini-key';
     process.env.GROQ_API_KEY = 'mock-groq-key';
+    process.env.NVIDIA_API_KEY = '';
+    process.env.LLM_PRIMARY_PROVIDER = 'GEMINI';
 
     // Reset circuit breakers
     ProviderManager.gemini.recordSuccess();
@@ -111,24 +129,16 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
     Goal.find = originalGoalFind;
     User.findById = originalUserFindById;
     ConversationHistory.findOne = originalConvFindOne;
-    process.env.GEMINI_API_KEY = originalEnvGemini;
-    process.env.GROQ_API_KEY = originalEnvGroq;
+    if (originalEnvGemini === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = originalEnvGemini;
+    if (originalEnvGroq === undefined) delete process.env.GROQ_API_KEY; else process.env.GROQ_API_KEY = originalEnvGroq;
+    if (originalEnvNvidia === undefined) delete process.env.NVIDIA_API_KEY; else process.env.NVIDIA_API_KEY = originalEnvNvidia;
+    if (originalPrimaryProvider === undefined) delete process.env.LLM_PRIMARY_PROVIDER; else process.env.LLM_PRIMARY_PROVIDER = originalPrimaryProvider;
   });
 
   it('Provider Abstraction & Fallback: ProviderManager executes Gemini adapter', async () => {
     axios.post = async (url) => {
       if (url.includes('generativelanguage.googleapis.com')) {
-        return {
-          data: {
-            candidates: [
-              {
-                content: { parts: [{ text: 'Gemini V3 advice. SEBI compliant.' }] },
-                finishReason: 'STOP',
-              },
-            ],
-            usageMetadata: { totalTokenCount: 150 },
-          },
-        };
+        return groundedGeminiPayload();
       }
       throw new Error('Unexpected URL');
     };
@@ -141,13 +151,15 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
     });
 
     assert.equal(result.version, '3.0');
-    assert.equal(result.provider, 'gemini');
+    assert.equal(result.provider, 'GEMINI');
+    assert.equal(result.model, 'gemini-runtime-test');
     const lastSavedModelMsg = savedMessages.filter(m => m.role === 'model').slice(-1)[0];
-    assert.ok(lastSavedModelMsg.metadata.explainability);
-    assert.ok(lastSavedModelMsg.metadata.governance);
+    assert.equal(lastSavedModelMsg.metadata.validation_status, 'PASS');
+    assert.deepEqual(lastSavedModelMsg.metadata.evidence_ids_used, ['E_PROFILE_RISK', 'E_REGULATORY_NOTICE']);
+    assert.equal(lastSavedModelMsg.metadata.tool_outputs, undefined);
     assert.equal(result.explainability, undefined);
     assert.equal(result.governance, undefined);
-    assert.match(result.response, /Gemini V3 advice/);
+    assert.match(result.response, /Moderate \[E_PROFILE_RISK\]/);
   });
 
   it('Phase 1: AIToolOrchestrator resolves parallel tool calls in a DAG graph', async () => {
@@ -221,50 +233,14 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
     assert.equal(ProviderManager.gemini.isHealthy(), false);
   });
 
-  // ── MCP Two-Pass Architecture Integration Coverage ──
-  // Cross-Reference: Exhaustive two-pass DAG & grounding assertions are also covered in server/test/twoPassChatLoop.test.js
-
-  it('MCP Two-Pass Overhaul: processChat executes two-pass tool call grounding', async () => {
+  it('Phase 6: processChat performs one read-only grounded call and exposes no tool surface', async () => {
     let callCount = 0;
-    axios.post = async (url) => {
+    let requestBody;
+    axios.post = async (url, body) => {
       if (url.includes('generativelanguage.googleapis.com')) {
-        callCount++;
-        if (callCount === 1) {
-          return {
-            data: {
-              candidates: [
-                {
-                  content: {
-                    parts: [
-                      {
-                        functionCall: {
-                          name: 'sip_projection',
-                          args: { monthlyInvestment: 10000, annualRate: 0.12, years: 10 },
-                        },
-                      },
-                    ],
-                  },
-                  finishReason: 'STOP',
-                },
-              ],
-              usageMetadata: { totalTokenCount: 100 },
-            },
-          };
-        } else {
-          return {
-            data: {
-              candidates: [
-                {
-                  content: {
-                    parts: [{ text: 'Grounded response: SIP future value is ₹23,23,391.' }],
-                  },
-                  finishReason: 'STOP',
-                },
-              ],
-              usageMetadata: { totalTokenCount: 120 },
-            },
-          };
-        }
+        callCount += 1;
+        requestBody = body;
+        return groundedGeminiPayload();
       }
       throw new Error('Unexpected URL');
     };
@@ -272,34 +248,25 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
     const result = await processChat({
       userId: mockUserId,
       user: mockUser,
-      message: 'Calculate SIP projection',
+      message: 'Explain my suitability.',
       sessionId: mockSessionId,
     });
 
-    assert.equal(callCount, 2, 'processChat must invoke provider twice for tool-grounded query');
+    assert.equal(callCount, 1);
+    assert.equal(requestBody.tools, undefined);
+    assert.equal(requestBody.generationConfig.responseMimeType, 'application/json');
     const lastSavedModelMsg = savedMessages.filter(m => m.role === 'model').slice(-1)[0];
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs.length, 1);
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs[0].result.futureValue, 2323391);
+    assert.equal(lastSavedModelMsg.metadata.tool_outputs, undefined);
     assert.equal(result.tool_results, undefined);
-    assert.match(result.response, /₹23,23,391/);
+    assert.match(result.response, /Moderate \[E_PROFILE_RISK\]/);
   });
 
-  it('MCP Two-Pass Overhaul: processChat completes direct non-tool questions in single pass', async () => {
+  it('Phase 6: processChat accepts only structured cited provider output', async () => {
     let callCount = 0;
     axios.post = async (url) => {
       if (url.includes('generativelanguage.googleapis.com')) {
         callCount++;
-        return {
-          data: {
-            candidates: [
-              {
-                content: { parts: [{ text: 'Direct financial answer without tools.' }] },
-                finishReason: 'STOP',
-              },
-            ],
-            usageMetadata: { totalTokenCount: 50 },
-          },
-        };
+        return groundedGeminiPayload();
       }
       throw new Error('Unexpected URL');
     };
@@ -311,12 +278,13 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
       sessionId: mockSessionId,
     });
 
-    assert.equal(callCount, 1, 'Direct answer path must use exactly 1 LLM call');
+    assert.equal(callCount, 1);
     assert.equal(result.tool_results, undefined);
-    assert.match(result.response, /Direct financial answer/);
+    assert.equal(result.validation_status, 'PASS');
+    assert.match(result.response, /\[E_PROFILE_RISK\]/);
   });
 
-  it('MCP Two-Pass Overhaul: isFallback local fallback path operates reliably when both providers fail', async () => {
+  it('Phase 6: provider failure returns a deterministic evidence-backed fallback', async () => {
     axios.post = async () => {
       throw new Error('All LLM endpoints down');
     };
@@ -328,8 +296,10 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
       sessionId: mockSessionId,
     });
 
-    assert.equal(result.provider, 'local_fallback');
+    assert.equal(result.provider, 'DETERMINISTIC_TEMPLATE');
+    assert.equal(result.fallback, true);
     assert.equal(result.tool_results, undefined);
-    assert.match(result.response, /live model is temporarily unavailable|authoritative recommendation/i);
+    assert.match(result.response, /authoritative backend reports/i);
+    assert.match(result.response, /\[E_PROFILE_RISK\]/);
   });
 });

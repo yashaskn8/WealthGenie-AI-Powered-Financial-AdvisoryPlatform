@@ -1,4 +1,4 @@
-import { test, describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import jwt from 'jsonwebtoken';
@@ -169,51 +169,27 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
     });
   });
 
-  it('POST /api/chat/message end-to-end two-pass tool execution through Express route layer', async () => {
-    const originalPost = (await import('axios')).default.post;
+  it('POST /api/chat/message invokes one grounded read-only generation with no financial tools', async () => {
+    const originalGenerate = ProviderManager.gemini.generate;
+    const originalNvidia = process.env.NVIDIA_API_KEY;
+    const originalPrimary = process.env.LLM_PRIMARY_PROVIDER;
     let callCount = 0;
-
-    (await import('axios')).default.post = async (url) => {
-      if (url.includes('generativelanguage.googleapis.com')) {
-        callCount++;
-        if (callCount === 1) {
-          return {
-            data: {
-              candidates: [
-                {
-                  content: {
-                    parts: [
-                      {
-                        functionCall: {
-                          name: 'sip_projection',
-                          args: { monthlyInvestment: 10000, annualRate: 0.12, years: 10 },
-                        },
-                      },
-                    ],
-                  },
-                  finishReason: 'STOP',
-                },
-              ],
-              usageMetadata: { totalTokenCount: 100 },
-            },
-          };
-        } else {
-          return {
-            data: {
-              candidates: [
-                {
-                  content: {
-                    parts: [{ text: 'Grounded response: SIP future value is ₹23,23,391.' }],
-                  },
-                  finishReason: 'STOP',
-                },
-              ],
-              usageMetadata: { totalTokenCount: 120 },
-            },
-          };
-        }
-      }
-      throw new Error('Unexpected URL');
+    let generationArgs;
+    process.env.NVIDIA_API_KEY = '';
+    process.env.LLM_PRIMARY_PROVIDER = 'GEMINI';
+    ProviderManager.gemini.generate = async args => {
+      callCount += 1;
+      generationArgs = args;
+      const text = 'The final suitability ceiling is Moderate [E_PROFILE_RISK].';
+      return {
+        provider: 'gemini', model: 'gemini-route-test', tokensUsed: 10,
+        text: JSON.stringify({
+          text,
+          evidenceIdsUsed: ['E_PROFILE_RISK'],
+          claims: [{ text, evidenceIds: ['E_PROFILE_RISK'] }],
+          unavailableFacts: [],
+        }),
+      };
     };
 
     try {
@@ -224,18 +200,23 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
             'content-type': 'application/json',
             authorization: `Bearer ${validToken}`,
           },
-          body: JSON.stringify({ message: 'Calculate 10000 monthly SIP for 10 years at 12%' }),
+          body: JSON.stringify({ message: 'Explain my suitability.' }),
         });
 
         assert.equal(res.status, 200);
         const data = await res.json();
-        assert.equal(callCount, 2, 'Route handler must execute 2-pass LLM cycle for tool calls');
-        assert.match(data.response, /₹23,23,391/);
+        assert.equal(callCount, 1);
+        assert.equal(generationArgs.tools, null);
+        assert.equal(generationArgs.jsonMode, true);
+        assert.equal(data.provider, 'GEMINI');
+        assert.match(data.response, /Moderate \[E_PROFILE_RISK\]/);
         assert.equal(data.tool_results, undefined, 'Tool results must not leak to client response');
         assert.equal(data.audit, undefined, 'Audit metadata must not leak to client response');
       });
     } finally {
-      (await import('axios')).default.post = originalPost;
+      ProviderManager.gemini.generate = originalGenerate;
+      if (originalNvidia === undefined) delete process.env.NVIDIA_API_KEY; else process.env.NVIDIA_API_KEY = originalNvidia;
+      if (originalPrimary === undefined) delete process.env.LLM_PRIMARY_PROVIDER; else process.env.LLM_PRIMARY_PROVIDER = originalPrimary;
     }
   });
 

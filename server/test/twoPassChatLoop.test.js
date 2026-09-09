@@ -1,318 +1,131 @@
-import { test, describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import axios from 'axios';
-import { processChat } from '../services/geminiChatService.js';
-import { ProviderManager } from '../services/providerAbstraction.js';
-import { PrometheusMetrics } from '../services/metricsCollector.js';
-import FinancialProfile from '../models/FinancialProfile.js';
-import Recommendation from '../models/Recommendation.js';
-import Goal from '../models/Goal.js';
-import User from '../models/User.js';
-import ConversationHistory from '../models/ConversationHistory.js';
-import { canonicalProfile } from './helpers/canonicalProfile.js';
+import { buildGroundedEvidencePacket, makeEvidenceEntry } from '../services/groundedEvidence.js';
+import { generateGroundedExplanation } from '../services/groundedExplanationService.js';
 
-const mockUserId = '60d5ecb8b3b3a72d9c8e4a11';
-const mockSessionId = 'test-session-2pass';
+const profile = Object.freeze({
+  age: 35,
+  monthlySavings: 20000,
+  riskTolerance: 'Moderate',
+  suitabilityRisk: 'Moderate',
+  investmentHorizonYears: 10,
+  investmentGoals: ['Wealth Growth'],
+  suitabilityReasonCodes: ['PREFERENCE_CAP'],
+});
 
-const mockUser = {
-  _id: mockUserId,
-  email: 'investor@example.com',
-  name: 'Grounded Investor',
-};
-
-const mockProfile = {
-  _id: '60d5ecb8b3b3a72d9c8e4a33',
-  userId: mockUserId,
-  ...canonicalProfile({ age: 30, monthlySavings: 20000 }),
-};
-
-describe('Phase 3: Two-Pass Tool-Grounded Chat Loop Tests', () => {
-  let originalPost;
-  let originalProfileFindOne;
-  let originalRecFindOne;
-  let originalGoalFind;
-  let originalUserFindById;
-  let originalConvFindOne;
-  let savedMessages = [];
-
-  beforeEach(() => {
-    originalPost = axios.post;
-    originalProfileFindOne = FinancialProfile.findOne;
-    originalRecFindOne = Recommendation.findOne;
-    originalGoalFind = Goal.find;
-    originalUserFindById = User.findById;
-    originalConvFindOne = ConversationHistory.findOne;
-    savedMessages = [];
-
-    process.env.GEMINI_API_KEY = 'mock-gemini-key';
-    process.env.GROQ_API_KEY = 'mock-groq-key';
-
-    ProviderManager.gemini.recordSuccess();
-    ProviderManager.groq.recordSuccess();
-
-    FinancialProfile.findOne = () => ({ sort: () => ({ lean: async () => mockProfile }) });
-    Recommendation.findOne = () => ({ sort: () => ({ lean: async () => null }) });
-    Goal.find = () => ({ sort: () => ({ lean: async () => [] }) });
-    User.findById = () => ({ lean: async () => mockUser });
-    ConversationHistory.findOne = async () => ({
-      userId: mockUserId,
-      session_id: mockSessionId,
-      messages: savedMessages,
-      save: async function () { return true; },
-    });
+function runHostile(packet, text) {
+  const provider = {
+    name: 'nvidia_nim',
+    configuredModel: () => 'test-model',
+    generate: async () => ({
+      provider: 'nvidia_nim',
+      model: 'test-model',
+      text: JSON.stringify({
+        text,
+        evidenceIdsUsed: [text.match(/\[(E_[A-Z0-9_:-]+)\]/)?.[1] || 'E_PROFILE_RISK'],
+        claims: [{
+          text,
+          evidenceIds: [text.match(/\[(E_[A-Z0-9_:-]+)\]/)?.[1] || 'E_PROFILE_RISK'],
+        }],
+        unavailableFacts: [],
+        proposedAllocation: [{ instrument: 'Bitcoin', weight: 100 }],
+      }),
+    }),
+  };
+  return generateGroundedExplanation({ question: 'Explain the authoritative result.', evidencePacket: packet }, {
+    providers: [provider], getCache: async () => null, setCache: async () => false,
   });
+}
 
-  afterEach(() => {
-    axios.post = originalPost;
-    FinancialProfile.findOne = originalProfileFindOne;
-    Recommendation.findOne = originalRecFindOne;
-    Goal.find = originalGoalFind;
-    User.findById = originalUserFindById;
-    ConversationHistory.findOne = originalConvFindOne;
-  });
-
-  it('Two-Pass Execution: Pass 1 requests sip_projection tool, Pass 2 grounds final response in tool result', async () => {
-    let callCount = 0;
-    let pass2ReceivedToolResult = false;
-    let pass1ResponseText = 'Pass 1 ungrounded guess: your SIP might grow to ₹20,00,000.';
-
-    axios.post = async (url, payload) => {
-      if (url.includes('generativelanguage.googleapis.com')) {
-        callCount++;
-        if (callCount === 1) {
-          // Pass 1: Emit native function call
-          return {
-            data: {
-              candidates: [
-                {
-                  content: {
-                    parts: [
-                      {
-                        functionCall: {
-                          name: 'sip_projection',
-                          args: { monthlyInvestment: 10000, annualRate: 0.12, years: 10 },
-                        },
-                      },
-                    ],
-                  },
-                  finishReason: 'STOP',
-                },
-              ],
-              usageMetadata: { totalTokenCount: 100 },
-            },
-          };
-        } else {
-          // Pass 2: Received history with functionResponse part
-          const contents = payload.contents || [];
-          const lastTurn = contents[contents.length - 1];
-          const hasFunctionResponse = lastTurn?.parts?.some(p => p.functionResponse?.name === 'sip_projection');
-          if (hasFunctionResponse) {
-            pass2ReceivedToolResult = true;
-          }
-
-          return {
-            data: {
-              candidates: [
-                {
-                  content: {
-                    parts: [
-                      {
-                        text: 'Based on exact computation, a monthly SIP of ₹10,000 at 12% over 10 years yields a future value of ₹23,23,391.',
-                      },
-                    ],
-                  },
-                  finishReason: 'STOP',
-                },
-              ],
-              usageMetadata: { totalTokenCount: 150 },
-            },
-          };
-        }
-      }
-      throw new Error('Unexpected URL');
+describe('Phase 6 financial-authority isolation', () => {
+  it('cannot introduce an instrument or alter authoritative recommendation weights', async () => {
+    const recommendation = {
+      modelVersion: 'recommendation-test',
+      profileInputHash: 'profile-hash',
+      instruments: [{ id: 'debt', name: 'Debt Fund', type: 'Debt_MF', allocationWeight: 1, nominalReturn: 7 }],
     };
-
-    const result = await processChat({
-      userId: mockUserId,
-      user: mockUser,
-      message: 'Calculate future value of 10000 monthly SIP for 10 years at 12%',
-      sessionId: mockSessionId,
-    });
-
-    assert.equal(callCount, 2, 'Must execute exactly two passes for tool-grounded query');
-    assert.equal(pass2ReceivedToolResult, true, 'Pass 2 must receive tool execution result in conversation history');
-    const lastSavedModelMsg = savedMessages.filter(m => m.role === 'model').slice(-1)[0];
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs.length, 1);
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs[0].result.futureValue, 2323391);
-    assert.equal(result.tool_results, undefined, 'Raw tool results must not leak in client DTO');
-    assert.match(result.response, /₹23,23,391/);
-    assert.notEqual(result.response, pass1ResponseText, 'Pass 2 response must differ from ungrounded Pass 1 text');
+    const packet = buildGroundedEvidencePacket({ question: 'Explain my recommendation.', profile, recommendation });
+    const before = JSON.stringify({ packet, recommendation });
+    const result = await runHostile(packet, 'Add Bitcoin to the portfolio [E_REC_001].');
+    assert.equal(result.provider, 'DETERMINISTIC_TEMPLATE');
+    assert.equal(result.fallback, true);
+    assert.doesNotMatch(result.text, /bitcoin/i);
+    assert.equal(JSON.stringify({ packet, recommendation }), before);
+    assert.deepEqual(recommendation.instruments, [{ id: 'debt', name: 'Debt Fund', type: 'Debt_MF', allocationWeight: 1, nominalReturn: 7 }]);
   });
 
-  it('Direct Answer Path: General inquiry without tools returns Pass 1 response directly without Pass 2', async () => {
-    let callCount = 0;
-
-    axios.post = async (url) => {
-      if (url.includes('generativelanguage.googleapis.com')) {
-        callCount++;
-        return {
-          data: {
-            candidates: [
-              {
-                content: {
-                  parts: [{ text: 'Equity mutual funds invest in stocks of listed companies.' }],
-                },
-                finishReason: 'STOP',
-              },
-            ],
-            usageMetadata: { totalTokenCount: 80 },
-          },
-        };
-      }
-      throw new Error('Unexpected URL');
-    };
-
-    const result = await processChat({
-      userId: mockUserId,
-      user: mockUser,
-      message: 'What are equity mutual funds?',
-      sessionId: mockSessionId,
+  it('cannot change profile suitability or deterministic market context', async () => {
+    const market = makeEvidenceEntry('E_MARKET_CONTEXT', 'MARKET_CONTEXT', {
+      context: 'CAUTIOUS', authorityRole: 'DETERMINISTIC_POLICY_CHAMPION', reasonCodes: ['PRICE_BELOW_MA50'],
+    }, { dataClass: 'DETERMINISTIC_POLICY_RESULT', displayValue: 'CAUTIOUS deterministic market context' });
+    const packet = buildGroundedEvidencePacket({
+      question: 'Explain suitability and context.', profile, additionalEntries: [market],
     });
-
-    assert.equal(callCount, 1, 'Direct non-computational query must complete in Pass 1');
-    assert.match(result.response, /invest in stocks/);
-    assert.equal(result.tool_results, undefined);
+    const suitability = await runHostile(packet, 'Your suitability is Aggressive [E_PROFILE_RISK].');
+    const context = await runHostile(packet, 'The deterministic market context is Normal [E_MARKET_CONTEXT].');
+    assert.equal(suitability.provider, 'DETERMINISTIC_TEMPLATE');
+    assert.equal(context.provider, 'DETERMINISTIC_TEMPLATE');
+    assert.doesNotMatch(suitability.text, /Aggressive/);
+    assert.doesNotMatch(context.text, /market context is Normal/i);
+    assert.equal(profile.suitabilityRisk, 'Moderate');
+    assert.equal(market.value.context, 'CAUTIOUS');
   });
 
-  it('Groq Provider Fallback: Groq executes native tool call and Pass 2 grounding when Gemini fails', async () => {
-    let groqCallCount = 0;
-
-    axios.post = async (url, payload) => {
-      // Gemini endpoint fails
-      if (url.includes('generativelanguage.googleapis.com')) {
-        throw new Error('Gemini 500 error');
-      }
-
-      // Groq API endpoint
-      if (url.includes('api.groq.com')) {
-        groqCallCount++;
-        if (groqCallCount === 1) {
-          // Pass 1: Groq emits tool call using OpenAI tool_calls format
-          return {
-            data: {
-              choices: [
-                {
-                  message: {
-                    content: null,
-                    tool_calls: [
-                      {
-                        function: {
-                          name: 'sip_projection',
-                          arguments: JSON.stringify({ monthlyInvestment: 15000, annualRate: 0.12, years: 10 }),
-                        },
-                      },
-                    ],
-                  },
-                  finish_reason: 'tool_calls',
-                },
-              ],
-              usage: { total_tokens: 110 },
-            },
-          };
-        } else {
-          // Pass 2: Groq receives tool execution result and generates grounded output
-          return {
-            data: {
-              choices: [
-                {
-                  message: {
-                    content: 'Groq Grounded: Monthly SIP of ₹15,000 grows to ₹34,85,086.',
-                  },
-                  finish_reason: 'stop',
-                },
-              ],
-              usage: { total_tokens: 140 },
-            },
-          };
-        }
-      }
-      throw new Error(`Unexpected URL: ${url}`);
-    };
-
-    const result = await processChat({
-      userId: mockUserId,
-      user: mockUser,
-      message: 'Calculate 15000 monthly SIP for 10 years at 12%',
-      sessionId: mockSessionId,
-    });
-
-    assert.equal(groqCallCount, 2, 'Groq provider must execute 2 passes when invoked');
-    assert.equal(result.provider, 'groq');
-    const lastSavedModelMsg = savedMessages.filter(m => m.role === 'model').slice(-1)[0];
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs.length, 1);
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs[0].result.futureValue, 3485086);
-    assert.equal(result.tool_results, undefined);
-    assert.match(result.response, /Groq Grounded/);
+  it('cannot modify tax, official-rate, or projection facts', async () => {
+    const entries = [
+      makeEvidenceEntry('E_TAX_POLICY', 'TAX', { taxAmount: 12000, policyVersion: 'tax-v1' }, {
+        dataClass: 'AUTHORITATIVE_BACKEND_RESULT', displayValue: 'Tax amount INR 12,000 under tax-v1',
+      }),
+      makeEvidenceEntry('E_GOV_PPF_RATE', 'PRODUCT_FACT', { ratePct: 7.1 }, {
+        dataClass: 'QUARTERLY_OFFICIAL_RATE', displayValue: 'PPF official rate 7.1%',
+      }),
+      makeEvidenceEntry('E_PROJECTION_ASSUMPTION', 'PROJECTION', { annualReturnAssumptionPct: 8, providerForecast: false }, {
+        dataClass: 'MODEL_ASSUMPTION', displayValue: 'WealthGenie model return assumption 8%',
+      }),
+    ];
+    const packet = buildGroundedEvidencePacket({ question: 'Explain these facts.', profile, additionalEntries: entries });
+    const cases = [
+      ['Tax is INR 99,999 [E_TAX_POLICY].', /99,999/],
+      ['PPF pays 15% [E_GOV_PPF_RATE].', /15%/],
+      ['The projection assumption is 25% [E_PROJECTION_ASSUMPTION].', /25%/],
+    ];
+    for (const [text, forbidden] of cases) {
+      const result = await runHostile(packet, text);
+      assert.equal(result.provider, 'DETERMINISTIC_TEMPLATE');
+      assert.doesNotMatch(result.text, forbidden);
+    }
+    assert.deepEqual(entries.map(item => item.value), [
+      { taxAmount: 12000, policyVersion: 'tax-v1' },
+      { ratePct: 7.1 },
+      { annualReturnAssumptionPct: 8, providerForecast: false },
+    ]);
   });
 
-  it('Tool Execution Fault Isolation: processChat recovers cleanly when a tool throws or fails', async () => {
-    let callCount = 0;
-
-    axios.post = async (url) => {
-      if (url.includes('generativelanguage.googleapis.com')) {
-        callCount++;
-        if (callCount === 1) {
-          return {
-            data: {
-              candidates: [
-                {
-                  content: {
-                    parts: [
-                      {
-                        functionCall: {
-                          name: 'rebalance_calculator',
-                          args: { invalid_param: true }, // Invalid arguments to trigger tool failure
-                        },
-                      },
-                    ],
-                  },
-                  finishReason: 'STOP',
-                },
-              ],
-              usageMetadata: { totalTokenCount: 90 },
-            },
-          };
-        } else {
-          return {
-            data: {
-              candidates: [
-                {
-                  content: {
-                    parts: [{ text: 'I noticed an issue calculating exact rebalance targets, but here is general advice.' }],
-                  },
-                  finishReason: 'STOP',
-                },
-              ],
-              usageMetadata: { totalTokenCount: 100 },
-            },
-          };
-        }
-      }
-      throw new Error('Unexpected URL');
-    };
-
-    const result = await processChat({
-      userId: mockUserId,
-      user: mockUser,
-      message: 'Rebalance portfolio with bad inputs',
-      sessionId: mockSessionId,
+  it('cannot promote HMM shadow state or gain an execution channel', async () => {
+    const packet = buildGroundedEvidencePacket({
+      question: 'Explain HMM.', profile,
+      additionalEntries: [makeEvidenceEntry('E_HMM_SHADOW', 'ML_DIAGNOSTIC', {
+        state: 'STATE_0', role: 'SHADOW', allocationAuthority: false,
+      }, { dataClass: 'SHADOW_DIAGNOSTIC', displayValue: 'STATE_0 shadow diagnostic' })],
     });
-
-    assert.equal(callCount, 2, 'Pass 2 must run even when tool execution returns failure status');
-    const lastSavedModelMsg = savedMessages.filter(m => m.role === 'model').slice(-1)[0];
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs.length, 1);
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs[0].success, false);
-    assert.equal(result.tool_results, undefined);
-    assert.match(result.response, /general advice/);
+    let request;
+    const provider = {
+      name: 'nvidia_nim', configuredModel: () => 'test-model',
+      generate: async args => {
+        request = args;
+        const text = 'The shadow diagnostic reports STATE_0 [E_HMM_SHADOW].';
+        return { provider: 'nvidia_nim', model: 'test-model', text: JSON.stringify({
+          text, evidenceIdsUsed: ['E_HMM_SHADOW'], claims: [{ text, evidenceIds: ['E_HMM_SHADOW'] }], unavailableFacts: [],
+        }) };
+      },
+    };
+    const result = await generateGroundedExplanation({ question: 'Report the shadow state without interpreting it.', evidencePacket: packet }, {
+      providers: [provider], getCache: async () => null, setCache: async () => false,
+    });
+    assert.equal(result.provider, 'NVIDIA_NIM');
+    assert.match(result.text, /STATE_0/);
+    assert.doesNotMatch(result.text, /bull|bear|crash|recession/i);
+    assert.equal(request.tools, null);
+    assert.equal(result.proposedAllocation, undefined);
   });
 });

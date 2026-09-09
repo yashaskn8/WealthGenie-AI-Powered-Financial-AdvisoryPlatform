@@ -1,9 +1,8 @@
-import { test, describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import axios from 'axios';
 import { processChat } from '../services/geminiChatService.js';
-import { ProviderManager, GroqProviderAdapter } from '../services/providerAbstraction.js';
-import { PrometheusMetrics } from '../services/metricsCollector.js';
+import { ProviderManager } from '../services/providerAbstraction.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import Goal from '../models/Goal.js';
@@ -41,6 +40,8 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
   let originalGoalFind;
   let originalUserFindById;
   let originalConvFindOne;
+  let originalNvidiaKey;
+  let originalPrimaryProvider;
   let savedMessages = [];
 
   beforeEach(() => {
@@ -50,10 +51,14 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
     originalGoalFind = Goal.find;
     originalUserFindById = User.findById;
     originalConvFindOne = ConversationHistory.findOne;
+    originalNvidiaKey = process.env.NVIDIA_API_KEY;
+    originalPrimaryProvider = process.env.LLM_PRIMARY_PROVIDER;
     savedMessages = [];
 
     process.env.GEMINI_API_KEY = 'mock-gemini-key';
     process.env.GROQ_API_KEY = 'mock-groq-key';
+    process.env.NVIDIA_API_KEY = '';
+    process.env.LLM_PRIMARY_PROVIDER = 'GEMINI';
 
     ProviderManager.gemini.recordSuccess();
     ProviderManager.groq.recordSuccess();
@@ -77,6 +82,8 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
     Goal.find = originalGoalFind;
     User.findById = originalUserFindById;
     ConversationHistory.findOne = originalConvFindOne;
+    if (originalNvidiaKey === undefined) delete process.env.NVIDIA_API_KEY; else process.env.NVIDIA_API_KEY = originalNvidiaKey;
+    if (originalPrimaryProvider === undefined) delete process.env.LLM_PRIMARY_PROVIDER; else process.env.LLM_PRIMARY_PROVIDER = originalPrimaryProvider;
   });
 
   // ── Groq Adapter Unit Tests ──
@@ -240,12 +247,13 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
     ProviderManager.groq.recordSuccess();
   });
 
-  // ── Groq Full Two-Pass End-to-End via processChat ──
+  // ── Groq grounded explanation integration via processChat ──
 
-  it('Groq two-pass: lump_sum_projection tool call with Pass 2 grounding through processChat', async () => {
+  it('Groq fallback receives one read-only grounded request with no tool surface', async () => {
     let groqCallCount = 0;
+    let requestBody;
 
-    axios.post = async (url) => {
+    axios.post = async (url, body) => {
       // Gemini fails
       if (url.includes('generativelanguage.googleapis.com')) {
         throw new Error('Gemini down');
@@ -253,37 +261,15 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
 
       if (url.includes('api.groq.com')) {
         groqCallCount++;
-        if (groqCallCount === 1) {
-          return {
-            data: {
-              choices: [{
-                message: {
-                  content: null,
-                  tool_calls: [{
-                    function: {
-                      name: 'lump_sum_projection',
-                      arguments: JSON.stringify({ principal: 1000000, annualRate: 0.10, years: 5 }),
-                    },
-                  }],
-                },
-                finish_reason: 'tool_calls',
-              }],
-              usage: { total_tokens: 100 },
-            },
-          };
-        } else {
-          return {
-            data: {
-              choices: [{
-                message: {
-                  content: 'Groq Grounded: ₹10,00,000 invested at 10% for 5 years grows to ₹16,10,510.',
-                },
-                finish_reason: 'stop',
-              }],
-              usage: { total_tokens: 130 },
-            },
-          };
-        }
+        requestBody = body;
+        const text = 'The profile age is 35 years [E_PROFILE_AGE].';
+        return { data: {
+          model: 'openai/gpt-oss-120b',
+          choices: [{ message: { content: JSON.stringify({
+            text, evidenceIdsUsed: ['E_PROFILE_AGE'], claims: [{ text, evidenceIds: ['E_PROFILE_AGE'] }], unavailableFacts: [],
+          }) }, finish_reason: 'stop' }],
+          usage: { total_tokens: 80 },
+        } };
       }
       throw new Error(`Unexpected URL: ${url}`);
     };
@@ -291,20 +277,22 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
     const result = await processChat({
       userId: mockUserId,
       user: mockUser,
-      message: 'What will 10 lakh grow to in 5 years at 10%?',
+      message: 'Explain my age evidence.',
       sessionId: mockSessionId,
     });
 
-    assert.equal(groqCallCount, 2, 'Groq must execute 2 passes for tool-grounded query');
-    assert.equal(result.provider, 'groq');
+    assert.equal(groqCallCount, 1);
+    assert.equal(requestBody.tools, undefined);
+    assert.deepEqual(requestBody.response_format, { type: 'json_object' });
+    assert.equal(result.provider, 'GROQ');
+    assert.equal(result.model, 'openai/gpt-oss-120b');
     const lastSavedModelMsg = savedMessages.filter(m => m.role === 'model').slice(-1)[0];
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs.length, 1);
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs[0].result.futureValue, 1610510);
+    assert.equal(lastSavedModelMsg.metadata.tool_outputs, undefined);
     assert.equal(result.tool_results, undefined);
-    assert.match(result.response, /Groq Grounded/);
+    assert.match(result.response, /35 years \[E_PROFILE_AGE\]/);
   });
 
-  it('Groq two-pass: multiple simultaneous tool calls (sip + tax) are orchestrated correctly', async () => {
+  it('Groq tool-call-only output is never executed and fails closed', async () => {
     let groqCallCount = 0;
 
     axios.post = async (url) => {
@@ -314,57 +302,13 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
 
       if (url.includes('api.groq.com')) {
         groqCallCount++;
-        if (groqCallCount === 1) {
-          return {
-            data: {
-              choices: [{
-                message: {
-                  content: null,
-                  tool_calls: [
-                    {
-                      function: {
-                        name: 'sip_projection',
-                        arguments: JSON.stringify({ monthlyInvestment: 10000, annualRate: 0.12, years: 10 }),
-                      },
-                    },
-                    {
-                      function: {
-                        name: 'tax_calculator',
-                        arguments: JSON.stringify({
-                          income: 2000000,
-                          incomeSource: 'salary',
-                          fiscalYear: 'FY2026-27',
-                          age: 35,
-                          regime: 'new',
-                          section80C: 0,
-                          nps80CCD1B: 0,
-                          section80D_self: 0,
-                          section80D_parents: 0,
-                          parentsSenior: false,
-                          hra: 0,
-                        }),
-                      },
-                    },
-                  ],
-                },
-                finish_reason: 'tool_calls',
-              }],
-              usage: { total_tokens: 150 },
-            },
-          };
-        } else {
-          return {
-            data: {
-              choices: [{
-                message: {
-                  content: 'Groq Multi-Tool: SIP grows to ₹23,23,391 and your tax has been computed.',
-                },
-                finish_reason: 'stop',
-              }],
-              usage: { total_tokens: 160 },
-            },
-          };
-        }
+        return { data: {
+          model: 'openai/gpt-oss-120b',
+          choices: [{ message: { content: null, tool_calls: [{
+            function: { name: 'portfolio_optimizer', arguments: '{}' },
+          }] }, finish_reason: 'tool_calls' }],
+          usage: { total_tokens: 50 },
+        } };
       }
       throw new Error(`Unexpected URL: ${url}`);
     };
@@ -376,14 +320,11 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
       sessionId: mockSessionId,
     });
 
-    assert.equal(groqCallCount, 2, 'Groq must execute 2 passes');
-    assert.equal(result.provider, 'groq');
+    assert.equal(groqCallCount, 1);
+    assert.equal(result.provider, 'DETERMINISTIC_TEMPLATE');
     const lastSavedModelMsg = savedMessages.filter(m => m.role === 'model').slice(-1)[0];
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs.length, 2, 'Must have 2 tool results');
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs[0].tool, 'sip_projection');
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs[0].success, true);
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs[1].tool, 'tax_calculator');
-    assert.equal(lastSavedModelMsg.metadata.tool_outputs[1].success, true);
+    assert.equal(lastSavedModelMsg.metadata.tool_outputs, undefined);
+    assert.ok(lastSavedModelMsg.metadata.validation_reason_codes.includes('EMPTY_COMPLETION'));
     assert.equal(result.tool_results, undefined);
   });
 
@@ -397,17 +338,14 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
 
       if (url.includes('api.groq.com')) {
         groqCallCount++;
-        return {
-          data: {
-            choices: [{
-              message: {
-                content: 'Debt mutual funds invest in government and corporate bonds for stable returns.',
-              },
-              finish_reason: 'stop',
-            }],
-            usage: { total_tokens: 60 },
-          },
-        };
+        const text = 'The profile age is 35 years [E_PROFILE_AGE].';
+        return { data: {
+          model: 'openai/gpt-oss-120b',
+          choices: [{ message: { content: JSON.stringify({
+            text, evidenceIdsUsed: ['E_PROFILE_AGE'], claims: [{ text, evidenceIds: ['E_PROFILE_AGE'] }], unavailableFacts: [],
+          }) }, finish_reason: 'stop' }],
+          usage: { total_tokens: 60 },
+        } };
       }
       throw new Error(`Unexpected URL: ${url}`);
     };
@@ -415,13 +353,13 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
     const result = await processChat({
       userId: mockUserId,
       user: mockUser,
-      message: 'What are debt mutual funds?',
+      message: 'Explain my age evidence.',
       sessionId: mockSessionId,
     });
 
     assert.equal(groqCallCount, 1, 'Non-tool query must complete in single Groq pass');
-    assert.equal(result.provider, 'groq');
+    assert.equal(result.provider, 'GROQ');
     assert.equal(result.tool_results, undefined);
-    assert.match(result.response, /debt mutual funds|bonds/i);
+    assert.match(result.response, /35 years \[E_PROFILE_AGE\]/);
   });
 });

@@ -5,7 +5,7 @@ import axios from 'axios';
 import FinancialProfile from '../models/FinancialProfile.js';
 import { generateAdvisory, getGoalAdvisory } from '../services/geminiService.js';
 import { processChat } from '../services/geminiChatService.js';
-import { buildSystemPrompt } from '../services/genieChatSystemPrompt.js';
+import { buildGroundedEvidencePacket } from '../services/groundedEvidence.js';
 import {
   INSTRUMENT_PARAMS,
   PROJECTION_ASSUMPTION_DATA_CLASS,
@@ -37,22 +37,34 @@ function llmProfile(overrides = {}) {
   return buildLlmFinancialContext(profile, assessSuitabilityRisk(profile));
 }
 
-test('geminiService uses Gemini before Groq and falls back deterministically', async (t) => {
+test('geminiService uses the shared grounded provider contract', async (t) => {
   const originalPost = axios.post;
   const originalGemini = process.env.GEMINI_API_KEY;
   const originalGroq = process.env.GROQ_API_KEY;
+  const originalNvidia = process.env.NVIDIA_API_KEY;
+  const originalPrimary = process.env.LLM_PRIMARY_PROVIDER;
   const calls = [];
 
   process.env.GEMINI_API_KEY = 'gemini-test-key';
   process.env.GROQ_API_KEY = 'groq-test-key';
+  process.env.NVIDIA_API_KEY = '';
+  process.env.LLM_PRIMARY_PROVIDER = 'GEMINI';
+  const groundedJson = JSON.stringify({
+    text: 'The final suitability ceiling is Moderate [E_PROFILE_RISK].',
+    evidenceIdsUsed: ['E_PROFILE_RISK'],
+    claims: [{ text: 'The final suitability ceiling is Moderate [E_PROFILE_RISK].', evidenceIds: ['E_PROFILE_RISK'] }],
+    unavailableFacts: [],
+  });
   axios.post = async (url) => {
     calls.push(url);
-    return { data: { candidates: [{ content: { parts: [{ text: 'Gemini response' }] }, finishReason: 'STOP' }] } };
+    return { data: { modelVersion: 'gemini-3.6-flash', candidates: [{ content: { parts: [{ text: groundedJson }] }, finishReason: 'STOP' }] } };
   };
   t.after(() => {
     axios.post = originalPost;
     if (originalGemini === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = originalGemini;
     if (originalGroq === undefined) delete process.env.GROQ_API_KEY; else process.env.GROQ_API_KEY = originalGroq;
+    if (originalNvidia === undefined) delete process.env.NVIDIA_API_KEY; else process.env.NVIDIA_API_KEY = originalNvidia;
+    if (originalPrimary === undefined) delete process.env.LLM_PRIMARY_PROVIDER; else process.env.LLM_PRIMARY_PROVIDER = originalPrimary;
   });
 
   const advisory = await generateAdvisory({
@@ -61,8 +73,10 @@ test('geminiService uses Gemini before Groq and falls back deterministically', a
   });
   const goalAdvice = await getGoalAdvisory('Suggest one adjustment.', llmProfile({ age: 32, monthlySavings: 20000 }));
 
-  assert.equal(advisory.text, 'Gemini response');
-  assert.equal(goalAdvice, 'Gemini response');
+  assert.match(advisory.text, /Moderate \[E_PROFILE_RISK\]/);
+  assert.equal(advisory.provider, 'GEMINI');
+  assert.equal(advisory.model, 'gemini-3.6-flash');
+  assert.match(goalAdvice, /Moderate \[E_PROFILE_RISK\]/);
   assert.ok(calls[0].includes('generativelanguage.googleapis.com'));
   assert.ok(calls[1].includes('generativelanguage.googleapis.com'));
 });
@@ -83,22 +97,16 @@ test('geminiChatService returns profile setup guidance when no profile exists', 
   assert.match(result.response, /financial profile/i);
 });
 
-test('genieChatSystemPrompt grounds prompt only in canonical profile, recommendations, and separate goals', () => {
-  const prompt = buildSystemPrompt(
-    { name: 'Priya', email: 'p@example.com' },
-    canonicalProfile({ age: 35, monthlySavings: 25000, investmentHorizonYears: 15 }),
-    { instruments: [{ name: 'Nifty 50 ETF', type: 'ETF', nominalReturn: 10.8, allocationWeight: 0.5 }] },
-    null,
-    [{ goal_name: 'Retirement', target_amount: 5000000, target_date: '2045-01-01' }]
-  );
-
-  assert.match(prompt, /Priya/);
-  assert.match(prompt, /Nifty 50 ETF/);
-  assert.match(prompt, /Retirement/);
-  assert.match(prompt, /ACTION_CARD/);
-  assert.match(prompt, /SEBI/);
-  const authoritativeSections = prompt.split('# Hard boundaries')[0];
-  assert.doesNotMatch(authoritativeSections, /annual income|tax slab/i);
+test('grounded evidence minimizes external profile data and excludes identity', () => {
+  const packet = buildGroundedEvidencePacket({
+    question: 'Why this recommendation?',
+    profile: llmProfile({ age: 35, monthlySavings: 25000, investmentHorizonYears: 15 }),
+    recommendation: { modelVersion: 'test', profileInputHash: 'hash', instruments: [] },
+  });
+  assert.ok(packet.entries.some(item => item.id === 'E_PROFILE_RISK'));
+  assert.ok(packet.entries.some(item => item.id === 'E_REGULATORY_NOTICE'));
+  assert.equal(JSON.stringify(packet).includes('p@example.com'), false);
+  assert.ok(packet.privacy.excludedFields.includes('email'));
 });
 
 test('instrumentConstants exposes immutable, versioned model assumptions', () => {

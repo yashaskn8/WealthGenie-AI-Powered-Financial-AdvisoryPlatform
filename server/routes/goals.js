@@ -132,7 +132,15 @@ async function generateGoalAdvice(goal, profile) {
   const yearsRemaining = computeYearsRemaining(goal.target_date);
   const prompt = `Custom planning goal "${goal.goal_name}" targets ₹${Number(goal.target_amount).toLocaleString('en-IN')} in ${yearsRemaining} years. The computed monthly SIP is ₹${Number(goal.recommended_sip).toLocaleString('en-IN')} against a Financial Profile savings capacity of ₹${profile.monthlySavings.toLocaleString('en-IN')}. Goal status is ${String(goal.status).replace(/_/g, ' ')}. Suggest one adjustment without treating the custom goal name as a Financial Profile input.`;
   try {
-    return await getGoalAdvisory(prompt, context);
+    return await getGoalAdvisory(prompt, context, {
+      goalName: goal.goal_name,
+      targetAmount: Number(goal.target_amount),
+      yearsRemaining,
+      recommendedSip: Number(goal.recommended_sip),
+      monthlySavingsCapacity: profile.monthlySavings,
+      status: goal.status,
+      classification: 'NON_RECOMMENDATION_GOAL_PLAN',
+    });
   } catch {
     return `Review the target date or target amount because the required ₹${Number(goal.recommended_sip).toLocaleString('en-IN')} monthly SIP must stay within your ₹${profile.monthlySavings.toLocaleString('en-IN')} savings capacity.`;
   }

@@ -21,6 +21,9 @@ import { canonicalProfile } from './helpers/canonicalProfile.js';
 import { investmentDatabase } from '../data/investmentDatabase.js';
 import { postTaxReturnSchema } from '../validation/schemas.js';
 import { FinancialToolRegistry } from '../services/financialToolRegistry.js';
+import { buildGroundedEvidencePacket } from '../services/groundedEvidence.js';
+import { buildLlmFinancialContext } from '../services/recommendationProfile.js';
+import { assessSuitabilityRisk } from '../services/riskProfiler.js';
 
 test('tax policies are independently versioned by fiscal year with official references', () => {
   const fy2025 = getTaxPolicyMetadata('FY2025-26');
@@ -106,10 +109,22 @@ test('projection parameters are immutable model assumptions and never provider f
   assert.equal(result.params.Equity_MF.dataClass, 'MODEL_ASSUMPTION');
 });
 
-test('chat grounding identifies recommendation returns as model assumptions', () => {
-  const promptBuilder = readFileSync(resolve(process.cwd(), 'services/genieChatSystemPrompt.js'), 'utf8');
-  assert.match(promptBuilder, /pre-tax nominal model assumption \(not a provider forecast\)/);
-  assert.doesNotMatch(promptBuilder, /\$\{instrument\.nominalReturn\}% pre-tax nominal,/);
+test('chat evidence identifies recommendation returns as model assumptions', () => {
+  const profile = canonicalProfile();
+  const context = buildLlmFinancialContext(profile, assessSuitabilityRisk(profile));
+  const packet = buildGroundedEvidencePacket({
+    question: 'Explain my recommendation.',
+    profile: context,
+    recommendation: {
+      modelVersion: 'test-model',
+      profileInputHash: 'test-profile-hash',
+      instruments: [{ id: 'equity', name: 'Equity', type: 'Equity_MF', nominalReturn: 12, allocationWeight: 1 }],
+    },
+  });
+  const evidence = packet.entries.find(item => item.id === 'E_REC_001');
+  assert.equal(evidence.value.returnDataClass, 'MODEL_ASSUMPTION');
+  assert.equal(evidence.value.providerForecast, false);
+  assert.match(evidence.displayValue, /pre-tax nominal model assumption/);
 });
 
 test('legacy catalog return fields are explicitly classified as model assumptions', () => {

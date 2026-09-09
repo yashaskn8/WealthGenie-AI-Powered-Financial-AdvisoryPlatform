@@ -1,241 +1,99 @@
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { processChat } from '../services/geminiChatService.js';
-import { ProviderManager } from '../services/providerAbstraction.js';
-import FinancialProfile from '../models/FinancialProfile.js';
-import User from '../models/User.js';
-import ConversationHistory from '../models/ConversationHistory.js';
-import Goal from '../models/Goal.js';
-import Recommendation from '../models/Recommendation.js';
-import { canonicalProfile } from './helpers/canonicalProfile.js';
+import { buildGroundedEvidencePacket } from '../services/groundedEvidence.js';
+import { generateGroundedExplanation } from '../services/groundedExplanationService.js';
 
-describe('Phase 1: Agentic AI Self-Correction & Replanning Loop Tests', () => {
-  const testUserId = '64b0f0000000000000000001';
-  const testSessionId = 'replan-test-session-001';
+function packet() {
+  return buildGroundedEvidencePacket({
+    question: 'Explain suitability.',
+    profile: {
+      age: 35,
+      monthlySavings: 20000,
+      riskTolerance: 'Moderate',
+      suitabilityRisk: 'Moderate',
+      investmentHorizonYears: 10,
+      investmentGoals: ['Wealth Growth'],
+      suitabilityReasonCodes: ['PREFERENCE_CAP'],
+    },
+  });
+}
 
-  beforeEach(() => {
-    // Mock database models
-    FinancialProfile.findOne = () => ({
-      sort: () => ({
-        lean: async () => ({
-          _id: '64b0f0000000000000000002',
-          userId: testUserId,
-          ...canonicalProfile({
-            age: 32,
-            monthlyTakeHome: 150000,
-            monthlySavings: 45000,
-            liquidSavings: 450000,
-            investmentHorizonYears: 15,
-          }),
-        }),
-      }),
+function output(value = 'Moderate') {
+  const text = `The backend suitability ceiling is ${value} [E_PROFILE_RISK].`;
+  return JSON.stringify({
+    text,
+    evidenceIdsUsed: ['E_PROFILE_RISK'],
+    claims: [{ text, evidenceIds: ['E_PROFILE_RISK'] }],
+    unavailableFacts: [],
+  });
+}
+
+const noCache = { getCache: async () => null, setCache: async () => false };
+
+describe('Phase 6 bounded grounded generation', () => {
+  it('never exposes tools or starts an LLM-controlled replan loop', async () => {
+    let calls = 0;
+    let request;
+    const provider = {
+      name: 'nvidia_nim',
+      configuredModel: () => 'test-model',
+      generate: async args => {
+        calls += 1;
+        request = args;
+        return { provider: 'nvidia_nim', model: 'test-model', text: output(), tool_calls: [{ tool: 'portfolio_optimizer' }] };
+      },
+    };
+    const result = await generateGroundedExplanation({ question: 'Explain suitability.', evidencePacket: packet() }, {
+      providers: [provider], ...noCache,
     });
-
-    User.findById = () => ({
-      lean: async () => ({
-        _id: testUserId,
-        name: 'Rohan Sharma',
-        email: 'rohan@example.com',
-      }),
-    });
-
-    Recommendation.findOne = () => ({
-      sort: () => ({
-        lean: async () => ({
-          recommendedRegime: 'new',
-          allocation: { equity: 60, debt: 40 },
-          generatedAt: new Date(),
-        }),
-      }),
-    });
-
-    Goal.find = () => ({
-      sort: () => ({
-        lean: async () => [
-          { goal_name: 'Retirement Fund', target_amount: 20000000, target_year: 2040 },
-        ],
-      }),
-    });
-
-    savedMessages = [];
-    ConversationHistory.findOne = async () => ({
-      userId: testUserId,
-      profileId: '64b0f0000000000000000002',
-      session_id: testSessionId,
-      messages: savedMessages,
-      save: async function () { return this; },
-    });
+    assert.equal(calls, 1);
+    assert.equal(request.tools, null);
+    assert.equal(result.provider, 'NVIDIA_NIM');
+    assert.equal(result.validation.status, 'PASS');
+    assert.equal(result.toolCalls, undefined);
   });
 
-  let savedMessages = [];
-
-  it('1. Tool Validation Error Self-Correction: Pass 1 has invalid args, Replan #1 corrects args and succeeds', async () => {
-    let passCount = 0;
-
-    ProviderManager.gemini.generate = async ({ recentHistory }) => {
-      passCount++;
-
-      if (passCount === 1) {
-        // Pass 1: LLM mistakenly sends negative investment or invalid param to sip_projection
-        return {
-          text: '',
-          tool_calls: [
-            {
-              tool: 'sip_projection',
-              arguments: { monthlyInvestment: 50, annualRate: 0.12, years: 10 }, // 50 < min 100
-            },
-          ],
-          tokensUsed: 150,
-          provider: 'gemini',
-          wasCompleted: true,
-        };
-      } else if (passCount === 2) {
-        // Replan 1: LLM inspects the error in functionResponse and corrects monthlyInvestment to 5000
-        const lastTurn = recentHistory[recentHistory.length - 1];
-        const errorText = lastTurn.parts?.[0]?.functionResponse?.response?.error || '';
-        assert.match(errorText, /monthlyInvestment/);
-
-        return {
-          text: '',
-          tool_calls: [
-            {
-              tool: 'sip_projection',
-              arguments: { monthlyInvestment: 5000, annualRate: 0.12, years: 10 },
-            },
-          ],
-          tokensUsed: 180,
-          provider: 'gemini',
-          wasCompleted: true,
-        };
-      } else {
-        // Grounding pass: LLM produces final text
-        return {
-          text: 'Based on your corrected SIP calculation of ₹5,000/month at 12% for 10 years, your future value will be ₹11.62 Lakhs.',
-          tool_calls: [],
-          tokensUsed: 220,
-          provider: 'gemini',
-          wasCompleted: true,
-        };
-      }
+  it('uses the identical evidence contract when moving to the next provider', async () => {
+    const requests = [];
+    const first = {
+      name: 'nvidia_nim', configuredModel: () => 'nim-test',
+      generate: async args => {
+        requests.push(args);
+        return { provider: 'nvidia_nim', model: 'nim-test', text: output('Aggressive') };
+      },
     };
-
-    const res = await processChat({
-      userId: testUserId,
-      user: { userId: testUserId, email: 'rohan@example.com' },
-      message: 'Calculate my SIP growth for ₹5000/month',
-      sessionId: testSessionId,
+    const second = {
+      name: 'gemini', configuredModel: () => 'gemini-test',
+      generate: async args => {
+        requests.push(args);
+        return { provider: 'gemini', model: 'gemini-test', text: output() };
+      },
+    };
+    const result = await generateGroundedExplanation({ question: 'Explain suitability.', evidencePacket: packet() }, {
+      providers: [first, second], ...noCache,
     });
-
-    assert.equal(res.grounded, true);
-    assert.equal(res.audit, undefined, 'Client DTO must not leak internal audit metadata');
-    const lastModelMsg = savedMessages.filter(m => m.role === 'model').slice(-1)[0];
-    const auditMeta = lastModelMsg.metadata;
-    assert.equal(auditMeta.replan_count, 1);
-    assert.equal(auditMeta.replans.length, 1);
-    assert.equal(auditMeta.replans[0].trigger, 'TOOL_FAILURE_CORRECTION');
-    assert.equal(auditMeta.tool_outputs.length, 2); // 1 failed + 1 corrected
-    assert.equal(auditMeta.tool_outputs[1].success, true);
-    assert.match(res.response, /₹11.62 Lakhs|11,61,695/);
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].recentHistory[0].parts[0].text, requests[1].recentHistory[0].parts[0].text);
+    assert.equal(result.provider, 'GEMINI');
+    assert.equal(result.model, 'gemini-test');
   });
 
-  it('2. Reasoning-Driven Replanning: Initial tool succeeds but LLM realizes alternative tool is needed for ambiguous query', async () => {
-    let passCount = 0;
-
-    ProviderManager.gemini.generate = async () => {
-      passCount++;
-
-      if (passCount === 1) {
-        // User asks "I need 1 Crore in 15 years, what SIP is needed?".
-        // Pass 1: LLM uses a valid forward projection, then recognizes that
-        // reverse_sip is the correct operation for a target-corpus question.
-        return {
-          text: '',
-          tool_calls: [
-            {
-              tool: 'sip_projection',
-              arguments: { monthlyInvestment: 40000, annualRate: 0.12, years: 15 },
-            },
-          ],
-          tokensUsed: 140,
-          provider: 'gemini',
-          wasCompleted: true,
-        };
-      } else if (passCount === 2) {
-        // Replan 1: Tool succeeded, but LLM reasons: "To find the monthly SIP needed for a 1 Crore goal, I should call reverse_sip instead."
-        return {
-          text: '',
-          tool_calls: [
-            {
-              tool: 'reverse_sip',
-              arguments: { targetAmount: 10000000, annualRate: 0.12, years: 15, currentSavings: 0 },
-            },
-          ],
-          tokensUsed: 190,
-          provider: 'gemini',
-          wasCompleted: true,
-        };
-      } else {
-        // Grounding pass with reverse_sip calculation
-        return {
-          text: 'To reach your target corpus of ₹1.00 Crore in 15 years at 12% expected annual return, your required monthly SIP is ₹19,819/month.',
-          tool_calls: [],
-          tokensUsed: 210,
-          provider: 'gemini',
-          wasCompleted: true,
-        };
-      }
-    };
-
-    const res = await processChat({
-      userId: testUserId,
-      user: { userId: testUserId, email: 'rohan@example.com' },
-      message: 'I want to accumulate 1 Crore in 15 years. How much monthly SIP do I need?',
-      sessionId: testSessionId,
+  it('bounds failures to one call per configured provider and then fails closed', async () => {
+    let calls = 0;
+    const providers = Array.from({ length: 3 }, (_, index) => ({
+      name: `provider_${index}`,
+      configuredModel: () => `model_${index}`,
+      generate: async () => {
+        calls += 1;
+        return { provider: `provider_${index}`, model: `model_${index}`, text: '{malformed' };
+      },
+    }));
+    const result = await generateGroundedExplanation({ question: 'Explain suitability.', evidencePacket: packet() }, {
+      providers, ...noCache,
     });
-
-    assert.equal(res.grounded, true);
-    assert.equal(res.audit, undefined);
-    const lastModelMsg = savedMessages.filter(m => m.role === 'model').slice(-1)[0];
-    const auditMeta = lastModelMsg.metadata;
-    assert.equal(auditMeta.replan_count, 1);
-    assert.equal(auditMeta.replans[0].trigger, 'REASONING_DRIVEN_TOOL_ADJUSTMENT');
-    assert.equal(auditMeta.tool_outputs.some(t => t.tool === 'reverse_sip' && t.success), true);
-    assert.match(res.response, /₹19,819/);
-  });
-
-  it('3. Runaway Prevention: Max replans (MAX_REPLANS=2) caps loop when errors persist', async () => {
-    let passCount = 0;
-
-    ProviderManager.gemini.generate = async () => {
-      passCount++;
-      // Continuously request invalid tools/args
-      return {
-        text: passCount > 2 ? 'I attempted to calculate this multiple times but encountered repeated parameter errors.' : '',
-        tool_calls: [
-          {
-            tool: 'sip_projection',
-            arguments: { monthlyInvestment: -100, annualRate: 2.5, years: 0 }, // invalid
-          },
-        ],
-        tokensUsed: 100,
-        provider: 'gemini',
-        wasCompleted: true,
-      };
-    };
-
-    const res = await processChat({
-      userId: testUserId,
-      user: { userId: testUserId, email: 'rohan@example.com' },
-      message: 'Bad calculation request',
-      sessionId: testSessionId,
-    });
-
-    assert.equal(res.audit, undefined);
-    const lastModelMsg = savedMessages.filter(m => m.role === 'model').slice(-1)[0];
-    const auditMeta = lastModelMsg.metadata;
-    assert.equal(auditMeta.replan_count, 2);
-    assert.equal(auditMeta.safety_limit_triggered, true);
-    assert.equal(auditMeta.safety_limit_reason, 'MAX_REPLANS_EXHAUSTED_WITH_FAILURES');
-    assert.match(res.response, /Session Safety Limit Notice/);
+    assert.equal(calls, 3);
+    assert.equal(result.provider, 'DETERMINISTIC_TEMPLATE');
+    assert.equal(result.fallback, true);
+    assert.ok(result.validation.reasonCodes.includes('MALFORMED_GROUNDED_JSON'));
   });
 });

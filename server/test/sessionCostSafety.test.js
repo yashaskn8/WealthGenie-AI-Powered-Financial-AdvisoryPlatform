@@ -1,157 +1,111 @@
-import { describe, it, beforeEach } from 'node:test';
+import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { processChat } from '../services/geminiChatService.js';
 import { ProviderManager } from '../services/providerAbstraction.js';
 import FinancialProfile from '../models/FinancialProfile.js';
-import User from '../models/User.js';
 import ConversationHistory from '../models/ConversationHistory.js';
-import Goal from '../models/Goal.js';
 import Recommendation from '../models/Recommendation.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
 
-describe('Phase 4: Session-Level Cost & Runaway-Loop Safety Protection', () => {
-  const testUserId = '64b0f0000000000000000001';
-  const testSessionId = 'session-safety-test-001';
+describe('grounded chat session-cost safety', () => {
+  const userId = '64b0f0000000000000000001';
+  let originals;
+  let env;
+  let session;
+  let providerCalls;
 
   beforeEach(() => {
-    FinancialProfile.findOne = () => ({
-      sort: () => ({
-        lean: async () => ({
-          _id: '64b0f0000000000000000002',
-          userId: testUserId,
-          ...canonicalProfile({
-            age: 32,
-            monthlyTakeHome: 150000,
-            monthlySavings: 45000,
-            liquidSavings: 450000,
-            investmentHorizonYears: 15,
-          }),
-        }),
-      }),
-    });
-
-    User.findById = () => ({
-      lean: async () => ({
-        _id: testUserId,
-        name: 'Rohan Sharma',
-        email: 'rohan@example.com',
-      }),
-    });
-
-    Recommendation.findOne = () => ({
-      sort: () => ({
-        lean: async () => ({
-          recommendedRegime: 'new',
-          allocation: { equity: 60, debt: 40 },
-          generatedAt: new Date(),
-        }),
-      }),
-    });
-
-    Goal.find = () => ({
-      sort: () => ({
-        lean: async () => [],
-      }),
-    });
-  });
-
-  it('1. User-Facing Safety Limit Notice: Delivered directly in response text when replans are exhausted with failures', async () => {
-    const savedMessages = [];
-    ConversationHistory.findOne = async () => ({
-      userId: testUserId,
-      profileId: '64b0f0000000000000000002',
-      session_id: testSessionId,
-      messages: savedMessages,
-      save: async function () { return this; },
-    });
-
-    ProviderManager.gemini.generate = async () => ({
-      text: 'Repeatedly failed tool parameters.',
-      tool_calls: [{ tool: 'sip_projection', arguments: { monthlyInvestment: -999, annualRate: 5.0, years: -10 } }],
-      tokensUsed: 200,
-      provider: 'gemini',
-      wasCompleted: true,
-    });
-
-    const res = await processChat({
-      userId: testUserId,
-      user: { userId: testUserId, email: 'rohan@example.com' },
-      message: 'Induce runaway loop with invalid parameters',
-      sessionId: testSessionId,
-    });
-
-    assert.equal(res.audit, undefined, 'Client DTO must not contain internal audit object');
-    const lastModelMsg = savedMessages.filter(m => m.role === 'model').slice(-1)[0];
-    const auditMeta = lastModelMsg.metadata;
-    assert.equal(auditMeta.safety_limit_triggered, true);
-    assert.equal(auditMeta.safety_limit_reason, 'MAX_REPLANS_EXHAUSTED_WITH_FAILURES');
-    // Verify user-facing response contains clear warning banner
-    assert.match(res.response, /⚠️ \*\*Session Safety Limit Notice\*\*/);
-    assert.match(res.response, /maximum calculation depth limit/);
-  });
-
-  it('2. Session-Level Token Budget Cap: Terminates immediately when cumulative session tokens exceed 50,000', async () => {
-    // Mock existing session with 52,000 cumulative tokens
-    const existingSession = {
-      userId: testUserId,
-      profileId: '64b0f0000000000000000002',
-      session_id: 'exhausted-session-002',
-      messages: [{ role: 'user', content: 'previous query' }],
-      cumulative_tokens: 52000,
-      cumulative_hops: 15,
-      save: async function () { return this; },
+    originals = {
+      profileFindOne: FinancialProfile.findOne,
+      conversationFindOne: ConversationHistory.findOne,
+      recommendationFindOne: Recommendation.findOne,
+      geminiGenerate: ProviderManager.gemini.generate,
     };
-
-    ConversationHistory.findOne = async () => existingSession;
-
-    const res = await processChat({
-      userId: testUserId,
-      user: { userId: testUserId, email: 'rohan@example.com' },
-      message: 'Calculate something new in exhausted session',
-      sessionId: 'exhausted-session-002',
-    });
-
-    assert.equal(res.provider, 'safety_circuit_breaker');
-    assert.equal(res.audit, undefined, 'Client DTO must not contain internal audit object');
-    const lastMsgMeta = existingSession.messages[existingSession.messages.length - 1].metadata;
-    assert.equal(lastMsgMeta.safety_limit_triggered, true);
-    assert.equal(lastMsgMeta.safety_limit_reason, 'SESSION_CUMULATIVE_TOKEN_CAP_EXCEEDED');
-    assert.match(res.response, /⚠️ \*\*Session Safety Limit Reached\*\*/);
-    assert.match(res.response, /cumulative reasoning token budget \(50,000 tokens\)/);
-  });
-
-  it('3. Turn-Level Token Budget Cap: Replan loop terminates when single turn token usage exceeds 12,000', async () => {
-    const savedMessages = [];
-    ConversationHistory.findOne = async () => ({
-      userId: testUserId,
+    env = {
+      nvidia: process.env.NVIDIA_API_KEY,
+      gemini: process.env.GEMINI_API_KEY,
+      groq: process.env.GROQ_API_KEY,
+      primary: process.env.LLM_PRIMARY_PROVIDER,
+    };
+    process.env.NVIDIA_API_KEY = '';
+    process.env.GEMINI_API_KEY = 'unit-test-only';
+    process.env.GROQ_API_KEY = '';
+    process.env.LLM_PRIMARY_PROVIDER = 'GEMINI';
+    FinancialProfile.findOne = () => ({ sort: () => ({ lean: async () => ({
+      _id: '64b0f0000000000000000002', userId,
+      ...canonicalProfile({ age: 32, monthlySavings: 45000, investmentHorizonYears: 15 }),
+    }) }) });
+    Recommendation.findOne = () => ({ sort: () => ({ lean: async () => null }) });
+    session = {
+      userId,
       profileId: '64b0f0000000000000000002',
-      session_id: 'heavy-token-session-003',
-      messages: savedMessages,
-      save: async function () { return this; },
-    });
-
-    let pass = 0;
+      session_id: 'cost-safety',
+      messages: [],
+      cumulative_tokens: 0,
+      save: async function save() { return this; },
+    };
+    ConversationHistory.findOne = async () => session;
+    providerCalls = 0;
     ProviderManager.gemini.generate = async () => {
-      pass++;
+      providerCalls += 1;
+      const text = 'The final suitability ceiling is Moderate [E_PROFILE_RISK].';
       return {
-        text: 'Heavy token response',
-        tool_calls: pass === 1 ? [{ tool: 'sip_projection', arguments: { monthlyInvestment: 5000, annualRate: 0.12, years: 10 } }] : [],
-        tokensUsed: 13000, // Exceeds 12000 turn limit
-        provider: 'gemini',
-        wasCompleted: true,
+        provider: 'gemini', model: 'gemini-cost-test', tokensUsed: 250,
+        text: JSON.stringify({ text, evidenceIdsUsed: ['E_PROFILE_RISK'], claims: [{ text, evidenceIds: ['E_PROFILE_RISK'] }], unavailableFacts: [] }),
       };
     };
+  });
 
-    const res = await processChat({
-      userId: testUserId,
-      user: { userId: testUserId, email: 'rohan@example.com' },
-      message: 'Heavy token query',
-      sessionId: 'heavy-token-session-003',
-    });
+  afterEach(() => {
+    FinancialProfile.findOne = originals.profileFindOne;
+    ConversationHistory.findOne = originals.conversationFindOne;
+    Recommendation.findOne = originals.recommendationFindOne;
+    ProviderManager.gemini.generate = originals.geminiGenerate;
+    for (const [name, value] of Object.entries({
+      NVIDIA_API_KEY: env.nvidia,
+      GEMINI_API_KEY: env.gemini,
+      GROQ_API_KEY: env.groq,
+      LLM_PRIMARY_PROVIDER: env.primary,
+    })) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  });
 
-    assert.equal(res.audit, undefined);
-    const lastModelMsg = savedMessages.filter(m => m.role === 'model').slice(-1)[0];
-    const auditMeta = lastModelMsg.metadata;
-    assert.equal(auditMeta.tokens_used >= 12000, true);
+  it('counts only final provider usage and performs no LLM-controlled replan', async () => {
+    const response = await processChat({ userId, user: {}, message: 'Explain suitability.', sessionId: 'cost-safety' });
+    assert.equal(providerCalls, 1);
+    assert.equal(session.cumulative_tokens, 250);
+    assert.equal(session.messages.at(-1).metadata.tokens_used, 250);
+    assert.equal(response.provider, 'GEMINI');
+    assert.equal(response.audit, undefined);
+    assert.equal(response.replan_count, undefined);
+  });
+
+  it('does not contact any external provider after the cumulative token cap', async () => {
+    session.cumulative_tokens = 52000;
+    const response = await processChat({ userId, user: {}, message: 'Explain suitability.', sessionId: 'cost-safety' });
+    assert.equal(providerCalls, 0);
+    assert.equal(response.provider, 'DETERMINISTIC_TEMPLATE');
+    assert.equal(response.fallback, true);
+    assert.equal(session.cumulative_tokens, 52000);
+    assert.ok(session.messages.at(-1).metadata.validation_reason_codes.includes('NO_LLM_PROVIDER_CONFIGURED'));
+  });
+
+  it('persists no hidden reasoning or raw provider payload at any token count', async () => {
+    ProviderManager.gemini.generate = async () => {
+      providerCalls += 1;
+      const text = 'The final suitability ceiling is Moderate [E_PROFILE_RISK].';
+      return {
+        provider: 'gemini', model: 'gemini-cost-test', tokensUsed: 13000,
+        text: JSON.stringify({ text, evidenceIdsUsed: ['E_PROFILE_RISK'], claims: [{ text, evidenceIds: ['E_PROFILE_RISK'] }], unavailableFacts: [] }),
+      };
+    };
+    await processChat({ userId, user: {}, message: 'Explain suitability.', sessionId: 'cost-safety' });
+    const metadata = session.messages.at(-1).metadata;
+    assert.equal(metadata.tokens_used, 13000);
+    assert.equal(metadata.chain_of_thought, undefined);
+    assert.equal(metadata.raw_prompt, undefined);
+    assert.equal(metadata.raw_provider_response, undefined);
+    assert.equal(metadata.tool_outputs, undefined);
   });
 });
