@@ -73,7 +73,7 @@ const riskCategoryToSlider = (cat) => {
   return null;
 };
 
-const RecommendationDashboard = ({ userProfile, recommendations: propRecommendations, recommendationMeta, onExploreAll, onRebalance, onNavigate, onLearnMore, isLoading: isLoadingProp, explanation: _explanation, fallbackNotice, onDismissFallbackNotice }) => {
+const RecommendationDashboard = ({ userProfile, recommendations: propRecommendations, recommendationMeta, onExploreAll, onRebalance, onNavigate, onLearnMore, isLoading: isLoadingProp, isAdvisoryLoading = false, explanation: _explanation, fallbackNotice, onDismissFallbackNotice }) => {
   const profileHorizon = Number(userProfile?.investment_horizon_years);
   const horizon = Number.isFinite(profileHorizon) && profileHorizon > 0 ? profileHorizon : null;
   const isLoading = Boolean(isLoadingProp);
@@ -1592,7 +1592,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
         {/* ═══════════════════════════════════════════════════════════
             SECTION 10: AI ADVISORY CARD — Structured Smart Advisory Synthesis
             ═══════════════════════════════════════════════════════════ */}
-        {recommendationMeta?.advisory_text && (() => {
+        {recommendationMeta?.advisory_text ? (() => {
           const rawText = recommendationMeta.advisory_text;
           
           // Clean up and extract any leading salutation like "Dear Investor,"
@@ -1791,7 +1791,47 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
               </div>
             </div>
           );
-        })()}
+        })() : (isAdvisoryLoading || recommendationMeta?.advisory_explanation?.status === 'PENDING' || recommendationMeta?.advisory_explanation?.status === 'GENERATING') ? (
+          <div className="holographic-card" data-testid="advisory-loading-skeleton" style={{
+            marginTop: 36,
+            marginBottom: 36,
+            padding: '28px 32px',
+            borderRadius: 20,
+            background: 'linear-gradient(145deg, rgba(13, 20, 36, 0.96) 0%, rgba(22, 32, 54, 0.92) 100%)',
+            border: '1px solid rgba(56, 189, 248, 0.28)',
+            boxShadow: '0 16px 48px rgba(0, 0, 0, 0.5), inset 0 1px 1px rgba(255, 255, 255, 0.12)',
+            position: 'relative',
+            overflow: 'hidden'
+          }}>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 16,
+              paddingBottom: 18, marginBottom: 18,
+              borderBottom: '1px solid rgba(255, 255, 255, 0.08)'
+            }}>
+              <div style={{
+                width: 44, height: 44, borderRadius: 12,
+                background: 'linear-gradient(135deg, #06b6d4 0%, #8b5cf6 100%)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                boxShadow: '0 0 20px rgba(6, 182, 212, 0.35)'
+              }}>
+                <Sparkles size={22} color="#ffffff" />
+              </div>
+              <div>
+                <h3 style={{ fontSize: '1.15rem', fontWeight: 800, color: '#f8fafc', margin: 0, letterSpacing: '-0.2px' }}>
+                  Generating grounded explanation…
+                </h3>
+                <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: 3, fontWeight: 500 }}>
+                  Synthesizing SEBI-grounded personalized advisory narrative from authoritative portfolio metrics
+                </div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div style={{ height: 14, width: '92%', borderRadius: 6, background: 'rgba(255,255,255,0.06)' }} />
+              <div style={{ height: 14, width: '85%', borderRadius: 6, background: 'rgba(255,255,255,0.06)' }} />
+              <div style={{ height: 14, width: '65%', borderRadius: 6, background: 'rgba(255,255,255,0.06)' }} />
+            </div>
+          </div>
+        ) : null}
 
         {/* ═══════════════════════════════════════════════════════════
             SECTION 9: BROWSE BY INSTRUMENT TYPE / RISK LEVEL

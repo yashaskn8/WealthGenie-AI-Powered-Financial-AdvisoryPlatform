@@ -82,7 +82,10 @@ const AllocationPlanner = ({ profile, recommendations = [], recommendationMeta }
   const altExposure = useMemo(() =>
     allocation.filter(a => a.cat === "Commodity" || a.cat === "Alternative" || a.cat === "Gold").reduce((s, a) => s + a.allocationPct, 0), [allocation]);
   
-  const rationaleText = recommendationMeta?.advisory_text || 'The recommendation service did not return an advisory explanation.';
+  const rationaleText = recommendationMeta?.advisory_text
+    || (['PENDING', 'GENERATING'].includes(recommendationMeta?.advisory_explanation?.status)
+      ? 'Generating grounded explanation…'
+      : 'The recommendation service did not return an advisory explanation.');
   const assetClassCount = new Set(allocation.map(item => item.cat)).size;
 
   const [hoveredSlice, setHoveredSlice] = useState(null);

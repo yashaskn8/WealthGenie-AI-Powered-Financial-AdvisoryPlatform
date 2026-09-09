@@ -106,18 +106,23 @@ function buildDashboardProjection(profile, instruments) {
 }
 
 router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHandler(async (req, res) => {
+  const tTotalStart = performance.now();
   const { profileId } = req.body;
+  const tProfileStart = performance.now();
   const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
+  const tProfile = performance.now() - tProfileStart;
   if (!stored) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
 
   const profile = buildRecommendationProfile(stored);
   const suitability = assessSuitabilityRisk(profile);
+  const tIdempotencyStart = performance.now();
   const idempotencyClaim = await claimAdvisoryIdempotency({
     key: req.headers['idempotency-key'],
     userId: req.user.userId,
     profileId: stored._id,
     payload: { profileId },
   });
+  const tIdempotency = performance.now() - tIdempotencyStart;
   if (idempotencyClaim.state === 'REPLAY') {
     res.setHeader('X-Cache-Lookup', 'HIT - Idempotent');
     return res.status(idempotencyClaim.response.status).json(idempotencyClaim.response.body);
@@ -126,6 +131,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
   try {
     const missingMlProfileFields = getMissingMlProfileFields(profile);
     const unknownOptionalProfileFields = getUnknownOptionalProfileFields(profile);
+    const tMlStart = performance.now();
     const mlResult = missingMlProfileFields.length > 0
       ? getIncompleteProfileFallback(profile, suitability)
       : await getMLPrediction(
@@ -134,10 +140,12 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
         req.user.userId,
         req.user.role,
       );
+    const tMl = performance.now() - tMlStart;
     const modelVersion = mlResult.model_version;
     if (typeof modelVersion !== 'string' || !modelVersion.trim()) {
       throw createError(502, 'ML result did not include a model version', 'Recommendation model metadata is unavailable.');
     }
+    const tPipelineStart = performance.now();
     const { instruments, confidenceScores, riskReconciliation, computedWeights } = runPipeline(profile, mlResult);
     if (!instruments.length) {
       throw createError(422, 'No instruments passed the suitability boundary', 'No suitable instruments were found for this profile.');
@@ -145,20 +153,10 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
 
     const portfolioReturnAssumption = buildPortfolioReturnAssumption(instruments);
     const assetClassAllocation = buildAssetClassAllocation(instruments);
+    const tPipeline = performance.now() - tPipelineStart;
+    const tProjectionStart = performance.now();
     const dashboardProjection = buildDashboardProjection(profile, instruments);
-    const advisory = await generateAdvisory({
-      profile: buildLlmFinancialContext(profile, suitability),
-      instruments: instruments.map(instrument => ({
-        id: instrument.id,
-        name: instrument.name,
-        type: instrument.type,
-        nominalReturn: instrument.nominalReturn,
-        allocationWeight: instrument.allocationWeight,
-      })),
-      shapExplanation: mlResult.explanation || null,
-      modelVersion,
-      policyVersion: RECOMMENDATION_POLICY_VERSION,
-    });
+    const tProjection = performance.now() - tProjectionStart;
 
     const recommendationId = new mongoose.Types.ObjectId();
     const auditId = new mongoose.Types.ObjectId();
@@ -171,19 +169,8 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       userId: req.user.userId,
       profileId: stored._id,
       instruments,
-      advisoryText: advisory.text,
-      advisoryMetadata: {
-        status: advisory.status,
-        provider: advisory.provider,
-        model: advisory.model,
-        promptVersion: advisory.promptVersion,
-        groundingVersion: advisory.groundingVersion,
-        evidenceIdsUsed: advisory.evidenceIdsUsed,
-        unavailableFacts: advisory.unavailableFacts,
-        citations: advisory.citations,
-        validation: advisory.validation,
-        generatedAt: advisory.generatedAt,
-      },
+      advisoryText: null,
+      advisoryMetadata: { status: 'PENDING' },
       confidenceScores,
       mlFallback: Boolean(mlResult.fallback),
       modelVersion,
@@ -207,9 +194,9 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
         returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
         modelVersion,
         recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
-        advisorySummary: advisory.text ? advisory.text.slice(0, 500) : '',
+        advisorySummary: '',
       },
-      cited_rag_chunk_ids: advisory.cited_chunks || mlResult.cited_chunk_ids || [],
+      cited_rag_chunk_ids: mlResult.cited_chunk_ids || [],
       engine: mlResult.fallback ? 'rule_fallback' : 'ml_service',
       timestamp,
     };
@@ -219,19 +206,8 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       audit_hash: inputHash,
       instruments,
       ranked: true,
-      advisory_text: advisory.text,
-      advisory_explanation: {
-        status: advisory.status,
-        provider: advisory.provider,
-        model: advisory.model,
-        prompt_version: advisory.promptVersion,
-        grounding_version: advisory.groundingVersion,
-        evidence_ids_used: advisory.evidenceIdsUsed,
-        unavailable_facts: advisory.unavailableFacts,
-        citations: advisory.citations,
-        validation_status: advisory.validation?.status,
-        generated_at: advisory.generatedAt,
-      },
+      advisory_text: null,
+      advisory_explanation: { status: 'PENDING' },
       confidence_scores: confidenceScores,
       decision_path: mlResult.decision_path,
       explanation: mlResult.explanation || null,
@@ -262,21 +238,211 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       computed_weights: computedWeights,
     };
 
+    const tPersistStart = performance.now();
     const persisted = await persistAdvisoryAtomically({
       recommendation: recommendationData,
       auditRecord: auditRecordData,
       response,
       idempotencyClaim,
     });
+    const tPersist = performance.now() - tPersistStart;
+    const tCacheStart = performance.now();
     const cacheKey = buildRecommendationCacheKey(req.user.userId, stored._id, profile, modelVersion);
     await setCache(cacheKey, persisted, 86400).catch(error => {
       logger.warn('Recommendation cache write failed after committed advisory', { error: error.message });
     });
+    const tCache = performance.now() - tCacheStart;
+    const tTotal = performance.now() - tTotalStart;
+
+    res.setHeader('Server-Timing', [
+      `profile;dur=${tProfile.toFixed(2)}`,
+      `idempotency;dur=${tIdempotency.toFixed(2)}`,
+      `ml;dur=${tMl.toFixed(2)}`,
+      `pipeline;dur=${tPipeline.toFixed(2)}`,
+      `projection;dur=${tProjection.toFixed(2)}`,
+      `persistence;dur=${tPersist.toFixed(2)}`,
+      `cache;dur=${tCache.toFixed(2)}`,
+      `total;dur=${tTotal.toFixed(2)}`,
+    ].join(', '));
+
     return res.json(persisted);
   } catch (error) {
     await releaseAdvisoryIdempotency(idempotencyClaim).catch(releaseError => {
       logger.error('Failed to release advisory idempotency claim', { error: releaseError.message });
     });
+    throw error;
+  }
+}));
+
+router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, res) => {
+  const { recommendationId } = req.params;
+  if (!isValidObjectId(recommendationId)) {
+    throw createError(400, 'Invalid recommendation ID format', 'Invalid recommendation ID.');
+  }
+
+  const recommendation = await Recommendation.findById(recommendationId);
+  if (!recommendation) {
+    throw createError(404, 'Recommendation not found or access denied', 'Recommendation not found.');
+  }
+  if (recommendation.userId.toString() !== req.user.userId.toString() && req.user.role !== 'admin') {
+    throw createError(403, 'Access denied to recommendation', 'Access denied.');
+  }
+
+  const isReady = recommendation.advisoryMetadata?.status === 'READY'
+    || recommendation.advisoryMetadata?.status === 'GROUNDED_EXPLANATION_AVAILABLE'
+    || recommendation.advisoryMetadata?.status === 'GROUNDED_EXPLANATION_FALLBACK'
+    || (Boolean(recommendation.advisoryText) && !['PENDING', 'GENERATING', 'FAILED'].includes(recommendation.advisoryMetadata?.status));
+
+  if (isReady) {
+    return res.json({
+      recommendationId: recommendation._id,
+      advisory_text: recommendation.advisoryText,
+      advisory_explanation: {
+        status: recommendation.advisoryMetadata?.status || 'GROUNDED_EXPLANATION_AVAILABLE',
+        provider: recommendation.advisoryMetadata?.provider,
+        model: recommendation.advisoryMetadata?.model,
+        prompt_version: recommendation.advisoryMetadata?.promptVersion || recommendation.advisoryMetadata?.prompt_version,
+        grounding_version: recommendation.advisoryMetadata?.groundingVersion || recommendation.advisoryMetadata?.grounding_version,
+        evidence_ids_used: recommendation.advisoryMetadata?.evidenceIdsUsed || recommendation.advisoryMetadata?.evidence_ids_used || [],
+        unavailable_facts: recommendation.advisoryMetadata?.unavailableFacts || recommendation.advisoryMetadata?.unavailable_facts || [],
+        citations: recommendation.advisoryMetadata?.citations || [],
+        validation_status: recommendation.advisoryMetadata?.validation?.status || recommendation.advisoryMetadata?.validation_status,
+        generated_at: recommendation.advisoryMetadata?.generatedAt || recommendation.advisoryMetadata?.generated_at,
+      },
+    });
+  }
+
+  // Atomic PENDING/FAILED -> GENERATING claim via conditional update
+  const claimed = await Recommendation.findOneAndUpdate(
+    {
+      _id: recommendationId,
+      userId: req.user.userId,
+      $or: [
+        { 'advisoryMetadata.status': 'PENDING' },
+        { 'advisoryMetadata.status': 'FAILED' },
+        { advisoryMetadata: null },
+        { advisoryMetadata: { $exists: false } },
+      ],
+    },
+    {
+      $set: {
+        'advisoryMetadata.status': 'GENERATING',
+        'advisoryMetadata.claimedAt': new Date(),
+      },
+    },
+    { new: true },
+  );
+
+  if (!claimed) {
+    const current = await Recommendation.findById(recommendationId);
+    const currentIsReady = current?.advisoryMetadata?.status === 'READY'
+      || current?.advisoryMetadata?.status === 'GROUNDED_EXPLANATION_AVAILABLE'
+      || current?.advisoryMetadata?.status === 'GROUNDED_EXPLANATION_FALLBACK'
+      || (Boolean(current?.advisoryText) && !['PENDING', 'GENERATING', 'FAILED'].includes(current?.advisoryMetadata?.status));
+
+    if (currentIsReady) {
+      return res.json({
+        recommendationId: current._id,
+        advisory_text: current.advisoryText,
+        advisory_explanation: {
+          status: current.advisoryMetadata?.status || 'GROUNDED_EXPLANATION_AVAILABLE',
+          provider: current.advisoryMetadata?.provider,
+          model: current.advisoryMetadata?.model,
+          prompt_version: current.advisoryMetadata?.promptVersion || current.advisoryMetadata?.prompt_version,
+          grounding_version: current.advisoryMetadata?.groundingVersion || current.advisoryMetadata?.grounding_version,
+          evidence_ids_used: current.advisoryMetadata?.evidenceIdsUsed || current.advisoryMetadata?.evidence_ids_used || [],
+          unavailable_facts: current.advisoryMetadata?.unavailableFacts || current.advisoryMetadata?.unavailable_facts || [],
+          citations: current.advisoryMetadata?.citations || [],
+          validation_status: current.advisoryMetadata?.validation?.status || current.advisoryMetadata?.validation_status,
+          generated_at: current.advisoryMetadata?.generatedAt || current.advisoryMetadata?.generated_at,
+        },
+      });
+    }
+
+    return res.status(409).json({
+      error: 'Advisory generation already in progress',
+      status: 'GENERATING',
+    });
+  }
+
+  try {
+    const storedProfile = await FinancialProfile.findOne({
+      _id: recommendation.profileId,
+      userId: req.user.userId,
+    }).lean();
+    if (!storedProfile) {
+      throw createError(404, 'Source financial profile not found', 'Profile not found.');
+    }
+
+    const profile = buildRecommendationProfile(storedProfile);
+    const suitability = assessSuitabilityRisk(profile);
+    const shapExplanation = recommendation.responseSnapshot?.explanation || null;
+
+    const advisory = await generateAdvisory({
+      profile: buildLlmFinancialContext(profile, suitability),
+      instruments: recommendation.instruments.map(instrument => ({
+        id: instrument.id,
+        name: instrument.name,
+        type: instrument.type,
+        nominalReturn: instrument.nominalReturn,
+        allocationWeight: instrument.allocationWeight,
+      })),
+      shapExplanation,
+      modelVersion: recommendation.modelVersion,
+      policyVersion: RECOMMENDATION_POLICY_VERSION,
+    });
+
+    const advisoryMetadata = {
+      status: advisory.status,
+      provider: advisory.provider,
+      model: advisory.model,
+      promptVersion: advisory.promptVersion,
+      groundingVersion: advisory.groundingVersion,
+      evidenceIdsUsed: advisory.evidenceIdsUsed,
+      unavailableFacts: advisory.unavailableFacts,
+      citations: advisory.citations,
+      validation: advisory.validation,
+      generatedAt: advisory.generatedAt,
+    };
+
+    // Update ONLY advisoryText and advisoryMetadata fields on the Recommendation document
+    // Instruments, allocation weights, and original AuditRecord are NEVER mutated
+    await Recommendation.updateOne(
+      { _id: recommendationId, userId: req.user.userId },
+      {
+        $set: {
+          advisoryText: advisory.text,
+          advisoryMetadata,
+        },
+      },
+    );
+
+    return res.json({
+      recommendationId: recommendation._id,
+      advisory_text: advisory.text,
+      advisory_explanation: {
+        status: advisory.status,
+        provider: advisory.provider,
+        model: advisory.model,
+        prompt_version: advisory.promptVersion,
+        grounding_version: advisory.groundingVersion,
+        evidence_ids_used: advisory.evidenceIdsUsed,
+        unavailable_facts: advisory.unavailableFacts,
+        citations: advisory.citations,
+        validation_status: advisory.validation?.status,
+        generated_at: advisory.generatedAt,
+      },
+    });
+  } catch (error) {
+    await Recommendation.updateOne(
+      { _id: recommendationId, userId: req.user.userId },
+      {
+        $set: {
+          'advisoryMetadata.status': 'FAILED',
+          'advisoryMetadata.error': error.message,
+        },
+      },
+    ).catch(() => {});
     throw error;
   }
 }));

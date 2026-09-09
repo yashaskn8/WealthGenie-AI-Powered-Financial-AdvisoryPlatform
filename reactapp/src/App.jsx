@@ -39,7 +39,8 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
   const [showComparisonTable, setShowComparisonTable] = useState(false);
   const [backendRecs, setBackendRecs] = useState(null);
   const [backendFallback, setBackendFallback] = useState(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isRecommendationLoading, setIsRecommendationLoading] = useState(true);
+  const [isAdvisoryLoading, setIsAdvisoryLoading] = useState(false);
 
   // Stable serialized key - changes ONLY when profile data changes, not on every render
   const profileKey = useMemo(() => financialProfileKey(userProfile), [userProfile]);
@@ -50,7 +51,8 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
     let cancelled = false;
     const fetchBackendData = async () => {
       try {
-        setIsLoading(true);
+        setIsRecommendationLoading(true);
+        setIsAdvisoryLoading(false);
         setBackendRecs(null); // Clear stale data immediately
         setBackendFallback(null);
         const activeProfileId = profileId;
@@ -61,9 +63,45 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
         if (cancelled) return;
         setBackendRecs({
           ...recResponse,
-          profileId: activeProfileId
+          profileId: activeProfileId,
         });
         setBackendFallback(null);
+        setIsRecommendationLoading(false);
+
+        // Two-phase fetch: deferred advisory generation
+        if (recResponse?.recommendationId && (recResponse.advisory_explanation?.status === 'PENDING' || !recResponse.advisory_text)) {
+          setIsAdvisoryLoading(true);
+          try {
+            const advResponse = await api.fetchAdvisory(recResponse.recommendationId, { signal: controller.signal });
+            if (!cancelled && advResponse) {
+              setBackendRecs(prev => {
+                if (!prev || prev.recommendationId !== recResponse.recommendationId) return prev;
+                return {
+                  ...prev,
+                  advisory_text: advResponse.advisory_text,
+                  advisory_explanation: advResponse.advisory_explanation,
+                };
+              });
+            }
+          } catch (advErr) {
+            if (!cancelled && advErr?.code !== 'REQUEST_ABORTED') {
+              console.warn('Deferred advisory generation failed:', advErr);
+              setBackendRecs(prev => {
+                if (!prev || prev.recommendationId !== recResponse.recommendationId) return prev;
+                return {
+                  ...prev,
+                  advisory_explanation: {
+                    ...(prev.advisory_explanation || {}),
+                    status: 'FAILED',
+                    error: advErr.message,
+                  },
+                };
+              });
+            }
+          } finally {
+            if (!cancelled) setIsAdvisoryLoading(false);
+          }
+        }
       } catch (err) {
         if (err?.code === 'REQUEST_ABORTED' || cancelled) return;
         console.error("Failed to fetch backend recommendations:", err);
@@ -72,8 +110,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
           message: 'Authoritative recommendations are temporarily unavailable',
           detail: err?.message || null,
         });
-      } finally {
-        if (!cancelled) setIsLoading(false);
+        setIsRecommendationLoading(false);
       }
     };
     fetchBackendData();
@@ -211,7 +248,8 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
             userProfile={userProfile}
             recommendations={recommendations}
             recommendationMeta={backendRecs}
-            isLoading={isLoading}
+            isLoading={isRecommendationLoading}
+            isAdvisoryLoading={isAdvisoryLoading}
             explanation={backendRecs?.explanation || null}
             fallbackNotice={backendFallback}
             onDismissFallbackNotice={() => setBackendFallback(null)}

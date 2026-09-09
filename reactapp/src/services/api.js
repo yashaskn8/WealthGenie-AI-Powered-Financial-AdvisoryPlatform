@@ -353,6 +353,10 @@ export async function getRecommendations(profileId, options = {}) {
   return request('POST', '/recommend', { profileId }, { timeoutMs: 90000, ...options });
 }
 
+export async function fetchAdvisory(recommendationId, options = {}) {
+  return request('POST', `/recommend/${recommendationId}/advisory`, {}, { timeoutMs: 90000, ...options });
+}
+
 // ─── VERIFIED MARKET DATA (PHASE 1) ──────────────────────
 export async function getBenchmarkMarketFacts(options = {}) {
   return request('GET', '/market/benchmarks', null, options);

@@ -47,7 +47,10 @@ const InsightsScreen = ({ profile, recommendations, recommendationMeta }) => {
       tag: 'Advisory Context',
       tagColor: '#fbbf24',
       severity: 'medium',
-      body: recommendationMeta?.advisory_text || 'The advisory service did not return a narrative explanation.',
+      body: recommendationMeta?.advisory_text
+        || (['PENDING', 'GENERATING'].includes(recommendationMeta?.advisory_explanation?.status)
+          ? 'Generating grounded explanation…'
+          : 'The advisory service did not return a narrative explanation.'),
       action: recommendationMeta?.reconciliation_note || 'Review the recommendation dashboard for instrument-level evidence.',
       delay: 0.3
     },

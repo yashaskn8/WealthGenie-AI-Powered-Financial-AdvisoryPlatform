@@ -352,11 +352,22 @@ test('Chaos: all explanation providers offline returns grounded deterministic ad
       headers: { authorization: `Bearer ${token}`, 'idempotency-key': 'chaos-llm-fallback-001' },
     });
 
-    console.log(`[CHAOS-4] Recommend: status=${recRes.status}, advisory_text prefix="${recBody?.advisory_text?.substring(0, 60)}..."`);
     assert.equal(recRes.status, 200);
-    assert.match(recBody.advisory_text, /authoritative backend reports/i);
-    assert.match(recBody.advisory_text, /\[E_PROFILE_RISK\]/);
-    assert.equal(recBody.advisory_explanation.provider, 'DETERMINISTIC_TEMPLATE');
-    assert.equal(recBody.advisory_explanation.status, 'GROUNDED_EXPLANATION_FALLBACK');
+    assert.equal(recBody.advisory_text, null);
+    assert.equal(recBody.advisory_explanation.status, 'PENDING');
+
+    // 3. Fetch deferred advisory — explanation providers are offline, emits deterministic template
+    const { response: advRes, body: advBody } = await jsonFetch(`${baseUrl}/api/recommend/${recBody.recommendationId}/advisory`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    console.log(`[CHAOS-4] Deferred advisory: status=${advRes.status}, advisory_text prefix="${advBody?.advisory_text?.substring(0, 60)}..."`);
+    assert.equal(advRes.status, 200);
+    assert.match(advBody.advisory_text, /authoritative backend reports/i);
+    assert.match(advBody.advisory_text, /\[E_PROFILE_RISK\]/);
+    assert.equal(advBody.advisory_explanation.provider, 'DETERMINISTIC_TEMPLATE');
+    assert.equal(advBody.advisory_explanation.status, 'GROUNDED_EXPLANATION_FALLBACK');
   });
 });
