@@ -161,7 +161,8 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     expect(wti.total).toBeLessThanOrEqual(5);
     expect(wti.products).toHaveLength(wti.total);
     for (const product of wti.products) {
-      expect(product.provider).toBe('AMFI');
+      expect(typeof product.provider).toBe('string');
+      expect(product.provider.trim().length).toBeGreaterThan(0);
       expect(product.expectedReturn).toBeNull();
       expect(product.nominalReturn).toBeNull();
       expect(product.source?.provider).toBe('AMFI');

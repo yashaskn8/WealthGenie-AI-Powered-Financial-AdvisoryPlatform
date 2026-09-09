@@ -119,10 +119,22 @@ jobs:
           }
           $env:JWT_SECRET = $JWT_SECRET
           cd server
-          # Coverage is already collected by both Linux/Mongo integration jobs.
-          # Running the identical suite under c8 again on the slower Windows
-          # runner adds instrumentation cost without adding coverage evidence.
-          npm run test:unit
+          # advisoryPersistence.test.js requires real Mongo transaction semantics.
+          # It remains fully covered by both Linux/Mongo integration jobs (Mongo 6.0 and 7.0).
+          # The Windows job intentionally verifies the cross-platform no-Mongo test surface.
+          $unitTestFiles = Get-ChildItem -Path test -Recurse -Filter *.test.js |
+            Where-Object { $_.Name -ne 'advisoryPersistence.test.js' } |
+            ForEach-Object { $_.FullName }
+
+          if (-not $unitTestFiles -or $unitTestFiles.Count -eq 0) {
+            throw "No Windows unit test files selected."
+          }
+
+          if ($unitTestFiles | Where-Object { $_ -match '[\\/]advisoryPersistence\.test\.js$' }) {
+            throw "Mongo transaction suite was accidentally included in Windows no-Mongo test selection."
+          }
+
+          node --test --test-concurrency=1 $unitTestFiles
 
   frontend-quality-matrix:
     name: Frontend (Node ${{ matrix.node-version }}, ${{ matrix.os }})
