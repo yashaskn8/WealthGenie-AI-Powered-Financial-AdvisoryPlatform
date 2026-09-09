@@ -17,7 +17,7 @@
 | **Terraform IaC (Validated)** | [`terraform/`](terraform/) | Modular IaC for AWS VPC (3-AZ, public/private subnets, NAT Gateway), Amazon DocumentDB (3-node cluster, KMS encrypted), ALB, and Route53 DNS. Validated via `terraform validate` ("Success! The configuration is valid") & `terraform plan` ("Plan: 22 to add, 0 to change, 0 to destroy") |
 | **Random Forest classifier** | Production-serving `model.pkl` with TreeSHAP explainability | 95.63% rule-approx. fidelity (independent CFP benchmark: 25.26%) |
 | **FT-Transformer benchmark** | [`multi_model_benchmark.json`](ml-service/reports/multi_model_benchmark.json) | 97.05% rule-approx. fidelity (independent CFP benchmark: 15.83%) |
-| **RAG pipeline** | Live-wired into Express chat via [`intentGate.js`](server/services/intentGate.js) -> [`ragClient.js`](server/services/ragClient.js) -> FastAPI `/rag/query` | 508-chunk real corpus (Tax, SEBI, RBI/DICGC), FAISS `IndexFlatIP` vector store, 75-query eval ([`real_corpus_evaluation_report.json`](ml-service/reports/real_corpus_evaluation_report.json)): 98.7% document hit rate, Precision@4 0.7367, MRR 0.9022, NDCG@4 0.7564, 31.7ms avg latency |
+| **RAG research subsystem** | Standalone FastAPI `/rag/query` retrieval and tenant-isolation evaluation; it is not the active financial authority for Express chat | 508-chunk corpus (Tax, SEBI, RBI/DICGC), FAISS `IndexFlatIP` vector store, 75-query evaluation ([`real_corpus_evaluation_report.json`](ml-service/reports/real_corpus_evaluation_report.json)): 98.7% document hit rate, Precision@4 0.7367, MRR 0.9022, NDCG@4 0.7564, 31.7ms average latency |
 | **Embedding ablation study** | [`embedding_ablation.json`](ml-service/reports/embedding_ablation.json) | Semantic vs hash: +2.0% Recall, +0.09 MRR |
 | **Base LLM evaluation** | [`llm_eval_report.json`](ml-service/reports/llm_eval_report.json) | BLEU 0.028, ROUGE-L 0.284, Semantic Sim 0.666 |
 | **Fail-closed auth** | [`test_fail_closed_auth_when_api_key_unset`](ml-service/tests/test_ml_validation.py) | HTTP 500 when `ML_SERVICE_API_KEY` unset in non-local env |
@@ -36,10 +36,9 @@
 | [`server/test/idempotency.test.js`](server/test/idempotency.test.js) | Idempotency deduplication & dead-letter queue routing suite (3/3 pass) |
 | [`server/test/auditTrail.test.js`](server/test/auditTrail.test.js) | Regulatory advisory audit trail integration test suite (4/4 pass) |
 | **Offline-Resilient Test Database Provisioning** | [`server/test/helpers/mongoTestHelper.js`](server/test/helpers/mongoTestHelper.js) | Unified 4-tier test database engine: `MONGODB_URI` env → Testcontainers `mongo:7.0` → `MongoMemoryServer` fallback → Fail-Fast actionable diagnostics. All 11 integration test files centralized through helper. Full suite: **384/384 pass, 0 failures**. |
-| **Self-Correction & Replanning Loop (Phase 1)** | [`server/services/geminiChatService.js`](server/services/geminiChatService.js) & [`server/test/replanLoop.test.js`](server/test/replanLoop.test.js) | Multi-pass replanning loop (`MAX_REPLANS = 2`) feeding tool validation/execution errors or reasoning-driven wrong tool feedback back to LLM for argument correction, alternative tool selection, or user clarification. Verified live over HTTP. |
-| **Confused Deputy & Tool Boundary Defense (Phase 2)** | [`server/services/financialToolRegistry.js`](server/services/financialToolRegistry.js) & [`server/test/confusedDeputySecurity.test.js`](server/test/confusedDeputySecurity.test.js) | Deep recursive prototype pollution stripping (`sanitizeToolInputs`), whitelisted asset keys, and regex-constrained allocation keys. Red-team suite proves 100% containment of 7 attack classes. |
-| **Layered Memory & Tamper-Evident Ledger (Phase 3)** | [`server/services/layeredMemoryManager.js`](server/services/layeredMemoryManager.js) & [`server/scripts/verify_layered_memory_live.js`](server/scripts/verify_layered_memory_live.js) | 7-tier memory system (Working, Profile, Mid-Term, Preference, Decision, Tool, System) verified over 8 live HTTP turns beyond 5-turn working window. Cryptographic SHA-256 audit ledger verified with deliberate tamper detection at `brokenIndex: 0`. |
-| **Session Cost & Runaway Loop Protection (Phase 4)** | [`server/services/geminiChatService.js`](server/services/geminiChatService.js) & [`server/test/sessionCostSafety.test.js`](server/test/sessionCostSafety.test.js) | Session cumulative token caps (50,000 tokens), turn-level token caps (12,000 tokens), and hop caps (20 hops). Terminates runaway loops gracefully with direct user-facing notice banner in primary response text. |
+| **Grounded Explanation Boundary (Phase 6)** | [`server/services/geminiChatService.js`](server/services/geminiChatService.js), [`server/services/groundedExplanationService.js`](server/services/groundedExplanationService.js), [`server/services/groundingValidator.js`](server/services/groundingValidator.js) | Saved profile/current recommendation → minimal evidence packet → provider-neutral explanation → strict evidence validation. NVIDIA NIM is preferred, Gemini/Groq are optional fallbacks, the LLM tool allowlist is empty, and a deterministic grounded template handles provider failure. |
+| **Read-Only LLM Provider Boundary** | [`server/services/providerAbstraction.js`](server/services/providerAbstraction.js) | Provider credentials remain server-only. Providers cannot call financial tools, alter allocation, change suitability, rank products, or fetch arbitrary sources. |
+| **Conversation Persistence and Cost Bound** | [`server/services/geminiChatService.js`](server/services/geminiChatService.js) | Conversation evidence metadata is persisted, chat requests are rate-limited, and a 50,000-token session ceiling forces provider-free grounded fallback. There is no current multi-agent or replanning authority claim. |
 
 ---
 
@@ -93,14 +92,18 @@ Automated testing conducted via `axe-core` and `@testing-library/react` in `reac
 - **Test Suite Results**: 21 Vitest test suites (67 unit/integration tests) passing (`npm test`).
 
 ### 4. Playwright End-to-End Suite & Reproducible Stack Execution
-- **Test File**: `reactapp/e2e/full-flow.spec.js` (Playwright configuration in `reactapp/playwright.config.js`).
+- **Test File**: `reactapp/e2e/full-flow.spec.ts` (Playwright configuration in `reactapp/playwright.config.js`).
 - **Flow Verified**:
   1. **Signup**: Creates new account with password validation and mobile checks.
   2. **Profile Completion**: Fills monthly take-home, savings, age, tax regime, and auto-scales CTC.
-  3. **Recommendations & Deep Dive**: Verifies ranked investment cards mount; opens `DeepDiveModal` and dismisses it.
-  4. **Goal Planning**: Creates a target goal through the 3-step wizard and verifies Monte Carlo projections.
-  5. **GenieChat**: Asks a grounded financial question and verifies AI streaming response.
-- **Runtime**: **17.4s** executed against live Express (5000), Python FastAPI ML (8000), MongoDB (27017), and Vite (5173).
+  3. **Recommendations**: Verifies the saved-profile recommendation, allocation normalization, profile-version refresh, and restored dashboard UI.
+  4. **Where to Invest**: Calls the protected backend ranking path and verifies 0–5 truthful source-backed products without expected-return fabrication.
+  5. **Market Context & Adjustment**: Verifies explicit available/unavailable state, provenance, bounded adjustment, and post-adjustment suitability/concentration validation.
+  6. **Projection & Monte Carlo**: Verifies server-owned model-assumption provenance and non-provider-forecast labels.
+  7. **Goal, Tax, Session & Auth**: Creates a goal, runs explicit-source/fiscal-year tax comparison, restores a session, logs out, logs in, and logs out again.
+  8. **GenieChat**: Verifies evidence IDs, citations, grounding validation, provider metadata, and the visible grounded-data disclosure.
+  9. **Browser Boundary**: Fails on direct browser traffic to NSE, AMFI, SBI, India Post or LLM providers, and on unexpected page/console errors.
+- **Runtime**: Environment-dependent; the GitHub Actions browser lifecycle job is the release evidence against the complete real dependency stack.
 - **Reproducing Full-Stack E2E Test Runs**:
   - **Option A (Docker Full Stack)**:
     ```bash
@@ -114,7 +117,7 @@ Automated testing conducted via `axe-core` and `@testing-library/react` in `reac
     3. Terminal 3 (ML Service): `cd ml-service && uvicorn main:app --port 8000` (port `8000`).
     4. Terminal 4 (React & E2E): `cd reactapp && npm run dev` then in another window `npx playwright test`.
 - **CI Integration Status Disclosure**:
-  > **Note**: The Playwright E2E suite is configured for local and pre-release test runs via `npm run test:e2e`. **It is explicitly NOT wired into the automated GitHub Actions CI workflow (`.github/workflows/ci.yml`)** because the CI matrix runs isolated headless unit tests and does not spin up the multi-container live stack (Vite + Express + FastAPI + Mongo + Redis) required for full browser testing.
+  > The browser lifecycle is a required GitHub Actions job. It provisions a replica-set MongoDB, Redis, FastAPI, Express and Vite before running Playwright; it is not a mocked UI-only gate.
 
 ---
 
@@ -154,29 +157,22 @@ To transition from the Kind-based verification to a live production AWS/GCP clou
 
 ---
 
-## Agentic AI Platform Classification & Architectural Maturity Audit
+## Grounded Explanation Classification & Authority Audit
 
-### Classification: Progression from "Agentic Application" to "Agent Platform"
+### Classification: constrained read-only explanation layer
 
-Following the completion and independent verification of Phases 1 through 4, WealthGenie's Agentic AI architecture has transitioned from a fixed-pipeline **Agentic Application** to an autonomous **Agent Platform**:
+The current chat path is intentionally not an autonomous financial agent. It can explain only facts already produced by WealthGenie's authoritative backend:
 
-| Dimension | Initial Audit State ("Agentic Application") | Current Verified State ("Agent Platform") |
-|---|---|---|
-| **Replanning & Error Recovery** | Static fallback: tool errors immediately yielded generic fallback text or rule defaults. | **Autonomous Replanning Loop**: When a tool fails validation/execution or when ambiguous intent requires an alternative calculation, the error is fed back to the LLM. The model reasons, corrects parameters, or selects an alternative tool (capped at `MAX_REPLANS = 2`). |
-| **Tool Calling Boundary & Security** | Parameter schemas accepted unchecked prototype strings (`__proto__`, `constructor`) in object/array patterns. | **Confused Deputy Hardening**: Deep recursive input sanitization (`sanitizeToolInputs`), whitelisted asset keys (`VALID_ASSET_KEYS`), and regex-constrained dictionary keys. 100% containment of 7 red-team attack classes. |
-| **Context & Memory Architecture** | Ephemeral per-request memory or unbounded history accumulation. | **7-Tier Layered Memory**: Verified across 8+ turns (beyond 5-message working memory window). Tamper-evident SHA-256 cryptographic audit ledger detecting corrupted chain blocks at `brokenIndex: 0`. |
-| **Safety & Cost Protection** | Per-user rate limiting only; no loop hop or cumulative session token bounds. | **Multi-Tier Resource Envelopes**: Session-wide token cap (50,000 tokens), turn-level token cap (12,000 tokens), and hop cap (20 hops) with clear user-facing warning banners delivered in the primary response text. |
+| Dimension | Current verified boundary |
+|---|---|
+| **Financial authority** | Express-owned Financial Profile, hard suitability, eligible universe, recommendation, tax, projection and product-ranking services. |
+| **LLM input** | Minimal versioned evidence packet with source, timestamps, freshness and explicit unavailable facts. |
+| **LLM actions** | None. The grounded tool allowlist is empty; providers cannot edit a profile, fetch arbitrary URLs, calculate returns or change a recommendation. |
+| **Output validation** | Evidence IDs, numbers, dates, URLs, financial terms and authority labels are checked against the packet before release. |
+| **Failure behavior** | Missing credentials, provider errors or invalid output use a deterministic template grounded on the same packet. Financial facts are never synthesized as fallback. |
+| **Providers** | NVIDIA NIM preferred for grounded explanation; Gemini and Groq optional. React calls only Express. |
 
-### Real vs. Out-of-Scope Capabilities Disclosure
-
-- **Real & Fully Verified**:
-  1. Multi-pass tool self-correction and reasoning-driven replanning loop (`geminiChatService.js`, `replanLoop.test.js`, live HTTP trace).
-  2. Confused deputy prototype pollution defense across all 7 financial tools (`financialToolRegistry.js`, `confusedDeputySecurity.test.js`).
-  3. Multi-turn layered memory retrieval & cryptographic audit ledger tamper verification (`layeredMemoryManager.js`, `verify_layered_memory_live.js`, `proofLayeredMemory.test.js`).
-  4. Session-level cumulative token budgets and runaway-loop circuit breakers (`sessionCostSafety.test.js`, `verify_session_cost_safety_live.js`).
-- **Explicitly Out of Scope / Deferred**:
-  1. Arbitrary dynamic code execution sandbox (all AI actions are strictly confined to the closed deterministic tool registry).
-  2. Cross-network distributed multi-agent consensus protocols (orchestration is single-agent DAG and hierarchical planner).
+The standalone RAG, layered-memory, tool-registry and DAG modules remain research/legacy subsystems. They are not represented as the active chat financial authority.
 
 ---
 
@@ -235,7 +231,7 @@ WealthGenie is purpose-built and scoped strictly to **Indian personal income tax
 | MongoDB loss during write | Monkey-patched `FinancialProfile.create` (L106) | `mongoose.disconnect()` severs real TCP connection | Real `MongoNotConnectedError` → error handler → HTTP 503 |
 | Redis offline fallback | `setRedisAvailable(false)` flag flip (L134) | `connectRedis()` against real server; if unavailable, real no-client path | HybridStore falls back to MemoryStore → HTTP 200 |
 | ML service timeout | Monkey-patched `axios.post` (L165) | Dead port `59999` → real OS-level `ECONNREFUSED` | `mlClient.js` catches real error → `rule_fallback` |
-| Gemini & Groq offline | Monkey-patched `axios.post` (L207) | API keys cleared from `process.env` | Real code path skips API calls → `getFallbackAdvisory()` |
+| LLM providers offline | Provider calls isolated/disabled | Current chat path uses the validated deterministic grounded-evidence template; no recommendation or profile value changes |
 
 ### Phase 2 — MongoDB Mid-Transaction Failure (`midTransaction.test.js`)
 

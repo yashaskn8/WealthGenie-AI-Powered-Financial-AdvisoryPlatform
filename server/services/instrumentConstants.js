@@ -10,9 +10,9 @@
  * =========================================================================
  * 📘 BEGINNER NOTE: NOMINAL RATE vs. REAL RATE & VOLATILITY
  * =========================================================================
- * 1. Nominal Rate (nominalRate): The percentage return an investment is expected to 
- *    earn before accounting for inflation or taxes. For example, if a Fixed Deposit (FD)
- *    has a nominal rate of 6.5%, a ₹10,000 investment grows to ₹10,650 in a year.
+ * 1. Nominal Rate (nominalRate): A versioned WealthGenie model-policy input used
+ *    for scenarios before inflation or taxes. It is not a live product rate,
+ *    historical return, provider forecast, or promise of future performance.
  *    To get the "Real Rate" (purchasing power growth), you subtract the inflation rate 
  *    (e.g., if inflation is 5%, the real return is roughly 6.5% - 5% = 1.5%).
  * 
@@ -28,8 +28,8 @@ export const PROJECTION_ASSUMPTION_VERSION = 'wealthgenie-projection-assumptions
 export const PROJECTION_ASSUMPTION_SOURCE = 'WEALTHGENIE_MODEL_POLICY';
 export const PROJECTION_ASSUMPTION_DATA_CLASS = 'MODEL_ASSUMPTION';
 
-// ACCURACY NOTE: nominalRate for Mutual Funds/ETFs is already net of Total Expense Ratio (TER).
-// expenseRatio is documented here for transparency and used in risk/Sharpe adjustments.
+// MODEL NOTE: nominalRate and expenseRatio are frozen academic policy assumptions.
+// They are not source-established current product facts and must never be labelled as such.
 const rawModelAssumptions = {
   // Versioned scenario inputs. Any future recalibration requires a new assumption
   // version and regression evidence; provider observations must never mutate them.

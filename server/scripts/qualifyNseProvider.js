@@ -76,7 +76,11 @@ try {
   assert.equal(cachedHistoricalSnapshot.cache.hit, true);
   assert(historicalSnapshot.candleCount >= 200);
 
-  const features = computeMarketContextFeatures({ quoteSnapshot, historicalSnapshot });
+  // The forced refresh is the latest authoritative quote snapshot and is also
+  // the snapshot the HTTP route will read back from cache. Using the earlier
+  // coalescing snapshot here creates a race during open-market ticks.
+  const verifiedQuoteSnapshot = forcedQuoteSnapshot;
+  const features = computeMarketContextFeatures({ quoteSnapshot: verifiedQuoteSnapshot, historicalSnapshot });
   const candidate = classifyDeterministicMarketContext(features);
   const published = applyMarketContextHysteresis(candidate, null, new Date()).result;
   assert.equal(features.status, 'FEATURES_AVAILABLE');
@@ -102,16 +106,16 @@ try {
   const sensitiveCachePattern = /authorization|bearer|cookie|sessionid|analytics_token|access_token/i;
   assert.equal(sensitiveCachePattern.test(serializedCache), false);
 
-  const nifty = quoteSnapshot.facts.find(
+  const nifty = verifiedQuoteSnapshot.facts.find(
     fact => fact.canonicalProductId === MARKET_BENCHMARKS.NIFTY_50.canonicalProductId,
   );
-  const vix = quoteSnapshot.facts.find(
+  const vix = verifiedQuoteSnapshot.facts.find(
     fact => fact.canonicalProductId === MARKET_BENCHMARKS.INDIA_VIX.canonicalProductId,
   );
   const report = {
-    provider: quoteSnapshot.provider,
-    qualification: quoteSnapshot.qualification,
-    dataClasses: { quotes: quoteSnapshot.dataClass, history: historicalSnapshot.dataClass },
+    provider: verifiedQuoteSnapshot.provider,
+    qualification: verifiedQuoteSnapshot.qualification,
+    dataClasses: { quotes: verifiedQuoteSnapshot.dataClass, history: historicalSnapshot.dataClass },
     nifty50: publicFact(nifty),
     indiaVix: publicFact(vix),
     history: {

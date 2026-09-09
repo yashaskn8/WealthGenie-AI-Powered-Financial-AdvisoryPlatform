@@ -1,8 +1,8 @@
 # WealthGenie — AI-Powered Financial Advisory & Portfolio Optimization Platform
 
-> A full-stack financial advisory engine featuring a 5-stage portfolio optimization pipeline, hybrid RAG knowledge retrieval, deep learning suitability classification, multi-agent conversational AI, and real-time FY2025-26 Indian tax regime evaluation.
+> A full-stack financial decision-support engine with backend-owned suitability and allocation, source-backed investment data, deterministic market context, shadow ML evaluation, grounded LLM explanations, and versioned Indian tax calculations.
 
-[![CI Test Matrix](https://github.com/yashaskn8/WealthGenie-AI-Powered-Financial-Advisory-Platform/actions/workflows/ci.yml/badge.svg)](https://github.com/yashaskn8/WealthGenie-AI-Powered-Financial-Advisory-Platform/actions/workflows/ci.yml)
+[![CI Test Matrix](https://github.com/yashaskn8/WealthGenie-Architecture-Restoration/actions/workflows/ci.yml/badge.svg)](https://github.com/yashaskn8/WealthGenie-Architecture-Restoration/actions/workflows/ci.yml)
 [![Node.js](https://img.shields.io/badge/Node.js-v22.x-339933?logo=node.js)](https://nodejs.org/)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
@@ -23,11 +23,12 @@
 ### Core Engineering Capabilities Demonstrated
 
 * **5-Stage Mathematical Portfolio Optimization**: Combines mean-variance quadratic optimization (`numeric` solver), rule-based heuristic fallback, policy concentration caps (`CONCENTRATION_CAPS`), and emergency fund floor protection.
-* **Multi-Tenant RAG Knowledge Retrieval**: Intent-gated architecture combining `SentenceTransformers` (`all-MiniLM-L6-v2` 384D) vector search and BM25 sparse retrieval over vectorized SEBI/RBI/IT-Act chunks with multi-tenant namespace isolation and inline citation verification.
+* **Source-Backed Product and Market Data**: Normalized provider-neutral facts from NSE, AMFI, India Post/Department of Posts, and SBI, with timestamps, freshness, caching, request coalescing, and explicit unavailable states.
 * **OpenTelemetry Distributed Tracing**: Full W3C `traceparent` and `X-Correlation-ID` context propagation across Express and FastAPI microservices exporting spans to local `traces.jsonl`.
 * **Tamper-Evident Advisory Audit Chain**: Transactional SHA-256 hash chaining binds advisory inputs, outputs, model/rule versions, provenance, timestamps, and correlation data. MongoDB records are not described as immutable.
 * **Multi-Model Tabular Deep Learning**: Comparative suitability modeling benchmarking **Random Forest** (95.63% test rule-approximation fidelity, TreeSHAP explainability), **PyTorch MLP** (95.60%), and **FT-Transformer** (*NeurIPS 2021*, 97.05% test rule-approximation fidelity).
-* **Multi-Agent Conversational System**: Layered stateful conversation orchestration featuring security prompt injection defense, financial tool calling, `LayeredMemoryManager`, and structured JSON response protocols.
+* **Grounded Explanation Boundary**: NVIDIA NIM is preferred only for explaining a minimal read-only backend evidence packet. Gemini and Groq are optional fallback providers; every model response is validated, and a deterministic grounded template remains available without changing financial decisions.
+* **Market Context Evaluation**: The deterministic market-context policy is the recommendation champion. A CPU-friendly HMM is loaded and evaluated in shadow mode only; it cannot change allocations or suitability.
 * **Dual Tax Engine (FY2025-26)**: In-memory Indian tax engine evaluating Old vs New tax regimes, Section 87A marginal rebate relief, surcharges, and Section 80C/80D deductions.
 * **REST Architecture**: Express gateway benchmarked up to **5,537.7 req/s** on local load tests (`autocannon` v8.0.0) with fail-closed API security and Mongoose schema validation.
 
@@ -38,14 +39,14 @@
 | Capability | Implementation Mechanism | Verification / Benchmark Source |
 | :--- | :--- | :--- |
 | **Portfolio Recommendation** | 5-stage pipeline: Risk scoring → Asset allocation → Quadratic solver / Heuristic fallback → Policy caps → Rebalancing | [`server/services/RecommendationPipeline.js`](server/services/RecommendationPipeline.js), [`server/test/recommendationPipeline.test.js`](server/test/recommendationPipeline.test.js) |
-| **RAG Knowledge Retrieval & Multi-Tenancy** | FastAPI hybrid vector search (`all-MiniLM-L6-v2` 384D) with tenant namespace isolation & intent routing | Document Hit Rate: **98.7%**, Precision@4: **0.7367**, MRR: **0.9022** ([`real_corpus_evaluation_report.json`](ml-service/reports/real_corpus_evaluation_report.json), [`test_rag_tenant_isolation.py`](ml-service/tests/test_rag_tenant_isolation.py)) |
+| **RAG Research Subsystem** | Standalone FastAPI hybrid retrieval evaluation with tenant isolation; it is not the active financial authority for chat | Document Hit Rate: **98.7%**, Precision@4: **0.7367**, MRR: **0.9022** ([`real_corpus_evaluation_report.json`](ml-service/reports/real_corpus_evaluation_report.json), [`test_rag_tenant_isolation.py`](ml-service/tests/test_rag_tenant_isolation.py)) |
 | **Distributed Tracing** | OpenTelemetry SDK with W3C `traceparent` propagation across Express <-> FastAPI microservices exporting to `traces.jsonl` | [`server/config/tracing.js`](server/config/tracing.js), [`ml-service/tracing.py`](ml-service/tracing.py), [`scripts/verify_distributed_tracing.js`](scripts/verify_distributed_tracing.js) |
 | **Tamper-Evident Advisory Audit Chain** | Transactional canonical SHA-256 record chain with fail-loudly guarantees and verification endpoint | [`server/models/AuditRecord.js`](server/models/AuditRecord.js), [`server/test/auditChain.test.js`](server/test/auditChain.test.js) |
 | **Playwright Full-Lifecycle E2E Suite** | Real-service user lifecycle against replica-set MongoDB, Redis, FastAPI, Express, and Vite | [`reactapp/e2e/full-flow.spec.ts`](reactapp/e2e/full-flow.spec.ts), [`.github/workflows/ci.yml`](.github/workflows/ci.yml) |
 | **Investor Classification** | Random Forest (`model.pkl`), PyTorch MLP, and FT-Transformer tabular neural network | FT-Transformer: **97.05%** rule-approx. (independent CFP: 15.83%), RF: **95.63%** rule-approx. (independent CFP: 25.26%) ([`multi_model_benchmark.json`](ml-service/reports/multi_model_benchmark.json)) |
-| **Agentic Advisory Chat** | Multi-agent state machine (`geminiChatService.js`, `aiToolOrchestrator.js`) with tool-calling graph | Post-patch load test: **105.7–193.6 req/s** (chat API throughput) ([`load_test_report.md`](load_test_report.md)) |
+| **Grounded Advisory Explanation** | Backend evidence packet → provider adapter → strict grounding validator → React provenance rendering; LLM tool allowlist is empty | [`server/services/groundedExplanationService.js`](server/services/groundedExplanationService.js), [`server/services/groundingValidator.js`](server/services/groundingValidator.js) |
 | **Tax Regime Computation** | In-memory FY2025-26 Old vs New regime calculator with Section 87A rebate logic | Compute throughput: **3,736.7–5,537.7 req/s** (tax engine execution) ([`load_test_report.md`](load_test_report.md)) |
-| **Financial Instrument Catalog** | 155 curated instruments across 14 asset classes | Canonical [`server/data/investment_master.json`](server/data/investment_master.json), generated frontend mirror, and parity test |
+| **Where-to-Invest Product Evidence** | AMFI-backed mutual-fund universe and official India Post/SBI fixed-income facts; 0–5 truthful results with unavailable/comparable states | [`server/services/mutualFundProductRanking.js`](server/services/mutualFundProductRanking.js), [`server/services/fixedIncomeProductRanking.js`](server/services/fixedIncomeProductRanking.js) |
 | **Security Controls** | Fail-closed API key verification, prompt injection defense pipeline, Joi validation | [`test_fail_closed_auth_when_api_key_unset`](ml-service/tests/test_ml_validation.py) |
 | **Distributed Systems Failure-Mode Testing** | Real-failure chaos tests (MongoDB disconnect, Redis disconnect, ML ECONNREFUSED), mid-transaction partial-write proof, Redis fail-closed audit | [`chaos.test.js`](server/test/chaos.test.js), [`midTransaction.test.js`](server/test/midTransaction.test.js), [`redisFailClosed.test.js`](server/test/redisFailClosed.test.js) |
 | **Testing & CI/CD** | Backend, ML, frontend, dependency-audit, API-contract, and real-service browser gates | GitHub Actions workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) |
@@ -54,22 +55,21 @@
 
 ## System Architecture
 
-The platform architecture splits workload across an Express.js Gateway (IntentGate) (Node.js), a FastAPI Machine Learning & RAG Microservice (Python 3.12), a MongoDB document datastore, a Redis cache and coordination layer, and a React 19 single-page application.
+The platform splits workload across an authoritative Express API (Node.js), a FastAPI ML and research-retrieval service (Python 3.12), MongoDB, Redis, and a React 19 presentation client. Provider-specific payloads stop at server adapters and are normalized before feature or policy code consumes them.
 
 ![System Architecture Diagram showing the React SPA, Express API Gateway, MongoDB, Redis, FastAPI ML microservice, and LLMs](docs/architecture/system_architecture.png)
 > **System architecture.** End-to-end request pathways across the React client, Express REST API Gateway, MongoDB document datastore, Redis cache, and Python FastAPI ML microservice.
 
 ### Request Flow
-1. **User Request**: React SPA submits user profile or query payload to Express gateway.
-2. **Intent Classification**: [`intentGate.js`](server/services/intentGate.js) routes factual tax/regulatory queries to FastAPI RAG (`/rag/query`) and advisory queries to Gemini/Groq LLM orchestrators.
-3. **Execution**:
-   - **Recommendation Requests**: Express invokes `RecommendationPipeline.js` (5-stage optimization) + queries FastAPI ML microservice for suitability predictions.
-   - **RAG Queries**: FastAPI embeds query with `all-MiniLM-L6-v2` (384D), searches vector database, and returns cited responses.
-4. **Response Delivery**: Output passes through security filters and structured JSON validation before returning to client.
+1. **Profile and recommendation**: React submits validated facts to Express. Express constructs the canonical Financial Profile, applies hard suitability, creates the eligible universe and allocation, and persists recommendation/audit records transactionally.
+2. **Market and product facts**: Server-side adapters fetch only required NSE, AMFI, India Post, and SBI facts. The normalized contracts preserve source, observation time, fetch time, freshness, and unavailable states; Redis provides bounded caching and request coalescing.
+3. **Market context and adjustment**: The deterministic feature engine feeds the deterministic market-context policy champion. Hysteresis/state persistence and bounded profile-safe adjustment run before post-adjustment suitability and concentration validation. The HMM remains shadow-only.
+4. **Explanation**: Express creates a minimal evidence packet from already-authoritative facts. NVIDIA NIM, Gemini, or Groq may explain that packet without tools. The grounding validator rejects unsupported output; deterministic template fallback is grounded on the same packet.
+5. **Presentation**: React renders authoritative response data and provenance and never calls financial-data or LLM providers directly.
 
 Express is the authoritative boundary for personalized recommendations, product suitability and ordering, allocation policy, eligibility, and tax decisions. React supplies validated inputs and renders returned decisions; it does not silently substitute local financial-policy calculations when a backend decision is unavailable.
 
-The public Express contract is defined by [`server/openapi.yaml`](server/openapi.yaml) and checked against the registered routes. Express-to-FastAPI prediction and RAG payloads use shared fixtures plus strict Node and Pydantic validators. Public errors use the stable `{ error, message, code, request_id, details? }` envelope.
+The public Express contract is defined by [`server/openapi.yaml`](server/openapi.yaml) and checked against the registered routes. Express-to-FastAPI prediction payloads use shared fixtures plus strict Node and Pydantic validators. The FastAPI RAG subsystem remains available for isolated retrieval research, not as a bypass around Express financial authority. Public errors use the stable `{ error, message, code, request_id, details? }` envelope.
 
 ---
 
@@ -121,21 +121,18 @@ Base `Qwen/Qwen2.5-0.5B-Instruct` was evaluated across 25 financial prompts agai
 
 ---
 
-## Agentic AI & Conversation Architecture
+## Grounded Explanation Architecture
 
-The chat system implements a stateful, tool-assisted agent pipeline driven by [`geminiChatService.js`](server/services/geminiChatService.js) and [`aiToolOrchestrator.js`](server/services/aiToolOrchestrator.js):
+Chat is an explanation layer, not a recommendation engine. [`geminiChatService.js`](server/services/geminiChatService.js) loads the user's saved profile and a recommendation only when its profile hash is current, then asks [`groundedExplanationService.js`](server/services/groundedExplanationService.js) to build and explain a minimal evidence packet.
 
-![Agentic AI Workflow Diagram showing prompt injection inspection, intent gate routing, layered memory manager, financial tool registry, and tool trace graph](docs/architecture/agent_workflow.png)
-> **Agentic AI workflow.** Step-by-step advisory flow from security prompt inspection and intent classification to tool execution and structured response generation.
+### Authority and Failure Boundaries
 
-### Component Breakdown
-* **`geminiChatService.js`**: Orchestrates the multi-pass tool-grounded execution loop with self-correcting replanning (`MAX_REPLANS = 2`), session token budgeting, and governance trace logging.
-* **`aiToolOrchestrator.js`**: Resolves tool dependency DAGs, executes independent tool batches concurrently, and coordinates intermediate replanning evaluation.
-* **`financialToolRegistry.js`**: Exposes canonical, deterministic financial tools with deep prototype pollution sanitization (`sanitizeToolInputs`), whitelisted asset keys, and strict Joi schema contracts.
-* **`layeredMemoryManager.js`**: Implements 7 memory tiers (Working, Profile, Mid-Term with TTL, Preference, Decision, Tool, System) with tamper-evident SHA-256 cryptographic audit ledger verification.
-* **`immutableSecurityPipeline.js`**: Sanitizes prompt inputs and detects injection attacks before LLM submission.
-* **`intentGate.js`**: Classifies incoming queries to decide whether RAG grounding or LLM tool-orchestration is required.
-* **`toolTraceGraph.js`**: Snapshots reproducible tool execution DAGs and governance checksums for enterprise auditability.
+* **Read-only evidence**: Profile suitability, recommendation, market context, official fixed-income rates, and projection assumptions enter the packet only through canonical backend services.
+* **Provider abstraction**: [`providerAbstraction.js`](server/services/providerAbstraction.js) offers NVIDIA NIM as the preferred grounded explanation provider, with optional Gemini and Groq fallbacks. React never calls any provider directly.
+* **No financial tools**: `GROUNDED_LLM_TOOL_ALLOWLIST` is empty. The model cannot change profiles, select products, compute returns, set allocations, or bypass suitability.
+* **Validation**: [`groundingValidator.js`](server/services/groundingValidator.js) rejects unknown evidence IDs, unsupported numbers/dates/URLs, and uncontrolled financial or authority claims.
+* **Fail-safe response**: Missing credentials, provider errors, invalid JSON, or grounding failures produce a validated deterministic template from the same evidence packet. They do not silently invent facts or change financial decisions.
+* **Audit metadata**: Responses expose provider/model, prompt and grounding versions, evidence IDs, unavailable facts, citations, validation status, timestamps, and whether fallback was used.
 
 ---
 
@@ -151,7 +148,7 @@ The core recommendation engine ([`RecommendationPipeline.js`](server/services/Re
 2. **Stage 2 — Target Allocation Matrix**: Maps composite risk score to asset class targets (Equity, Debt, Gold, Liquid).
 3. **Stage 3 — Mathematical Optimization**: Executes mean-variance quadratic optimization via `numeric` package to maximize return for target volatility. If optimizer fails or encounters invalid boundaries, falls back to deterministic heuristic solver.
 4. **Stage 4 — Policy Concentration Caps**: Enforces `CONCENTRATION_CAPS` (e.g. Smallcap ≤15%, Direct Equity ≤20%, SGB ≤10%, NPS ≤25%) with iterative excess redistribution.
-5. **Stage 5 — Execution Pathway Selection**: Ranks catalog product candidates across 155 catalog instruments using profile-aware scoring.
+5. **Stage 5 — Execution Pathway Selection**: Produces deterministic eligible parent instruments with versioned model assumptions and concentration validation. Product-level Where-to-Invest ranking is a separate source-backed path; the legacy catalog is reference metadata only and never supplies product order or live financial values.
 
 ### Security Controls
 * **Fail-Closed API Key Authentication**: [`verify_api_key()`](ml-service/main.py#L231) in the ML microservice returns HTTP 500 (misconfiguration error) if `ML_SERVICE_API_KEY` is unset in non-local environments, preventing unauthorized access.
@@ -175,8 +172,8 @@ Empirical load testing was conducted using `autocannon` (v8.0.0) across 30-secon
 | **Stress Ceiling (Tax Compare)** | 200 | 35.0 ms | 43.0 ms | 54.0 ms | **5,537.7 req/s** | **0.00%** | 166,115x HTTP 200 |
 | **Instruments DB (Read-Heavy)** | 10 | 48.0 ms | 66.0 ms | 73.0 ms | **199.0 req/s** | **0.00%** | 5,969x HTTP 200 |
 | **Instruments DB (Read-Heavy)** | 100 | 79.0 ms | 244.0 ms | 267.0 ms | **973.7 req/s** | **0.00%** | 29,212x HTTP 200 |
-| **Agentic Chat Endpoint (Post-Patch)** | 10 | 90.0 ms | 155.0 ms | 245.0 ms | **105.7 req/s** | **0.00%** | 3,170x HTTP 200 |
-| **Agentic Chat Endpoint (Post-Patch)** | 100 | 506.0 ms | 844.0 ms | 874.0 ms | **193.6 req/s** | **0.00%** | 5,807x HTTP 200 |
+| **Historical Chat Endpoint Benchmark** | 10 | 90.0 ms | 155.0 ms | 245.0 ms | **105.7 req/s** | **0.00%** | 3,170x HTTP 200 |
+| **Historical Chat Endpoint Benchmark** | 100 | 506.0 ms | 844.0 ms | 874.0 ms | **193.6 req/s** | **0.00%** | 5,807x HTTP 200 |
 
 *Full benchmark report*: [`load_test_report.md`](load_test_report.md) with committed raw outputs in `server/reports/loadtest/`.
 
@@ -190,7 +187,7 @@ Empirical load testing was conducted using `autocannon` (v8.0.0) across 30-secon
 | **Backend Gateway** | Node.js v22.x, Express.js, Mongoose ODM, Joi Validation, Numeric.js, Autocannon |
 | **ML Microservice** | Python 3.12, FastAPI, PyTorch, scikit-learn, SentenceTransformers, NumPy, pandas, Uvicorn |
 | **Database & Cache** | MongoDB v7.0 (Document Store & Vector Chunk Persistence), Redis 7.2 (Streams DAG Persistence, Cache & HybridStore) |
-| **AI / LLM / RAG** | Google Gemini 1.5 Pro / Flash API, Groq API, `all-MiniLM-L6-v2` 384D Embeddings |
+| **AI / LLM / RAG** | NVIDIA NIM (preferred grounded explanation only), optional Gemini/Groq fallbacks, `all-MiniLM-L6-v2` retrieval research |
 | **Containerization & CI** | Docker, Docker Compose, GitHub Actions (Multi-OS Node + Python matrix) |
 
 ---
@@ -205,8 +202,8 @@ Empirical load testing was conducted using `autocannon` (v8.0.0) across 30-secon
 
 ### 1. Clone Repository
 ```bash
-git clone https://github.com/yashaskn8/WealthGenie-AI-Powered-Financial-Advisory-Platform.git
-cd WealthGenie-AI-Powered-Financial-Advisory-Platform
+git clone https://github.com/yashaskn8/WealthGenie-Architecture-Restoration.git
+cd WealthGenie-Architecture-Restoration
 ```
 
 ### 2. Environment Configuration
@@ -220,10 +217,17 @@ cp reactapp/.env.example reactapp/.env
 Key environment variables to configure in `server/.env`:
 ```ini
 PORT=5000
-MONGODB_URI=mongodb://127.0.0.1:27017/wealthgenie
+MONGODB_URI=mongodb://127.0.0.1:27017/wealthgenie?replicaSet=rs0
+REDIS_URL=redis://127.0.0.1:6379
 JWT_SECRET=your_secure_jwt_secret_key_min_32_chars
 ML_SERVICE_URL=http://127.0.0.1:8000
-GEMINI_API_KEY=your_gemini_api_key
+ML_SERVICE_API_KEY=use_the_same_private_value_as_the_ml_service
+# Optional explanation providers; the deterministic grounded fallback needs none.
+NVIDIA_API_KEY=your_rotated_nvidia_key
+# GEMINI_API_KEY=optional_fallback_key
+# GROQ_API_KEY=optional_fallback_key
+# Optional authenticated market-data fallback; NSE remains the public primary source.
+# UPSTOX_ANALYTICS_TOKEN=optional_upstox_token
 ```
 
 In `ml-service/.env`:
@@ -232,6 +236,8 @@ PORT=8000
 ENVIRONMENT=local
 ML_SERVICE_API_KEY=your_ml_service_key
 ```
+
+NSE, AMFI, India Post/Department of Posts, and SBI public data do not require browser-visible API keys. All provider access is server-side. Never place an LLM or market-provider secret in a `VITE_*` variable or commit a real `.env` file.
 
 ### 3. Start Backend Services Locally
 
@@ -398,7 +404,7 @@ WealthGenie-AI-Powered-Financial-Advisory-Platform/
 │   ├── middleware/                # Auth, rate-limiter, correlation/traceparent, idempotency
 │   ├── models/                    # Mongoose Schemas (User, Profile, Recommendation, AuditRecord)
 │   ├── routes/                    # REST Endpoints (recommend, tax, profile, chat, etc.)
-│   ├── services/                  # RecommendationPipeline, TaxEngine, GeminiChatService
+│   ├── services/                  # Recommendation, tax, market-data and grounded-explanation authority
 │   └── test/                      # Node.js unit, integration, transaction, and contract tests
 ├── ml-service/                    # FastAPI Machine Learning Microservice
 │   ├── main.py                    # FastAPI routes (/predict, /rag/query, /health)

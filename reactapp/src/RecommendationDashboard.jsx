@@ -1686,7 +1686,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                       Genie's Personal Advisory Summary
                     </h3>
                     <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: 2, fontWeight: 500 }}>
-                      AI-synthesized financial allocation & strategy tailored to your profile
+                      Backend-generated allocation and grounded explanation for your saved profile
                     </div>
                   </div>
                 </div>
@@ -2074,8 +2074,8 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                 <div style={{display: 'flex', gap: 12, alignItems: 'flex-start'}}>
                   <span style={{fontSize: '1.2rem', lineHeight: 1}}>&#x1F4A1;</span>
                   <div>
-                    <div style={{fontWeight: 700, color: '#e2e8f0', fontSize: '0.82rem', marginBottom: 2}}>Returns shown are after tax</div>
-                    <div style={{fontSize: '0.72rem', color: '#94a3b8', lineHeight: 1.5}}>Unlike most apps, WealthGenie shows you what you actually keep after paying tax — not just the headline rate.</div>
+                    <div style={{fontWeight: 700, color: '#e2e8f0', fontSize: '0.82rem', marginBottom: 2}}>Dashboard returns are pre-tax model assumptions</div>
+                    <div style={{fontSize: '0.72rem', color: '#94a3b8', lineHeight: 1.5}}>Use Real Returns or Save on Taxes with explicit income, regime, income source, and fiscal year to obtain a separate server-calculated tax result.</div>
                   </div>
                 </div>
                 <div style={{display: 'flex', gap: 12, alignItems: 'flex-start'}}>

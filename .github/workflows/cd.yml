@@ -183,7 +183,7 @@ jobs:
           echo "- **Deep Health Probe (/health/deep)**: \`$DEEP_RES\`" >> $GITHUB_STEP_SUMMARY
 
           echo "4. Testing Business Endpoint /api/tax/compare..."
-          TAX_RES=$(curl -s -f "http://127.0.0.1:5000/api/tax/compare?income=1200000")
+          TAX_RES=$(curl -s -f "http://127.0.0.1:5000/api/tax/compare?income=1200000&incomeSource=salary&fiscalYear=FY2026-27")
           echo "Tax Compare Response: $TAX_RES"
           echo "- **Business Tax Endpoint (/api/tax/compare)**: \`$TAX_RES\`" >> $GITHUB_STEP_SUMMARY
 
