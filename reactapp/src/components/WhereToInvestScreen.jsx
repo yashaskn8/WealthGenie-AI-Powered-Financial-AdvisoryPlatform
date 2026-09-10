@@ -28,6 +28,7 @@ const WhereToInvestScreen = ({
   onSelectInvestment,
   recommendationsLoading = false,
   recommendationsError = null,
+  recommendationMeta = null,
 }) => {
   // Recommendations in exact backend order
   const recommendedParents = useMemo(() => recommendations || [], [recommendations]);
@@ -252,6 +253,7 @@ const WhereToInvestScreen = ({
             key={activeParent.id}
             inv={activeParent}
             userProfile={userProfile}
+            recommendationMeta={recommendationMeta}
           />
         </main>
       )}

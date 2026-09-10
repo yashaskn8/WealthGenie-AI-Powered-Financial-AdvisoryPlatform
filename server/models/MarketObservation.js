@@ -20,7 +20,18 @@ const metricsSchema = new mongoose.Schema({
 
 const marketObservationSchema = new mongoose.Schema({
   schemaVersion: { type: String, required: true },
-  kind: { type: String, enum: ['MUTUAL_FUND_NAV', 'MARKET_QUOTE', 'SCHEME_INTEREST_RATE', 'TERM_DEPOSIT_RATE'], required: true },
+  kind: {
+    type: String,
+    enum: [
+      'MUTUAL_FUND_NAV',
+      'MARKET_QUOTE',
+      'MARKET_HISTORY_CANDLE',
+      'MARKET_CONTEXT_SNAPSHOT',
+      'SCHEME_INTEREST_RATE',
+      'TERM_DEPOSIT_RATE',
+    ],
+    required: true,
+  },
   canonicalProductId: { type: String, required: true, index: true },
   value: { type: Number, required: true },
   currency: { type: String, default: null },
@@ -43,6 +54,11 @@ const marketObservationSchema = new mongoose.Schema({
     url: { type: String, required: true },
   },
   metrics: { type: metricsSchema, default: () => ({}) },
+  // A qualified market-context publication is derived from the observations
+  // above. Keeping its immutable, provider-backed DTO beside those
+  // observations lets the service recover after Redis/process restarts without
+  // treating a cache entry as financial authority.
+  snapshotPayload: { type: mongoose.Schema.Types.Mixed, default: null },
 }, { strict: 'throw', timestamps: true });
 
 marketObservationSchema.index(

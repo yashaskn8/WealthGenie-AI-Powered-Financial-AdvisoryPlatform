@@ -29,6 +29,28 @@ const MARKET_CONTEXT_MOCK = {
   sources: [
     { provider: 'NSE', instrumentId: 'NIFTY 50', dataClass: 'LIVE' },
   ],
+  marketSnapshot: {
+    schemaVersion: 'market-snapshot-1.0.0',
+    status: 'CURRENT',
+    availability: 'AVAILABLE',
+    providerStatus: {
+      quotes: { provider: 'NSE', status: 'AVAILABLE' },
+      history: { provider: 'NSE', status: 'AVAILABLE' },
+    },
+    observedFacts: [],
+    derivedFacts: [],
+    policyOutput: {
+      semanticClass: 'POLICY_OUTPUT',
+      dataClass: 'POLICY_OUTPUT',
+      status: 'MARKET_CONTEXT_AVAILABLE',
+      reasonCodes: [],
+      policyVersion: 'market-context-policy-1.0.0',
+    },
+    provenance: { sources: [{ provider: 'NSE', instrumentId: 'NIFTY 50', dataClass: 'LIVE' }] },
+    observedAt: '2026-09-09T10:00:00.000Z',
+    evaluatedAt: '2026-09-09T14:46:01.694Z',
+    marketSession: { status: 'MARKET_OPEN', tradingDate: '2026-09-09' },
+  },
 };
 
 test.describe('Beginner-First Navigation Architecture E2E Journey', () => {
@@ -157,16 +179,64 @@ test.describe('Beginner-First Navigation Architecture E2E Journey', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          rankingId: 'wti_rank_nav',
-          universe: 'QUALIFIED_GOVERNMENT_SAVINGS',
+          success: true,
+          total: 1,
+          excluded: [],
+          suitability: { status: 'SUITABLE', riskReconciliation: { final_risk_tier: 'MEDIUM' } },
+          catalog: {
+            dataClass: 'REFERENCE_METADATA',
+            title: 'Where to invest in Public Provident Fund (PPF)',
+            note: 'Only the qualified provider response supplies current product facts.',
+            howToStart: 'Open a PPF account through a qualified government channel.',
+            riskLevel: 1,
+            providerCoverage: {
+              parentInstrumentId: 'ppf',
+              parentName: 'Public Provident Fund (PPF)',
+              canBeRecommended: true,
+              qualifiedWtiProvider: 'GOVERNMENT_OF_INDIA',
+              productOptionsAvailable: true,
+              status: 'QUALIFIED_PROVIDER_PATH',
+              currentFailureMode: 'QUALIFIED_PROVIDER_RESPONSE_REQUIRED',
+              productSubstitutionAllowed: false,
+            },
+          },
+          ranking: {
+            status: 'VERIFIED_COMPARABLE_OPTIONS',
+            authority: 'GOVERNMENT_OF_INDIA',
+            reasonCodes: ['OFFICIAL_SOURCE_FACT_VERIFIED', 'SINGLE_CANONICAL_PRODUCT', 'MERIT_RANKING_NOT_CLAIMED'],
+          },
+          comparisonUniverse: { verifiedProductCount: 1, disclosure: 'One qualified government product is available.' },
           products: [
             {
-              id: 'ppf-main',
+              id: 'government:india-post:ppf',
+              canonicalProductId: 'government:india-post:ppf',
+              parentInstrumentId: 'ppf',
+              productType: 'SMALL_SAVINGS',
+              presentationStatus: 'VERIFIED_COMPARABLE_OPTION',
+              rank: 1,
+              tiedRank: 1,
               name: 'Public Provident Fund',
-              metric: '7.1% p.a. (Govt fixed)',
-              risk: 'Very Low Risk',
-              source: 'India Post / DEA',
-              access: '15-year lock-in with partial withdrawals',
+              provider: 'Government of India / India Post',
+              source: { provider: 'GOVERNMENT_OF_INDIA', instrumentId: 'ppf', url: 'https://www.indiapost.gov.in/' },
+              officialRate: {
+                value: 7.1,
+                unit: 'PERCENT_PER_ANNUM',
+                basis: 'OFFICIAL_NOMINAL_RATE_PER_ANNUM',
+                dataClass: 'QUARTERLY_OFFICIAL_RATE',
+              },
+              expectedReturn: null,
+              nominalReturn: null,
+              effectiveYield: null,
+              postTaxReturn: null,
+              risk: { level: 'Very Low Risk' },
+              beginnerSuitability: {
+                whyThisFitsYou: 'Fits the verified low-risk government savings category.',
+                riskTier: 'Very Low Risk',
+                accessToMoney: '15-year lock-in with partial withdrawals',
+                verifiedFactLabel: 'Current official rate',
+                verifiedFactValue: '7.10% p.a.',
+                sourceProvider: 'Government of India / India Post',
+              },
             },
           ],
         }),
@@ -194,7 +264,7 @@ test.describe('Beginner-First Navigation Architecture E2E Journey', () => {
     // 2. Click "See Where to Invest" CTA
     await whereToInvestCTA.click();
     await expect(page).toHaveURL(/page=investments/);
-    await expect(page.getByText('Top Verified Choices for You')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Your recommended categories' })).toBeVisible();
 
     // Verify category selector is in exact backend recommendation order
     const categorySelector = page.getByRole('tablist', { name: 'Recommended investment categories' });

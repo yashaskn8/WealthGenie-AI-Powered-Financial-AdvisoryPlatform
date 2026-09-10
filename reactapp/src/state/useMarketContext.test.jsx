@@ -22,11 +22,17 @@ const snapshot = {
 };
 
 function Probe() {
-  const { marketContext, marketContextRefreshing, refreshMarketContext } = useMarketContext();
+  const {
+    marketContext,
+    marketContextRefreshing,
+    marketContextTransport,
+    refreshMarketContext,
+  } = useMarketContext();
   return (
     <div>
       <span data-testid="context">{marketContext?.context || 'loading'}</span>
       <span data-testid="refreshing">{marketContextRefreshing ? 'refreshing' : 'idle'}</span>
+      <span data-testid="transport-status">{marketContextTransport.revalidationStatus}</span>
       <button type="button" onClick={() => refreshMarketContext()}>refresh</button>
     </div>
   );
@@ -60,5 +66,26 @@ describe('shared market context store', () => {
     expect(screen.getByTestId('refreshing').textContent).toBe('refreshing');
     resolveRefresh({ ...snapshot, context: 'CAUTIOUS' });
     await waitFor(() => expect(screen.getByTestId('context').textContent).toBe('CAUTIOUS'));
+    expect(screen.getByTestId('transport-status').textContent).toBe('SUCCESS');
+  });
+
+  it('does not force a second backend read when another consumer mounts inside the cadence', async () => {
+    const view = render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('context').textContent).toBe('NORMAL'));
+    vi.clearAllMocks();
+    view.rerender(<><Probe /><Probe /></>);
+    await waitFor(() => expect(screen.getAllByTestId('context')[1].textContent).toBe('NORMAL'));
+    expect(api.getCurrentMarketContext).not.toHaveBeenCalled();
+  });
+
+  it('preserves the verified snapshot and discloses a failed manual refresh', async () => {
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('context').textContent).toBe('NORMAL'));
+    api.getCurrentMarketContext.mockRejectedValueOnce(new Error('NSE temporarily unavailable'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'refresh' }));
+
+    await waitFor(() => expect(screen.getByTestId('transport-status').textContent).toBe('FAILED'));
+    expect(screen.getByTestId('context').textContent).toBe('NORMAL');
   });
 });

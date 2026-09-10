@@ -147,6 +147,15 @@ function buildMarketAdjustmentMetadata(adjustment, marketContext) {
   };
 }
 
+function currentAllocationSourceFor(marketAdjustment) {
+  return marketAdjustment?.applied ? 'MARKET_CONTEXT_ADJUSTED' : 'ORIGINAL_RECOMMENDATION';
+}
+
+function plainMarketAdjustment(value) {
+  if (!value) return null;
+  return typeof value.toObject === 'function' ? value.toObject({ flattenMaps: true }) : value;
+}
+
 router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHandler(async (req, res) => {
   const tTotalStart = performance.now();
   const { profileId } = req.body;
@@ -225,6 +234,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
     // assertion protects the persistence path if the adjustment DTO evolves.
     assertPortfolioSuitable(profile, instruments.map(instrument => instrument.id));
     const { confidenceScores, riskReconciliation, computedWeights } = pipelineResult;
+    marketAdjustment.currentAllocationSource = currentAllocationSourceFor(marketAdjustment);
     const tMarketContext = performance.now() - tMarketContextStart;
 
     const portfolioReturnAssumption = buildPortfolioReturnAssumption(instruments);
@@ -252,6 +262,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       modelVersion,
       profileInputHash: inputHash,
       marketAdjustment,
+      currentAllocationSource: marketAdjustment.currentAllocationSource,
     };
     const auditRecordData = {
       _id: auditId,
@@ -315,6 +326,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       excluded_due_to_eligibility: riskReconciliation.excluded_due_to_eligibility,
       computed_weights: computedWeights,
       market_adjustment: marketAdjustment,
+      current_allocation_source: marketAdjustment.currentAllocationSource,
     };
 
     const tPersistStart = performance.now();
@@ -590,6 +602,10 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
     instrument.allocationWeight = Number(weights[instrument.id].toFixed(4));
     instrument.allocation_pct = Number((weights[instrument.id] * 100).toFixed(2));
   });
+  const supersededAt = new Date();
+  const generationMarketAdjustment = plainMarketAdjustment(recommendation.marketAdjustment);
+  recommendation.currentAllocationSource = 'USER_REBALANCED';
+  recommendation.marketAdjustmentSupersededAt = supersededAt;
   await recommendation.save();
   await delCache(buildRecommendationCacheKey(req.user.userId, stored._id, profile, recommendation.modelVersion));
   const updatedInstruments = recommendation.instruments.map(instrument => (
@@ -607,6 +623,15 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
     provider_forecast: false,
     asset_class_allocation: buildAssetClassAllocation(updatedInstruments),
     dashboard_projection: buildDashboardProjection(profile, updatedInstruments),
+    current_allocation_source: 'USER_REBALANCED',
+    generation_market_adjustment: generationMarketAdjustment,
+    market_adjustment: generationMarketAdjustment
+      ? {
+        ...generationMarketAdjustment,
+        currentAllocationSource: 'USER_REBALANCED',
+        supersededByManualRebalanceAt: supersededAt.toISOString(),
+      }
+      : null,
   });
 }));
 

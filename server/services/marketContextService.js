@@ -9,6 +9,7 @@ import {
   MARKET_FACT_SEMANTIC_CLASSES,
 } from './marketData/contracts.js';
 import { computeMarketContextFeatures } from './marketContextFeatureEngine.js';
+import { readLatestPersistedMarketContext, persistMarketContextSnapshot } from './marketData/MarketDataRepository.js';
 import {
   MARKET_CONTEXT_POLICY_VERSION,
   applyMarketContextHysteresis,
@@ -200,27 +201,48 @@ async function writeState(state, setState) {
   }
 }
 
-async function readLastKnownGood(getLkg) {
+async function readLastKnownGood(getLkg, getDurable) {
+  const candidates = [];
   try {
     const cached = await getLkg(MARKET_CONTEXT_LKG_CACHE_KEY);
-    if (cached?.marketContext?.marketSnapshot) {
-      processLastKnownGood = cached;
-      return { value: cached, storage: 'REDIS' };
-    }
+    if (cached?.marketContext?.marketSnapshot) candidates.push({ value: cached, storage: 'REDIS' });
   } catch {
-    // Last-known-good is an optimisation and must never make an unavailable
-    // provider look current.
+    // Redis is an optimisation. The durable observation path is still tried.
+  }
+  try {
+    const durable = await getDurable();
+    if (durable?.marketContext?.marketSnapshot) candidates.push({ value: durable, storage: 'MONGODB' });
+  } catch {
+    // Persistence outages must not turn a previously qualified observation
+    // into a fabricated current value.
+  }
+  if (candidates.length > 0) {
+    candidates.sort((left, right) => Date.parse(right.value.storedAt || 0) - Date.parse(left.value.storedAt || 0));
+    const newest = candidates[0];
+    processLastKnownGood = newest.value;
+    return {
+      value: newest.value,
+      storage: candidates.length > 1 ? `${newest.storage}+OTHER` : newest.storage,
+    };
   }
   return { value: processLastKnownGood, storage: processLastKnownGood ? 'PROCESS_MEMORY' : 'NONE' };
 }
 
-async function writeLastKnownGood(value, setLkg) {
+async function writeLastKnownGood(value, setLkg, persistDurable) {
   processLastKnownGood = value;
+  let durableStorage = 'PERSISTENCE_UNAVAILABLE';
+  try {
+    durableStorage = (await persistDurable(value)).status;
+  } catch {
+    durableStorage = 'PERSISTENCE_ERROR';
+  }
   try {
     const persisted = await setLkg(MARKET_CONTEXT_LKG_CACHE_KEY, value, MARKET_CONTEXT_LKG_TTL_SECONDS);
-    return persisted === true ? 'REDIS_WITH_PROCESS_FALLBACK' : 'PROCESS_MEMORY';
+    if (persisted === true && durableStorage === 'PERSISTED') return 'MONGODB_AND_REDIS_WITH_PROCESS_FALLBACK';
+    if (persisted === true) return 'REDIS_WITH_PROCESS_FALLBACK';
+    return durableStorage === 'PERSISTED' ? 'MONGODB_WITH_PROCESS_FALLBACK' : 'PROCESS_MEMORY';
   } catch {
-    return 'PROCESS_MEMORY';
+    return durableStorage === 'PERSISTED' ? 'MONGODB_WITH_PROCESS_FALLBACK' : 'PROCESS_MEMORY';
   }
 }
 
@@ -270,6 +292,8 @@ export async function getLiveMarketContext(options = {}, dependencies = {}) {
   const setState = dependencies.setCache || setCache;
   const getLkg = dependencies.getLkgCache || getState;
   const setLkg = dependencies.setLkgCache || setState;
+  const getDurableLkg = dependencies.getDurableLkg || (() => readLatestPersistedMarketContext());
+  const persistDurableLkg = dependencies.persistDurableLkg || (value => persistMarketContextSnapshot(value));
   const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
   if (Number.isNaN(now.getTime())) throw new TypeError('now must be a valid date.');
 
@@ -299,7 +323,7 @@ export async function getLiveMarketContext(options = {}, dependencies = {}) {
     const currentEvidencePresent = availableFactCount(quoteSnapshot) > 0
       || (Array.isArray(historicalSnapshot?.candles) && historicalSnapshot.candles.length > 0);
     const recovered = currentEvidencePresent ? null : recoverLastKnownGood(
-      await readLastKnownGood(getLkg).then(result => result.value),
+       await readLastKnownGood(getLkg, getDurableLkg).then(result => result.value),
       now,
       candidate.reasonCodes,
     );
@@ -342,7 +366,7 @@ export async function getLiveMarketContext(options = {}, dependencies = {}) {
       schemaVersion: MARKET_SNAPSHOT_SCHEMA_VERSION,
       storedAt: evaluatedAt,
       marketContext: published,
-    }, setLkg);
+    }, setLkg, persistDurableLkg);
   }
   return published;
 }
@@ -361,7 +385,8 @@ export async function getLatestQualifiedMarketContextForRecommendation(options =
   const getLkg = dependencies.getLkgCache || dependencies.getCache || getCache;
   const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
   if (Number.isNaN(now.getTime())) throw new TypeError('now must be a valid date.');
-  const stored = await readLastKnownGood(getLkg);
+  const getDurableLkg = dependencies.getDurableLkg || (() => readLatestPersistedMarketContext());
+  const stored = await readLastKnownGood(getLkg, getDurableLkg);
   const recovered = recoverLastKnownGood(stored.value, now);
   if (!recovered) {
     return {

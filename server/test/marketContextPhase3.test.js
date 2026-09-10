@@ -251,3 +251,29 @@ test('qualified market context survives hot-cache expiry through last-known-good
   assert.equal(unavailable.marketSnapshot.status, 'LAST_AVAILABLE');
   assert.equal(unavailable.recommendationUsability.status, 'USABLE');
 });
+
+test('qualified market context survives Redis and process-memory loss through durable observation recovery', async () => {
+  resetMarketContextProcessStateForTest();
+  let durableSnapshot = null;
+  const qualified = await getLiveMarketContext({ now: NOW }, {
+    fetchBenchmarkQuotes: async () => quoteSnapshot(),
+    fetchNiftyHistoricalCandles: async () => historySnapshot(Array.from({ length: 60 }, (_, index) => 100 + index)),
+    getCache: async () => null,
+    setCache: async () => false,
+    persistDurableLkg: async value => {
+      durableSnapshot = value;
+      return { status: 'PERSISTED' };
+    },
+  });
+  assert.equal(qualified.recommendationUsability.status, 'USABLE');
+  assert.ok(durableSnapshot?.marketContext?.marketSnapshot);
+
+  resetMarketContextProcessStateForTest();
+  const recovered = await getLatestQualifiedMarketContextForRecommendation({ now: new Date('2026-09-08T12:05:00.000Z') }, {
+    getCache: async () => null,
+    getDurableLkg: async () => durableSnapshot,
+  });
+  assert.equal(recovered.recoveredFromLastKnownGood, true);
+  assert.equal(recovered.marketSnapshot.status, 'LAST_AVAILABLE');
+  assert.equal(recovered.recommendationUsability.status, 'USABLE');
+});

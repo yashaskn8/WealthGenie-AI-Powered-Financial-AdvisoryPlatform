@@ -24,7 +24,7 @@ const TABS = [
   { id: 'Stress Test', icon: <Flame size={16} /> }
 ];
 
-const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRecommendations, horizon, userProfile, initialTab = 'Overview' }) => {
+const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRecommendations, horizon, userProfile, recommendationMeta = null, initialTab = 'Overview' }) => {
   const [activeTab, setActiveTab] = useState(initialTab || 'Overview');
 
   React.useEffect(() => {
@@ -399,7 +399,7 @@ const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRec
         {/* Scrollable Content Area */}
         <div className="ddm-scroll-container">
           {activeTab === 'Overview' && <OverviewTab inv={inv} comparisonData={comparisonData} onSelectInvestment={onSelectInvestment} />}
-          {activeTab === 'Where to Invest' && <WhereToInvestTab inv={inv} userProfile={userProfile} />}
+          {activeTab === 'Where to Invest' && <WhereToInvestTab inv={inv} userProfile={userProfile} recommendationMeta={recommendationMeta} />}
           {activeTab === 'Calculator' && <CalculatorTab {...calcProps} setCalcAmount={setCalcAmount} setCalcYears={setCalcYears} setCalcReturn={setCalcReturn} setInflationRate={setInflationRate} />}
           {activeTab === 'Tax' && <TaxTab inv={inv} calcAmount={calcAmount} calcYears={calcYears} userProfile={userProfile} />}
           {activeTab === 'History' && <HistoryTab inv={inv} historicalData={historicalData} benchmarkRate={benchmarkRate} inflationRate={inflationRate} projectionError={projectionError} />}

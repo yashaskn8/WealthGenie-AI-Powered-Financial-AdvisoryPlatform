@@ -484,11 +484,19 @@ export function getWhereToInvestProviderCoverageMatrix() {
   return investmentDatabase.map(instrument => {
     const fixedIncomeProvider = fixedIncomeProviderForParent(instrument.id);
     const provider = fixedIncomeProvider || (supportsAmfiParentCategory(instrument.id) ? PROVIDERS.AMFI : null);
+    const canBeRecommended = resolveBackendType(instrument) !== null && getInstrumentRisk(instrument) !== null;
     return {
       parentInstrumentId: instrument.id,
+      parentName: instrument.name,
+      canBeRecommended,
       category: instrument.category,
       provider,
+      qualifiedWtiProvider: provider,
+      productOptionsAvailable: Boolean(provider),
       status: provider ? 'QUALIFIED_PROVIDER_PATH' : 'UNSUPPORTED_FAIL_CLOSED',
+      currentFailureMode: provider
+        ? 'QUALIFIED_PROVIDER_RESPONSE_REQUIRED'
+        : 'NO_QUALIFIED_WTI_PROVIDER_FAIL_CLOSED',
       productSubstitutionAllowed: false,
     };
   });

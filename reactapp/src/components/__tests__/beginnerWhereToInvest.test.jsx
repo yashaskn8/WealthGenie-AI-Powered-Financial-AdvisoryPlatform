@@ -6,6 +6,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import WhereToInvestTab from '../deepdive/WhereToInvestTab';
 import * as api from '../../services/api';
+import { resetMarketContextStoreForTest } from '../../state/useMarketContext';
 
 vi.mock('../../services/api', () => ({
   getCurrentMarketContext: vi.fn(),
@@ -16,9 +17,11 @@ vi.mock('../../services/api', () => ({
 describe('Beginner-First Where-To-Invest UX', () => {
   afterEach(() => {
     cleanup();
+    resetMarketContextStoreForTest();
   });
 
   beforeEach(() => {
+    resetMarketContextStoreForTest();
     vi.clearAllMocks();
 
     api.getCurrentMarketContext.mockResolvedValue({
@@ -183,6 +186,7 @@ describe('Beginner-First Where-To-Invest UX', () => {
     expect(await screen.findByText('NORMAL')).toBeTruthy();
     expect(screen.getByText(/Market conditions look steady/i)).toBeTruthy();
     unmount();
+    resetMarketContextStoreForTest();
 
     api.getCurrentMarketContext.mockResolvedValueOnce({
       status: 'MARKET_CONTEXT_AVAILABLE',
@@ -206,6 +210,7 @@ describe('Beginner-First Where-To-Invest UX', () => {
     expect(screen.getByText(/Markets are moving more sharply than usual/i)).toBeTruthy();
 
     cleanup();
+    resetMarketContextStoreForTest();
 
     api.getCurrentMarketContext.mockResolvedValueOnce({
       status: 'MARKET_CONTEXT_AVAILABLE',

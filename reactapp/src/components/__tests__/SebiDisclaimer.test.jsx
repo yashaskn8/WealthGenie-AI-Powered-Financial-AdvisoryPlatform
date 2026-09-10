@@ -7,6 +7,7 @@ import { afterEach, describe, it, expect, vi } from 'vitest';
 import SebiDisclaimer from '../SebiDisclaimer';
 import WhereToInvestTab from '../deepdive/WhereToInvestTab';
 import * as api from '../../services/api';
+import { resetMarketContextStoreForTest } from '../../state/useMarketContext';
 
 vi.mock('../../services/api', () => ({
   rankInvestmentCandidates: vi.fn(async () => ({
@@ -49,7 +50,10 @@ vi.mock('../../services/api', () => ({
 }));
 
 describe('SebiDisclaimer Component', () => {
-  afterEach(() => cleanup());
+  afterEach(() => {
+    cleanup();
+    resetMarketContextStoreForTest();
+  });
 
   it('renders regulatory disclaimer text', () => {
     render(<SebiDisclaimer />);

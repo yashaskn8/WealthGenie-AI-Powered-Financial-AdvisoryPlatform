@@ -12,6 +12,11 @@ const store = {
   isLoading: false,
   isRefreshing: false,
   lastResolvedAt: null,
+  transport: {
+    lastAttemptAt: null,
+    lastSuccessfulAt: null,
+    revalidationStatus: 'IDLE',
+  },
 };
 
 const listeners = new Set();
@@ -57,6 +62,11 @@ async function requestMarketContext({ force = false } = {}) {
   if (inFlight) return inFlight;
   if (!force && !shouldRevalidate()) return store.snapshot;
 
+  store.transport = {
+    ...store.transport,
+    lastAttemptAt: new Date().toISOString(),
+    revalidationStatus: 'REFRESHING',
+  };
   store.isLoading = !store.snapshot;
   store.isRefreshing = Boolean(store.snapshot);
   emit();
@@ -65,11 +75,25 @@ async function requestMarketContext({ force = false } = {}) {
       store.snapshot = snapshot;
       store.error = null;
       store.lastResolvedAt = Date.now();
+      store.transport = {
+        ...store.transport,
+        lastSuccessfulAt: new Date().toISOString(),
+        revalidationStatus: 'SUCCESS',
+      };
       return snapshot;
     })
     .catch((error) => {
       if (error?.code !== 'REQUEST_ABORTED') {
         store.error = error?.message || 'Live market context request failed.';
+        store.transport = {
+          ...store.transport,
+          revalidationStatus: 'FAILED',
+        };
+      } else {
+        store.transport = {
+          ...store.transport,
+          revalidationStatus: 'IDLE',
+        };
       }
       return store.snapshot;
     })
@@ -106,9 +130,9 @@ function subscribe(listener) {
   listeners.add(listener);
   consumerCount += 1;
   bindLifecycle();
-  // Every newly mounted surface revalidates, while the module-level in-flight
-  // promise guarantees that multiple consumers still produce one backend read.
-  requestMarketContext({ force: true });
+  // Normal consumers share the current snapshot and cadence. Only the explicit
+  // refresh control bypasses revalidation thresholds.
+  requestMarketContext();
   return () => {
     listeners.delete(listener);
     consumerCount = Math.max(0, consumerCount - 1);
@@ -127,6 +151,7 @@ export function useMarketContext() {
     marketContextError: store.error,
     marketContextLoading: store.isLoading,
     marketContextRefreshing: store.isRefreshing,
+    marketContextTransport: store.transport,
     refreshMarketContext: () => requestMarketContext({ force: true }),
   };
 }
@@ -140,6 +165,11 @@ export function resetMarketContextStoreForTest() {
   store.isLoading = false;
   store.isRefreshing = false;
   store.lastResolvedAt = null;
+  store.transport = {
+    lastAttemptAt: null,
+    lastSuccessfulAt: null,
+    revalidationStatus: 'IDLE',
+  };
   inFlight = null;
   consumerCount = 0;
   listeners.clear();

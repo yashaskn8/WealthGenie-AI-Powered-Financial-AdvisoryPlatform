@@ -37,6 +37,37 @@ const instrumentDetailSchema = new mongoose.Schema({
   allocationWeight: { type: Number, min: 0, max: 1, required: true },
 }, { _id: false, strict: 'throw' });
 
+const recommendationUsabilitySchema = new mongoose.Schema({
+  status: { type: String, enum: ['USABLE', 'NOT_USABLE'], default: null },
+  reasonCodes: { type: [String], default: [] },
+  observedAgeSeconds: { type: Number, min: 0, default: null },
+  maxAgeSeconds: { type: Number, min: 0, default: null },
+}, { _id: false, strict: false });
+
+// Keep generation-time market evidence typed at its stable boundary while
+// allowing additive fields from older/newer snapshots to round-trip safely.
+const marketAdjustmentSchema = new mongoose.Schema({
+  status: { type: String, enum: ['APPLIED', 'NOT_APPLIED', 'UNAVAILABLE'], default: null },
+  contextStatus: { type: String, default: null },
+  context: { type: String, default: null },
+  policyVersion: { type: String, default: null },
+  observedAt: { type: Date, default: null },
+  evaluatedAt: { type: Date, default: null },
+  reasonCodes: { type: [String], default: [] },
+  adjustmentVersion: { type: String, default: null },
+  applied: { type: Boolean, default: false },
+  maxTotalTiltPct: { type: Number, min: 0, default: null },
+  actualTotalTiltPct: { type: Number, min: 0, default: null },
+  baseWeights: { type: Map, of: Number, default: null },
+  adjustedWeights: { type: Map, of: Number, default: null },
+  changedInstruments: { type: [mongoose.Schema.Types.Mixed], default: [] },
+  suitabilityValidation: { type: String, default: null },
+  concentrationValidation: { type: String, default: null },
+  recommendationUsability: { type: recommendationUsabilitySchema, default: null },
+  currentAllocationSource: { type: String, enum: ['ORIGINAL_RECOMMENDATION', 'MARKET_CONTEXT_ADJUSTED', 'USER_REBALANCED'], default: null },
+  supersededByManualRebalanceAt: { type: Date, default: null },
+}, { _id: false, strict: false });
+
 const recommendationSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   profileId: { type: mongoose.Schema.Types.ObjectId, ref: 'FinancialProfile', required: true },
@@ -54,7 +85,13 @@ const recommendationSchema = new mongoose.Schema({
   idempotencyOperationId: { type: String, default: null },
   idempotencyRequestHash: { type: String, default: null },
   responseSnapshot: { type: mongoose.Schema.Types.Mixed, default: null },
-  marketAdjustment: { type: mongoose.Schema.Types.Mixed, default: null },
+  marketAdjustment: { type: marketAdjustmentSchema, default: null },
+  currentAllocationSource: {
+    type: String,
+    enum: ['ORIGINAL_RECOMMENDATION', 'MARKET_CONTEXT_ADJUSTED', 'USER_REBALANCED'],
+    default: 'ORIGINAL_RECOMMENDATION',
+  },
+  marketAdjustmentSupersededAt: { type: Date, default: null },
   generatedAt: { type: Date, default: Date.now },
 }, { strict: 'throw' });
 

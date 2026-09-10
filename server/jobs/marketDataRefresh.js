@@ -11,8 +11,13 @@ import {
   fetchAmfiProductSnapshot,
 } from '../services/marketDataService.js';
 import { getLiveMarketContext } from '../services/marketContextService.js';
+import logger from '../utils/logger.js';
 
 let activeJobStopper = null;
+
+export const MARKET_CONTEXT_OPEN_REFRESH_MS = 8 * 60 * 1000;
+export const MARKET_CONTEXT_CLOSED_REFRESH_MS = 30 * 60 * 1000;
+export const MARKET_CONTEXT_HOLIDAY_REFRESH_MS = 2 * 60 * 60 * 1000;
 
 /**
  * Start all scheduled market data refresh jobs.
@@ -28,17 +33,30 @@ export function startMarketDataRefreshJobs() {
       fetchAmfiProductSnapshot({ forceRefresh: true }),
       fetchAmfiHistoricalNavSnapshot({ forceRefresh: true }),
     ]);
-    console.info(`[CRON] AMFI: ${current.productCount} current products (${current.status}), ${historical.productCount} historical observations (${historical.status})`);
+    logger.info('AMFI refresh completed', {
+      currentProductCount: current.productCount,
+      currentStatus: current.status,
+      historicalProductCount: historical.productCount,
+      historicalStatus: historical.status,
+    });
   }));
 
-  // A single batched request refreshes NIFTY 50 and India VIX every 2 hours;
-  // daily history remains protected by its longer cache window.
-  cancellations.push(scheduleJob('0 */2 * * *', 'Primary Market Context', async () => {
+  // During an NSE session, refresh the batched quote set frequently enough to
+  // keep a recommendation-age snapshot inside the 15-minute open-session
+  // contract. Outside a session, the scheduler backs off; the provider's
+  // calendar remains the authority for holidays and session status.
+  cancellations.push(scheduleAdaptiveJob('Primary Market Context', async () => {
     const result = await getLiveMarketContext({ forceQuoteRefresh: true });
-    console.info(`[CRON] Primary market context: ${result.context || 'UNAVAILABLE'}, status ${result.status}`);
+    logger.info('Primary market context refresh completed', {
+      context: result.context || null,
+      status: result.status,
+      marketSession: result.marketSnapshot?.marketSession?.status || 'UNKNOWN',
+      recommendationUsability: result.recommendationUsability?.status || 'NOT_USABLE',
+    });
+    return result;
   }));
 
-  console.info('[CRON] Market data refresh jobs scheduled');
+  logger.info('Market data refresh jobs scheduled');
   activeJobStopper = () => cancellations.forEach(cancel => cancel());
   return activeJobStopper;
 }
@@ -55,23 +73,35 @@ export function stopMarketDataRefreshJobs() {
 function scheduleJob(cronExpr, name, fn) {
   const { initialDelayMs, intervalMs } = getScheduleTiming(cronExpr);
   let interval = null;
+  let running = false;
 
   // Preserve the startup warmup so caches populate shortly after boot.
   const warmup = setTimeout(async () => {
+    if (running) return;
+    running = true;
     try {
       await fn();
-      console.info(`[CRON] ${name}: initial run complete`);
+      logger.info(`${name}: initial run complete`);
     } catch (err) {
-      console.error(`[CRON] ${name}: initial run failed:`, err.message);
+      logger.error(`${name}: initial run failed`, { error: err.message });
+    } finally {
+      running = false;
     }
   }, 5000);
   warmup.unref?.();
 
   const runScheduled = async () => {
+    if (running) {
+      logger.warn(`${name}: overlapping refresh skipped`);
+      return;
+    }
+    running = true;
     try {
       await fn();
     } catch (err) {
-      console.error(`[CRON] ${name} failed:`, err.message);
+      logger.error(`${name} failed`, { error: err.message });
+    } finally {
+      running = false;
     }
   };
 
@@ -86,6 +116,43 @@ function scheduleJob(cronExpr, name, fn) {
     clearTimeout(warmup);
     clearTimeout(scheduledStart);
     if (interval) clearInterval(interval);
+  };
+}
+
+export function getMarketContextRefreshDelay(result) {
+  const session = result?.marketSnapshot?.marketSession?.status;
+  if (session === 'MARKET_OPEN') return MARKET_CONTEXT_OPEN_REFRESH_MS;
+  if (session === 'MARKET_HOLIDAY') return MARKET_CONTEXT_HOLIDAY_REFRESH_MS;
+  return MARKET_CONTEXT_CLOSED_REFRESH_MS;
+}
+
+function scheduleAdaptiveJob(name, fn) {
+  let timer = null;
+  let stopped = false;
+  let running = false;
+
+  const run = async () => {
+    if (stopped || running) return;
+    running = true;
+    let result = null;
+    try {
+      result = await fn();
+    } catch (error) {
+      logger.error(`${name} failed`, { error: error.message });
+    } finally {
+      running = false;
+      if (!stopped) {
+        timer = setTimeout(run, getMarketContextRefreshDelay(result));
+        timer.unref?.();
+      }
+    }
+  };
+
+  timer = setTimeout(run, 5000);
+  timer.unref?.();
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
   };
 }
 

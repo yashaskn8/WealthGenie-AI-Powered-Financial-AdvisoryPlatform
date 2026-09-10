@@ -193,16 +193,19 @@ export function buildNiftyHistoryWindow(now = new Date()) {
 export async function fetchNiftyHistoricalCandles({
   forceRefresh = false,
   now = new Date(),
+  persist = true,
 } = {}) {
   const window = buildNiftyHistoryWindow(now);
   const provider = PRIMARY_MARKET_PROVIDER === 'UPSTOX' ? upstoxHistoryProvider : nseHistoryProvider;
   const instrumentId = PRIMARY_MARKET_PROVIDER === 'UPSTOX'
     ? NIFTY_50_INSTRUMENT_KEY
     : MARKET_BENCHMARKS.NIFTY_50.canonicalProductId;
-  return provider.getDailyCandles(instrumentId, {
+  const snapshot = await provider.getDailyCandles(instrumentId, {
     ...window,
     forceRefresh,
   });
+  const persistence = persist ? await persistFreshSnapshot(snapshot) : { status: 'NOT_REQUESTED' };
+  return { ...snapshot, persistence };
 }
 
 /**

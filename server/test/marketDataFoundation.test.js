@@ -17,6 +17,7 @@ import {
 } from '../services/marketData/requestCache.js';
 import {
   buildObservationOperations,
+  buildHistoryObservationOperations,
   buildProductOperations,
   persistVerifiedMarketSnapshot,
 } from '../services/marketData/MarketDataRepository.js';
@@ -257,4 +258,30 @@ test('persistence operations include only verified numeric observations', async 
   const result = await persistVerifiedMarketSnapshot(snapshot, { ProductModel, ObservationModel });
   assert.equal(result.status, 'PERSISTED');
   assert.deepEqual(calls, [['products', 2], ['facts', 1]]);
+});
+
+test('durable history observations preserve candle semantics without treating cache age as observation age', () => {
+  const snapshot = {
+    schemaVersion: 'market-fact-1.0.0',
+    status: AVAILABILITY.AVAILABLE,
+    instrumentKey: 'market:index:nifty-50',
+    dataClass: 'DAILY',
+    fetchedAt: FIXED_NOW.toISOString(),
+    freshness: { status: FRESHNESS.FRESH, ageSeconds: 60, maxAgeSeconds: 345600 },
+    source: { provider: 'NSE', instrumentId: 'NIFTY 50', url: 'https://www.nseindia.com/api/historicalOR/indicesHistory' },
+    candles: [{
+      timestamp: '2026-09-07T10:00:00.000Z',
+      effectiveTradingDate: '2026-09-07',
+      open: 100,
+      high: 110,
+      low: 90,
+      close: 105,
+    }],
+  };
+  const [operation] = buildHistoryObservationOperations(snapshot);
+  assert.equal(operation.updateOne.filter.kind, 'MARKET_HISTORY_CANDLE');
+  assert.equal(operation.updateOne.update.$set.value, 105);
+  assert.equal(operation.updateOne.update.$set.observedAt.toISOString(), '2026-09-07T10:00:00.000Z');
+  assert.equal(operation.updateOne.update.$set.lastFetchedAt.toISOString(), FIXED_NOW.toISOString());
+  assert.equal(operation.updateOne.update.$set.metrics.high, 110);
 });

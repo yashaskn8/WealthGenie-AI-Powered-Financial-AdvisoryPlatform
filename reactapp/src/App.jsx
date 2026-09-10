@@ -344,8 +344,11 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
           return_assumption_source: response.return_assumption_source,
           observed_market_fact: response.observed_market_fact,
           provider_forecast: response.provider_forecast,
-          asset_class_allocation: response.asset_class_allocation,
-          dashboard_projection: response.dashboard_projection,
+           asset_class_allocation: response.asset_class_allocation,
+           dashboard_projection: response.dashboard_projection,
+           current_allocation_source: response.current_allocation_source,
+           generation_market_adjustment: response.generation_market_adjustment,
+           market_adjustment: response.market_adjustment,
         };
       });
 
@@ -395,6 +398,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
               userProfile={userProfile}
               recommendationsLoading={isRecommendationLoading}
               recommendationsError={backendFallback?.message || null}
+              recommendationMeta={backendRecs}
               onLearnMore={handleLearnMore}
               onSelectInvestment={setDeepDiveInvestment}
             />
@@ -503,6 +507,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
           onSelectInvestment={setDeepDiveInvestment}
           userProfile={userProfile}
           allRecommendations={recommendations}
+          recommendationMeta={backendRecs}
           horizon={userProfile.investment_horizon_years}
           initialTab={deepDiveInitialTab}
         />

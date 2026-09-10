@@ -115,7 +115,12 @@ The first complete observation initializes state. A worse context requires two
 distinct observation fingerprints; a recovery requires three. Re-reading the
 same observation does not advance confirmation. State uses Redis with a
 seven-day TTL and process memory only as a single-instance continuity fallback.
-Unavailable observations do not update state.
+Qualified quote/history observations and the published snapshot are also
+written to the durable `MarketObservation` store. Recovery order is newest
+verified provider evidence, durable observation, Redis hot cache, then process
+memory. Recovered evidence is always re-aged: old evidence is never relabelled
+`CURRENT`, and observation age is kept separate from cache age. Unavailable
+observations do not update state.
 
 Adjustment version `market-context-adjustment-1.0.0` transfers at most 0, 2, 4,
 or 5 percentage points for `NORMAL`, `CAUTIOUS`, `HIGH_VOLATILITY`, and
@@ -131,10 +136,12 @@ preview and cannot execute trades.
 Benchmark quotes use one official all-indices response, normalized down to only
 NIFTY 50 and India VIX, and the existing 60-second Redis/coalescing cache. The
 bounded daily-history requests share one six-hour Redis/coalescing cache entry.
-The trading-holiday calendar is cached for 24 hours. The existing two-hour
-periodic job refreshes quotes and evaluates context; it does not stream or
-persist ticks. No paid vendor, account dependency, GPU, new microservice,
-headless browser, or websocket was introduced.
+The trading-holiday calendar is cached for 24 hours. A single-flight,
+session-aware refresh job runs about every eight minutes during an open NSE
+session, backs off to thirty minutes while closed, and backs off to two hours
+on an established holiday. It refreshes quotes and evaluates context; it does
+not stream or persist ticks. No paid vendor, account dependency, GPU, new
+microservice, headless browser, or websocket was introduced.
 
 An explicitly selected but unconfigured optional Upstox adapter returns
 `PROVIDER_NOT_CONFIGURED`. NSE source errors, holiday-calendar failures, stale

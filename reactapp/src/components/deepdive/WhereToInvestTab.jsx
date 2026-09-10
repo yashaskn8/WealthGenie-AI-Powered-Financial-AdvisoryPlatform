@@ -109,6 +109,18 @@ const MARKET_CONTEXT_COPY = {
   },
 };
 
+function marketSnapshotFingerprint(snapshot) {
+  if (!snapshot) return null;
+  return [
+    snapshot.schemaVersion,
+    snapshot.status,
+    snapshot.observedAt,
+    snapshot.evaluatedAt,
+    snapshot.policyOutput?.policyVersion,
+    ...(snapshot.policyOutput?.reasonCodes || []),
+  ].join('|');
+}
+
 const SIGNAL_DEFINITIONS = [
   { key: 'nifty50Current', label: 'NIFTY 50', group: 'market' },
   { key: 'nifty50PreviousClose', label: 'Previous close', group: 'market' },
@@ -134,7 +146,7 @@ function getRiskTierColor(tier) {
   }
 }
 
-const WhereToInvestTab = ({ inv, userProfile }) => {
+const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const profileId = userProfile?.profileId;
   const parentInstrumentId = inv?.id;
   const requestKey = `${profileId || 'missing-profile'}:${parentInstrumentId || 'missing-instrument'}`;
@@ -166,6 +178,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
     marketContextError,
     marketContextLoading,
     marketContextRefreshing,
+    marketContextTransport,
     refreshMarketContext,
   } = useMarketContext();
   const [sortBy, setSortBy] = useState('score');
@@ -186,8 +199,17 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
     setContextPreviewError(null);
   }, [parentInstrumentId]);
 
+  const currentMarketSnapshot = marketContext?.marketSnapshot || null;
+  const currentSnapshotFingerprint = marketSnapshotFingerprint(currentMarketSnapshot);
+  useEffect(() => {
+    if (contextPreview && contextPreview.__marketSnapshotFingerprint !== currentSnapshotFingerprint) {
+      setContextPreview(null);
+      setContextPreviewError('This preview is stale because the verified market snapshot changed. Run it again.');
+    }
+  }, [currentSnapshotFingerprint, contextPreview]);
+
   const toggleContextPreview = async () => {
-    if (contextPreview) {
+    if (contextPreview && contextPreview.__marketSnapshotFingerprint === currentSnapshotFingerprint) {
       setContextPreview(null);
       return;
     }
@@ -199,7 +221,10 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
       setContextPreviewLoading(true);
       setContextPreviewError(null);
       const result = await api.previewMarketContextAdjustment(profileId);
-      setContextPreview(result);
+      setContextPreview({
+        ...result,
+        __marketSnapshotFingerprint: marketSnapshotFingerprint(result?.marketContext?.marketSnapshot),
+      });
     } catch (error) {
       setContextPreview(null);
       setContextPreviewError(error.message || 'Market-context adjustment preview is unavailable.');
@@ -340,6 +365,17 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
   });
   const marketEvidenceSource = getMarketEvidenceSource(marketContext);
   const marketObservedAt = formatMarketTimestamp(marketSnapshot?.observedAt || marketContext?.observedAt);
+  const currentAllocationSource = recommendationMeta?.current_allocation_source
+    || recommendationMeta?.currentAllocationSource
+    || 'ORIGINAL_RECOMMENDATION';
+  const generationAdjustment = recommendationMeta?.generation_market_adjustment
+    || recommendationMeta?.market_adjustment
+    || null;
+  const adjustmentExplanation = currentAllocationSource === 'USER_REBALANCED'
+    ? 'Your current allocation was manually rebalanced. The market context below is current evidence; it is not proof that your saved weights were changed by the market policy.'
+    : currentAllocationSource === 'MARKET_CONTEXT_ADJUSTED' && generationAdjustment?.applied === true
+      ? 'The saved recommendation includes a bounded market-context adjustment inside your suitability limits.'
+      : 'The market context below is current evidence. Your saved recommendation remains profile-led unless the recommendation metadata says a bounded adjustment was applied.';
 
   let marketBadgeColor = '#38bdf8';
   let marketBadgeBg = 'rgba(56, 189, 248, 0.12)';
@@ -410,11 +446,14 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
         <div className="wti-beginner-market-body">
           <p className="wti-beginner-market-headline">{contextCopy.headline}</p>
           <p className="wti-beginner-meaning">
-            <span className="wti-meaning-lead">What this means for you:</span> {contextCopy.explanation}
+            <span className="wti-meaning-lead">What this means for you:</span> {adjustmentExplanation}
           </p>
           <div className="wti-market-evidence-summary" data-testid="market-data-status">
             <span className="wti-market-data-status">{marketDisplay.label}</span>
             <span>{marketDisplay.detail}</span>
+            {marketContextTransport?.revalidationStatus === 'FAILED' && (
+              <span role="status">Refresh failed; showing the last verified snapshot.</span>
+            )}
             <span className="wti-market-data-asof">
               As of: {marketObservedAt || 'Unavailable'} · Source: {marketEvidenceSource || 'Unavailable'}
             </span>
