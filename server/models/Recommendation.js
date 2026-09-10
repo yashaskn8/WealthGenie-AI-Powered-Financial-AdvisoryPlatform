@@ -54,6 +54,7 @@ const recommendationSchema = new mongoose.Schema({
   idempotencyOperationId: { type: String, default: null },
   idempotencyRequestHash: { type: String, default: null },
   responseSnapshot: { type: mongoose.Schema.Types.Mixed, default: null },
+  marketAdjustment: { type: mongoose.Schema.Types.Mixed, default: null },
   generatedAt: { type: Date, default: Date.now },
 }, { strict: 'throw' });
 

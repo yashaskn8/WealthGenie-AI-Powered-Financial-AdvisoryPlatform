@@ -17,6 +17,7 @@ import {
   Calculator,
   IndianRupee,
   ArrowUpRight,
+  RefreshCw,
 } from 'lucide-react';
 import * as api from '../../services/api';
 import SebiDisclaimer from '../SebiDisclaimer';
@@ -26,6 +27,7 @@ import {
   getMarketEvidenceSource,
   nullableMarketNumber,
 } from '../../utils/marketDataDisplay';
+import { useMarketContext } from '../../state/useMarketContext';
 
 const RISK_LEVELS = [
   { label: 'Low', color: '#22c55e', desc: 'Lower relative risk. Any guarantee or insurance depends on the specific product terms.' },
@@ -159,8 +161,13 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
   const [contextPreview, setContextPreview] = useState(null);
   const [contextPreviewError, setContextPreviewError] = useState(null);
   const [contextPreviewLoading, setContextPreviewLoading] = useState(false);
-  const [marketContext, setMarketContext] = useState(null);
-  const [marketContextError, setMarketContextError] = useState(null);
+  const {
+    marketContext,
+    marketContextError,
+    marketContextLoading,
+    marketContextRefreshing,
+    refreshMarketContext,
+  } = useMarketContext();
   const [sortBy, setSortBy] = useState('score');
   const [isTechExpanded, setIsTechExpanded] = useState(false);
 
@@ -173,23 +180,6 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
   const [taxRegime, setTaxRegime] = useState('new');
   const [taxFiscalYear, setTaxFiscalYear] = useState('FY2025-26');
   const [activeTaxContext, setActiveTaxContext] = useState(null);
-
-  // Fetch live market context on mount
-  useEffect(() => {
-    const controller = new AbortController();
-    api.getCurrentMarketContext({ signal: controller.signal })
-      .then((result) => {
-        setMarketContext(result);
-        setMarketContextError(null);
-      })
-      .catch((error) => {
-        if (error?.code !== 'REQUEST_ABORTED') {
-          setMarketContext(null);
-          setMarketContextError(error.message || 'Live market context request failed.');
-        }
-      });
-    return () => controller.abort();
-  }, []);
 
   useEffect(() => {
     setContextPreview(null);
@@ -346,7 +336,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
   const contextCopy = MARKET_CONTEXT_COPY[beginnerMarketState] || MARKET_CONTEXT_COPY.UNAVAILABLE;
   const marketSnapshot = marketContext?.marketSnapshot || null;
   const marketDisplay = getMarketDisplayState(marketContext, {
-    loading: marketContext === null && !marketContextError,
+    loading: marketContextLoading && marketContext === null && !marketContextError,
   });
   const marketEvidenceSource = getMarketEvidenceSource(marketContext);
   const marketObservedAt = formatMarketTimestamp(marketSnapshot?.observedAt || marketContext?.observedAt);
@@ -428,6 +418,16 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
             <span className="wti-market-data-asof">
               As of: {marketObservedAt || 'Unavailable'} · Source: {marketEvidenceSource || 'Unavailable'}
             </span>
+            <button
+              type="button"
+              className="wti-market-refresh-btn"
+              onClick={() => refreshMarketContext()}
+              disabled={marketContextRefreshing || marketContextLoading}
+              aria-label="Refresh market data"
+            >
+              <RefreshCw size={13} className={marketContextRefreshing ? 'wti-refresh-spin' : ''} />
+              <span>{marketContextRefreshing ? 'Refreshing…' : 'Refresh'}</span>
+            </button>
           </div>
         </div>
 

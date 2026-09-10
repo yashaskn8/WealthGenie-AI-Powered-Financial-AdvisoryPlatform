@@ -19,6 +19,8 @@ import {
   assertPortfolioSuitable,
   resolveConcentrationCap,
 } from '../services/RecommendationPipeline.js';
+import { applyProfileSafeMarketContextAdjustment } from '../services/regimeRotationEngine.js';
+import { getLatestQualifiedMarketContextForRecommendation } from '../services/marketContextService.js';
 import {
   buildRecommendationProfile,
   buildRecommendationProfileHash,
@@ -105,6 +107,46 @@ function buildDashboardProjection(profile, instruments) {
   });
 }
 
+function unavailableMarketAdjustment(reasonCode, marketContext = null) {
+  return {
+    status: 'UNAVAILABLE',
+    contextStatus: marketContext?.status ?? 'MARKET_CONTEXT_UNAVAILABLE',
+    context: marketContext?.context ?? null,
+    policyVersion: marketContext?.policyVersion ?? null,
+    observedAt: marketContext?.marketSnapshot?.observedAt ?? marketContext?.observedAt ?? null,
+    evaluatedAt: marketContext?.evaluatedAt ?? null,
+    reasonCodes: [reasonCode, ...(marketContext?.reasonCodes || [])],
+    adjustmentVersion: 'market-context-adjustment-1.0.0',
+    applied: false,
+    maxTotalTiltPct: 0,
+    actualTotalTiltPct: 0,
+    suitabilityValidation: 'NOT_RUN',
+    concentrationValidation: 'NOT_RUN',
+  };
+}
+
+function buildMarketAdjustmentMetadata(adjustment, marketContext) {
+  return {
+    status: adjustment.applied ? 'APPLIED' : 'NOT_APPLIED',
+    contextStatus: adjustment.contextStatus,
+    context: adjustment.context,
+    policyVersion: marketContext?.policyVersion ?? null,
+    observedAt: marketContext?.marketSnapshot?.observedAt ?? marketContext?.observedAt ?? null,
+    evaluatedAt: marketContext?.evaluatedAt ?? null,
+    reasonCodes: adjustment.reasonCodes || [],
+    adjustmentVersion: adjustment.adjustmentVersion,
+    applied: adjustment.applied,
+    maxTotalTiltPct: adjustment.maxTotalTiltPct,
+    actualTotalTiltPct: adjustment.actualTotalTiltPct,
+    baseWeights: adjustment.baseWeights,
+    adjustedWeights: adjustment.adjustedWeights,
+    changedInstruments: adjustment.explanations || [],
+    suitabilityValidation: adjustment.suitabilityRevalidated ? 'PASSED' : 'NOT_RUN',
+    concentrationValidation: adjustment.concentrationCapsRevalidated ? 'PASSED' : 'NOT_RUN',
+    recommendationUsability: marketContext?.recommendationUsability ?? null,
+  };
+}
+
 router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHandler(async (req, res) => {
   const tTotalStart = performance.now();
   const { profileId } = req.body;
@@ -146,10 +188,44 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       throw createError(502, 'ML result did not include a model version', 'Recommendation model metadata is unavailable.');
     }
     const tPipelineStart = performance.now();
-    const { instruments, confidenceScores, riskReconciliation, computedWeights } = runPipeline(profile, mlResult);
-    if (!instruments.length) {
+    const pipelineResult = runPipeline(profile, mlResult);
+    const baseInstruments = pipelineResult.instruments;
+    if (!baseInstruments.length) {
       throw createError(422, 'No instruments passed the suitability boundary', 'No suitable instruments were found for this profile.');
     }
+    const tMarketContextStart = performance.now();
+    let marketContext;
+    try {
+      marketContext = await getLatestQualifiedMarketContextForRecommendation();
+    } catch (error) {
+      logger.warn('Recommendation market context read failed closed', { error: error.message });
+      marketContext = {
+        status: 'MARKET_CONTEXT_UNAVAILABLE',
+        context: null,
+        reasonCodes: ['MARKET_CONTEXT_READ_FAILED_CLOSED'],
+        recommendationUsability: { status: 'NOT_USABLE', reasonCodes: ['MARKET_CONTEXT_READ_FAILED_CLOSED'] },
+      };
+    }
+    let marketAdjustment;
+    let adjustedInstruments = baseInstruments;
+    try {
+      const adjustment = applyProfileSafeMarketContextAdjustment({
+        profile,
+        instruments: baseInstruments,
+        marketContext,
+      });
+      adjustedInstruments = adjustment.adjustedInstruments;
+      marketAdjustment = buildMarketAdjustmentMetadata(adjustment, marketContext);
+    } catch (error) {
+      logger.warn('Recommendation market adjustment failed closed', { error: error.message, code: error.code });
+      marketAdjustment = unavailableMarketAdjustment('MARKET_CONTEXT_ADJUSTMENT_FAILED_CLOSED', marketContext);
+    }
+    const instruments = adjustedInstruments;
+    // The adjustment engine revalidates this boundary; the explicit final
+    // assertion protects the persistence path if the adjustment DTO evolves.
+    assertPortfolioSuitable(profile, instruments.map(instrument => instrument.id));
+    const { confidenceScores, riskReconciliation, computedWeights } = pipelineResult;
+    const tMarketContext = performance.now() - tMarketContextStart;
 
     const portfolioReturnAssumption = buildPortfolioReturnAssumption(instruments);
     const assetClassAllocation = buildAssetClassAllocation(instruments);
@@ -175,6 +251,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       mlFallback: Boolean(mlResult.fallback),
       modelVersion,
       profileInputHash: inputHash,
+      marketAdjustment,
     };
     const auditRecordData = {
       _id: auditId,
@@ -194,6 +271,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
         returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
         modelVersion,
         recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
+        marketAdjustment,
         advisorySummary: '',
       },
       cited_rag_chunk_ids: mlResult.cited_chunk_ids || [],
@@ -236,6 +314,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       ml_input_fields_unknown: missingMlProfileFields,
       excluded_due_to_eligibility: riskReconciliation.excluded_due_to_eligibility,
       computed_weights: computedWeights,
+      market_adjustment: marketAdjustment,
     };
 
     const tPersistStart = performance.now();
@@ -259,6 +338,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       `idempotency;dur=${tIdempotency.toFixed(2)}`,
       `ml;dur=${tMl.toFixed(2)}`,
       `pipeline;dur=${tPipeline.toFixed(2)}`,
+      `market-context;dur=${tMarketContext.toFixed(2)}`,
       `projection;dur=${tProjection.toFixed(2)}`,
       `persistence;dur=${tPersist.toFixed(2)}`,
       `cache;dur=${tCache.toFixed(2)}`,

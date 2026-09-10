@@ -2672,6 +2672,48 @@ input[type=range]::-moz-range-thumb:hover {
   font-variant-numeric: tabular-nums;
 }
 
+.wti-market-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  padding: 3px 7px;
+  border: 1px solid rgba(56, 189, 248, 0.22);
+  border-radius: 6px;
+  background: rgba(56, 189, 248, 0.08);
+  color: #bae6fd;
+  font: inherit;
+  font-size: 0.66rem;
+  font-weight: 700;
+  line-height: 1.15;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.wti-market-refresh-btn:hover:not(:disabled),
+.wti-market-refresh-btn:focus-visible {
+  background: rgba(56, 189, 248, 0.16);
+  border-color: rgba(56, 189, 248, 0.5);
+  color: #f0f9ff;
+}
+
+.wti-market-refresh-btn:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.wti-refresh-spin {
+  animation: wti-market-refresh-spin 900ms linear infinite;
+}
+
+@keyframes wti-market-refresh-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wti-refresh-spin { animation: none; }
+}
+
 .wti-meaning-lead {
   color: #cbd5e1;
   font-weight: 600;

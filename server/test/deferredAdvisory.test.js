@@ -118,6 +118,8 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     assert.ok(recData.dashboard_projection, 'Must return dashboard projection');
     assert.ok(recData.model_version, 'Must return model_version');
     assert.ok(recData.recommendation_policy_version, 'Must return recommendation_policy_version');
+    assert.ok(recData.market_adjustment, 'Must publish bounded market adjustment metadata');
+    assert.match(serverTimingHeader, /market-context;dur=/);
 
     // Execution should be rapid (sub-second without LLM)
     assert.ok(elapsed < 10000, `Core response took ${elapsed}ms; should not block on LLM`);
@@ -129,12 +131,14 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     assert.equal(storedRec.advisoryText, null, 'Persisted advisoryText must be null');
     assert.equal(storedRec.advisoryMetadata?.status, 'PENDING', 'Persisted advisoryMetadata.status must be PENDING');
     assert.equal(storedRec.userId.toString(), userAId.toString());
+    assert.ok(storedRec.marketAdjustment, 'Market adjustment metadata must be persisted with the recommendation');
   });
 
   await t.test('3. Audit record is created with advisorySummary: "" and intact hash', async () => {
     const auditRecord = await AuditRecord.findById(recData.audit_id).lean();
     assert.ok(auditRecord, 'AuditRecord must exist in database');
     assert.equal(auditRecord.recommendations.advisorySummary, '', 'Audit advisorySummary must be empty string');
+    assert.ok(auditRecord.recommendations.marketAdjustment, 'Audit must retain market adjustment metadata');
     assert.ok(auditRecord.record_hash, 'AuditRecord must have record_hash');
   });
 

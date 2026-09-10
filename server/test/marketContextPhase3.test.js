@@ -9,6 +9,7 @@ import {
 } from '../services/marketContextPolicy.js';
 import {
   getLiveMarketContext,
+  getLatestQualifiedMarketContextForRecommendation,
   resetMarketContextProcessStateForTest,
 } from '../services/marketContextService.js';
 import { MARKET_BENCHMARKS } from '../services/marketData/marketBenchmarks.js';
@@ -216,4 +217,37 @@ test('unconfigured provider and provider failures never create a normal fallback
   assert(failed.reasonCodes.includes('MARKET_QUOTE_SOURCE_ERROR'));
   assert(failed.reasonCodes.includes('MARKET_HISTORY_SOURCE_ERROR'));
   assert.equal(failed.statePersistence, 'NOT_WRITTEN_UNAVAILABLE_OBSERVATION');
+});
+
+test('qualified market context survives hot-cache expiry through last-known-good recommendation reads', async () => {
+  resetMarketContextProcessStateForTest();
+  const values = new Map();
+  const cache = {
+    get: async key => values.get(key) ?? null,
+    set: async (key, value) => { values.set(key, value); return true; },
+  };
+  const qualified = await getLiveMarketContext({ now: NOW }, {
+    fetchBenchmarkQuotes: async () => quoteSnapshot(),
+    fetchNiftyHistoricalCandles: async () => historySnapshot(Array.from({ length: 60 }, (_, index) => 100 + index)),
+    getCache: cache.get,
+    setCache: cache.set,
+  });
+  assert.equal(qualified.status, 'MARKET_CONTEXT_AVAILABLE');
+  assert.equal(qualified.recommendationUsability.status, 'USABLE');
+
+  const recommendationRead = await getLatestQualifiedMarketContextForRecommendation({ now: NOW }, {
+    getCache: cache.get,
+  });
+  assert.equal(recommendationRead.recommendationUsability.status, 'USABLE');
+  assert.equal(recommendationRead.marketSnapshot.recoveredFromLastKnownGood, true);
+
+  const unavailable = await getLiveMarketContext({ now: new Date('2026-09-08T12:05:00.000Z') }, {
+    fetchBenchmarkQuotes: async () => { throw new Error('quote outage'); },
+    fetchNiftyHistoricalCandles: async () => { throw new Error('history outage'); },
+    getCache: cache.get,
+    setCache: cache.set,
+  });
+  assert.equal(unavailable.recoveredFromLastKnownGood, true);
+  assert.equal(unavailable.marketSnapshot.status, 'LAST_AVAILABLE');
+  assert.equal(unavailable.recommendationUsability.status, 'USABLE');
 });

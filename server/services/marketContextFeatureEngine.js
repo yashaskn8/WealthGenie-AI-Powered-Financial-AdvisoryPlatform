@@ -70,8 +70,41 @@ function quoteProblem(fact, label) {
   if (!fact || fact.availabilityStatus !== AVAILABILITY.AVAILABLE || finitePositive(fact.value) === null) {
     return `${label}_UNAVAILABLE`;
   }
+  if (fact.freshness?.status === FRESHNESS.UNKNOWN) return `${label}_FRESHNESS_UNKNOWN`;
   if (fact.freshness?.status !== FRESHNESS.FRESH) return `${label}_STALE`;
   return null;
+}
+
+/**
+ * Build one deterministic row per verified trading session. The current quote
+ * is excluded from the completed-session series so an after-close quote cannot
+ * be counted twice when daily history already contains that same session.
+ */
+export function buildCanonicalSessionSeries({ currentQuoteFact, historyCandles = [] } = {}) {
+  const quoteDate = currentQuoteFact?.effectiveTradingDate
+    || (currentQuoteFact?.observedAt ? String(currentQuoteFact.observedAt).slice(0, 10) : null);
+  const byDate = new Map();
+  for (const candle of Array.isArray(historyCandles) ? historyCandles : []) {
+    const effectiveTradingDate = String(
+      candle?.effectiveTradingDate || (candle?.timestamp ? String(candle.timestamp).slice(0, 10) : ''),
+    ).trim();
+    const close = finitePositive(candle?.close);
+    const high = finitePositive(candle?.high);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveTradingDate) || close === null || high === null) continue;
+    const existing = byDate.get(effectiveTradingDate);
+    const timestamp = Date.parse(candle?.timestamp);
+    const existingTimestamp = Date.parse(existing?.timestamp);
+    if (!existing || (Number.isFinite(timestamp) && timestamp >= existingTimestamp)) {
+      byDate.set(effectiveTradingDate, { ...candle, effectiveTradingDate, close, high });
+    }
+  }
+  const allSessions = [...byDate.values()].sort((left, right) => (
+    left.effectiveTradingDate.localeCompare(right.effectiveTradingDate)
+  ));
+  const completedSessions = quoteDate
+    ? allSessions.filter(session => session.effectiveTradingDate < quoteDate)
+    : allSessions;
+  return { quoteDate, allSessions, completedSessions };
 }
 
 function sourceDescriptor(source, observedAt, fetchedAt, freshness, metadata = {}) {
@@ -180,6 +213,8 @@ function buildSemanticFacts({ signals, niftyFact, vixFact, quoteSnapshot, histor
 function unavailableResult({ quoteSnapshot, historicalSnapshot, signals, reasonCodes, sources }) {
   return {
     status: 'FEATURES_UNAVAILABLE',
+    policyAvailability: 'UNAVAILABLE',
+    dataCompleteness: 'UNAVAILABLE',
     signals,
     reasonCodes: [...new Set(reasonCodes)],
     observedAt: null,
@@ -237,6 +272,8 @@ export function computeMarketContextFeatures({ quoteSnapshot, historicalSnapshot
     if (!reasonCodes.includes('PROVIDER_NOT_CONFIGURED') && !reasonCodes.includes('MARKET_HISTORY_SOURCE_ERROR')) {
       reasonCodes.push('NIFTY50_HISTORY_UNAVAILABLE');
     }
+  } else if (historicalSnapshot?.freshness?.status === FRESHNESS.UNKNOWN) {
+    reasonCodes.push('NIFTY50_HISTORY_FRESHNESS_UNKNOWN');
   } else if (historicalSnapshot?.freshness?.status !== FRESHNESS.FRESH) {
     reasonCodes.push('NIFTY50_HISTORY_STALE');
   }
@@ -260,6 +297,8 @@ export function computeMarketContextFeatures({ quoteSnapshot, historicalSnapshot
           qualification: quoteSnapshot?.qualification ?? null,
           fetchedAt: quoteSnapshot?.fetchedAt ?? null,
           cache: quoteSnapshot?.cache ?? null,
+          calendar: quoteSnapshot?.calendar ?? null,
+          reasonCodes: quoteSnapshot?.reasonCodes ?? [],
         },
         history: {
           provider: historicalSnapshot?.provider ?? null,
@@ -267,19 +306,25 @@ export function computeMarketContextFeatures({ quoteSnapshot, historicalSnapshot
           qualification: historicalSnapshot?.qualification ?? null,
           fetchedAt: historicalSnapshot?.fetchedAt ?? null,
           cache: historicalSnapshot?.cache ?? null,
+          calendar: historicalSnapshot?.calendar ?? null,
+          reasonCodes: historicalSnapshot?.reasonCodes ?? [],
         },
       },
     };
   }
 
-  const closes = validCandles.map(candle => Number(candle.close));
-  const recentCandles = validCandles.slice(-MARKET_CONTEXT_RECENT_HIGH_SESSIONS);
-  const recentHigh = Math.max(niftyCurrent, ...recentCandles.map(candle => Number(candle.high)));
+  const sessionSeries = buildCanonicalSessionSeries({ currentQuoteFact: niftyFact, historyCandles: validCandles });
+  const completedSessions = sessionSeries.completedSessions;
+  const closes = completedSessions.map(candle => Number(candle.close));
+  const recentCandles = completedSessions.slice(-MARKET_CONTEXT_RECENT_HIGH_SESSIONS);
+  const recentHigh = recentCandles.length > 0
+    ? Math.max(...recentCandles.map(candle => Number(candle.high)))
+    : null;
   const recentCloses = closes.slice(-21);
   const dailyLogReturns = recentCloses.slice(1).map((close, index) => (
     Math.log(close / recentCloses[index])
   ));
-  const ma50 = average(closes.slice(-50));
+  const ma50 = closes.length >= 50 ? average(closes.slice(-50)) : null;
   const ma200 = closes.length >= 200 ? average(closes.slice(-200)) : null;
   const realizedVolatility = sampleStandardDeviation(dailyLogReturns);
 
@@ -304,6 +349,8 @@ export function computeMarketContextFeatures({ quoteSnapshot, historicalSnapshot
   const quoteObserved = [niftyFact.observedAt, vixFact.observedAt].map(Date.parse).filter(Number.isFinite);
   return {
     status: 'FEATURES_AVAILABLE',
+    policyAvailability: 'AVAILABLE',
+    dataCompleteness: ma200 === null ? 'PARTIAL' : 'COMPLETE',
     signals,
     reasonCodes: ma200 === null ? ['MA200_UNAVAILABLE_INSUFFICIENT_HISTORY'] : [],
     observedAt: quoteObserved.length === 2 ? new Date(Math.min(...quoteObserved)).toISOString() : null,
@@ -322,6 +369,8 @@ export function computeMarketContextFeatures({ quoteSnapshot, historicalSnapshot
         qualification: quoteSnapshot?.qualification ?? null,
         fetchedAt: quoteSnapshot?.fetchedAt ?? null,
         cache: quoteSnapshot?.cache ?? null,
+        calendar: quoteSnapshot?.calendar ?? null,
+        reasonCodes: quoteSnapshot?.reasonCodes ?? [],
       },
       history: {
         provider: historicalSnapshot?.provider ?? null,
@@ -329,6 +378,8 @@ export function computeMarketContextFeatures({ quoteSnapshot, historicalSnapshot
         qualification: historicalSnapshot?.qualification ?? null,
         fetchedAt: historicalSnapshot?.fetchedAt ?? null,
         cache: historicalSnapshot?.cache ?? null,
+        calendar: historicalSnapshot?.calendar ?? null,
+        reasonCodes: historicalSnapshot?.reasonCodes ?? [],
       },
     },
   };

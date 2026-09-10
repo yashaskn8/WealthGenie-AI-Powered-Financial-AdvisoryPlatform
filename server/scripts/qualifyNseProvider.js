@@ -75,6 +75,8 @@ try {
   assert.equal(coalescedHistoricalSnapshot.status, 'AVAILABLE');
   assert.equal(cachedHistoricalSnapshot.cache.hit, true);
   assert(historicalSnapshot.candleCount >= 200);
+  assert.equal(quoteSnapshot.calendar?.status, 'AVAILABLE');
+  assert.equal(historicalSnapshot.calendar?.status, 'AVAILABLE');
 
   // The forced refresh is the latest authoritative quote snapshot and is also
   // the snapshot the HTTP route will read back from cache. Using the earlier
@@ -84,6 +86,10 @@ try {
   const candidate = classifyDeterministicMarketContext(features);
   const published = applyMarketContextHysteresis(candidate, null, new Date()).result;
   assert.equal(features.status, 'FEATURES_AVAILABLE');
+  assert.equal(features.policyAvailability, 'AVAILABLE');
+  assert(['COMPLETE', 'PARTIAL'].includes(features.dataCompleteness));
+  ['return1DayPct', 'return5DayPct', 'return20DayPct', 'drawdownFromRecentHighPct', 'realizedVolatility20DayAnnualizedPct']
+    .forEach(key => assert.equal(features.signals[key].available, true, `${key} must be derived from verified sessions`));
   assert.equal(candidate.status, 'MARKET_CONTEXT_AVAILABLE');
 
   process.env.NODE_ENV = 'test';
@@ -101,6 +107,8 @@ try {
   assert.equal(routeBody.status, candidate.status);
   assert.equal(routeBody.candidateContext, candidate.context);
   assert.deepEqual(signalValues(routeBody.signals), signalValues(candidate.signals));
+  assert.equal(routeBody.marketSnapshot.policyOutput.context, routeBody.context);
+  assert.equal(routeBody.marketSnapshot.policyAvailability, 'AVAILABLE');
 
   const serializedCache = [...storedValues.entries()].map(([key, value]) => `${key}\n${value}`).join('\n');
   const sensitiveCachePattern = /authorization|bearer|cookie|sessionid|analytics_token|access_token/i;

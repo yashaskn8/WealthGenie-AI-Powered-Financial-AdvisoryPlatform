@@ -5,6 +5,7 @@ import {
   enforceAllocationTargets,
   filterEligible,
   getInstrumentRisk,
+  getWhereToInvestProviderCoverageMatrix,
   instrumentRiskTier,
   normaliseConfidenceScores,
   parseProfile,
@@ -150,6 +151,16 @@ test('WTI unsupported categories fail closed while preserving parent suitability
   );
   assert.equal(excessiveRisk.length, 0);
   assert.equal(excessiveRisk.metadata.excluded[0].reasonCode, 'RISK_EXCEEDS_FINAL_SUITABILITY');
+});
+
+test('WTI provider coverage matrix audits every catalog parent and never substitutes unsupported products', () => {
+  const matrix = getWhereToInvestProviderCoverageMatrix();
+  assert.equal(matrix.length, investmentDatabase.length);
+  assert.equal(new Set(matrix.map(item => item.parentInstrumentId)).size, investmentDatabase.length);
+  assert(matrix.every(item => item.productSubstitutionAllowed === false));
+  assert(matrix.some(item => item.parentInstrumentId === 'ppf' && item.provider === 'GOVERNMENT_OF_INDIA'));
+  assert(matrix.some(item => item.parentInstrumentId === 'fd' && item.provider === 'SBI'));
+  assert(matrix.some(item => item.parentInstrumentId === 'index_mf' && item.status === 'UNSUPPORTED_FAIL_CLOSED'));
 });
 
 test('WTI legacy catalog exports reference text only and cannot expose product or financial authority', () => {

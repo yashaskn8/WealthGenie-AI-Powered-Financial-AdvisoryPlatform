@@ -20,16 +20,29 @@ export async function readThroughMarketCache({
 }) {
   if (!forceRefresh) {
     const cached = await getCache(cacheKey);
-    if (cached) return { ...cached, cache: { hit: true, backend: 'REDIS' } };
+    if (cached) return {
+      ...cached,
+      cache: { hit: true, backend: 'REDIS' },
+      cacheMetadata: cached.cacheMetadata || { cachedAt: null },
+    };
   }
 
   return coalesceMarketRequest(cacheKey, async () => {
     if (!forceRefresh) {
       const cachedAfterWait = await getCache(cacheKey);
-      if (cachedAfterWait) return { ...cachedAfterWait, cache: { hit: true, backend: 'REDIS' } };
+      if (cachedAfterWait) return {
+        ...cachedAfterWait,
+        cache: { hit: true, backend: 'REDIS' },
+        cacheMetadata: cachedAfterWait.cacheMetadata || { cachedAt: null },
+      };
     }
     const result = await loader();
-    if (shouldCache(result)) await setCache(cacheKey, result, ttlSeconds);
+    if (shouldCache(result)) {
+      await setCache(cacheKey, {
+        ...result,
+        cacheMetadata: { ...(result?.cacheMetadata || {}), cachedAt: new Date().toISOString() },
+      }, ttlSeconds);
+    }
     return { ...result, cache: { hit: false, backend: 'REDIS' } };
   });
 }

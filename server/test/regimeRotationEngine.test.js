@@ -72,6 +72,20 @@ test('unavailable and normal contexts never change the recommendation', () => {
   assert.deepEqual(normal.adjustedWeights, normal.baseWeights);
 });
 
+test('a policy context without recommendation-safe freshness cannot change the recommendation', () => {
+  const result = applyProfileSafeMarketContextAdjustment({
+    profile: PROFILE,
+    instruments: [instrument('ppf', 1, 0.85), instrument('smallcap_mf', 5, 0.15)],
+    marketContext: {
+      status: 'MARKET_CONTEXT_AVAILABLE',
+      context: 'RISK_OFF',
+      recommendationUsability: { status: 'NOT_USABLE', reasonCodes: ['MARKET_SNAPSHOT_OBSERVATION_TOO_OLD'] },
+    },
+  });
+  assert.equal(result.applied, false);
+  assert(result.reasonCodes.includes('MARKET_CONTEXT_NOT_USABLE_FOR_RECOMMENDATION'));
+});
+
 test('an ML shadow state cannot become an allocation context', () => {
   const instruments = [instrument('ppf', 1, 0.85), instrument('smallcap_mf', 5, 0.15)];
   const result = applyProfileSafeMarketContextAdjustment({

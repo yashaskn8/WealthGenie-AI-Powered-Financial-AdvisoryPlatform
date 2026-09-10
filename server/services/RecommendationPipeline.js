@@ -480,6 +480,20 @@ function referenceMetadata(parent, entry) {
   };
 }
 
+export function getWhereToInvestProviderCoverageMatrix() {
+  return investmentDatabase.map(instrument => {
+    const fixedIncomeProvider = fixedIncomeProviderForParent(instrument.id);
+    const provider = fixedIncomeProvider || (supportsAmfiParentCategory(instrument.id) ? PROVIDERS.AMFI : null);
+    return {
+      parentInstrumentId: instrument.id,
+      category: instrument.category,
+      provider,
+      status: provider ? 'QUALIFIED_PROVIDER_PATH' : 'UNSUPPORTED_FAIL_CLOSED',
+      productSubstitutionAllowed: false,
+    };
+  });
+}
+
 /**
  * WTI is an alternate presentation of the same hard parent-level suitability
  * decision. Phase 2 sources mutual-fund products and ranking evidence from
@@ -504,7 +518,10 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
   }
 
   const parent = { name: catalog.name, riskScore: getInstrumentRisk(catalog) };
-  const catalogMetadata = referenceMetadata(parent, whereToInvestCatalog[catalog.id]);
+  const catalogMetadata = {
+    ...referenceMetadata(parent, whereToInvestCatalog[catalog.id]),
+    providerCoverage: getWhereToInvestProviderCoverageMatrix().find(item => item.parentInstrumentId === catalog.id),
+  };
   const formatOutput = (resultProducts, metadata) => {
     const enriched = enrichProductsWithPostTaxAndSuitability(resultProducts, {
       profile: canonical,

@@ -37,6 +37,8 @@ function value(signals, key) {
 export function classifyDeterministicMarketContext(features) {
   const base = {
     status: 'MARKET_CONTEXT_UNAVAILABLE',
+    policyAvailability: 'UNAVAILABLE',
+    dataCompleteness: features?.dataCompleteness ?? 'UNAVAILABLE',
     context: null,
     confidence: null,
     classification: MARKET_CONTEXT_CLASSIFICATION,
@@ -93,6 +95,7 @@ export function classifyDeterministicMarketContext(features) {
   return {
     ...base,
     status: 'MARKET_CONTEXT_AVAILABLE',
+    policyAvailability: 'AVAILABLE',
     context,
     reasonCodes: [...new Set([...features.reasonCodes, ...reasonCodes])],
   };

@@ -2,8 +2,8 @@
  * @vitest-environment jsdom
  */
 import React from 'react';
-import { render, screen, within } from '@testing-library/react';
-import { describe, it, expect, vi } from 'vitest';
+import { render, screen, within, cleanup } from '@testing-library/react';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import SebiDisclaimer from '../SebiDisclaimer';
 import WhereToInvestTab from '../deepdive/WhereToInvestTab';
 import * as api from '../../services/api';
@@ -49,6 +49,8 @@ vi.mock('../../services/api', () => ({
 }));
 
 describe('SebiDisclaimer Component', () => {
+  afterEach(() => cleanup());
+
   it('renders regulatory disclaimer text', () => {
     render(<SebiDisclaimer />);
     const matches = screen.getAllByText(/Not SEBI-registered investment advice/i);

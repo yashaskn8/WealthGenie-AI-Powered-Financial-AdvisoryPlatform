@@ -15,7 +15,10 @@ import {
 } from '../services/marketData/nseTradingCalendar.js';
 import { clearInFlightMarketRequestsForTest } from '../services/marketData/requestCache.js';
 import { setRedisAvailable, setRedisClient } from '../config/redis.js';
-import { computeMarketContextFeatures } from '../services/marketContextFeatureEngine.js';
+import {
+  buildCanonicalSessionSeries,
+  computeMarketContextFeatures,
+} from '../services/marketContextFeatureEngine.js';
 import {
   MARKET_REGIME_DATASET_SCHEMA_VERSION,
   buildMarketRegimeDataset,
@@ -297,6 +300,56 @@ test('provider HTTP and parser failures return SOURCE_ERROR with no quote or can
   });
   assert.equal(history.status, 'SOURCE_ERROR');
   assert.deepEqual(history.candles, []);
+});
+
+test('NSE calendar failure preserves valid quote and history facts but withholds freshness/session authority', async () => {
+  const quoteProvider = new NseMarketDataProvider({
+    clock: () => new Date(FETCHED_AT),
+    holidayLoader: async () => { throw new Error('calendar outage'); },
+    httpClient: { get: async () => ({ data: QUOTE_PAYLOAD }) },
+  });
+  const quote = await quoteProvider.getQuotes(DEFAULT_BENCHMARK_IDS, { forceRefresh: true });
+  assert.equal(quote.status, 'AVAILABLE');
+  assert.equal(quote.facts.length, 2);
+  assert.equal(quote.facts[0].value, 23635.1);
+  assert.equal(quote.facts[0].freshness.status, 'UNKNOWN');
+  assert.equal(quote.marketSession.status, 'UNKNOWN');
+  assert.equal(quote.calendar.status, 'UNAVAILABLE');
+
+  const historyProvider = new NseHistoricalDataProvider({
+    clock: () => new Date('2026-09-08T04:00:00.000Z'),
+    holidayLoader: async () => { throw new Error('calendar outage'); },
+    httpClient: { get: async () => ({ data: { data: [historyRow('2026-09-07', 24020)] } }) },
+  });
+  const history = await historyProvider.getDailyCandles(
+    MARKET_BENCHMARKS.NIFTY_50.canonicalProductId,
+    { fromDate: '2026-09-01', toDate: '2026-09-07', forceRefresh: true },
+  );
+  assert.equal(history.status, 'AVAILABLE');
+  assert.equal(history.candleCount, 1);
+  assert.equal(history.candles[0].close, 24020);
+  assert.equal(history.freshness.status, 'UNKNOWN');
+  assert.equal(history.calendar.status, 'UNAVAILABLE');
+
+  const features = computeMarketContextFeatures({ quoteSnapshot: quote, historicalSnapshot: history });
+  assert.equal(features.status, 'FEATURES_UNAVAILABLE');
+  assert(features.reasonCodes.includes('NIFTY50_QUOTE_FRESHNESS_UNKNOWN'));
+  assert(features.reasonCodes.includes('NIFTY50_HISTORY_FRESHNESS_UNKNOWN'));
+});
+
+test('canonical session series deduplicates current-session history and preserves completed-session order', () => {
+  const series = buildCanonicalSessionSeries({
+    currentQuoteFact: { effectiveTradingDate: '2026-09-08' },
+    historyCandles: [
+      { effectiveTradingDate: '2026-09-08', timestamp: '2026-09-08T10:00:00.000Z', close: 102, high: 104 },
+      { effectiveTradingDate: '2026-09-07', timestamp: '2026-09-07T10:00:00.000Z', close: 101, high: 103 },
+      { effectiveTradingDate: '2026-09-07', timestamp: '2026-09-07T11:00:00.000Z', close: 101.5, high: 104 },
+      { effectiveTradingDate: '2026-09-05', timestamp: '2026-09-05T10:00:00.000Z', close: 99, high: 100 },
+    ],
+  });
+  assert.deepEqual(series.allSessions.map(row => row.effectiveTradingDate), ['2026-09-05', '2026-09-07', '2026-09-08']);
+  assert.deepEqual(series.completedSessions.map(row => row.effectiveTradingDate), ['2026-09-05', '2026-09-07']);
+  assert.equal(series.completedSessions.at(-1).close, 101.5);
 });
 
 test('NSE quote provider coalesces concurrent requests and then serves Redis cache', async () => {

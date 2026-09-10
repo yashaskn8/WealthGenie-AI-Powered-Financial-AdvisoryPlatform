@@ -118,6 +118,10 @@ export function applyProfileSafeMarketContextAdjustment({
   if (marketContext?.status !== 'MARKET_CONTEXT_AVAILABLE' || !marketContext.context) {
     return unchangedResult(instruments, marketContext, 'MARKET_CONTEXT_UNAVAILABLE_NO_ADJUSTMENT');
   }
+  if (marketContext?.recommendationUsability?.status
+      && marketContext.recommendationUsability.status !== 'USABLE') {
+    return unchangedResult(instruments, marketContext, 'MARKET_CONTEXT_NOT_USABLE_FOR_RECOMMENDATION');
+  }
   const maxTotalTiltPct = MARKET_CONTEXT_MAX_TOTAL_TILT_PCT[marketContext.context];
   if (!Number.isFinite(maxTotalTiltPct)) {
     throw new TypeError(`Unsupported market context: ${marketContext.context}`);

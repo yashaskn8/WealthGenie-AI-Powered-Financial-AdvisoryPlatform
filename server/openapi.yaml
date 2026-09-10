@@ -513,7 +513,7 @@ components:
     RecommendationResponse:
       type: object
       required: [recommendationId, audit_id, audit_hash, instruments, model_version, recommendation_policy_version, financial_profile_schema_version, return_basis, final_risk_tier]
-      properties: { recommendationId: { type: string }, audit_id: { type: string }, audit_hash: { type: string }, instruments: { type: array, items: { type: object, additionalProperties: true } }, confidence_scores: { type: object, additionalProperties: true }, model_version: { type: string }, ml_fallback: { type: boolean }, optional_profile_fields_unknown: { type: array, items: { type: string } }, ml_input_fields_unknown: { type: array, items: { type: string } }, recommendation_policy_version: { type: string }, financial_profile_schema_version: { type: string }, return_basis: { type: string, const: PRE_TAX_NOMINAL }, final_risk_tier: { type: string }, excluded_due_to_eligibility: { type: array, items: { type: object, additionalProperties: true } } }
+      properties: { recommendationId: { type: string }, audit_id: { type: string }, audit_hash: { type: string }, instruments: { type: array, items: { type: object, additionalProperties: true } }, confidence_scores: { type: object, additionalProperties: true }, market_adjustment: { $ref: '#/components/schemas/MarketAdjustmentMetadata' }, model_version: { type: string }, ml_fallback: { type: boolean }, optional_profile_fields_unknown: { type: array, items: { type: string } }, ml_input_fields_unknown: { type: array, items: { type: string } }, recommendation_policy_version: { type: string }, financial_profile_schema_version: { type: string }, return_basis: { type: string, const: PRE_TAX_NOMINAL }, final_risk_tier: { type: string }, excluded_due_to_eligibility: { type: array, items: { type: object, additionalProperties: true } } }
       additionalProperties: true
     AuditMetadata:
       type: object
@@ -540,6 +540,22 @@ components:
         policyVersion: { type: [string, 'null'] }
         evaluatedAt: { type: string, format: date-time }
         marketSnapshot: { $ref: '#/components/schemas/MarketContextSnapshot' }
+      additionalProperties: true
+    MarketAdjustmentMetadata:
+      type: object
+      required: [status, applied, actualTotalTiltPct, reasonCodes, suitabilityValidation, concentrationValidation]
+      properties:
+        status: { type: string, enum: [APPLIED, NOT_APPLIED, UNAVAILABLE] }
+        applied: { type: boolean }
+        contextStatus: { type: string }
+        context: { type: [string, 'null'] }
+        policyVersion: { type: [string, 'null'] }
+        observedAt: { type: [string, 'null'], format: date-time }
+        evaluatedAt: { type: [string, 'null'], format: date-time }
+        actualTotalTiltPct: { type: number, minimum: 0 }
+        reasonCodes: { type: array, items: { type: string } }
+        suitabilityValidation: { type: string }
+        concentrationValidation: { type: string }
       additionalProperties: true
     MarketContextSnapshot:
       type: object
