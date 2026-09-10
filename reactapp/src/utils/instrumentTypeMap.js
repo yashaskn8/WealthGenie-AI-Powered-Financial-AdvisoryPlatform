@@ -9,6 +9,7 @@ export const BACKEND_TO_LOCAL_MAP = Object.freeze({
   SGB: 'sgb',
   Debt_MF: 'debt_mf',
   Liquid_MF: 'liquid_mf',
+  Arbitrage_MF: 'arbitrage_mf',
   Hybrid_MF: 'hybrid_mf',
   Index_MF: 'index_mf',
   Midcap_MF: 'midcap_mf',
@@ -31,6 +32,7 @@ export const LOCAL_TO_BACKEND_MAP = Object.freeze({
   sgb: 'SGB',
   debt_mf: 'Debt_MF',
   liquid_mf: 'Liquid_MF',
+  arbitrage_mf: 'Arbitrage_MF',
   hybrid_mf: 'Hybrid_MF',
   midcap_mf: 'Midcap_MF',
   smallcap_mf: 'Smallcap_MF',
@@ -43,7 +45,7 @@ export const LOCAL_TO_BACKEND_MAP = Object.freeze({
 
 export const OPTIMISABLE_BACKEND_KEYS = new Set([
   'Equity_MF', 'ELSS', 'ETF', 'Debt_MF', 'FD', 'Gold', 'NPS', 'PPF',
-  'RBI_Bond', 'G-Sec', 'SGB', 'Liquid_MF', 'Hybrid_MF', 'Index_MF',
+  'RBI_Bond', 'G-Sec', 'SGB', 'Liquid_MF', 'Arbitrage_MF', 'Hybrid_MF', 'Index_MF',
   'Midcap_MF', 'Smallcap_MF', 'SCSS', 'SSY',
 ]);
 

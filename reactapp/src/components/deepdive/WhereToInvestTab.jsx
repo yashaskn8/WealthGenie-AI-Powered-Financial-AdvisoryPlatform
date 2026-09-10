@@ -16,6 +16,7 @@ import {
   ChevronUp,
   Calculator,
   IndianRupee,
+  ArrowUpRight,
 } from 'lucide-react';
 import * as api from '../../services/api';
 import SebiDisclaimer from '../SebiDisclaimer';
@@ -86,6 +87,44 @@ const MARKET_CONTEXT_DESCRIPTIONS = {
   UNAVAILABLE: 'Live market information is temporarily unavailable. Your personal suitability rules are still active.',
 };
 
+const MARKET_CONTEXT_COPY = {
+  NORMAL: {
+    headline: 'Market conditions look steady.',
+    explanation: 'Your plan maintains standard allocations within investments that fit your profile.',
+  },
+  CAUTIOUS: {
+    headline: 'Markets have been weaker recently.',
+    explanation: 'Your plan is being slightly more careful while staying within investments that already fit your profile.',
+  },
+  HIGH_VOLATILITY: {
+    headline: 'Markets are moving more sharply than usual.',
+    explanation: 'Your plan stays focused on profile-suitable investments with cautious risk management.',
+  },
+  RISK_OFF: {
+    headline: 'Market risk is elevated right now.',
+    explanation: 'Your plan applies the strongest allowed risk reduction while staying within your suitability limits.',
+  },
+  UNAVAILABLE: {
+    headline: 'Live market information is temporarily unavailable.',
+    explanation: 'Your personal suitability rules remain fully active.',
+  },
+};
+
+const SIGNAL_DEFINITIONS = [
+  { key: 'nifty50Current', label: 'NIFTY 50', group: 'market' },
+  { key: 'nifty50PreviousClose', label: 'Previous close', group: 'market' },
+  { key: 'indiaVixCurrent', label: 'India VIX', group: 'market' },
+  { key: 'return1DayPct', label: '1-day return', group: 'market' },
+  { key: 'return5DayPct', label: '5-day return', group: 'market' },
+  { key: 'return20DayPct', label: '20-day return', group: 'market' },
+  { key: 'drawdownFromRecentHighPct', label: 'Drawdown from recent high', group: 'trend' },
+  { key: 'movingAverage50Day', label: '50-day moving average', group: 'trend' },
+  { key: 'movingAverage200Day', label: '200-day moving average', group: 'trend' },
+  { key: 'priceVsMovingAverage50Pct', label: 'vs. 50-day average', group: 'trend' },
+  { key: 'priceVsMovingAverage200Pct', label: 'vs. 200-day average', group: 'trend' },
+  { key: 'realizedVolatility20DayAnnualizedPct', label: '20-day realized volatility', group: 'volatility' },
+];
+
 function getRiskTierColor(tier) {
   switch (tier) {
     case 'Very Low Risk': return { color: '#22c55e', bg: 'rgba(34, 197, 94, 0.1)', border: 'rgba(34, 197, 94, 0.3)' };
@@ -127,6 +166,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
   const [marketContext, setMarketContext] = useState(null);
   const [marketContextError, setMarketContextError] = useState(null);
   const [sortBy, setSortBy] = useState('score');
+  const [isTechExpanded, setIsTechExpanded] = useState(false);
 
   // Illustrative principal & tax context state
   const [illustrativePrincipal, setIllustrativePrincipal] = useState(10000);
@@ -305,22 +345,34 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
   const contextAvailable = marketContext?.status === 'MARKET_CONTEXT_AVAILABLE';
   const contextRawState = contextAvailable ? marketContext.context : 'MARKET_CONTEXT_UNAVAILABLE';
   const beginnerMarketState = contextAvailable ? marketContext.context : 'UNAVAILABLE';
-  const beginnerMarketText = MARKET_CONTEXT_DESCRIPTIONS[beginnerMarketState] || MARKET_CONTEXT_DESCRIPTIONS.UNAVAILABLE;
+  const contextCopy = MARKET_CONTEXT_COPY[beginnerMarketState] || MARKET_CONTEXT_COPY.UNAVAILABLE;
 
   let marketBadgeColor = '#38bdf8';
-  let marketBadgeBg = 'rgba(56, 189, 248, 0.15)';
+  let marketBadgeBg = 'rgba(56, 189, 248, 0.12)';
+  let marketBadgeBorder = 'rgba(56, 189, 248, 0.25)';
   if (beginnerMarketState === 'NORMAL') {
     marketBadgeColor = '#22c55e';
-    marketBadgeBg = 'rgba(34, 197, 94, 0.15)';
+    marketBadgeBg = 'rgba(34, 197, 94, 0.12)';
+    marketBadgeBorder = 'rgba(34, 197, 94, 0.25)';
   } else if (beginnerMarketState === 'CAUTIOUS') {
     marketBadgeColor = '#f59e0b';
-    marketBadgeBg = 'rgba(245, 158, 11, 0.15)';
+    marketBadgeBg = 'rgba(245, 158, 11, 0.12)';
+    marketBadgeBorder = 'rgba(245, 158, 11, 0.25)';
   } else if (beginnerMarketState === 'HIGH_VOLATILITY' || beginnerMarketState === 'RISK_OFF') {
     marketBadgeColor = '#ef4444';
-    marketBadgeBg = 'rgba(239, 68, 68, 0.15)';
+    marketBadgeBg = 'rgba(239, 68, 68, 0.12)';
+    marketBadgeBorder = 'rgba(239, 68, 68, 0.25)';
   }
 
-  const contextSignals = Object.entries(marketContext?.signals || {});
+  const signalMap = marketContext?.signals || {};
+  const definedSignalKeys = new Set(SIGNAL_DEFINITIONS.map(d => d.key));
+  const marketSignals = SIGNAL_DEFINITIONS.filter(d => d.group === 'market' && signalMap[d.key]);
+  const trendSignals = SIGNAL_DEFINITIONS.filter(d => d.group === 'trend' && signalMap[d.key]);
+  const volatilitySignals = SIGNAL_DEFINITIONS.filter(d => d.group === 'volatility' && signalMap[d.key]);
+  const otherSignals = Object.keys(signalMap)
+    .filter(k => !definedSignalKeys.has(k))
+    .map(k => ({ key: k, label: k.replace(/([A-Z])/g, ' $1').trim() }));
+
   const contextReasonCodes = marketContext?.reasonCodes || (marketContextError ? ['MARKET_CONTEXT_REQUEST_FAILED'] : []);
 
   const formatSignal = (item) => {
@@ -332,124 +384,192 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
   return (
     <div className="tab-fade-in">
       {/* ─── Beginner-First Market Summary Card ─── */}
-      <section className="wti-beginner-market-card" aria-label="Market conditions overview">
+      <section
+        className="wti-beginner-market-card"
+        aria-label="Market conditions overview"
+        style={{ borderLeftColor: marketBadgeColor }}
+      >
         <div className="wti-beginner-market-header">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <Globe size={18} style={{ color: marketBadgeColor }} />
-            <span style={{ fontSize: '1rem', fontWeight: 800, color: '#f8fafc', letterSpacing: '-0.01em' }}>
-              Market today
-            </span>
+          <div className="wti-header-title-group">
+            <Globe size={16} className="wti-header-globe-icon" style={{ color: marketBadgeColor }} />
+            <h3 className="wti-header-title">Market today</h3>
           </div>
           <span
             className="wti-beginner-market-badge"
             style={{
               color: marketBadgeColor,
               background: marketBadgeBg,
-              border: `1px solid ${marketBadgeColor}50`,
+              borderColor: marketBadgeBorder,
             }}
           >
             {marketContext === null && !marketContextError ? 'LOADING' : contextRawState}
           </span>
         </div>
 
-        <p className="wti-beginner-market-text">{beginnerMarketText}</p>
-
-        <div className="wti-beginner-meaning">
-          <strong>What this means for you:</strong> Your plan may become slightly more careful, but it will only adjust investments that already fit your profile.
+        <div className="wti-beginner-market-body">
+          <p className="wti-beginner-market-headline">{contextCopy.headline}</p>
+          <p className="wti-beginner-meaning">
+            <span className="wti-meaning-lead">What this means for you:</span> {contextCopy.explanation}
+          </p>
         </div>
 
-        {/* Technical Details Accordion — Collapsed by Default */}
-        <details className="wti-tech-accordion">
-          <summary className="wti-tech-summary">
-            <Activity size={13} />
-            <span>View technical details</span>
-          </summary>
-
-          <div
-            data-testid="market-context-panel"
-            style={{
-              marginTop: 12,
-              background: 'rgba(2, 6, 23, 0.75)',
-              border: `1px solid ${marketBadgeColor}35`,
-              borderRadius: '8px',
-              padding: '12px 14px',
-            }}
+        <div className="wti-beginner-market-footer">
+          <button
+            type="button"
+            className="wti-preview-plan-btn"
+            onClick={toggleContextPreview}
+            disabled={contextPreviewLoading || !contextAvailable || !profileId}
+            aria-label="See how this affects my plan"
           >
-            <p style={{ fontSize: '0.78rem', lineHeight: 1.5, color: '#94a3b8', margin: '0 0 8px 0' }}>
-              {contextAvailable
-                ? `${marketContext.classification} · ${marketContext.policyVersion} · confidence: unavailable (deterministic policy, not ML)`
-                : marketContextError || 'No usable live context is published unless NIFTY 50, India VIX, and sufficient fresh history are all verified.'}
-            </p>
+            <ArrowUpRight size={14} />
+            <span>
+              {contextPreviewLoading
+                ? 'Running Server Preview…'
+                : contextPreview
+                ? 'Adjustment Preview Ready ✓'
+                : 'See how this affects my plan'}
+            </span>
+          </button>
 
-            {contextSignals.length > 0 && (
-              <div
-                data-testid="market-context-signals"
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
-                  gap: 6,
-                  marginBottom: 8,
-                }}
-              >
-                {contextSignals.map(([key, item]) => (
-                  <div key={key} style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 5, padding: '5px 8px' }}>
-                    <div style={{ color: '#64748b', fontSize: '0.62rem' }}>{key.replace(/([A-Z])/g, ' $1').trim()}</div>
-                    <div style={{ color: item?.available ? '#e2e8f0' : '#fbbf24', fontSize: '0.74rem', fontWeight: 650 }}>
-                      {formatSignal(item)}
-                    </div>
+          <button
+            type="button"
+            className="wti-tech-toggle-btn"
+            onClick={() => setIsTechExpanded(prev => !prev)}
+            aria-expanded={isTechExpanded}
+            aria-controls="market-context-panel"
+          >
+            <span>Technical details</span>
+            <ChevronDown
+              size={14}
+              className={`wti-chevron-icon ${isTechExpanded ? 'wti-chevron-rotated' : ''}`}
+            />
+          </button>
+        </div>
+
+        {contextPreview && (
+          <p className="wti-preview-feedback">
+            Server preview {contextPreview.applied ? 'applied' : 'did not apply'} a bounded {contextPreview.actualTotalTiltPct ?? 0}% total tilt across {contextPreview.explanations?.length ?? 0} allocation change{contextPreview.explanations?.length === 1 ? '' : 's'}. It is not persisted and does not execute trades.
+          </p>
+        )}
+        {contextPreviewError && (
+          <p role="alert" className="wti-preview-error">{contextPreviewError}</p>
+        )}
+
+        {/* Technical Details Panel — Collapsed by Default */}
+        <div
+          id="market-context-panel"
+          data-testid="market-context-panel"
+          className={`wti-tech-panel ${isTechExpanded ? 'wti-tech-panel--expanded' : 'wti-tech-panel--collapsed'}`}
+          hidden={!isTechExpanded}
+        >
+          <div className="wti-tech-panel-inner">
+            {/* Metric Signal Groups */}
+            <div data-testid="market-context-signals" className="wti-tech-signals-container">
+              {marketSignals.length > 0 && (
+                <div className="wti-tech-group">
+                  <h4 className="wti-tech-group-title">Market & Index</h4>
+                  <div className="wti-tech-metric-grid">
+                    {marketSignals.map(sig => (
+                      <div key={sig.key} className="wti-tech-metric-tile">
+                        <span className="wti-tech-metric-label">{sig.label}</span>
+                        <span
+                          className="wti-tech-metric-value"
+                          style={{ color: signalMap[sig.key]?.available ? '#f8fafc' : '#fbbf24' }}
+                        >
+                          {formatSignal(signalMap[sig.key])}
+                        </span>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
-            )}
+                </div>
+              )}
 
-            <div style={{ fontSize: '0.68rem', lineHeight: 1.5, color: '#94a3b8', marginBottom: 8 }}>
-              <div>
-                Observed: {marketContext?.observedAt || 'UNAVAILABLE'} · Evaluated: {marketContext?.evaluatedAt || 'UNAVAILABLE'} · Freshness: {marketContext?.freshness?.status || 'UNAVAILABLE'}
-              </div>
-              <div>
-                Sources:{' '}
-                {marketContext?.sources?.length
-                  ? marketContext.sources.map(source => `${source.provider || 'UNAVAILABLE'} (${source.instrumentId || 'benchmark history'} · ${source.dataClass || 'UNAVAILABLE'})`).join(', ')
-                  : 'UNAVAILABLE'}
-              </div>
-              <div>Reason codes: {contextReasonCodes.length ? contextReasonCodes.join(', ') : 'UNAVAILABLE'}</div>
+              {trendSignals.length > 0 && (
+                <div className="wti-tech-group">
+                  <h4 className="wti-tech-group-title">Trend & Moving Averages</h4>
+                  <div className="wti-tech-metric-grid">
+                    {trendSignals.map(sig => (
+                      <div key={sig.key} className="wti-tech-metric-tile">
+                        <span className="wti-tech-metric-label">{sig.label}</span>
+                        <span
+                          className="wti-tech-metric-value"
+                          style={{ color: signalMap[sig.key]?.available ? '#f8fafc' : '#fbbf24' }}
+                        >
+                          {formatSignal(signalMap[sig.key])}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {volatilitySignals.length > 0 && (
+                <div className="wti-tech-group">
+                  <h4 className="wti-tech-group-title">Volatility</h4>
+                  <div className="wti-tech-metric-grid">
+                    {volatilitySignals.map(sig => (
+                      <div key={sig.key} className="wti-tech-metric-tile">
+                        <span className="wti-tech-metric-label">{sig.label}</span>
+                        <span
+                          className="wti-tech-metric-value"
+                          style={{ color: signalMap[sig.key]?.available ? '#f8fafc' : '#fbbf24' }}
+                        >
+                          {formatSignal(signalMap[sig.key])}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {otherSignals.length > 0 && (
+                <div className="wti-tech-group">
+                  <h4 className="wti-tech-group-title">Other Signals</h4>
+                  <div className="wti-tech-metric-grid">
+                    {otherSignals.map(sig => (
+                      <div key={sig.key} className="wti-tech-metric-tile">
+                        <span className="wti-tech-metric-label">{sig.label}</span>
+                        <span
+                          className="wti-tech-metric-value"
+                          style={{ color: signalMap[sig.key]?.available ? '#f8fafc' : '#fbbf24' }}
+                        >
+                          {formatSignal(signalMap[sig.key])}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-              <span style={{ fontSize: '0.72rem', fontStyle: 'italic', color: '#64748b' }}>
+            {/* Evidence & Provenance Section */}
+            <div className="wti-tech-evidence-section">
+              <h4 className="wti-tech-group-title">Evidence & Policy Provenance</h4>
+              <div className="wti-tech-policy-badge">
+                {contextAvailable
+                  ? `${marketContext.classification} · ${marketContext.policyVersion} · confidence: unavailable (deterministic policy, not ML)`
+                  : marketContextError || 'No usable live context is published unless NIFTY 50, India VIX, and sufficient fresh history are all verified.'}
+              </div>
+
+              <div className="wti-tech-provenance-lines">
+                <div>
+                  Observed: {marketContext?.observedAt || 'UNAVAILABLE'} · Evaluated: {marketContext?.evaluatedAt || 'UNAVAILABLE'} · Freshness: {marketContext?.freshness?.status || 'UNAVAILABLE'}
+                </div>
+                <div>
+                  Sources:{' '}
+                  {marketContext?.sources?.length
+                    ? marketContext.sources.map(source => `${source.provider || 'UNAVAILABLE'} (${source.instrumentId || 'benchmark history'} · ${source.dataClass || 'UNAVAILABLE'})`).join(', ')
+                    : 'UNAVAILABLE'}
+                </div>
+                <div>Reason codes: {contextReasonCodes.length ? contextReasonCodes.join(', ') : 'UNAVAILABLE'}</div>
+              </div>
+
+              <p className="wti-tech-safety-note">
                 Context can only reduce risk within the already eligible recommendation. It cannot add products, override suitability, or execute trades.
-              </span>
-              <button
-                type="button"
-                onClick={toggleContextPreview}
-                disabled={contextPreviewLoading || !contextAvailable || !profileId}
-                style={{
-                  padding: '5px 12px',
-                  borderRadius: '5px',
-                  border: 'none',
-                  background: contextPreview ? '#22c55e' : marketBadgeColor,
-                  color: '#020617',
-                  fontSize: '0.72rem',
-                  fontWeight: 700,
-                  cursor: contextAvailable && profileId ? 'pointer' : 'not-allowed',
-                  opacity: contextAvailable && profileId ? 1 : 0.55,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '5px',
-                }}
-              >
-                <Activity size={13} />
-                {contextPreviewLoading ? 'Running Server Preview…' : contextPreview ? 'Adjustment Preview Ready ✓' : 'Preview Profile-Safe Adjustment'}
-              </button>
-            </div>
-            {contextPreview && (
-              <p style={{ fontSize: '0.7rem', color: '#94a3b8', margin: '8px 0 0' }}>
-                Server preview {contextPreview.applied ? 'applied' : 'did not apply'} a bounded {contextPreview.actualTotalTiltPct ?? 0}% total tilt across {contextPreview.explanations?.length ?? 0} allocation change{contextPreview.explanations?.length === 1 ? '' : 's'}. It is not persisted and does not execute trades.
               </p>
-            )}
-            {contextPreviewError && <p role="alert" style={{ fontSize: '0.7rem', color: '#fca5a5', margin: '8px 0 0' }}>{contextPreviewError}</p>}
+            </div>
           </div>
-        </details>
+        </div>
       </section>
 
       {/* ─── Illustrative Investment & Tax Controls Bar ─── */}
@@ -533,18 +653,18 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
       )}
 
       {/* ─── Section Header & Sorting ─── */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: '0.75rem' }}>
+      <div className="wti-section-header-row">
         <div>
-          <h3 className="ddm-section-header" style={{ margin: 0 }}>Top verified choices in this category</h3>
-          <p style={{ fontSize: '0.8rem', color: '#94a3b8', margin: '4px 0 0' }}>
+          <h3 className="wti-section-title">Top verified choices in this category</h3>
+          <p className="wti-section-subtitle">
             Up to 5 source-verified Direct-plan options ranked using verified historical NAV evidence.{' '}
-            <span style={{ fontSize: '0.72rem', opacity: 0.85 }}>({headerLabel})</span>
+            <span className="wti-status-label">({headerLabel})</span>
           </p>
         </div>
 
         {/* Sorting Controls */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'rgba(15, 23, 42, 0.7)', padding: '4px 8px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.08)' }}>
-          <span style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 600, marginRight: 2 }}>Sort:</span>
+        <div className="wti-sort-controls">
+          <span className="wti-sort-label">Sort:</span>
           {[
             { id: 'score', label: isEvidenceRanked ? 'Historical Evidence' : 'Comparable Set' },
             { id: 'postTaxYield', label: activeTaxContext ? 'Post-Tax Calculated' : 'Post-Tax Needs Inputs' },
@@ -558,18 +678,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                 ? (isEvidenceRanked ? 'Server order among explicitly sourced Direct Growth options by one-year historical NAV return' : 'Stable display order only; not a ranking')
                 : 'Unavailable without established provider-specific data'}
               onClick={() => mode.id === 'score' && setSortBy(mode.id)}
-              style={{
-                padding: '4px 10px',
-                borderRadius: '6px',
-                border: sortBy === mode.id ? '1px solid #38bdf8' : '1px solid transparent',
-                background: sortBy === mode.id ? 'rgba(56, 189, 248, 0.2)' : 'transparent',
-                color: sortBy === mode.id ? '#38bdf8' : '#94a3b8',
-                fontSize: '0.72rem',
-                fontWeight: 600,
-                cursor: mode.id === 'score' ? 'pointer' : 'not-allowed',
-                opacity: mode.id === 'score' ? 1 : 0.55,
-                transition: 'all 0.2s ease',
-              }}
+              className={`wti-sort-btn ${sortBy === mode.id ? 'wti-sort-btn--active' : ''}`}
             >
               {mode.label}
             </button>
@@ -605,41 +714,21 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
       )}
 
       {isUnavailable && !rankingError && (
-        <div role="status" style={{
-          background: 'rgba(100, 116, 139, 0.12)',
-          border: '1px solid rgba(148, 163, 184, 0.3)',
-          borderRadius: '8px',
-          padding: '10px 14px',
-          marginBottom: '1rem',
-          display: 'flex',
-          gap: '10px',
-          fontSize: '0.8rem',
-          color: '#cbd5e1',
-        }}>
-          <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 2 }} />
+        <div role="status" className="wti-status-banner wti-status-banner--unavailable">
+          <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 2 }} />
           <div><strong>UNAVAILABLE:</strong> No current source-qualified product comparison is available for this parent category. No fallback products or financial values were inserted.</div>
         </div>
       )}
 
       {/* Sub-Category Sector/Theme Drill-Down Tabs */}
       {subKeys.length > 0 && (
-        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '1rem' }}>
+        <div className="wti-sub-pills">
           {subKeys.map(key => (
             <button
               key={key}
               type="button"
               onClick={() => setActiveSubTab(key)}
-              style={{
-                padding: '6px 14px',
-                borderRadius: '20px',
-                border: activeSubTab === key ? '1px solid #38bdf8' : '1px solid rgba(255,255,255,0.1)',
-                background: activeSubTab === key ? 'rgba(56, 189, 248, 0.15)' : 'rgba(15, 23, 42, 0.6)',
-                color: activeSubTab === key ? '#38bdf8' : '#94a3b8',
-                fontSize: '0.8rem',
-                fontWeight: '600',
-                cursor: 'pointer',
-                textTransform: 'capitalize',
-              }}
+              className={`wti-sub-pill ${activeSubTab === key ? 'wti-sub-pill--active' : ''}`}
             >
               {SUB_TAB_LABELS[key] || key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
             </button>
@@ -648,18 +737,8 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
       )}
 
       {rankingError && (
-        <div style={{
-          background: 'rgba(239, 68, 68, 0.1)',
-          border: '1px solid rgba(239, 68, 68, 0.3)',
-          borderRadius: '8px',
-          padding: '10px 14px',
-          marginBottom: '1rem',
-          display: 'flex',
-          gap: '10px',
-          fontSize: '0.8rem',
-          color: '#fecaca',
-        }}>
-          <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 2, color: '#ef4444' }} />
+        <div className="wti-status-banner wti-status-banner--error">
+          <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 2, color: '#ef4444' }} />
           <div>{rankingError}</div>
         </div>
       )}
@@ -807,14 +886,14 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                 {/* Card Top: Product Name, Chips, Metric */}
                 <div className="wti-card-top">
                   <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                      <h4 className="wti-name">{product.name}</h4>
+                    <div className="wti-card-chips" style={{ marginTop: 0, marginBottom: 4 }}>
+                      <h4 className="wti-name" style={{ margin: 0 }}>{product.name}</h4>
                       <span
                         className="wti-badge"
                         style={{
-                          background: isEvidenceRanked ? 'rgba(34, 197, 94, 0.15)' : 'rgba(56, 189, 248, 0.12)',
+                          background: isEvidenceRanked ? 'rgba(34, 197, 94, 0.12)' : 'rgba(56, 189, 248, 0.08)',
                           color: isEvidenceRanked ? '#4ade80' : '#38bdf8',
-                          borderColor: isEvidenceRanked ? 'rgba(34, 197, 94, 0.4)' : 'rgba(56, 189, 248, 0.3)',
+                          borderColor: isEvidenceRanked ? 'rgba(34, 197, 94, 0.3)' : 'rgba(56, 189, 248, 0.25)',
                         }}
                       >
                         {product.presentationStatus?.replaceAll('_', ' ') || 'UNAVAILABLE'}
@@ -822,11 +901,9 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                       {product.tiedRank && <span className="wti-badge">TIED RANK</span>}
                     </div>
 
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginTop: 4 }}>
-                      <span className="wti-provider">
-                        {product.provider || 'Provider unavailable'} · {product.source?.provider || 'Source unavailable'}
-                      </span>
-                    </div>
+                    <span className="wti-provider">
+                      {product.provider || 'Provider unavailable'} · {product.source?.provider || 'Source unavailable'}
+                    </span>
 
                     {/* Risk & Access Chips */}
                     <div className="wti-card-chips">
@@ -847,8 +924,8 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                   </div>
 
                   {/* Fact Metric Display */}
-                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
-                    <span style={{ fontSize: '0.68rem', color: '#94a3b8', fontWeight: 700 }}>
+                  <div className="wti-card-metric-col">
+                    <span className="wti-card-metric-label">
                       {product.displayMetricLabel}
                     </span>
                     <div className="wti-rate-chip">{product.displayMetric}</div>
@@ -874,17 +951,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                         {postTax.metricLabel}:{' '}
                         <strong>{postTax.postTaxRatePct !== null ? `${postTax.postTaxRatePct}%` : 'Calculated'}</strong>
                       </span>
-                      <span
-                        style={{
-                          fontSize: '0.68rem',
-                          fontWeight: 700,
-                          padding: '2px 8px',
-                          borderRadius: '10px',
-                          background: 'rgba(52, 211, 153, 0.15)',
-                          color: '#34d399',
-                          border: '1px solid rgba(52, 211, 153, 0.3)',
-                        }}
-                      >
+                      <span className="wti-badge" style={{ background: 'rgba(52, 211, 153, 0.1)', color: '#34d399', borderColor: 'rgba(52, 211, 153, 0.2)' }}>
                         Defensible Post-Tax
                       </span>
                     </div>
@@ -929,7 +996,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                 )}
 
                 {/* Existing Highlights & Warnings */}
-                <p className="wti-highlights" style={{ margin: '8px 0 12px' }}>
+                <p className="wti-highlights">
                   {product.officialRate
                     ? product.officialRate.dataClass === 'QUARTERLY_OFFICIAL_RATE'
                       ? `Official Government of India rate effective ${product.officialRate.effectiveFrom || 'UNAVAILABLE'} to ${product.officialRate.effectiveTo || 'UNAVAILABLE'}. This is an official interval fact, not a live market price or expected return.`

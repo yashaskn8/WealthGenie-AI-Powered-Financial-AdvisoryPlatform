@@ -605,180 +605,180 @@
   color: var(--color-white);
 }
 
-/* Execution Pathway (WTI) Premium Styles — Ultra-Premium Glass Cards */
+/* ═══════════════════════════════════════════════════════════════════════════
+   WTI Product Grid & Cards — High-Craft Fintech Design
+   ═══════════════════════════════════════════════════════════════════════════ */
 .wti-grid {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 24px;
+  gap: 16px;
 }
 
 .wti-item {
   display: flex;
   align-items: stretch;
   gap: 0;
-  background: linear-gradient(165deg, rgba(15, 23, 42, 0.8), rgba(2, 6, 23, 0.95));
-  border: 1px solid var(--border-default);
-  border-top: 1px solid var(--border-hover);
-  border-left: 4px solid rgba(56, 189, 248, 0.4);
-  border-radius: var(--radius-xl);
+  background: linear-gradient(165deg, rgba(15, 23, 42, 0.85) 0%, rgba(2, 6, 23, 0.95) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 3px solid rgba(56, 189, 248, 0.45);
+  border-radius: 14px;
   position: relative;
-  transition: all 0.5s var(--ease-out-expo);
+  transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 240ms ease,
+              box-shadow 240ms ease;
   overflow: hidden;
-  box-shadow: 
-    0 16px 40px -10px rgba(0, 0, 0, 0.5),
-    inset 0 1px 0 var(--border-default);
-  backdrop-filter: blur(24px);
+  box-shadow: 0 4px 20px -4px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  will-change: transform;
 }
 
-/* Inner ambient glow */
+/* Subtle ambient glow — only on hover */
 .wti-item::before {
   content: '';
   position: absolute;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: radial-gradient(800px circle at 0% 0%, rgba(56, 189, 248, 0.06), transparent 40%);
+  inset: 0;
+  background: radial-gradient(600px circle at 0% 0%, rgba(56, 189, 248, 0.05), transparent 40%);
   pointer-events: none;
-  transition: all 0.5s ease;
+  opacity: 0;
+  transition: opacity 240ms ease;
   z-index: 0;
 }
 
 .wti-item:hover {
-  transform: translateY(-4px) scale(1.01);
-  border-color: var(--color-primary-border);
-  border-left-color: var(--color-primary);
-  box-shadow: 
-    0 24px 60px -12px rgba(0, 0, 0, 0.6), 
-    0 0 40px -10px var(--color-primary-hover),
-    inset 0 1px 0 var(--border-default);
+  transform: translateY(-2px);
+  border-color: rgba(56, 189, 248, 0.28);
+  border-left-color: #38bdf8;
+  box-shadow: 0 12px 36px -8px rgba(0, 0, 0, 0.6),
+              0 0 0 1px rgba(56, 189, 248, 0.15),
+              0 0 20px -4px rgba(56, 189, 248, 0.1);
 }
-.wti-item:hover::before {
-  background: radial-gradient(800px circle at 0% 0%, rgba(56, 189, 248, 0.12), transparent 50%);
-}
+.wti-item:hover::before { opacity: 1; }
 
-/* Featured (top pick) card */
+/* Featured (top pick) — amber accent */
 .wti-item--featured {
   border-left-color: rgba(245, 158, 11, 0.6);
-  background: linear-gradient(165deg, rgba(30, 20, 5, 0.8), rgba(2, 6, 23, 0.95));
+  background: linear-gradient(165deg, rgba(28, 20, 5, 0.8) 0%, rgba(2, 6, 23, 0.95) 100%);
 }
 .wti-item--featured::before {
-  background: radial-gradient(800px circle at 0% 0%, rgba(245, 158, 11, 0.08), transparent 40%);
+  background: radial-gradient(600px circle at 0% 0%, rgba(245, 158, 11, 0.08), transparent 40%);
 }
 .wti-item--featured:hover {
-  border-left-color: var(--color-warning);
-  box-shadow: 
-    0 24px 60px -12px rgba(0, 0, 0, 0.6), 
-    0 0 40px -10px rgba(245, 158, 11, 0.15),
-    inset 0 1px 0 var(--border-default);
-}
-.wti-item--featured:hover::before {
-  background: radial-gradient(800px circle at 0% 0%, rgba(245, 158, 11, 0.15), transparent 50%);
+  border-left-color: #f59e0b;
+  border-color: rgba(245, 158, 11, 0.28);
+  box-shadow: 0 12px 36px -8px rgba(0, 0, 0, 0.6),
+              0 0 0 1px rgba(245, 158, 11, 0.15),
+              0 0 20px -4px rgba(245, 158, 11, 0.1);
 }
 
-/* Rank number column */
+/* Rank column — compact, elegant */
 .wti-rank {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-width: 64px;
-  font-size: 2.2rem;
-  font-weight: 900;
-  background: rgba(2, 6, 23, 0.5);
-  color: transparent;
-  -webkit-text-stroke: 1px rgba(56, 189, 248, 0.4);
-  border-right: 1px solid var(--border-subtle);
+  min-width: 52px;
+  font-size: 1.75rem;
+  font-weight: 800;
+  background: rgba(2, 6, 23, 0.4);
+  color: rgba(56, 189, 248, 0.35);
+  border-right: 1px solid rgba(255, 255, 255, 0.04);
   flex-shrink: 0;
-  font-family: var(--font-sans);
-  transition: all 0.5s ease;
+  font-family: var(--font-sans, system-ui);
+  transition: color 280ms ease;
   z-index: 1;
+  letter-spacing: -0.04em;
 }
 .wti-item:hover .wti-rank {
-  -webkit-text-stroke: 1px rgba(56, 189, 248, 0.8);
-  text-shadow: 0 0 20px rgba(56, 189, 248, 0.3);
-  background: rgba(56, 189, 248, 0.03);
+  color: rgba(56, 189, 248, 0.65);
 }
 .wti-item--featured .wti-rank {
-  -webkit-text-stroke: 1px rgba(139, 92, 246, 0.5);
+  color: rgba(245, 158, 11, 0.35);
 }
 .wti-item--featured:hover .wti-rank {
-  -webkit-text-stroke: 1px rgba(139, 92, 246, 0.9);
-  text-shadow: 0 0 20px rgba(139, 92, 246, 0.3);
-  background: rgba(139, 92, 246, 0.03);
+  color: rgba(245, 158, 11, 0.65);
 }
 
 /* Card body */
 .wti-card-body {
   flex: 1;
-  padding: 28px 32px;
+  padding: 18px 22px;
   display: flex;
   flex-direction: column;
   position: relative;
   z-index: 1;
+  min-width: 0;
 }
 
 .wti-card-top {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 20px;
-  margin-bottom: 18px;
+  gap: 16px;
+  margin-bottom: 12px;
 }
 
 .wti-name {
-  font-size: 1.25rem;
-  font-weight: 800;
-  color: var(--color-white);
-  letter-spacing: -0.02em;
-  line-height: 1.3;
-  margin: 0 0 8px;
-  text-shadow: 0 2px 10px rgba(0,0,0,0.5);
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #f1f5f9;
+  letter-spacing: -0.015em;
+  line-height: 1.35;
+  margin: 0 0 5px;
 }
 
 .wti-provider {
-  font-size: 0.65rem;
-  color: var(--color-primary);
-  font-weight: 800;
+  font-size: 0.62rem;
+  color: #64748b;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.15em;
-  opacity: 0.9;
+  letter-spacing: 0.08em;
   display: inline-block;
 }
 
-/* Rate chip — glowing green badge */
+/* Card metric column (right-aligned rate/metric display) */
+.wti-card-metric-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.wti-card-metric-label {
+  font-size: 0.62rem;
+  color: #64748b;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Rate chip — clean metric display */
 .wti-rate-chip {
   display: inline-flex;
   align-items: center;
-  background: var(--color-success-bg);
+  background: rgba(16, 185, 129, 0.1);
   border: 1px solid rgba(16, 185, 129, 0.3);
-  color: var(--color-success-light);
-  padding: 10px 20px;
-  border-radius: var(--radius-md);
-  font-family: 'JetBrains Mono', 'Courier New', monospace;
+  color: #34d399;
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-weight: 800;
-  font-size: 1.1rem;
+  font-size: 0.94rem;
   white-space: nowrap;
   flex-shrink: 0;
-  box-shadow: 
-    inset 0 0 20px rgba(16, 185, 129, 0.05),
-    0 4px 15px rgba(0, 0, 0, 0.2);
-  transition: all 0.4s var(--ease-out-expo);
-  backdrop-filter: blur(8px);
+  box-shadow: 0 2px 10px rgba(16, 185, 129, 0.12);
+  transition: all 200ms ease;
 }
 .wti-item:hover .wti-rate-chip {
-  background: var(--color-success-hover);
+  background: rgba(16, 185, 129, 0.16);
   border-color: rgba(16, 185, 129, 0.5);
-  box-shadow: 
-    inset 0 0 20px var(--color-success-bg),
-    0 8px 25px var(--color-success-hover);
-  color: var(--color-success-light);
-  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(16, 185, 129, 0.25);
+  transform: scale(1.02);
 }
 
 /* Description text */
 .wti-highlights {
-  font-size: 0.9rem;
-  line-height: 1.7;
-  color: var(--text-secondary);
-  margin: 0 0 24px;
-  flex: 1;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  color: #94a3b8;
+  margin: 0 0 12px;
   font-weight: 400;
 }
 
@@ -786,108 +786,98 @@
 .wti-meta-footer {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
-  border-top: 1px solid var(--border-default);
-  padding-top: 20px;
+  gap: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  padding-top: 12px;
 }
 
 .meta-box {
-  background: var(--border-subtle);
-  border: 1px solid var(--border-default);
-  padding: 8px 16px;
-  border-radius: var(--radius-sm);
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--text-muted);
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: #64748b;
   display: flex;
   align-items: center;
-  gap: 8px;
-  transition: all 0.3s var(--ease-out-expo);
+  gap: 5px;
+  transition: color 200ms ease;
 }
 .meta-box:hover {
-  background: var(--border-default);
-  border-color: var(--border-strong);
-  color: var(--color-gray-100);
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  color: #94a3b8;
 }
-.meta-box svg { opacity: 0.7; transition: opacity 0.3s ease; }
-.meta-box:hover svg { opacity: 1; }
+.meta-box svg { opacity: 0.6; }
+.meta-box:hover svg { opacity: 0.85; }
 
 .meta-box--pick {
-  background: rgba(245, 158, 11, 0.1);
-  border-color: rgba(245, 158, 11, 0.3);
-  color: var(--color-warning-light);
-  box-shadow: 0 2px 10px rgba(245, 158, 11, 0.05);
+  background: rgba(245, 158, 11, 0.08);
+  border-color: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
 }
-.meta-box--pick svg { opacity: 1; color: var(--color-warning-light); }
+.meta-box--pick svg { opacity: 1; color: #fbbf24; }
 .meta-box--pick:hover {
-  background: rgba(245, 158, 11, 0.15);
-  border-color: rgba(245, 158, 11, 0.5);
-  box-shadow: 0 6px 16px rgba(245, 158, 11, 0.15);
-  color: var(--color-warning-light);
+  background: rgba(245, 158, 11, 0.12);
+  color: #fbbf24;
 }
 
-/* WTI Note Banner */
+/* WTI Note Banner — compact, informational */
 .wti-note-banner {
   display: flex;
-  gap: 12px;
-  padding: 16px 20px;
-  background: linear-gradient(90deg, var(--color-primary-bg), rgba(56, 189, 248, 0.02));
-  border: 1px solid var(--color-primary-hover);
-  border-radius: var(--radius-lg);
-  margin-bottom: 20px;
-  color: var(--color-primary);
+  gap: 10px;
+  padding: 10px 14px;
+  background: rgba(56, 189, 248, 0.04);
+  border: 1px solid rgba(56, 189, 248, 0.12);
+  border-radius: 10px;
+  margin-bottom: 12px;
+  color: #38bdf8;
   align-items: flex-start;
 }
 .wti-note-banner p {
   margin: 0;
-  font-size: 0.85rem;
-  line-height: 1.6;
-  color: var(--color-gray-200);
+  font-size: 0.76rem;
+  line-height: 1.55;
+  color: #94a3b8;
 }
 
 /* WTI Badge */
 .wti-badge {
-  padding: 4px 12px;
-  border-radius: var(--radius-sm);
-  font-size: 0.62rem;
-  font-weight: 800;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.58rem;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
-  background: var(--color-violet-hover);
-  color: var(--color-violet-light);
-  border: 1px solid rgba(139, 92, 246, 0.3);
+  letter-spacing: 0.06em;
+  border: 1px solid;
   white-space: nowrap;
-  box-shadow: inset 0 0 10px var(--color-violet-bg);
+  line-height: 1.3;
 }
 
 /* WTI How to Start */
 .wti-howto {
   display: flex;
-  gap: 16px;
-  padding: 20px 24px;
-  background: linear-gradient(165deg, rgba(34, 197, 94, 0.08), rgba(2, 6, 23, 0.5));
-  border: 1px solid rgba(34, 197, 94, 0.15);
-  border-radius: var(--radius-lg);
-  margin-top: 24px;
+  gap: 12px;
+  padding: 14px 18px;
+  background: rgba(34, 197, 94, 0.04);
+  border: 1px solid rgba(34, 197, 94, 0.12);
+  border-radius: 10px;
+  margin-top: 16px;
   align-items: flex-start;
-  backdrop-filter: blur(10px);
 }
 .wti-howto-label {
-  font-size: 0.65rem;
-  font-weight: 800;
+  font-size: 0.62rem;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--color-success-light);
+  letter-spacing: 0.08em;
+  color: #4ade80;
   display: block;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 .wti-howto p {
   margin: 0;
-  font-size: 0.9rem;
-  line-height: 1.6;
-  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: #94a3b8;
 }
 
 /* Tax Cards Refinement */
@@ -1209,77 +1199,55 @@ input[type=range]::-moz-range-thumb:hover {
 }
 
 /* ═══════════════════ SEBI RISK-O-METER — Premium ═══════════════════ */
+/* ═══════════════════ RISK METER — Compact Suitability Indicator ═══════════════════ */
 .risk-meter-container {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 36px 32px 32px;
-  margin-bottom: 32px;
-  /* Deep stealth glass base */
-  background: linear-gradient(145deg, rgba(15, 23, 42, 0.8), rgba(2, 6, 23, 0.95));
-  border: 1px solid var(--border-subtle);
-  border-top: 1px solid var(--border-default);
-  border-bottom: 1px solid rgba(0, 0, 0, 0.8);
-  border-radius: var(--radius-xl);
-  backdrop-filter: blur(40px) saturate(150%);
+  padding: 18px 20px 16px;
+  margin-bottom: 16px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
   position: relative;
   overflow: hidden;
-  box-shadow: 
-    0 30px 60px -15px rgba(0, 0, 0, 0.9), 
-    inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  transition: all 0.5s var(--ease-out-expo);
+  box-shadow: 0 2px 8px -2px rgba(0, 0, 0, 0.3);
+  transition: border-color 200ms ease;
 }
 .risk-meter-container:hover {
-  border-color: var(--color-primary-border);
-  box-shadow: 
-    0 40px 80px -15px rgba(0, 0, 0, 0.95), 
-    0 0 60px rgba(56, 189, 248, 0.05),
-    inset 0 1px 0 var(--border-default);
-  transform: translateY(-4px);
-}
-.risk-meter-container::before {
-  content: '';
-  position: absolute;
-  top: 0; left: 10%; right: 10%;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(56, 189, 248, 0.5), transparent);
-  pointer-events: none;
-  box-shadow: 0 1px 15px rgba(56, 189, 248, 0.3);
+  border-color: rgba(255, 255, 255, 0.1);
 }
 
 .risk-meter-header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  font-size: 0.85rem;
-  font-weight: 800;
+  gap: 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 3px;
-  color: var(--color-gray-100);
-  margin-bottom: 16px;
-  text-shadow: 0 2px 10px rgba(0,0,0,0.5);
+  letter-spacing: 0.08em;
+  color: #e2e8f0;
+  margin-bottom: 10px;
   position: relative;
   z-index: 1;
 }
 
 .risk-meter-sebi-tag {
-  font-size: 0.65rem;
-  font-weight: 800;
-  letter-spacing: 1.5px;
-  padding: 5px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--color-primary-bg);
-  border: 1px solid var(--color-primary-border);
-  color: var(--color-primary);
-  margin-left: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  color: #38bdf8;
+  margin-left: 4px;
 }
 
-
 .risk-meter-gauge {
-  width: 320px;
-  height: 180px;
-  margin: 10px 0 0;
+  width: 220px;
+  height: 130px;
+  margin: 4px 0 0;
   position: relative;
   z-index: 1;
 }
@@ -1287,49 +1255,40 @@ input[type=range]::-moz-range-thumb:hover {
   width: 100%;
   height: 100%;
   overflow: visible;
-  filter: drop-shadow(0 6px 16px rgba(0,0,0,0.5));
+  filter: drop-shadow(0 2px 6px rgba(0,0,0,0.3));
 }
 
 .risk-meter-result {
   display: flex;
   flex-direction: column;
   align-items: center;
-  margin-top: 16px;
+  margin-top: 8px;
   position: relative;
   z-index: 1;
 }
 
-/* Glowing Alert Badge for Dynamic Risk */
 .risk-meter-pill {
-  font-size: 1.25rem;
-  font-weight: 900;
-  letter-spacing: 2px;
-  padding: 10px 32px;
-  border-radius: var(--radius-md);
-  border: 1px solid color-mix(in srgb, var(--risk-color) 40%, transparent);
-  border-top: 1px solid color-mix(in srgb, var(--risk-color) 70%, transparent);
+  font-size: 0.85rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 5px 16px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--risk-color) 30%, transparent);
   text-transform: uppercase;
-  background: linear-gradient(180deg, color-mix(in srgb, var(--risk-color) 15%, transparent), color-mix(in srgb, var(--risk-color) 5%, transparent));
+  background: color-mix(in srgb, var(--risk-color) 10%, transparent);
   color: var(--risk-color);
-  box-shadow: 
-    0 8px 30px -4px color-mix(in srgb, var(--risk-color) 25%, transparent),
-    inset 0 1px 0 color-mix(in srgb, var(--risk-color) 30%, transparent),
-    inset 0 -2px 10px color-mix(in srgb, var(--risk-color) 10%, transparent);
-  text-shadow: 0 0 12px color-mix(in srgb, var(--risk-color) 50%, transparent);
-  position: relative;
-  overflow: hidden;
-  backdrop-filter: blur(12px);
+  box-shadow: 0 2px 8px -2px color-mix(in srgb, var(--risk-color) 20%, transparent);
 }
 
 .risk-meter-desc {
-  font-size: 0.75rem;
-  color: var(--text-muted);
-  margin-top: 12px;
+  font-size: 0.7rem;
+  color: #64748b;
+  margin-top: 8px;
   text-align: center;
-  max-width: 320px;
-  line-height: 1.6;
+  max-width: 280px;
+  line-height: 1.5;
   font-style: italic;
-  font-weight: 500;
+  font-weight: 400;
 }
 
 /* ═══════════════════ GOAL EXPORT BUTTONS ═══════════════════ */
@@ -2612,16 +2571,19 @@ input[type=range]::-moz-range-thumb:hover {
    Beginner-First Where-To-Invest (WTI) UX Styles
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   WTI — Market Today Card (Compact Companion)
+   ═══════════════════════════════════════════════════════════════════════════ */
 .wti-beginner-market-card {
-  background: linear-gradient(135deg, rgba(15, 23, 42, 0.9) 0%, rgba(2, 6, 23, 0.95) 100%);
-  border: 1px solid rgba(56, 189, 248, 0.25);
-  border-radius: var(--radius-xl);
-  padding: 18px 22px;
-  margin-bottom: 1.5rem;
-  box-shadow: 0 8px 32px -4px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  backdrop-filter: blur(20px);
+  background: linear-gradient(145deg, rgba(15, 23, 42, 0.8) 0%, rgba(2, 6, 23, 0.92) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 3px solid #38bdf8;
+  border-radius: 12px;
+  padding: 14px 18px;
+  margin-bottom: 1.25rem;
+  box-shadow: 0 4px 20px -4px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04);
   position: relative;
-  overflow: hidden;
+  transition: border-color 200ms ease;
 }
 
 .wti-beginner-market-header {
@@ -2629,259 +2591,499 @@ input[type=range]::-moz-range-thumb:hover {
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 12px;
-  margin-bottom: 10px;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.wti-header-title-group {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.wti-header-globe-icon {
+  flex-shrink: 0;
+}
+
+.wti-header-title {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: #f1f5f9;
+  margin: 0;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
 }
 
 .wti-beginner-market-badge {
-  font-size: 0.75rem;
+  font-size: 0.64rem;
   font-weight: 700;
-  padding: 4px 12px;
-  border-radius: 20px;
-  letter-spacing: 0.05em;
+  padding: 3px 10px;
+  border-radius: 6px;
+  letter-spacing: 0.06em;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  border: 1px solid transparent;
+  text-transform: uppercase;
+  line-height: 1.2;
 }
 
-.wti-beginner-market-text {
-  font-size: 0.95rem;
-  font-weight: 500;
-  color: #f1f5f9;
-  line-height: 1.5;
-  margin: 0 0 10px 0;
-}
-
-.wti-beginner-meaning {
-  background: rgba(56, 189, 248, 0.06);
-  border-left: 3px solid #38bdf8;
-  border-radius: 0 var(--radius-md) var(--radius-md) 0;
-  padding: 10px 14px;
-  font-size: 0.84rem;
-  line-height: 1.55;
-  color: #cbd5e1;
+.wti-beginner-market-body {
   margin-bottom: 12px;
 }
 
-.wti-beginner-meaning strong {
-  color: #38bdf8;
+.wti-beginner-market-headline {
+  font-size: 0.84rem;
   font-weight: 600;
+  color: #f8fafc;
+  line-height: 1.45;
+  margin: 0 0 4px 0;
 }
 
-.wti-tech-accordion {
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  padding-top: 10px;
-  margin-top: 8px;
-}
-
-.wti-tech-summary {
-  font-size: 0.75rem;
-  font-weight: 600;
+.wti-beginner-meaning {
+  font-size: 0.78rem;
+  line-height: 1.5;
   color: #94a3b8;
-  cursor: pointer;
-  user-select: none;
+  margin: 0;
+}
+
+.wti-meaning-lead {
+  color: #cbd5e1;
+  font-weight: 600;
+}
+
+.wti-beginner-market-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.wti-preview-plan-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 8px;
-  border-radius: var(--radius-sm);
-  transition: all 0.2s ease;
-}
-
-.wti-tech-summary:hover, .wti-tech-summary:focus-visible {
+  padding: 6px 14px;
+  font-size: 0.74rem;
+  font-weight: 600;
   color: #38bdf8;
-  background: rgba(56, 189, 248, 0.1);
-  outline: none;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: all 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  line-height: 1.2;
+  box-shadow: 0 2px 8px rgba(56, 189, 248, 0.12);
 }
 
-/* ─── Illustrative Investment & Tax Controls Bar ─── */
+.wti-preview-plan-btn:hover:not(:disabled) {
+  background: rgba(56, 189, 248, 0.25);
+  border-color: #38bdf8;
+  color: #ffffff;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(56, 189, 248, 0.3);
+}
+
+.wti-preview-plan-btn:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+
+.wti-preview-plan-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.wti-tech-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #94a3b8;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: all 180ms ease;
+}
+
+.wti-tech-toggle-btn:hover {
+  color: #f1f5f9;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.wti-tech-toggle-btn:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+  color: #38bdf8;
+}
+
+.wti-chevron-icon {
+  transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.wti-chevron-rotated {
+  transform: rotate(180deg);
+}
+
+.wti-preview-feedback {
+  font-size: 0.68rem;
+  line-height: 1.45;
+  color: #94a3b8;
+  margin: 6px 0 0 0;
+}
+
+.wti-preview-error {
+  font-size: 0.68rem;
+  line-height: 1.45;
+  color: #fca5a5;
+  margin: 6px 0 0 0;
+}
+
+/* ─── Technical Details Panel ─── */
+.wti-tech-panel {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin-top: 10px;
+  padding-top: 10px;
+  transition: max-height 220ms cubic-bezier(0.16, 1, 0.3, 1), opacity 200ms ease;
+}
+
+.wti-tech-panel[hidden] {
+  display: none;
+}
+
+.wti-tech-panel-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wti-tech-signals-container {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+@media (max-width: 960px) {
+  .wti-tech-signals-container {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .wti-tech-signals-container {
+    grid-template-columns: 1fr;
+  }
+}
+
+.wti-tech-group {
+  background: rgba(2, 6, 23, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wti-tech-group-title {
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #475569;
+  margin: 0;
+}
+
+.wti-tech-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.wti-tech-metric-tile {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.03);
+  border-radius: 4px;
+  padding: 4px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.wti-tech-metric-label {
+  font-size: 0.6rem;
+  font-weight: 500;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wti-tech-metric-value {
+  font-size: 0.75rem;
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  line-height: 1.2;
+}
+
+.wti-tech-evidence-section {
+  background: rgba(2, 6, 23, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wti-tech-policy-badge {
+  font-size: 0.68rem;
+  line-height: 1.4;
+  color: #64748b;
+}
+
+.wti-tech-provenance-lines {
+  font-size: 0.62rem;
+  line-height: 1.5;
+  color: #475569;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wti-tech-safety-note {
+  font-size: 0.62rem;
+  font-style: italic;
+  color: #475569;
+  margin: 2px 0 0 0;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wti-tech-panel,
+  .wti-preview-plan-btn,
+  .wti-tech-toggle-btn,
+  .wti-chevron-icon {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   WTI — Controls Bar & Tax Drawer
+   ═══════════════════════════════════════════════════════════════════════════ */
 .wti-controls-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 14px;
-  background: rgba(15, 23, 42, 0.7);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--radius-lg);
-  padding: 12px 18px;
-  margin-bottom: 1.5rem;
+  gap: 10px;
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 1rem;
 }
 
 .wti-illustrative-group {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
 }
 
 .wti-illustrative-label {
-  font-size: 0.78rem;
+  font-size: 0.72rem;
   font-weight: 600;
-  color: #94a3b8;
+  color: #64748b;
 }
 
 .wti-amount-btn {
-  background: rgba(30, 41, 59, 0.6);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #cbd5e1;
-  font-size: 0.75rem;
+  background: rgba(30, 41, 59, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #94a3b8;
+  font-size: 0.72rem;
   font-weight: 600;
-  padding: 5px 12px;
-  border-radius: var(--radius-md);
+  padding: 4px 10px;
+  border-radius: 6px;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: border-color 180ms ease, color 180ms ease;
 }
 
 .wti-amount-btn:hover {
-  border-color: #38bdf8;
-  color: #f8fafc;
+  border-color: rgba(56, 189, 248, 0.3);
+  color: #e2e8f0;
+}
+
+.wti-amount-btn:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 1px;
 }
 
 .wti-amount-btn--active {
-  background: rgba(56, 189, 248, 0.2);
-  border-color: #38bdf8;
+  background: rgba(56, 189, 248, 0.12);
+  border-color: rgba(56, 189, 248, 0.35);
   color: #38bdf8;
-  box-shadow: 0 0 12px rgba(56, 189, 248, 0.25);
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.15);
 }
 
 .wti-tax-toggle-btn {
-  background: linear-gradient(135deg, rgba(56, 189, 248, 0.15), rgba(14, 165, 233, 0.1));
-  border: 1px solid rgba(56, 189, 248, 0.35);
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.25);
   color: #38bdf8;
-  font-size: 0.78rem;
+  font-size: 0.72rem;
   font-weight: 600;
-  padding: 6px 14px;
-  border-radius: var(--radius-md);
+  padding: 5px 12px;
+  border-radius: 6px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  transition: all 0.2s ease;
+  gap: 5px;
+  transition: background 180ms ease, border-color 180ms ease;
 }
 
 .wti-tax-toggle-btn:hover {
-  background: rgba(56, 189, 248, 0.25);
-  border-color: #38bdf8;
+  background: rgba(56, 189, 248, 0.15);
+  border-color: rgba(56, 189, 248, 0.4);
+}
+
+.wti-tax-toggle-btn:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 1px;
 }
 
 .wti-tax-drawer {
-  background: rgba(15, 23, 42, 0.85);
-  border: 1px solid rgba(56, 189, 248, 0.25);
-  border-radius: var(--radius-lg);
-  padding: 16px 20px;
-  margin-bottom: 1.5rem;
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(56, 189, 248, 0.18);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 1rem;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)) auto;
-  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)) auto;
+  gap: 12px;
   align-items: flex-end;
 }
 
 .wti-tax-input-group {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
 }
 
 .wti-tax-input-group label {
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 600;
-  color: #94a3b8;
+  color: #64748b;
 }
 
 .wti-tax-input {
-  background: rgba(2, 6, 23, 0.7);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #f8fafc;
-  font-size: 0.82rem;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
+  background: rgba(2, 6, 23, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #f1f5f9;
+  font-size: 0.78rem;
+  padding: 5px 8px;
+  border-radius: 5px;
   outline: none;
-  transition: border-color 0.2s ease;
+  transition: border-color 180ms ease;
 }
 
 .wti-tax-input:focus {
   border-color: #38bdf8;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.1);
 }
 
 .wti-apply-tax-btn {
   background: #38bdf8;
   border: none;
   color: #020617;
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   font-weight: 700;
-  padding: 7px 18px;
-  border-radius: var(--radius-sm);
+  padding: 6px 14px;
+  border-radius: 5px;
   cursor: pointer;
-  transition: all 0.2s ease;
-  height: 34px;
+  transition: background 180ms ease;
+  height: 30px;
 }
 
 .wti-apply-tax-btn:hover {
   background: #7dd3fc;
-  box-shadow: 0 0 14px rgba(56, 189, 248, 0.4);
 }
 
-/* ─── Beginner Product Card Enhancements ─── */
+.wti-apply-tax-btn:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 2px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   WTI — Beginner Product Card Sub-Components
+   ═══════════════════════════════════════════════════════════════════════════ */
 .wti-why-fits {
-  background: rgba(30, 41, 59, 0.45);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.06) 0%, rgba(16, 185, 129, 0.04) 100%);
+  border: 1px solid rgba(56, 189, 248, 0.18);
+  border-radius: 9px;
   padding: 10px 14px;
-  margin: 12px 0;
+  margin: 10px 0;
 }
 
 .wti-why-fits-label {
-  font-size: 0.7rem;
+  font-size: 0.62rem;
   font-weight: 700;
   color: #38bdf8;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 4px;
+  gap: 5px;
+  margin-bottom: 3px;
 }
 
 .wti-why-fits-text {
-  font-size: 0.82rem;
-  line-height: 1.55;
-  color: #e2e8f0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: #cbd5e1;
   margin: 0;
 }
 
 .wti-card-chips {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
-  margin-top: 6px;
+  margin-top: 5px;
 }
 
 .wti-risk-chip {
-  font-size: 0.7rem;
+  font-size: 0.62rem;
   font-weight: 600;
-  padding: 3px 9px;
-  border-radius: 12px;
+  padding: 2px 7px;
+  border-radius: 6px;
   border: 1px solid;
 }
 
 .wti-access-chip {
-  font-size: 0.7rem;
+  font-size: 0.62rem;
   font-weight: 500;
-  padding: 3px 9px;
-  border-radius: 12px;
-  background: rgba(148, 163, 184, 0.1);
-  color: #cbd5e1;
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.08);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.15);
 }
 
 /* Post-Tax Box */
 .wti-post-tax-box {
-  background: linear-gradient(135deg, rgba(16, 185, 129, 0.05) 0%, rgba(2, 6, 23, 0.6) 100%);
-  border: 1px solid rgba(16, 185, 129, 0.25);
-  border-radius: var(--radius-md);
-  padding: 12px 16px;
-  margin: 12px 0;
+  background: rgba(2, 6, 23, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin: 10px 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 
 .wti-post-tax-header {
@@ -2889,29 +3091,29 @@ input[type=range]::-moz-range-thumb:hover {
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: 6px;
+  margin-bottom: 8px;
 }
 
 .wti-post-tax-title {
-  font-size: 0.85rem;
+  font-size: 0.78rem;
   color: #94a3b8;
 }
 
 .wti-post-tax-title strong {
   color: #34d399;
-  font-size: 1.05rem;
-  margin-left: 4px;
+  font-size: 0.92rem;
+  margin-left: 3px;
 }
 
 .wti-illustrative-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
-  background: rgba(2, 6, 23, 0.5);
-  border-radius: var(--radius-sm);
-  padding: 8px 12px;
-  margin-bottom: 8px;
+  gap: 6px;
+  background: rgba(2, 6, 23, 0.4);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
 }
 
 @media (max-width: 640px) {
@@ -2923,17 +3125,17 @@ input[type=range]::-moz-range-thumb:hover {
 .wti-illustrative-grid > div {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
 .wti-illustrative-grid span {
-  font-size: 0.68rem;
-  color: #94a3b8;
+  font-size: 0.62rem;
+  color: #64748b;
 }
 
 .wti-illustrative-grid strong {
-  font-size: 0.85rem;
-  color: #f1f5f9;
+  font-size: 0.82rem;
+  color: #e2e8f0;
 }
 
 .wti-keep-highlight strong {
@@ -2941,48 +3143,225 @@ input[type=range]::-moz-range-thumb:hover {
 }
 
 .wti-post-tax-disclosure {
-  font-size: 0.68rem;
-  line-height: 1.45;
-  color: #94a3b8;
+  font-size: 0.62rem;
+  line-height: 1.4;
+  color: #64748b;
   font-style: italic;
 }
 
 .wti-post-tax-cta-box {
-  background: rgba(30, 41, 59, 0.4);
-  border: 1px dashed rgba(56, 189, 248, 0.3);
-  border-radius: var(--radius-md);
-  padding: 10px 14px;
-  margin: 12px 0;
+  background: rgba(30, 41, 59, 0.3);
+  border: 1px dashed rgba(56, 189, 248, 0.2);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 10px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 0.72rem;
+  color: #94a3b8;
+}
+
+.wti-calc-tax-btn {
+  background: rgba(56, 189, 248, 0.1);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  color: #38bdf8;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 180ms ease;
+}
+
+.wti-calc-tax-btn:hover {
+  background: rgba(56, 189, 248, 0.2);
+  color: #f8fafc;
+}
+
+.wti-card-tech-details {
+  margin-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  padding-top: 6px;
+}
+
+.wti-tech-summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: #475569;
+  cursor: pointer;
+  list-style: none;
+  padding: 2px 0;
+}
+
+.wti-tech-summary::-webkit-details-marker { display: none; }
+
+.wti-tech-summary:hover {
+  color: #94a3b8;
+}
+
+/* ─── 2-Column Desktop Workspace ─── */
+.wti-workspace {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.wti-workspace-primary {
+  flex: 1;
+  min-width: 0;
+}
+
+.wti-workspace-sidebar {
+  width: 320px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: sticky;
+  top: 16px;
+}
+
+@media (max-width: 1099px) {
+  .wti-workspace {
+    flex-direction: column;
+  }
+  .wti-workspace-sidebar {
+    width: 100%;
+    position: static;
+  }
+}
+
+/* ─── Section header & sort ─── */
+.wti-section-header-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 10px;
-  font-size: 0.78rem;
-  color: #cbd5e1;
+  margin-bottom: 0.75rem;
 }
 
-.wti-calc-tax-btn {
-  background: rgba(56, 189, 248, 0.15);
-  border: 1px solid rgba(56, 189, 248, 0.4);
-  color: #38bdf8;
-  font-size: 0.75rem;
+.wti-section-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: #f1f5f9;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.wti-section-subtitle {
+  font-size: 0.72rem;
+  color: #64748b;
+  margin: 3px 0 0;
+}
+
+.wti-section-subtitle .wti-status-label {
+  font-size: 0.68rem;
+  opacity: 0.85;
+}
+
+.wti-sort-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(15, 23, 42, 0.55);
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.wti-sort-label {
+  font-size: 0.65rem;
+  color: #475569;
   font-weight: 600;
-  padding: 4px 12px;
-  border-radius: var(--radius-sm);
+  margin-right: 2px;
+}
+
+.wti-sort-btn {
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #64748b;
+  font-size: 0.65rem;
+  font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: color 180ms ease, background 180ms ease;
 }
 
-.wti-calc-tax-btn:hover {
-  background: rgba(56, 189, 248, 0.3);
-  color: #f8fafc;
+.wti-sort-btn:hover:not(:disabled) {
+  color: #94a3b8;
 }
 
-.wti-card-tech-details {
-  margin-top: 14px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-  padding-top: 8px;
+.wti-sort-btn--active {
+  border-color: rgba(56, 189, 248, 0.3);
+  background: rgba(56, 189, 248, 0.1);
+  color: #38bdf8;
+}
+
+.wti-sort-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ─── Sub-category pills ─── */
+.wti-sub-pills {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.wti-sub-pill {
+  padding: 4px 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(15, 23, 42, 0.5);
+  color: #94a3b8;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 180ms ease, color 180ms ease, background 180ms ease;
+}
+
+.wti-sub-pill:hover {
+  color: #e2e8f0;
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.wti-sub-pill--active {
+  border-color: rgba(56, 189, 248, 0.35);
+  background: rgba(56, 189, 248, 0.1);
+  color: #38bdf8;
+}
+
+/* ─── Error/Unavailable banners ─── */
+.wti-status-banner {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  margin-bottom: 0.75rem;
+  font-size: 0.76rem;
+  align-items: flex-start;
+}
+
+.wti-status-banner--unavailable {
+  background: rgba(100, 116, 139, 0.08);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  color: #94a3b8;
+}
+
+.wti-status-banner--error {
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2996,3 +3375,4 @@ input[type=range]::-moz-range-thumb:hover {
     transform: none !important;
   }
 }
+

@@ -1,4 +1,4 @@
-﻿import rateLimit from 'express-rate-limit';
+import rateLimit from 'express-rate-limit';
 import RedisStore from 'rate-limit-redis';
 import { redisClient, redisAvailable } from '../config/redis.js';
 import logger from '../utils/logger.js';
@@ -101,6 +101,7 @@ export const authLimiter = rateLimit({
   legacyHeaders: false,
   store: new HybridStore({ prefix: 'rl:auth:', windowMs: 15 * 60 * 1000 }),
   passOnStoreError: false, // SECURITY: Fail-closed on auth store error
+  validate: { singleCount: false },
   skip: () => process.env.DISABLE_RATE_LIMIT === 'true',
 });
 
@@ -113,6 +114,7 @@ export const apiLimiter = rateLimit({
   handler: rateLimitHandler('Rate limit exceeded.', 'RATE_LIMIT_EXCEEDED'),
   store: new HybridStore({ prefix: 'rl:api:', windowMs: 60 * 1000 }),
   passOnStoreError: true, // Degrade gracefully for general read endpoints
+  validate: { singleCount: false },
   skip: () => process.env.DISABLE_RATE_LIMIT === 'true',
 });
 

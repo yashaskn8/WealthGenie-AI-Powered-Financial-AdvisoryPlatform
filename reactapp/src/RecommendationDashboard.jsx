@@ -355,7 +355,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
 
           <BackendFallbackBanner notice={fallbackNotice} onDismiss={onDismissFallbackNotice} />
 
-          {/* ─── ELEVATED FINANCIAL PROFILE GLASS CARD ─── */}
+          {/* ─── ELEVATED FINANCIAL PROFILE GLASS CARD & BEGINNER CONTROL CENTER ─── */}
           {(() => {
             const monthlyTakeHome = Number(userProfile?.monthly_take_home);
             const monthlySavings = Number(userProfile?.monthly_savings);
@@ -366,22 +366,193 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
             const profileVersion = userProfile?.version ?? userProfile?.__v;
 
             return (
-              <div style={{
-                background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.92) 0%, rgba(30, 41, 59, 0.85) 100%)',
-                backdropFilter: 'blur(20px)',
-                WebkitBackdropFilter: 'blur(20px)',
-                border: '1px solid rgba(56, 189, 248, 0.25)',
-                borderLeft: '4px solid #38bdf8',
-                borderRadius: 16,
-                padding: '12px 20px',
-                position: 'relative',
-                overflow: 'hidden',
-                boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.1)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: 16,
-                flexWrap: 'nowrap'
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginBottom: 20 }}>
+                {/* ── BEGINNER CONTROL CENTER HERO ── */}
+                <div
+                  className="beginner-control-center"
+                  data-testid="beginner-home-hero"
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))',
+                    gap: 16,
+                  }}
+                >
+                  {/* Card 1: Your Plan Today */}
+                  <div style={{
+                    background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.88))',
+                    border: '1px solid rgba(56, 189, 248, 0.28)',
+                    borderRadius: 16,
+                    padding: '20px 24px',
+                    boxShadow: '0 8px 32px rgba(0, 0, 0, 0.35)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'space-between',
+                  }}>
+                    <div>
+                      <div style={{ fontSize: '0.68rem', fontWeight: 800, color: '#38bdf8', letterSpacing: '1.5px', textTransform: 'uppercase', marginBottom: 6 }}>
+                        YOUR PLAN TODAY
+                      </div>
+                      <h2 style={{ fontSize: '1.35rem', fontWeight: 800, color: '#f8fafc', margin: '0 0 14px 0', letterSpacing: '-0.3px' }}>
+                        Plan Overview
+                      </h2>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+                        <div>
+                          <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginBottom: 2 }}>Monthly Investment Capacity</div>
+                          <div style={{ fontSize: '1.15rem', fontWeight: 800, color: '#4ade80' }}>
+                            {hasSavings ? `₹${monthlySavings.toLocaleString()}/mo` : (currentMonthly > 0 ? `₹${currentMonthly.toLocaleString()}/mo` : 'Not specified')}
+                          </div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginBottom: 2 }}>Risk Comfort Level</div>
+                          <div style={{ fontSize: '1rem', fontWeight: 800, color: derivedRiskLabel === 'High' ? '#f43f5e' : derivedRiskLabel === 'Low' ? '#22c55e' : '#dfbd69' }}>
+                            {derivedRiskLabel}
+                          </div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginBottom: 2 }}>Primary Goal</div>
+                          <div style={{ fontSize: '0.92rem', fontWeight: 700, color: '#e2e8f0' }}>
+                            {(userProfile?.investment_goals || [])[0] || 'Wealth Creation'}
+                          </div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginBottom: 2 }}>Investment Horizon</div>
+                          <div style={{ fontSize: '0.92rem', fontWeight: 700, color: '#818cf8' }}>
+                            {horizon ? `${horizon} Years` : 'Not specified'}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Card 2: Your Next Step */}
+                  <div style={{
+                    background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.88))',
+                    border: '1px solid rgba(129, 140, 248, 0.3)',
+                    borderRadius: 16,
+                    padding: '20px 24px',
+                    boxShadow: '0 8px 32px rgba(0, 0, 0, 0.35)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'space-between',
+                  }}>
+                    <div>
+                      <div style={{ fontSize: '0.68rem', fontWeight: 800, color: '#818cf8', letterSpacing: '1.5px', textTransform: 'uppercase', marginBottom: 6 }}>
+                        RECOMMENDED ACTION
+                      </div>
+                      <h2 style={{ fontSize: '1.35rem', fontWeight: 800, color: '#f8fafc', margin: '0 0 6px 0', letterSpacing: '-0.3px' }}>
+                        What Should You Do Next?
+                      </h2>
+                      <p style={{ fontSize: '0.85rem', color: '#94a3b8', margin: '0 0 16px 0', lineHeight: 1.5 }}>
+                        Review the verified financial choices selected specifically for your profile.
+                      </p>
+                    </div>
+
+                    <div>
+                      <button
+                        type="button"
+                        data-testid="home-cta-where-to-invest"
+                        onClick={() => onNavigate && onNavigate('investments')}
+                        style={{
+                          width: '100%',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: 8,
+                          padding: '12px 20px',
+                          borderRadius: 12,
+                          background: 'linear-gradient(135deg, #38bdf8, #6366f1)',
+                          color: '#0f172a',
+                          fontWeight: 800,
+                          fontSize: '0.92rem',
+                          border: 'none',
+                          cursor: 'pointer',
+                          boxShadow: '0 4px 18px rgba(56, 189, 248, 0.35)',
+                          transition: 'all 0.15s ease',
+                          marginBottom: 10,
+                          fontFamily: 'inherit',
+                        }}
+                      >
+                        <span>See Where to Invest</span>
+                        <ChevronRight size={18} />
+                      </button>
+
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          onClick={() => onNavigate && onNavigate('plan')}
+                          style={{
+                            flex: 1,
+                            padding: '7px 10px',
+                            borderRadius: 8,
+                            background: 'rgba(255, 255, 255, 0.05)',
+                            border: '1px solid rgba(255, 255, 255, 0.08)',
+                            color: '#cbd5e1',
+                            fontSize: '0.74rem',
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                            fontFamily: 'inherit',
+                          }}
+                        >
+                          Understand My Plan
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onNavigate && onNavigate('taxes')}
+                          style={{
+                            flex: 1,
+                            padding: '7px 10px',
+                            borderRadius: 8,
+                            background: 'rgba(255, 255, 255, 0.05)',
+                            border: '1px solid rgba(255, 255, 255, 0.08)',
+                            color: '#cbd5e1',
+                            fontSize: '0.74rem',
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                            fontFamily: 'inherit',
+                          }}
+                        >
+                          Check Taxes
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onNavigate && onNavigate('progress')}
+                          style={{
+                            flex: 1,
+                            padding: '7px 10px',
+                            borderRadius: 8,
+                            background: 'rgba(255, 255, 255, 0.05)',
+                            border: '1px solid rgba(255, 255, 255, 0.08)',
+                            color: '#cbd5e1',
+                            fontSize: '0.74rem',
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                            fontFamily: 'inherit',
+                          }}
+                        >
+                          See Progress
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* ── ELEVATED FINANCIAL PROFILE GLASS CARD ── */}
+                <div style={{
+                  background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.92) 0%, rgba(30, 41, 59, 0.85) 100%)',
+                  backdropFilter: 'blur(20px)',
+                  WebkitBackdropFilter: 'blur(20px)',
+                  border: '1px solid rgba(56, 189, 248, 0.25)',
+                  borderLeft: '4px solid #38bdf8',
+                  borderRadius: 16,
+                  padding: '12px 20px',
+                  position: 'relative',
+                  overflow: 'hidden',
+                  boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.1)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 16,
+                  flexWrap: 'nowrap'
               }}>
                 {/* Background Ambient Glow */}
                 <div style={{
@@ -500,6 +671,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                     <Edit3 size={14} />
                     Edit Profile
                   </button>
+                  </div>
                 </div>
               </div>
             );

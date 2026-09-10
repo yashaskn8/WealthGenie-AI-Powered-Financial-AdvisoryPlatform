@@ -24,8 +24,14 @@ const TABS = [
   { id: 'Stress Test', icon: <Flame size={16} /> }
 ];
 
-const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRecommendations, horizon, userProfile }) => {
-  const [activeTab, setActiveTab] = useState('Overview');
+const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRecommendations, horizon, userProfile, initialTab = 'Overview' }) => {
+  const [activeTab, setActiveTab] = useState(initialTab || 'Overview');
+
+  React.useEffect(() => {
+    if (isOpen && initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [isOpen, initialTab, investment?.id]);
   const calcMode = 'SIP';
   const [calcAmount, setCalcAmount] = useState(5000);
   const [calcYears, setCalcYears] = useState(15);

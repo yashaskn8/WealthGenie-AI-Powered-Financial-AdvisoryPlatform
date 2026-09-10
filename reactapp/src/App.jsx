@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, lazy, Suspense } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import './App.css';
 import RecommendationDashboard from './RecommendationDashboard';
 import Sidebar from './components/Sidebar';
@@ -11,21 +11,18 @@ import { assertKnownBackendInstrumentTypes } from './utils/instrumentTypeMap';
 import { investmentDatabase } from './investmentDatabase';
 import { financialProfileKey } from './utils/financialProfile';
 import { assertBackendRecommendationInstrument } from './utils/recommendationPresentation';
+import { fromSearchParams, toSearchParams, resolveNavigation, NAV_PAGES } from './utils/navigationMap';
 
 // ── Lazy-loaded page components (code-split for faster initial load) ──
-const GoalTracker = lazy(() => import('./components/GoalTracker'));
-const StepUpPlanner = lazy(() => import('./components/StepUpPlanner'));
-const TaxScreen = lazy(() => import('./components/TaxScreen'));
-const RebalancerScreen = lazy(() => import('./components/RebalancerScreen'));
+const WhereToInvestScreen = lazy(() => import('./components/WhereToInvestScreen'));
+const TaxesHub = lazy(() => import('./components/TaxesHub'));
+const ProgressHub = lazy(() => import('./components/ProgressHub'));
+const AdvancedHub = lazy(() => import('./components/AdvancedHub'));
+const AllocationPlanner = lazy(() => import('./components/AllocationPlanner'));
+const ProfileEditor = lazy(() => import('./ProfileEditor'));
+const HelpTourScreen = lazy(() => import('./HelpTourScreen'));
 const DeepDiveModal = lazy(() => import('./components/DeepDiveModal'));
 const ComparisonTableModal = lazy(() => import('./ComparisonTableModal'));
-const PostTaxAnalysis = lazy(() => import('./PostTaxAnalysis'));
-const HealthScoreScreen = lazy(() => import('./HealthScoreScreen'));
-const InsightsScreen = lazy(() => import('./InsightsScreen'));
-const HelpTourScreen = lazy(() => import('./HelpTourScreen'));
-const AllocationPlanner = lazy(() => import('./components/AllocationPlanner'));
-const GoalPlanner = lazy(() => import('./components/GoalPlanner'));
-const ProfileEditor = lazy(() => import('./ProfileEditor'));
 const ProfilePage = lazy(() => import('./components/ProfilePage'));
 const AuthPage = lazy(() => import('./components/AuthPage'));
 const LandingPage = lazy(() => import('./LandingPage'));
@@ -97,8 +94,28 @@ export async function fetchDeferredAdvisoryWithBoundedRetry(
 const DashboardShell = ({ userProfile, onProfileUpdate }) => {
   const navigate = useNavigate();
   const { logout } = useAuth();
-  const [activePage, setActivePage] = useState('dashboard');
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // URL search params are the SINGLE source of truth for navigation
+  const { page: activePage, tab: activeTab, needsReplace } = useMemo(
+    () => fromSearchParams(searchParams),
+    [searchParams]
+  );
+
+  // Normalize initial or malformed URLs with replace: true to prevent history pollution
+  useEffect(() => {
+    if (needsReplace) {
+      setSearchParams(toSearchParams({ page: activePage, tab: activeTab }), { replace: true });
+    }
+  }, [needsReplace, activePage, activeTab, setSearchParams]);
+
+  const navigateTo = (target, options = { replace: false }) => {
+    const resolved = resolveNavigation(target);
+    setSearchParams(toSearchParams(resolved), options);
+  };
+
   const [deepDiveInvestment, setDeepDiveInvestment] = useState(null);
+  const [deepDiveInitialTab, setDeepDiveInitialTab] = useState('Overview');
   const [showComparisonTable, setShowComparisonTable] = useState(false);
   const [backendRecs, setBackendRecs] = useState(null);
   const [backendFallback, setBackendFallback] = useState(null);
@@ -296,7 +313,8 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
     }
     return merged;
   }, [backendRecs]);
-  const handleLearnMore = (investment) => {
+  const handleLearnMore = (investment, initialTab = 'Overview') => {
+    setDeepDiveInitialTab(initialTab || 'Overview');
     setDeepDiveInvestment(investment);
   };
 
@@ -339,81 +357,86 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
 
   const renderPage = () => {
     switch (activePage) {
-      case 'dashboard':
+      case NAV_PAGES.HOME:
         return (
           <ErrorBoundary>
-          <RecommendationDashboard
-            userProfile={userProfile}
-            recommendations={recommendations}
-            recommendationMeta={backendRecs}
-            isLoading={isRecommendationLoading}
-            isAdvisoryLoading={isAdvisoryLoading}
-            explanation={backendRecs?.explanation || null}
-            fallbackNotice={backendFallback}
-            onDismissFallbackNotice={() => setBackendFallback(null)}
-            onRecalculate={() => setActivePage('profile')}
-            onLearnMore={handleLearnMore}
-            onExploreAll={() => setShowComparisonTable(true)}
-            onRebalance={() => setActivePage('rebalancer')}
-            onNavigate={setActivePage}
-          />
+            <RecommendationDashboard
+              userProfile={userProfile}
+              recommendations={recommendations}
+              recommendationMeta={backendRecs}
+              isLoading={isRecommendationLoading}
+              isAdvisoryLoading={isAdvisoryLoading}
+              explanation={backendRecs?.explanation || null}
+              fallbackNotice={backendFallback}
+              onDismissFallbackNotice={() => setBackendFallback(null)}
+              onRecalculate={() => navigateTo(NAV_PAGES.ACCOUNT)}
+              onLearnMore={handleLearnMore}
+              onExploreAll={() => setShowComparisonTable(true)}
+              onRebalance={() => navigateTo('rebalancer')}
+              onNavigate={navigateTo}
+            />
           </ErrorBoundary>
         );
-      case 'post-tax':
-        return <ErrorBoundary><PostTaxAnalysis profile={userProfile} recommendations={recommendations} /></ErrorBoundary>;
-      case 'health':
-        return <ErrorBoundary><HealthScoreScreen profile={userProfile} recommendations={recommendations} onNavigate={setActivePage} /></ErrorBoundary>;
-      case 'goals':
-        return <ErrorBoundary><GoalTracker profile={userProfile} onNavigate={setActivePage} /></ErrorBoundary>;
-      case 'goal-planner':
-        return <ErrorBoundary><GoalPlanner profile={userProfile} /></ErrorBoundary>;
-      case 'rebalancer':
+      case NAV_PAGES.PLAN:
         return (
           <ErrorBoundary>
-          <RebalancerScreen
-            key={recommendations.map(item => `${item.id}:${item.allocationWeight}`).join('|')}
-            profile={userProfile}
-            recommendations={recommendations}
-            onSave={handleRebalanceSave}
-          />
-          </ErrorBoundary>
-        );
-      case 'sip-planner':
-        return <ErrorBoundary><StepUpPlanner key={`${userProfile.profileId}:${userProfile.version}`} profile={userProfile} /></ErrorBoundary>;
-      case 'tax-optimizer':
-        return <ErrorBoundary><TaxScreen profile={userProfile} recommendations={recommendations} onLearnMore={handleLearnMore} /></ErrorBoundary>;
-      case 'compare':
-        return (
-          <ErrorBoundary>
-          <div style={{ padding: '40px 28px', maxWidth: 1200, margin: '0 auto', position: 'relative' }}>
-            <div style={{ marginBottom: 24 }}>
-              <div style={{ fontSize: '0.65rem', fontWeight: 700, letterSpacing: '3px', textTransform: 'uppercase', color: '#38bdf8', marginBottom: 8, opacity: 0.9 }}>
-                INVESTMENT EXPLORER
-              </div>
-              <h1 className="page-title" style={{ fontSize: '2.2rem', marginBottom: 6 }}>
-                Compare <span style={{
-                  background: 'linear-gradient(135deg, #38bdf8, #a78bfa)',
-                  WebkitBackgroundClip: 'text', backgroundClip: 'text', WebkitTextFillColor: 'transparent'
-                }}>Investments</span>
-              </h1>
-              <p className="page-subtitle" style={{ marginBottom: 0, fontSize: '0.95rem' }}>
-                Compare {investmentDatabase.length} available investments side by side
-              </p>
-            </div>
-            <ComparisonTableModal
-              isOpen={true}
-              onClose={() => setActivePage('dashboard')}
-              allInvestments={investmentDatabase}
-              embedded={true}
+            <AllocationPlanner
               profile={userProfile}
               recommendations={recommendations}
+              recommendationMeta={backendRecs}
             />
-          </div>
           </ErrorBoundary>
         );
-      case 'allocation':
-        return <ErrorBoundary><AllocationPlanner profile={userProfile} recommendations={recommendations} recommendationMeta={backendRecs} /></ErrorBoundary>;
-      case 'profile':
+      case NAV_PAGES.INVESTMENTS:
+        return (
+          <ErrorBoundary>
+            <WhereToInvestScreen
+              recommendations={recommendations}
+              userProfile={userProfile}
+              onLearnMore={handleLearnMore}
+              onSelectInvestment={setDeepDiveInvestment}
+            />
+          </ErrorBoundary>
+        );
+      case NAV_PAGES.TAXES:
+        return (
+          <ErrorBoundary>
+            <TaxesHub
+              activeTab={activeTab}
+              onTabChange={(newTab) => navigateTo({ page: NAV_PAGES.TAXES, tab: newTab })}
+              profile={userProfile}
+              recommendations={recommendations}
+              onLearnMore={handleLearnMore}
+            />
+          </ErrorBoundary>
+        );
+      case NAV_PAGES.PROGRESS:
+        return (
+          <ErrorBoundary>
+            <ProgressHub
+              activeTab={activeTab}
+              onTabChange={(newTab) => navigateTo({ page: NAV_PAGES.PROGRESS, tab: newTab })}
+              profile={userProfile}
+              recommendations={recommendations}
+              onNavigate={navigateTo}
+              onSaveRebalance={handleRebalanceSave}
+            />
+          </ErrorBoundary>
+        );
+      case NAV_PAGES.ADVANCED:
+        return (
+          <ErrorBoundary>
+            <AdvancedHub
+              activeTab={activeTab}
+              onTabChange={(newTab) => navigateTo({ page: NAV_PAGES.ADVANCED, tab: newTab })}
+              profile={userProfile}
+              recommendations={recommendations}
+              recommendationMeta={backendRecs}
+              onNavigateHome={() => navigateTo(NAV_PAGES.HOME)}
+            />
+          </ErrorBoundary>
+        );
+      case NAV_PAGES.ACCOUNT:
         return (
           <ErrorBoundary>
             <ProfileEditor
@@ -422,25 +445,14 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
             />
           </ErrorBoundary>
         );
-      case 'insights':
-        return <ErrorBoundary><InsightsScreen profile={userProfile} recommendations={recommendations} recommendationMeta={backendRecs} /></ErrorBoundary>;
-      case 'help':
-        return <ErrorBoundary><HelpTourScreen /></ErrorBoundary>;
-      default:
+      case NAV_PAGES.HELP:
         return (
-          <div style={{ padding: '80px 20px', maxWidth: 600, margin: '0 auto', color: '#fff', textAlign: 'center' }}>
-            <div style={{ fontSize: '0.6rem', fontWeight: 800, letterSpacing: '3px', textTransform: 'uppercase', color: '#8b5cf6', marginBottom: 16, opacity: 0.8 }}>
-              IN DEVELOPMENT
-            </div>
-            <h1 className="page-title" style={{ fontSize: '2.4rem', marginBottom: 12 }}>
-              Coming <span style={{
-                background: 'linear-gradient(135deg, #8b5cf6, #38bdf8)',
-                WebkitBackgroundClip: 'text', backgroundClip: 'text', WebkitTextFillColor: 'transparent'
-              }}>Soon</span>
-            </h1>
-            <p className="page-subtitle" style={{ fontSize: '1rem' }}>This feature is currently under development and will be available shortly.</p>
-          </div>
+          <ErrorBoundary>
+            <HelpTourScreen />
+          </ErrorBoundary>
         );
+      default:
+        return null;
     }
   };
 
@@ -473,7 +485,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
 
   return (
     <div className="app-shell">
-      <Sidebar activePage={activePage} onNavigate={setActivePage} onLogout={handleLogout} />
+      <Sidebar activePage={activePage} onNavigate={navigateTo} onLogout={handleLogout} />
       <main className="app-main">
         <Suspense fallback={lazyFallback}>
           {renderPage()}
@@ -490,11 +502,12 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
           userProfile={userProfile}
           allRecommendations={recommendations}
           horizon={userProfile.investment_horizon_years}
+          initialTab={deepDiveInitialTab}
         />
       </Suspense>
 
       {/* Comparison Table Modal */}
-      {showComparisonTable && activePage !== 'compare' && (
+      {showComparisonTable && activePage !== NAV_PAGES.ADVANCED && (
         <Suspense fallback={null}>
           <ComparisonTableModal
             isOpen={true}
@@ -507,7 +520,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
       )}
 
       {/* Genie Chatbot FAB */}
-      <GenieChat profile={userProfile} recommendations={recommendations} onNavigate={setActivePage} />
+      <GenieChat profile={userProfile} recommendations={recommendations} onNavigate={navigateTo} />
     </div>
   );
 };

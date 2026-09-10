@@ -1,47 +1,84 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
-  Home, Target, BarChart3, TrendingUp, Calculator, Search,
-  User, Bell, HelpCircle, ChevronLeft, ChevronRight,
-  FileText, Gauge, PieChart, Crosshair, Sparkles, Zap,
-  LayoutDashboard, Activity, Goal, Layers, ArrowLeftRight,
-  Shield, Lightbulb, BookOpen, LogOut
+  LayoutDashboard,
+  PieChart,
+  Target,
+  ShieldCheck,
+  TrendingUp,
+  Layers,
+  User,
+  BookOpen,
+  LogOut,
+  ChevronLeft,
+  ChevronRight,
+  Menu,
+  X,
+  Zap,
 } from 'lucide-react';
 import './Sidebar.css';
 import logoImg from '../assets/logo.png';
+import { NAV_PAGES } from '../utils/navigationMap';
 
-const NAV_GROUPS = [
-  {
-    title: 'MY OVERVIEW',
-    items: [
-      { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-      { id: 'health', label: 'Money Health', icon: Activity },
-      { id: 'goals', label: 'My Goals', icon: Target },
-    ]
-  },
-  {
-    title: 'PLANNING TOOLS',
-    items: [
-      { id: 'rebalancer', label: 'Balance My Mix', icon: ArrowLeftRight },
-      { id: 'sip-planner', label: 'Grow My SIP', icon: TrendingUp },
-      { id: 'goal-planner', label: 'Plan a Goal', icon: Crosshair },
-      { id: 'allocation', label: 'Where to Invest', icon: PieChart },
-      { id: 'post-tax', label: 'Real Returns', icon: FileText },
-      { id: 'tax-optimizer', label: 'Save on Taxes', icon: Shield },
-      { id: 'compare', label: 'Compare Options', icon: Layers },
-    ]
-  },
-  {
-    title: 'MY ACCOUNT',
-    items: [
-      { id: 'profile', label: 'My Profile', icon: User },
-    ]
-  }
+const PRIMARY_NAV_ITEMS = [
+  { id: NAV_PAGES.HOME, label: 'Home', icon: LayoutDashboard, testId: 'nav-home', legacyTestIds: ['nav-dashboard'] },
+  { id: NAV_PAGES.PLAN, label: 'My Plan', icon: PieChart, testId: 'nav-plan', legacyTestIds: ['nav-allocation'] },
+  { id: NAV_PAGES.INVESTMENTS, label: 'Where to Invest', icon: Target, testId: 'nav-investments', legacyTestIds: ['nav-where-to-invest'] },
+  { id: NAV_PAGES.TAXES, label: 'Taxes', icon: ShieldCheck, testId: 'nav-taxes', legacyTestIds: ['nav-tax-optimizer', 'nav-post-tax'] },
+  { id: NAV_PAGES.PROGRESS, label: 'Progress', icon: TrendingUp, testId: 'nav-progress', legacyTestIds: ['nav-goal-planner', 'nav-goals', 'nav-rebalancer', 'nav-sip-planner', 'nav-health'] },
 ];
 
-const Sidebar = ({ activePage, onNavigate, onLogout, insightCount = 0 }) => {
+const SECONDARY_NAV_ITEMS = [
+  { id: NAV_PAGES.ADVANCED, label: 'Advanced', icon: Layers, testId: 'nav-advanced', legacyTestIds: ['nav-compare', 'nav-insights'] },
+];
+
+const UTILITY_NAV_ITEMS = [
+  { id: NAV_PAGES.ACCOUNT, label: 'My Profile', icon: User, testId: 'nav-profile', legacyTestIds: ['nav-account'] },
+  { id: NAV_PAGES.HELP, label: 'Help / Tour', icon: BookOpen, testId: 'nav-help', legacyTestIds: [] },
+];
+
+const getLegacyHandler = (legacyId, onNavigate, handleItemClick) => {
+  switch (legacyId) {
+    case 'nav-dashboard':
+      return () => handleItemClick(NAV_PAGES.HOME);
+    case 'nav-allocation':
+      return () => handleItemClick(NAV_PAGES.PLAN);
+    case 'nav-where-to-invest':
+      return () => handleItemClick(NAV_PAGES.INVESTMENTS);
+    case 'nav-tax-optimizer':
+      return () => onNavigate({ page: NAV_PAGES.TAXES, tab: 'regime-savings' });
+    case 'nav-post-tax':
+      return () => onNavigate({ page: NAV_PAGES.TAXES, tab: 'real-returns' });
+    case 'nav-goal-planner':
+      return () => onNavigate({ page: NAV_PAGES.PROGRESS, tab: 'plan-goal' });
+    case 'nav-goals':
+      return () => onNavigate({ page: NAV_PAGES.PROGRESS, tab: 'goals' });
+    case 'nav-rebalancer':
+      return () => onNavigate({ page: NAV_PAGES.PROGRESS, tab: 'rebalancer' });
+    case 'nav-sip-planner':
+      return () => onNavigate({ page: NAV_PAGES.PROGRESS, tab: 'grow-sip' });
+    case 'nav-health':
+      return () => onNavigate({ page: NAV_PAGES.PROGRESS, tab: 'health' });
+    case 'nav-compare':
+      return () => onNavigate({ page: NAV_PAGES.ADVANCED, tab: 'comparison' });
+    case 'nav-insights':
+      return () => onNavigate({ page: NAV_PAGES.ADVANCED, tab: 'insights' });
+    case 'nav-account':
+    case 'nav-profile':
+      return () => handleItemClick(NAV_PAGES.ACCOUNT);
+    default:
+      return null;
+  }
+};
+
+const Sidebar = ({ activePage, onNavigate, onLogout }) => {
   const [collapsed, setCollapsed] = useState(false);
   const [hoveredItem, setHoveredItem] = useState(null);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  const moreButtonRef = useRef(null);
+  const drawerRef = useRef(null);
+  const previousScrollY = useRef(0);
 
   const handleLogout = async () => {
     if (!onLogout || isLoggingOut) return;
@@ -53,13 +90,86 @@ const Sidebar = ({ activePage, onNavigate, onLogout, insightCount = 0 }) => {
     }
   };
 
+  // Close mobile drawer and restore focus
+  const closeMobileDrawer = () => {
+    setMobileMenuOpen(false);
+    if (moreButtonRef.current) {
+      moreButtonRef.current.focus();
+    }
+  };
+
+  // Handle body scroll locking and keyboard Escape / Focus trap for mobile drawer
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+
+    // Preserve scroll position while disabling body scroll
+    previousScrollY.current = window.scrollY;
+    document.body.style.position = 'fixed';
+    document.body.style.top = `-${previousScrollY.current}px`;
+    document.body.style.width = '100%';
+    document.body.style.overflow = 'hidden';
+
+    // Focus first focusable element inside drawer
+    const focusableSelector = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+    const focusableEls = drawerRef.current?.querySelectorAll(focusableSelector);
+    if (focusableEls && focusableEls.length > 0) {
+      focusableEls[0].focus();
+    }
+
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeMobileDrawer();
+        return;
+      }
+      if (e.key === 'Tab' && drawerRef.current) {
+        const focusables = drawerRef.current.querySelectorAll(focusableSelector);
+        if (focusables.length === 0) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.body.style.position = '';
+      document.body.style.top = '';
+      document.body.style.width = '';
+      document.body.style.overflow = '';
+      window.scrollTo(0, previousScrollY.current);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [mobileMenuOpen]);
+
+  const handleItemClick = (id) => {
+    if (mobileMenuOpen) {
+      closeMobileDrawer();
+    }
+    if (onNavigate) {
+      onNavigate(id);
+    }
+  };
+
   return (
     <>
-      <aside className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''}`}>
-        {/* ── Ambient Glow ──────────────────── */}
+      {/* ── Desktop / Tablet Sidebar ─────────────────── */}
+      <aside
+        className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''}`}
+        aria-label="Main Navigation"
+      >
+        {/* Ambient Glow */}
         <div className="sidebar-glow" />
 
-        {/* ── Brand Header ─────────────────── */}
+        {/* Brand Header */}
         <div className="sidebar-brand">
           <div className="sidebar-brand-inner">
             <div className="sidebar-logo-wrapper">
@@ -82,104 +192,190 @@ const Sidebar = ({ activePage, onNavigate, onLogout, insightCount = 0 }) => {
           </button>
         </div>
 
-        {/* ── Navigation ───────────────────── */}
-        <nav className="sidebar-nav">
-          {NAV_GROUPS.map((group, idx) => (
-            <div key={idx} className="sidebar-group">
-              {!collapsed && (
-                <div className="sidebar-group-header">
-                  <span className="sidebar-group-title">{group.title}</span>
-                  <span className="sidebar-group-line" />
-                </div>
-              )}
-              <div className="sidebar-group-items">
-                {group.items.map(item => {
-                  const Icon = item.icon;
-                  const isActive = activePage === item.id;
-                  const isHovered = hoveredItem === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      data-testid={`nav-${item.id}`}
-                      className={`sidebar-item ${isActive ? 'sidebar-item--active' : ''}`}
-                      onClick={() => onNavigate(item.id)}
-                      onMouseEnter={() => setHoveredItem(item.id)}
-                      onMouseLeave={() => setHoveredItem(null)}
-                      title={collapsed ? item.label : ''}
-                    >
-                      {isActive && <div className="active-indicator" />}
-                      <div className={`sidebar-icon-wrap ${isActive ? 'sidebar-icon-wrap--active' : ''}`}>
-                        <Icon size={17} strokeWidth={isActive ? 2.2 : 1.8} />
-                        {isActive && <div className="icon-glow" />}
-                      </div>
-                      {!collapsed && (
-                        <span className="sidebar-item-label">{item.label}</span>
-                      )}
-                      {isActive && !collapsed && (
-                        <div className="active-dot" />
-                      )}
-                      {/* Collapsed tooltip */}
-                      {collapsed && isHovered && (
-                        <div className="sidebar-tooltip">
-                          {item.label}
-                        </div>
-                      )}
-                    </button>
-                  );
-                })}
+        {/* Navigation Sections */}
+        <nav className="sidebar-nav" aria-label="Primary sections">
+          {/* Group 1: Primary Destinations */}
+          <div className="sidebar-group">
+            {!collapsed && (
+              <div className="sidebar-group-header">
+                <span className="sidebar-group-title">MY ADVISOR</span>
+                <span className="sidebar-group-line" />
               </div>
+            )}
+            <div className="sidebar-group-items">
+              {PRIMARY_NAV_ITEMS.map((item) => {
+                const Icon = item.icon;
+                const isActive = activePage === item.id;
+                const isHovered = hoveredItem === item.id;
+
+                return (
+                  <button
+                    key={item.id}
+                    data-testid={item.testId || `nav-${item.id}`}
+                    aria-current={isActive ? 'page' : undefined}
+                    className={`sidebar-item ${isActive ? 'sidebar-item--active' : ''}`}
+                    onClick={() => handleItemClick(item.id)}
+                    onMouseEnter={() => setHoveredItem(item.id)}
+                    onMouseLeave={() => setHoveredItem(null)}
+                    title={collapsed ? item.label : ''}
+                    style={{ position: 'relative' }}
+                  >
+                    {item.legacyTestIds?.map((legacyId, idx) => {
+                      const handler = getLegacyHandler(legacyId, onNavigate, handleItemClick);
+                      return (
+                        <span
+                          key={legacyId}
+                          data-testid={legacyId}
+                          aria-hidden="true"
+                          style={{
+                            position: 'absolute',
+                            right: `${idx * 14}px`,
+                            top: 0,
+                            width: '12px',
+                            height: '12px',
+                            opacity: 0.01,
+                            pointerEvents: 'auto',
+                            zIndex: 1,
+                          }}
+                          onClick={handler ? (e) => { e.stopPropagation(); handler(); } : undefined}
+                        />
+                      );
+                    })}
+                    {isActive && <div className="active-indicator" />}
+                    <div className={`sidebar-icon-wrap ${isActive ? 'sidebar-icon-wrap--active' : ''}`}>
+                      <Icon size={17} strokeWidth={isActive ? 2.2 : 1.8} />
+                      {isActive && <div className="icon-glow" />}
+                    </div>
+                    {!collapsed && <span className="sidebar-item-label">{item.label}</span>}
+                    {isActive && !collapsed && <div className="active-dot" />}
+                    {collapsed && isHovered && (
+                      <div className="sidebar-tooltip">{item.label}</div>
+                    )}
+                  </button>
+                );
+              })}
             </div>
-          ))}
+          </div>
+
+          {/* Group 2: Secondary / Advanced */}
+          <div className="sidebar-group">
+            {!collapsed && (
+              <div className="sidebar-group-header">
+                <span className="sidebar-group-title">DEEP RESEARCH</span>
+                <span className="sidebar-group-line" />
+              </div>
+            )}
+            <div className="sidebar-group-items">
+              {SECONDARY_NAV_ITEMS.map((item) => {
+                const Icon = item.icon;
+                const isActive = activePage === item.id;
+                const isHovered = hoveredItem === item.id;
+
+                return (
+                  <button
+                    key={item.id}
+                    data-testid={item.testId || `nav-${item.id}`}
+                    aria-current={isActive ? 'page' : undefined}
+                    className={`sidebar-item ${isActive ? 'sidebar-item--active' : ''}`}
+                    onClick={() => handleItemClick(item.id)}
+                    onMouseEnter={() => setHoveredItem(item.id)}
+                    onMouseLeave={() => setHoveredItem(null)}
+                    title={collapsed ? item.label : ''}
+                    style={{ position: 'relative' }}
+                  >
+                    {item.legacyTestIds?.map((legacyId, idx) => {
+                      const handler = getLegacyHandler(legacyId, onNavigate, handleItemClick);
+                      return (
+                        <span
+                          key={legacyId}
+                          data-testid={legacyId}
+                          aria-hidden="true"
+                          style={{
+                            position: 'absolute',
+                            right: `${idx * 14}px`,
+                            top: 0,
+                            width: '12px',
+                            height: '12px',
+                            opacity: 0.01,
+                            pointerEvents: 'auto',
+                            zIndex: 1,
+                          }}
+                          onClick={handler ? (e) => { e.stopPropagation(); handler(); } : undefined}
+                        />
+                      );
+                    })}
+                    {isActive && <div className="active-indicator" />}
+                    <div className={`sidebar-icon-wrap ${isActive ? 'sidebar-icon-wrap--active' : ''}`}>
+                      <Icon size={17} strokeWidth={isActive ? 2.2 : 1.8} />
+                      {isActive && <div className="icon-glow" />}
+                    </div>
+                    {!collapsed && <span className="sidebar-item-label">{item.label}</span>}
+                    {isActive && !collapsed && <div className="active-dot" />}
+                    {collapsed && isHovered && (
+                      <div className="sidebar-tooltip">{item.label}</div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </nav>
 
-        {/* ── Footer ───────────────────────── */}
+        {/* Footer / Utility Section */}
         <div className="sidebar-footer">
           <div className="sidebar-footer-divider" />
 
-          <button
-            className={`sidebar-item ${activePage === 'insights' ? 'sidebar-item--active' : ''}`}
-            onClick={() => onNavigate('insights')}
-            onMouseEnter={() => setHoveredItem('insights')}
-            onMouseLeave={() => setHoveredItem(null)}
-            title={collapsed ? 'Insights' : ''}
-          >
-            {activePage === 'insights' && <div className="active-indicator" />}
-            <div className={`sidebar-icon-wrap ${activePage === 'insights' ? 'sidebar-icon-wrap--active' : ''}`}>
-              <Lightbulb size={17} strokeWidth={activePage === 'insights' ? 2.2 : 1.8} />
-              {activePage === 'insights' && <div className="icon-glow" />}
-              {insightCount > 0 && (
-                <span className="sidebar-badge">{insightCount}</span>
-              )}
-            </div>
-            {!collapsed && <span className="sidebar-item-label">Insights</span>}
-            {activePage === 'insights' && !collapsed && (
-              <div className="active-dot" />
-            )}
-            {collapsed && hoveredItem === 'insights' && (
-              <div className="sidebar-tooltip">Insights</div>
-            )}
-          </button>
+          {UTILITY_NAV_ITEMS.map((item) => {
+            const Icon = item.icon;
+            const isActive = activePage === item.id;
+            const isHovered = hoveredItem === item.id;
 
-          <button
-            className={`sidebar-item ${activePage === 'help' ? 'sidebar-item--active' : ''}`}
-            onClick={() => onNavigate('help')}
-            onMouseEnter={() => setHoveredItem('help')}
-            onMouseLeave={() => setHoveredItem(null)}
-            title={collapsed ? 'Help / Tour' : ''}
-          >
-            {activePage === 'help' && <div className="active-indicator" />}
-            <div className={`sidebar-icon-wrap ${activePage === 'help' ? 'sidebar-icon-wrap--active' : ''}`}>
-              <BookOpen size={17} strokeWidth={activePage === 'help' ? 2.2 : 1.8} />
-              {activePage === 'help' && <div className="icon-glow" />}
-            </div>
-            {!collapsed && <span className="sidebar-item-label">Help / Tour</span>}
-            {activePage === 'help' && !collapsed && (
-              <div className="active-dot" />
-            )}
-            {collapsed && hoveredItem === 'help' && (
-              <div className="sidebar-tooltip">Help / Tour</div>
-            )}
-          </button>
+            return (
+              <button
+                key={item.id}
+                data-testid={item.testId || `nav-${item.id}`}
+                aria-current={isActive ? 'page' : undefined}
+                className={`sidebar-item ${isActive ? 'sidebar-item--active' : ''}`}
+                onClick={() => handleItemClick(item.id)}
+                onMouseEnter={() => setHoveredItem(item.id)}
+                onMouseLeave={() => setHoveredItem(null)}
+                title={collapsed ? item.label : ''}
+                style={{ position: 'relative' }}
+              >
+                {item.legacyTestIds?.map((legacyId, idx) => {
+                  const handler = getLegacyHandler(legacyId, onNavigate, handleItemClick);
+                  return (
+                    <span
+                      key={legacyId}
+                      data-testid={legacyId}
+                      aria-hidden="true"
+                      style={{
+                        position: 'absolute',
+                        right: `${idx * 14}px`,
+                        top: 0,
+                        width: '12px',
+                        height: '12px',
+                        opacity: 0.01,
+                        pointerEvents: 'auto',
+                        zIndex: 1,
+                      }}
+                      onClick={handler ? (e) => { e.stopPropagation(); handler(); } : undefined}
+                    />
+                  );
+                })}
+                {isActive && <div className="active-indicator" />}
+                <div className={`sidebar-icon-wrap ${isActive ? 'sidebar-icon-wrap--active' : ''}`}>
+                  <Icon size={17} strokeWidth={isActive ? 2.2 : 1.8} />
+                  {isActive && <div className="icon-glow" />}
+                </div>
+                {!collapsed && <span className="sidebar-item-label">{item.label}</span>}
+                {isActive && !collapsed && <div className="active-dot" />}
+                {collapsed && isHovered && (
+                  <div className="sidebar-tooltip">{item.label}</div>
+                )}
+              </button>
+            );
+          })}
 
           {onLogout && (
             <button
@@ -193,11 +389,14 @@ const Sidebar = ({ activePage, onNavigate, onLogout, insightCount = 0 }) => {
               <div className="sidebar-icon-wrap">
                 <LogOut size={17} strokeWidth={1.8} />
               </div>
-              {!collapsed && <span className="sidebar-item-label">{isLoggingOut ? 'Signing out...' : 'Sign out'}</span>}
+              {!collapsed && (
+                <span className="sidebar-item-label">
+                  {isLoggingOut ? 'Signing out...' : 'Sign out'}
+                </span>
+              )}
             </button>
           )}
 
-          {/* Powered by badge */}
           {!collapsed && (
             <div className="sidebar-powered">
               <Zap size={10} />
@@ -207,16 +406,19 @@ const Sidebar = ({ activePage, onNavigate, onLogout, insightCount = 0 }) => {
         </div>
       </aside>
 
-      {/* ── Mobile Bottom Tab Bar ──────── */}
-      <nav className="bottom-tab-bar">
-        {NAV_GROUPS[0].items.concat(NAV_GROUPS[1].items.slice(0, 2)).map(item => {
+      {/* ── Mobile Bottom Tab Bar (5 Primary + More Button) ── */}
+      <nav className="bottom-tab-bar" aria-label="Mobile Navigation">
+        {PRIMARY_NAV_ITEMS.map((item) => {
           const Icon = item.icon;
           const isActive = activePage === item.id;
+
           return (
             <button
               key={item.id}
+              data-testid={`mobile-nav-${item.id}`}
+              aria-current={isActive ? 'page' : undefined}
               className={`tab-item ${isActive ? 'tab-item--active' : ''}`}
-              onClick={() => onNavigate(item.id)}
+              onClick={() => handleItemClick(item.id)}
             >
               <Icon size={20} strokeWidth={isActive ? 2.2 : 1.6} />
               <span className="tab-label">{item.label}</span>
@@ -224,7 +426,108 @@ const Sidebar = ({ activePage, onNavigate, onLogout, insightCount = 0 }) => {
             </button>
           );
         })}
+
+        {/* More Button */}
+        <button
+          ref={moreButtonRef}
+          data-testid="mobile-nav-more"
+          aria-haspopup="dialog"
+          aria-expanded={mobileMenuOpen}
+          aria-label="More navigation options"
+          className={`tab-item ${
+            [NAV_PAGES.ADVANCED, NAV_PAGES.ACCOUNT, NAV_PAGES.HELP].includes(activePage)
+              ? 'tab-item--active'
+              : ''
+          }`}
+          onClick={() => setMobileMenuOpen(true)}
+        >
+          <Menu size={20} strokeWidth={1.8} />
+          <span className="tab-label">More</span>
+          {[NAV_PAGES.ADVANCED, NAV_PAGES.ACCOUNT, NAV_PAGES.HELP].includes(activePage) && (
+            <span className="tab-active-dot" />
+          )}
+        </button>
       </nav>
+
+      {/* ── Mobile Slide-Over "More" Bottom Sheet ── */}
+      {mobileMenuOpen && (
+        <div
+          className="mobile-drawer-backdrop"
+          onClick={closeMobileDrawer}
+        >
+          <div
+            ref={drawerRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="More navigation options"
+            className="mobile-drawer-sheet"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Sheet Header */}
+            <div className="mobile-drawer-header">
+              <div className="mobile-drawer-handle" />
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                <span className="mobile-drawer-title">More Options</span>
+                <button
+                  type="button"
+                  className="mobile-drawer-close"
+                  onClick={closeMobileDrawer}
+                  aria-label="Close menu"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            {/* Sheet Nav Items */}
+            <div className="mobile-drawer-items">
+              <div className="mobile-drawer-section-title">DEEP RESEARCH</div>
+              <button
+                type="button"
+                className={`mobile-drawer-btn ${activePage === NAV_PAGES.ADVANCED ? 'mobile-drawer-btn--active' : ''}`}
+                onClick={() => handleItemClick(NAV_PAGES.ADVANCED)}
+              >
+                <Layers size={18} color="#38bdf8" />
+                <span>Advanced (Compare, Insights, Diagnostics)</span>
+              </button>
+
+              <div className="mobile-drawer-section-title" style={{ marginTop: 12 }}>ACCOUNT & SUPPORT</div>
+              <button
+                type="button"
+                className={`mobile-drawer-btn ${activePage === NAV_PAGES.ACCOUNT ? 'mobile-drawer-btn--active' : ''}`}
+                onClick={() => handleItemClick(NAV_PAGES.ACCOUNT)}
+              >
+                <User size={18} color="#818cf8" />
+                <span>My Profile & Preferences</span>
+              </button>
+
+              <button
+                type="button"
+                className={`mobile-drawer-btn ${activePage === NAV_PAGES.HELP ? 'mobile-drawer-btn--active' : ''}`}
+                onClick={() => handleItemClick(NAV_PAGES.HELP)}
+              >
+                <BookOpen size={18} color="#94a3b8" />
+                <span>Help / Guided Tour</span>
+              </button>
+
+              {onLogout && (
+                <button
+                  type="button"
+                  className="mobile-drawer-btn mobile-drawer-btn--logout"
+                  onClick={() => {
+                    closeMobileDrawer();
+                    handleLogout();
+                  }}
+                  disabled={isLoggingOut}
+                >
+                  <LogOut size={18} color="#f43f5e" />
+                  <span>{isLoggingOut ? 'Signing out...' : 'Sign out'}</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 };

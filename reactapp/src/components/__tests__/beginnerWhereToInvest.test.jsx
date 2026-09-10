@@ -2,8 +2,8 @@
  * @vitest-environment jsdom
  */
 import React from 'react';
-import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, within } from '@testing-library/react';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import WhereToInvestTab from '../deepdive/WhereToInvestTab';
 import * as api from '../../services/api';
 
@@ -14,6 +14,10 @@ vi.mock('../../services/api', () => ({
 }));
 
 describe('Beginner-First Where-To-Invest UX', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
 
@@ -85,11 +89,169 @@ describe('Beginner-First Where-To-Invest UX', () => {
     expect(screen.getByText(/Markets have been weaker recently/i)).toBeTruthy();
     expect(screen.getByText(/What this means for you:/i)).toBeTruthy();
 
-    // The market accordion summary uses exact text "View technical details";
-    // the product card uses "View technical details & provenance".
-    // Use getAllByText since the regex matches both.
-    const techDetailElements = screen.getAllByText(/View technical details/i);
-    expect(techDetailElements.length).toBeGreaterThanOrEqual(1);
+    // Technical details button exists and panel is collapsed by default
+    const marketTechBtn = screen.getByRole('button', { name: /technical details/i });
+    expect(marketTechBtn).toBeTruthy();
+    expect(marketTechBtn.getAttribute('aria-expanded')).toBe('false');
+
+    const panel = screen.getByTestId('market-context-panel');
+    expect(panel).not.toBeVisible();
+
+    // Raw engineering data is not exposed in the visible default view
+    expect(screen.getByText(/DETERMINISTIC_POLICY_HEURISTIC/)).not.toBeVisible();
+    expect(screen.getByText(/market-context-policy-1.0.0/)).not.toBeVisible();
+    expect(screen.getByText(/DRAWDOWN_EXCEEDS_CAUTION_THRESHOLD/)).not.toBeVisible();
+
+    // See how this affects my plan action is available
+    expect(screen.getByRole('button', { name: /see how this affects my plan/i })).toBeTruthy();
+  });
+
+  it('toggles technical details visibility with click and preserves financial metrics', async () => {
+    render(
+      <WhereToInvestTab
+        inv={{ id: 'ppf', name: 'Public Provident Fund', riskScore: 1 }}
+        userProfile={{ profileId: '64b000000000000000000001', monthly_take_home: 100000 }}
+      />
+    );
+
+    const techBtn = await screen.findByRole('button', { name: /technical details/i });
+    expect(techBtn.getAttribute('aria-expanded')).toBe('false');
+    const panel = screen.getByTestId('market-context-panel');
+    expect(panel).not.toBeVisible();
+
+    // Click to expand
+    fireEvent.click(techBtn);
+    expect(techBtn.getAttribute('aria-expanded')).toBe('true');
+    expect(panel).toBeVisible();
+
+    // Humanized labels and exact financial values verified inside expanded view
+    expect(screen.getByText('NIFTY 50')).toBeVisible();
+    expect(screen.getByText('23,450.5')).toBeVisible();
+    expect(screen.getByText('50-day moving average')).toBeVisible();
+    expect(screen.getByText('24,100.2')).toBeVisible();
+    expect(screen.getByText('200-day moving average')).toBeVisible();
+    expect(screen.getByText('23,100')).toBeVisible();
+
+    // Provenance and policy data visible
+    expect(screen.getByText(/DETERMINISTIC_POLICY_HEURISTIC/)).toBeVisible();
+    expect(screen.getByText(/DRAWDOWN_EXCEEDS_CAUTION_THRESHOLD/)).toBeVisible();
+
+    // Click to collapse
+    fireEvent.click(techBtn);
+    expect(techBtn.getAttribute('aria-expanded')).toBe('false');
+    expect(panel).not.toBeVisible();
+  });
+
+  it('supports keyboard interaction on the technical details control', async () => {
+    render(
+      <WhereToInvestTab
+        inv={{ id: 'ppf', name: 'Public Provident Fund', riskScore: 1 }}
+        userProfile={{ profileId: '64b000000000000000000001', monthly_take_home: 100000 }}
+      />
+    );
+
+    const techBtn = await screen.findByRole('button', { name: /technical details/i });
+    const panel = screen.getByTestId('market-context-panel');
+    expect(panel).not.toBeVisible();
+
+    fireEvent.click(techBtn);
+    expect(panel).toBeVisible();
+
+    fireEvent.click(techBtn);
+    expect(panel).not.toBeVisible();
+  });
+
+  it('renders appropriate context badges for NORMAL, HIGH_VOLATILITY, and RISK_OFF', async () => {
+    api.getCurrentMarketContext.mockResolvedValueOnce({
+      status: 'MARKET_CONTEXT_AVAILABLE',
+      context: 'NORMAL',
+      classification: 'DETERMINISTIC_POLICY_HEURISTIC',
+      policyVersion: 'market-context-policy-1.0.0',
+      observedAt: '2026-09-08T10:00:00.000Z',
+      freshness: { status: 'FRESH' },
+      signals: {},
+      sources: [],
+    });
+
+    const { unmount } = render(
+      <WhereToInvestTab
+        inv={{ id: 'ppf', name: 'Public Provident Fund', riskScore: 1 }}
+        userProfile={{ profileId: '64b000000000000000000001', monthly_take_home: 100000 }}
+      />
+    );
+
+    expect(await screen.findByText('NORMAL')).toBeTruthy();
+    expect(screen.getByText(/Market conditions look steady/i)).toBeTruthy();
+    unmount();
+
+    api.getCurrentMarketContext.mockResolvedValueOnce({
+      status: 'MARKET_CONTEXT_AVAILABLE',
+      context: 'HIGH_VOLATILITY',
+      classification: 'DETERMINISTIC_POLICY_HEURISTIC',
+      policyVersion: 'market-context-policy-1.0.0',
+      observedAt: '2026-09-08T10:00:00.000Z',
+      freshness: { status: 'FRESH' },
+      signals: {},
+      sources: [],
+    });
+
+    render(
+      <WhereToInvestTab
+        inv={{ id: 'ppf', name: 'Public Provident Fund', riskScore: 1 }}
+        userProfile={{ profileId: '64b000000000000000000001', monthly_take_home: 100000 }}
+      />
+    );
+
+    expect(await screen.findByText('HIGH_VOLATILITY')).toBeTruthy();
+    expect(screen.getByText(/Markets are moving more sharply than usual/i)).toBeTruthy();
+
+    cleanup();
+
+    api.getCurrentMarketContext.mockResolvedValueOnce({
+      status: 'MARKET_CONTEXT_AVAILABLE',
+      context: 'RISK_OFF',
+      classification: 'DETERMINISTIC_POLICY_HEURISTIC',
+      policyVersion: 'market-context-policy-1.0.0',
+      observedAt: '2026-09-08T10:00:00.000Z',
+      freshness: { status: 'FRESH' },
+      signals: {},
+      sources: [],
+    });
+
+    render(
+      <WhereToInvestTab
+        inv={{ id: 'ppf', name: 'Public Provident Fund', riskScore: 1 }}
+        userProfile={{ profileId: '64b000000000000000000001', monthly_take_home: 100000 }}
+      />
+    );
+
+    expect(await screen.findByText('RISK_OFF')).toBeTruthy();
+    expect(screen.getByText(/Market risk is elevated right now/i)).toBeTruthy();
+  });
+
+  it('triggers profile-safe adjustment preview when See how this affects my plan is clicked', async () => {
+    api.previewMarketContextAdjustment.mockResolvedValueOnce({
+      applied: true,
+      actualTotalTiltPct: 3.5,
+      explanations: ['Slight shift to short-term sovereign instruments'],
+    });
+
+    render(
+      <WhereToInvestTab
+        inv={{ id: 'ppf', name: 'Public Provident Fund', riskScore: 1 }}
+        userProfile={{ profileId: '64b000000000000000000001', monthly_take_home: 100000 }}
+      />
+    );
+
+    const previewBtn = await screen.findByRole('button', { name: /see how this affects my plan/i });
+    expect(previewBtn).toBeTruthy();
+    expect(previewBtn.disabled).toBe(false);
+
+    fireEvent.click(previewBtn);
+
+    expect(api.previewMarketContextAdjustment).toHaveBeenCalledWith('64b000000000000000000001');
+    expect(await screen.findByText(/Adjustment Preview Ready ✓/i)).toBeTruthy();
+    expect(screen.getByText(/bounded 3.5% total tilt/i)).toBeTruthy();
   });
 
   it('renders plain-English Why this fits you, risk tier, and access to money', async () => {

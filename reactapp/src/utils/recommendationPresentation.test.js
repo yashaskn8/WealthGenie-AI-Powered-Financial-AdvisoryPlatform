@@ -14,7 +14,8 @@ describe('recommendation presentation authority boundary', () => {
   it('accepts a complete authoritative recommendation instrument', () => {
     expect(assertBackendRecommendationInstrument(valid)).toBe(valid);
     expect(backendToLocalInstrument('Index_MF')).toBe('index_mf');
-    expect(assertKnownBackendInstrumentTypes(['Index_MF'])).toEqual([]);
+    expect(backendToLocalInstrument('Arbitrage_MF')).toBe('arbitrage_mf');
+    expect(assertKnownBackendInstrumentTypes(['Index_MF', 'Arbitrage_MF'])).toEqual([]);
   });
 
   it.each([
