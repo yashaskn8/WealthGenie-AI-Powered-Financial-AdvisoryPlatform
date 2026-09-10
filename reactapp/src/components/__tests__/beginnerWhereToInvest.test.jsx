@@ -305,6 +305,67 @@ describe('Beginner-First Where-To-Invest UX', () => {
     expect(screen.getAllByText('₹1,00,000').length).toBeGreaterThanOrEqual(1);
   });
 
+  it('prioritizes an official current rate over historical return in the product card', async () => {
+    api.rankInvestmentCandidates.mockResolvedValueOnce({
+      products: [{
+        id: 'fd:official',
+        name: 'Verified Term Deposit',
+        provider: 'Verified Bank',
+        source: { provider: 'SBI' },
+        officialRate: { value: 7.25, dataClass: 'OFFICIAL_BANK_PUBLISHED_RATE' },
+        historicalReturn: { valuePct: 99 },
+        presentationStatus: 'VERIFIED_COMPARABLE_OPTION',
+        beginnerSuitability: { riskTier: 'Low Risk', accessToMoney: 'Source terms required' },
+      }],
+      ranking: { status: 'VERIFIED_COMPARABLE_OPTIONS' },
+    });
+
+    render(
+      <WhereToInvestTab
+        inv={{ id: 'fd', name: 'Verified Term Deposits', riskScore: 1 }}
+        userProfile={{ profileId: '64b000000000000000000001' }}
+      />
+    );
+
+    expect(await screen.findByText('Current official bank rate')).toBeTruthy();
+    expect(screen.getByText('7.25% p.a.')).toBeTruthy();
+    expect(screen.queryByText('99.00% historical')).toBeNull();
+  });
+
+  it('describes an RBI floating coupon with reset semantics instead of bank-rate wording', async () => {
+    api.rankInvestmentCandidates.mockResolvedValueOnce({
+      products: [{
+        id: 'rbi:frsb',
+        name: 'RBI Floating Rate Savings Bonds',
+        provider: 'RBI',
+        source: { provider: 'RBI' },
+        productType: 'GOVERNMENT_BOND',
+        parentInstrumentId: 'rbi_bonds',
+        officialRate: {
+          value: 8.05,
+          dataClass: 'OFFICIAL_RBI_FLOATING_COUPON_RATE',
+          effectiveFrom: '2026-07-01',
+          effectiveTo: '2026-12-31',
+        },
+        presentationStatus: 'VERIFIED_COMPARABLE_OPTION',
+        beginnerSuitability: { riskTier: 'Very Low Risk', accessToMoney: '7-year maturity' },
+      }],
+      ranking: { status: 'VERIFIED_COMPARABLE_OPTIONS' },
+    });
+
+    render(
+      <WhereToInvestTab
+        inv={{ id: 'rbi_bonds', name: 'RBI Floating Rate Savings Bonds', riskScore: 1 }}
+        userProfile={{ profileId: '64b000000000000000000001' }}
+      />
+    );
+
+    expect(await screen.findByText(/Current RBI Floating Rate Savings Bond coupon effective 2026-07-01 to 2026-12-31/i)).toBeTruthy();
+    expect(screen.getByText(/resets on January 1 and July 1/i)).toBeTruthy();
+    expect(screen.getByText(/not a fixed 7-year guaranteed rate/i)).toBeTruthy();
+    expect(screen.queryByText(/Official bank-published card rate/i)).toBeNull();
+  });
+
   it('opens tax details drawer when Calculate after tax is clicked', async () => {
     render(
       <WhereToInvestTab
@@ -321,6 +382,7 @@ describe('Beginner-First Where-To-Invest UX', () => {
     fireEvent.click(taxBtns[0]);
 
     expect(screen.getByLabelText(/Annual Gross Income/i)).toBeTruthy();
+    expect(screen.getByLabelText(/Annual Gross Income/i).value).toBe('');
     expect(screen.getByLabelText(/Tax Regime/i)).toBeTruthy();
     expect(screen.getByLabelText(/Fiscal Year/i)).toBeTruthy();
     expect(screen.getByRole('button', { name: /Apply & Calculate/i })).toBeTruthy();

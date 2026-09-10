@@ -30,6 +30,15 @@ export const FRESHNESS = Object.freeze({
   UNKNOWN: 'UNKNOWN',
 });
 
+// Semantic class is intentionally separate from dataClass. dataClass describes
+// the provider fact (for example LIVE or DAILY); semanticClass describes where
+// the value sits in the market-data data plane.
+export const MARKET_FACT_SEMANTIC_CLASSES = Object.freeze({
+  OBSERVED: 'OBSERVED',
+  DERIVED: 'DERIVED',
+  POLICY_OUTPUT: 'POLICY_OUTPUT',
+});
+
 export function nullableFiniteNumber(value) {
   if (value === null || value === undefined || value === '') return null;
   const parsed = typeof value === 'number' ? value : Number(value);
@@ -86,6 +95,8 @@ export function createMarketFact({
   effectiveTo = null,
   publicationDate = null,
   dataClass = null,
+  semanticClass = MARKET_FACT_SEMANTIC_CLASSES.OBSERVED,
+  derivation = null,
   metrics = {},
   now = new Date(),
 }) {
@@ -115,6 +126,8 @@ export function createMarketFact({
     publicationDate: publicationDate || null,
     fetchedAt: normalizedFetchedAt,
     dataClass,
+    semanticClass,
+    derivation,
     availabilityStatus,
     freshness: evaluateFreshness({
       observedAt: normalizedObservedAt,

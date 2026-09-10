@@ -358,7 +358,7 @@ paths:
       responses: { '200': { $ref: '#/components/responses/Message' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
 
   /api/regime/current:
-    get: { operationId: getCurrentMarketContext, tags: [Regime], security: [], responses: { '200': { $ref: '#/components/responses/Object' } } }
+    get: { operationId: getCurrentMarketContext, tags: [Regime], security: [], responses: { '200': { description: Verified market context and additive market snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/MarketContextResponse' } } } } } }
   /api/regime/adjust:
     post:
       operationId: previewProfileSafeMarketContextAdjustment
@@ -531,6 +531,44 @@ components:
     Goal:
       allOf: [{ $ref: '#/components/schemas/GoalCreateRequest' }, { type: object, properties: { _id: { type: string }, monthly_sip_required: { type: number }, probability: { type: number }, status: { type: string } } }]
     Instrument: { type: object, required: [id, name], properties: { id: { type: string }, name: { type: string }, type: { type: string }, expectedReturn: { type: number }, risk: { type: string } }, additionalProperties: true }
+    MarketContextResponse:
+      type: object
+      required: [status, evaluatedAt, marketSnapshot]
+      properties:
+        status: { type: string, enum: [MARKET_CONTEXT_AVAILABLE, MARKET_CONTEXT_UNAVAILABLE] }
+        context: { type: [string, 'null'], enum: [NORMAL, CAUTIOUS, HIGH_VOLATILITY, RISK_OFF, MARKET_CONTEXT_UNAVAILABLE, null] }
+        policyVersion: { type: [string, 'null'] }
+        evaluatedAt: { type: string, format: date-time }
+        marketSnapshot: { $ref: '#/components/schemas/MarketContextSnapshot' }
+      additionalProperties: true
+    MarketContextSnapshot:
+      type: object
+      required: [schemaVersion, status, availability, providerStatus, observedFacts, derivedFacts, policyOutput, provenance, marketSession]
+      properties:
+        schemaVersion: { type: string, const: market-snapshot-1.0.0 }
+        status: { type: string, enum: [CURRENT, MARKET_CLOSED, LAST_AVAILABLE, STALE, PARTIAL_DATA, UNAVAILABLE] }
+        availability: { type: string, enum: [AVAILABLE, PARTIAL, UNAVAILABLE] }
+        providerStatus: { type: object, additionalProperties: true }
+        observedFacts: { type: array, items: { $ref: '#/components/schemas/MarketFact' } }
+        derivedFacts: { type: array, items: { $ref: '#/components/schemas/MarketFact' } }
+        policyOutput: { type: object, required: [semanticClass, dataClass, status, reasonCodes], additionalProperties: true, properties: { semanticClass: { type: string, const: POLICY_OUTPUT }, dataClass: { type: string, const: POLICY_OUTPUT }, status: { type: string }, reasonCodes: { type: array, items: { type: string } } } }
+        freshness: { type: [object, 'null'], additionalProperties: true }
+        provenance: { type: object, additionalProperties: true }
+        observedAt: { type: [string, 'null'], format: date-time }
+        evaluatedAt: { type: [string, 'null'], format: date-time }
+        marketSession: { type: object, required: [status], additionalProperties: true, properties: { status: { type: string, enum: [MARKET_OPEN, MARKET_CLOSED, MARKET_HOLIDAY, UNKNOWN] } } }
+      additionalProperties: true
+    MarketFact:
+      type: object
+      required: [key, value, dataClass, semanticClass, availabilityStatus]
+      properties:
+        key: { type: string }
+        value: { type: [number, 'null'] }
+        unit: { type: [string, 'null'] }
+        dataClass: { type: [string, 'null'], description: Provider fact class such as LIVE or DAILY; null for derived features. }
+        semanticClass: { type: string, enum: [OBSERVED, DERIVED] }
+        availabilityStatus: { type: string, enum: [AVAILABLE, UNAVAILABLE] }
+      additionalProperties: true
     RankInstrumentsRequest: { type: object, additionalProperties: false, required: [profileId, parentInstrumentId], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, parentInstrumentId: { type: string, maxLength: 50 } } }
     ProjectionRequest: { type: object, additionalProperties: false, required: [profileId, instruments, monthly_investment, years], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, instruments: { type: array, minItems: 1, maxItems: 10, items: { type: string, maxLength: 50 } }, monthly_investment: { type: number, exclusiveMinimum: 0, maximum: 10000000 }, years: { type: array, minItems: 1, maxItems: 10, uniqueItems: true, items: { type: integer, minimum: 1, maximum: 30 } } } }
     ProjectionComparisonRequest: { type: object, additionalProperties: false, required: [monthlyInvestment, annualReturnRate, benchmarkRate, inflationRate, years], properties: { monthlyInvestment: { type: number, exclusiveMinimum: 0, maximum: 10000000 }, annualReturnRate: { type: number, exclusiveMinimum: -1, maximum: 1 }, benchmarkRate: { type: number, exclusiveMinimum: -1, maximum: 1 }, inflationRate: { type: number, minimum: 0, maximum: 1 }, years: { type: integer, minimum: 1, maximum: 50 } } }

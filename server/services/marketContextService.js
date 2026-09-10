@@ -3,7 +3,11 @@ import {
   fetchBenchmarkQuotes,
   fetchNiftyHistoricalCandles,
 } from './marketDataService.js';
-import { AVAILABILITY } from './marketData/contracts.js';
+import {
+  AVAILABILITY,
+  FRESHNESS,
+  MARKET_FACT_SEMANTIC_CLASSES,
+} from './marketData/contracts.js';
 import { computeMarketContextFeatures } from './marketContextFeatureEngine.js';
 import {
   MARKET_CONTEXT_POLICY_VERSION,
@@ -13,6 +17,16 @@ import {
 
 const MARKET_CONTEXT_STATE_CACHE_KEY = `market:context:state:${MARKET_CONTEXT_POLICY_VERSION}`;
 const MARKET_CONTEXT_STATE_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+export const MARKET_SNAPSHOT_SCHEMA_VERSION = 'market-snapshot-1.0.0';
+export const MARKET_DISPLAY_STATUS = Object.freeze({
+  CURRENT: 'CURRENT',
+  MARKET_CLOSED: 'MARKET_CLOSED',
+  LAST_AVAILABLE: 'LAST_AVAILABLE',
+  STALE: 'STALE',
+  PARTIAL_DATA: 'PARTIAL_DATA',
+  UNAVAILABLE: 'UNAVAILABLE',
+});
 
 let processState = null;
 
@@ -24,6 +38,85 @@ function sourceFailureSnapshot(code, message) {
     fetchedAt: new Date().toISOString(),
     freshness: null,
     error: { code, message },
+  };
+}
+
+function availableFactCount(snapshot) {
+  return (snapshot?.facts || []).filter(fact => (
+    fact?.availabilityStatus === AVAILABILITY.AVAILABLE && Number.isFinite(fact.value)
+  )).length;
+}
+
+function hasStaleEvidence(quoteSnapshot, historicalSnapshot) {
+  return [
+    ...(quoteSnapshot?.facts || []).map(fact => fact?.freshness?.status),
+    historicalSnapshot?.freshness?.status,
+  ].includes(FRESHNESS.STALE);
+}
+
+function displayStatusFor({ quoteSnapshot, historicalSnapshot, features }) {
+  const availableQuotes = availableFactCount(quoteSnapshot);
+  const availableHistory = historicalSnapshot?.status === AVAILABILITY.AVAILABLE
+    && Array.isArray(historicalSnapshot?.candles)
+    && historicalSnapshot.candles.length > 0;
+  const anyAvailable = availableQuotes > 0 || availableHistory;
+  if (features?.status !== 'FEATURES_AVAILABLE') {
+    if (hasStaleEvidence(quoteSnapshot, historicalSnapshot)) return MARKET_DISPLAY_STATUS.STALE;
+    return anyAvailable ? MARKET_DISPLAY_STATUS.PARTIAL_DATA : MARKET_DISPLAY_STATUS.UNAVAILABLE;
+  }
+
+  const session = quoteSnapshot?.marketSession?.status
+    || quoteSnapshot?.facts?.find(fact => fact?.freshness?.marketSession)?.freshness?.marketSession;
+  if (session === 'MARKET_OPEN') return MARKET_DISPLAY_STATUS.CURRENT;
+  if (session === 'MARKET_CLOSED' || session === 'MARKET_HOLIDAY') return MARKET_DISPLAY_STATUS.MARKET_CLOSED;
+  return MARKET_DISPLAY_STATUS.LAST_AVAILABLE;
+}
+
+/**
+ * Additive DTO for the frontend. Raw provider facts, deterministic derived
+ * features, and policy output remain separate so presentation cannot mistake
+ * a calculation or classification for an observed market value.
+ */
+export function buildMarketSnapshot({ quoteSnapshot, historicalSnapshot, features, policy, evaluatedAt }) {
+  const displayStatus = displayStatusFor({ quoteSnapshot, historicalSnapshot, features });
+  const policyOutput = {
+    semanticClass: MARKET_FACT_SEMANTIC_CLASSES.POLICY_OUTPUT,
+    dataClass: MARKET_FACT_SEMANTIC_CLASSES.POLICY_OUTPUT,
+    status: policy?.status ?? 'MARKET_CONTEXT_UNAVAILABLE',
+    context: policy?.context ?? null,
+    classification: policy?.classification ?? null,
+    policyVersion: policy?.policyVersion ?? null,
+    reasonCodes: policy?.reasonCodes ?? [],
+    observedAt: policy?.observedAt ?? null,
+    evaluatedAt: evaluatedAt ?? null,
+  };
+  return {
+    schemaVersion: MARKET_SNAPSHOT_SCHEMA_VERSION,
+    status: displayStatus,
+    availability: features?.status === 'FEATURES_AVAILABLE'
+      ? AVAILABILITY.AVAILABLE
+      : (displayStatus === MARKET_DISPLAY_STATUS.PARTIAL_DATA || displayStatus === MARKET_DISPLAY_STATUS.STALE)
+        ? AVAILABILITY.PARTIAL
+        : AVAILABILITY.UNAVAILABLE,
+    providerStatus: features?.providerStatus ?? {
+      quotes: { provider: quoteSnapshot?.provider ?? null, status: quoteSnapshot?.status ?? AVAILABILITY.UNAVAILABLE },
+      history: { provider: historicalSnapshot?.provider ?? null, status: historicalSnapshot?.status ?? AVAILABILITY.UNAVAILABLE },
+    },
+    observedFacts: features?.observedFacts ?? [],
+    derivedFacts: features?.derivedFacts ?? [],
+    policyOutput,
+    freshness: features?.freshness ?? null,
+    provenance: {
+      sources: policy?.sources ?? features?.sources ?? [],
+      qualification: quoteSnapshot?.qualification ?? null,
+    },
+    observedAt: policy?.observedAt ?? features?.observedAt ?? null,
+    evaluatedAt: evaluatedAt ?? null,
+    marketSession: quoteSnapshot?.marketSession ?? {
+      status: 'UNKNOWN',
+      tradingDate: null,
+      checkedAt: evaluatedAt ?? null,
+    },
   };
 }
 
@@ -79,9 +172,17 @@ export async function getLiveMarketContext(options = {}, dependencies = {}) {
   const candidate = classifyDeterministicMarketContext(features);
   const evaluatedAt = now.toISOString();
   if (candidate.status !== 'MARKET_CONTEXT_AVAILABLE') {
+    const marketSnapshot = buildMarketSnapshot({
+      quoteSnapshot,
+      historicalSnapshot,
+      features,
+      policy: candidate,
+      evaluatedAt,
+    });
     return {
       ...candidate,
       evaluatedAt,
+      marketSnapshot,
       candidateContext: null,
       hysteresis: { status: 'NOT_APPLIED_MARKET_CONTEXT_UNAVAILABLE' },
       statePersistence: 'NOT_WRITTEN_UNAVAILABLE_OBSERVATION',
@@ -93,9 +194,17 @@ export async function getLiveMarketContext(options = {}, dependencies = {}) {
   const statePersistence = transition.changed
     ? await writeState(transition.state, setState)
     : prior.storage;
+  const marketSnapshot = buildMarketSnapshot({
+    quoteSnapshot,
+    historicalSnapshot,
+    features,
+    policy: transition.result,
+    evaluatedAt,
+  });
   return {
     ...transition.result,
     evaluatedAt,
+    marketSnapshot,
     statePersistence,
   };
 }

@@ -61,6 +61,34 @@ observation time, fetch time, and freshness:
 At least fifty valid candles are required for any available context. The
 200-day values remain explicitly unavailable when the shorter minimum is met.
 
+## Additive market snapshot contract
+
+The market-context endpoint now also returns a `marketSnapshot` envelope with
+schema version `market-snapshot-1.0.0`. This is an additive presentation
+contract; the existing top-level policy fields remain available for backward
+compatibility.
+
+The envelope keeps three data-plane layers separate:
+
+- `observedFacts`: provider observations such as the current NIFTY 50 value,
+  previous close, and India VIX, each retaining source, observed time, fetch
+  time, and freshness;
+- `derivedFacts`: deterministic returns, drawdown, volatility, and moving
+  averages, each naming its calculation basis and evidence inputs;
+- `policyOutput`: the versioned deterministic market-context classification.
+
+The semantic classes `OBSERVED`, `DERIVED`, and `POLICY_OUTPUT` are separate
+from provider `dataClass` values such as `LIVE` and `DAILY`. A provider class
+therefore cannot be mistaken for a policy decision or a derived return.
+
+The backend supplies the frontend display state rather than asking React to
+infer it: `CURRENT`, `MARKET_CLOSED`, `LAST_AVAILABLE`, `STALE`,
+`PARTIAL_DATA`, or `UNAVAILABLE`. Outside a verified session, a complete
+snapshot is shown as `LAST_AVAILABLE` rather than being called current. The
+NSE adapter explicitly reports `MARKET_OPEN`, `MARKET_CLOSED`, or
+`MARKET_HOLIDAY` when the exchange calendar is established. The closed state
+means the last verified session may be displayed; it is not a new quote.
+
 ## Versioned policy
 
 Classification is `DETERMINISTIC_POLICY_HEURISTIC`, policy version

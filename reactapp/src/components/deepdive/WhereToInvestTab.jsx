@@ -20,7 +20,12 @@ import {
 } from 'lucide-react';
 import * as api from '../../services/api';
 import SebiDisclaimer from '../SebiDisclaimer';
-import { nullableMarketNumber } from '../../utils/marketDataDisplay';
+import {
+  formatMarketTimestamp,
+  getMarketDisplayState,
+  getMarketEvidenceSource,
+  nullableMarketNumber,
+} from '../../utils/marketDataDisplay';
 
 const RISK_LEVELS = [
   { label: 'Low', color: '#22c55e', desc: 'Lower relative risk. Any guarantee or insurance depends on the specific product terms.' },
@@ -79,14 +84,6 @@ const SUB_TAB_LABELS = {
 
 const ILLUSTRATIVE_PRINCIPALS = [5000, 10000, 25000, 50000, 100000];
 
-const MARKET_CONTEXT_DESCRIPTIONS = {
-  NORMAL: 'Market conditions look normal.',
-  CAUTIOUS: 'Markets have been weaker recently, so your plan is being a little more careful.',
-  HIGH_VOLATILITY: 'Markets are moving more sharply than usual.',
-  RISK_OFF: 'Market risk is elevated, so your plan applies the strongest allowed risk reduction while staying within your suitability limits.',
-  UNAVAILABLE: 'Live market information is temporarily unavailable. Your personal suitability rules are still active.',
-};
-
 const MARKET_CONTEXT_COPY = {
   NORMAL: {
     headline: 'Market conditions look steady.',
@@ -105,7 +102,7 @@ const MARKET_CONTEXT_COPY = {
     explanation: 'Your plan applies the strongest allowed risk reduction while staying within your suitability limits.',
   },
   UNAVAILABLE: {
-    headline: 'Live market information is temporarily unavailable.',
+    headline: 'Verified market information is temporarily unavailable.',
     explanation: 'Your personal suitability rules remain fully active.',
   },
 };
@@ -159,7 +156,6 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
   const subCategoryMap = wtiData?.sectors || wtiData?.subCategories || null;
   const subKeys = subCategoryMap ? Object.keys(subCategoryMap) : [];
 
-  const [activeSubTab, setActiveSubTab] = useState(subKeys[0] || null);
   const [contextPreview, setContextPreview] = useState(null);
   const [contextPreviewError, setContextPreviewError] = useState(null);
   const [contextPreviewLoading, setContextPreviewLoading] = useState(false);
@@ -172,7 +168,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
   const [illustrativePrincipal, setIllustrativePrincipal] = useState(10000);
   const [showTaxDrawer, setShowTaxDrawer] = useState(false);
   const [taxAnnualIncome, setTaxAnnualIncome] = useState(
-    userProfile?.monthly_take_home ? String(userProfile.monthly_take_home * 12) : ''
+    userProfile?.annualGrossIncome ?? userProfile?.annual_gross_income ?? ''
   );
   const [taxRegime, setTaxRegime] = useState('new');
   const [taxFiscalYear, setTaxFiscalYear] = useState('FY2025-26');
@@ -245,10 +241,12 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
             const historicalReturn = nullableMarketNumber(product.historicalReturn?.valuePct);
             const nav = nullableMarketNumber(product.nav?.value);
             const officialRate = nullableMarketNumber(product.officialRate?.value);
-            const officialRateLabel = product.officialRate?.dataClass === 'OFFICIAL_BANK_PUBLISHED_RATE'
-              ? 'Current official bank rate'
-              : product.parentInstrumentId === 'rbi_bonds'
-                ? 'Current RBI bond coupon'
+            const isRbiFloatingCoupon = product.officialRate?.dataClass === 'OFFICIAL_RBI_FLOATING_COUPON_RATE'
+              || product.parentInstrumentId === 'rbi_bonds';
+            const officialRateLabel = isRbiFloatingCoupon
+              ? 'Current RBI bond coupon'
+              : product.officialRate?.dataClass === 'OFFICIAL_BANK_PUBLISHED_RATE'
+                ? 'Current official bank rate'
                 : 'Current official rate';
 
             return {
@@ -256,9 +254,9 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
               displayMetricLabel: Number.isFinite(officialRate)
                 ? officialRateLabel
                 : Number.isFinite(historicalReturn) ? 'Historical 1Y return' : 'Current NAV',
-              displayMetric: Number.isFinite(historicalReturn)
-                ? `${historicalReturn.toFixed(2)}% historical`
-                : Number.isFinite(officialRate) ? `${officialRate.toFixed(2)}% p.a.`
+              displayMetric: Number.isFinite(officialRate)
+                ? `${officialRate.toFixed(2)}% p.a.`
+                : Number.isFinite(historicalReturn) ? `${historicalReturn.toFixed(2)}% historical`
                   : Number.isFinite(nav) ? `₹${nav.toLocaleString('en-IN')}` : 'Unavailable',
             };
           }),
@@ -346,6 +344,12 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
   const contextRawState = contextAvailable ? marketContext.context : 'MARKET_CONTEXT_UNAVAILABLE';
   const beginnerMarketState = contextAvailable ? marketContext.context : 'UNAVAILABLE';
   const contextCopy = MARKET_CONTEXT_COPY[beginnerMarketState] || MARKET_CONTEXT_COPY.UNAVAILABLE;
+  const marketSnapshot = marketContext?.marketSnapshot || null;
+  const marketDisplay = getMarketDisplayState(marketContext, {
+    loading: marketContext === null && !marketContextError,
+  });
+  const marketEvidenceSource = getMarketEvidenceSource(marketContext);
+  const marketObservedAt = formatMarketTimestamp(marketSnapshot?.observedAt || marketContext?.observedAt);
 
   let marketBadgeColor = '#38bdf8';
   let marketBadgeBg = 'rgba(56, 189, 248, 0.12)';
@@ -375,11 +379,18 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
 
   const contextReasonCodes = marketContext?.reasonCodes || (marketContextError ? ['MARKET_CONTEXT_REQUEST_FAILED'] : []);
 
+  const semanticFacts = marketSnapshot
+    ? `${marketSnapshot.observedFacts?.length || 0} observed · ${marketSnapshot.derivedFacts?.length || 0} derived · 1 policy output`
+    : 'Observed, derived, and policy output are separated by the backend contract.';
+
   const formatSignal = (item) => {
     if (!item?.available || !Number.isFinite(item.value)) return 'UNAVAILABLE';
     const value = Number(item.value).toLocaleString('en-IN', { maximumFractionDigits: 2 });
     return item.unit === 'PERCENT' ? `${value}%` : value;
   };
+
+  const signalSemanticClass = (key) => signalMap[key]?.semanticClass || signalMap[key]?.dataClass
+    || (['nifty50Current', 'nifty50PreviousClose', 'indiaVixCurrent'].includes(key) ? 'OBSERVED' : 'DERIVED');
 
   return (
     <div className="tab-fade-in">
@@ -387,7 +398,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
       <section
         className="wti-beginner-market-card"
         aria-label="Market conditions overview"
-        style={{ borderLeftColor: marketBadgeColor }}
+        style={{ '--market-accent': marketBadgeColor }}
       >
         <div className="wti-beginner-market-header">
           <div className="wti-header-title-group">
@@ -402,7 +413,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
               borderColor: marketBadgeBorder,
             }}
           >
-            {marketContext === null && !marketContextError ? 'LOADING' : contextRawState}
+            {contextAvailable ? contextRawState : marketDisplay.key}
           </span>
         </div>
 
@@ -411,6 +422,13 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
           <p className="wti-beginner-meaning">
             <span className="wti-meaning-lead">What this means for you:</span> {contextCopy.explanation}
           </p>
+          <div className="wti-market-evidence-summary" data-testid="market-data-status">
+            <span className="wti-market-data-status">{marketDisplay.label}</span>
+            <span>{marketDisplay.detail}</span>
+            <span className="wti-market-data-asof">
+              As of: {marketObservedAt || 'Unavailable'} · Source: {marketEvidenceSource || 'Unavailable'}
+            </span>
+          </div>
         </div>
 
         <div className="wti-beginner-market-footer">
@@ -472,6 +490,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                     {marketSignals.map(sig => (
                       <div key={sig.key} className="wti-tech-metric-tile">
                         <span className="wti-tech-metric-label">{sig.label}</span>
+                        <span className="wti-tech-metric-class">{signalSemanticClass(sig.key)}</span>
                         <span
                           className="wti-tech-metric-value"
                           style={{ color: signalMap[sig.key]?.available ? '#f8fafc' : '#fbbf24' }}
@@ -491,6 +510,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                     {trendSignals.map(sig => (
                       <div key={sig.key} className="wti-tech-metric-tile">
                         <span className="wti-tech-metric-label">{sig.label}</span>
+                        <span className="wti-tech-metric-class">{signalSemanticClass(sig.key)}</span>
                         <span
                           className="wti-tech-metric-value"
                           style={{ color: signalMap[sig.key]?.available ? '#f8fafc' : '#fbbf24' }}
@@ -510,6 +530,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                     {volatilitySignals.map(sig => (
                       <div key={sig.key} className="wti-tech-metric-tile">
                         <span className="wti-tech-metric-label">{sig.label}</span>
+                        <span className="wti-tech-metric-class">{signalSemanticClass(sig.key)}</span>
                         <span
                           className="wti-tech-metric-value"
                           style={{ color: signalMap[sig.key]?.available ? '#f8fafc' : '#fbbf24' }}
@@ -529,6 +550,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                     {otherSignals.map(sig => (
                       <div key={sig.key} className="wti-tech-metric-tile">
                         <span className="wti-tech-metric-label">{sig.label}</span>
+                        <span className="wti-tech-metric-class">{signalSemanticClass(sig.key)}</span>
                         <span
                           className="wti-tech-metric-value"
                           style={{ color: signalMap[sig.key]?.available ? '#f8fafc' : '#fbbf24' }}
@@ -545,6 +567,12 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
             {/* Evidence & Provenance Section */}
             <div className="wti-tech-evidence-section">
               <h4 className="wti-tech-group-title">Evidence & Policy Provenance</h4>
+              <div className="wti-semantic-legend" data-testid="market-semantic-legend">
+                <span>Observed facts: provider values</span>
+                <span>Derived facts: deterministic calculations</span>
+                <span>Policy output: market-context classification</span>
+              </div>
+              <div className="wti-tech-provenance-lines">Data plane: {semanticFacts}</div>
               <div className="wti-tech-policy-badge">
                 {contextAvailable
                   ? `${marketContext.classification} · ${marketContext.policyVersion} · confidence: unavailable (deterministic policy, not ML)`
@@ -652,12 +680,34 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
         </form>
       )}
 
+      <section className="wti-parent-recommendation" aria-labelledby="wti-parent-recommendation-title">
+        <div className="wti-parent-recommendation-label">YOUR PLAN RECOMMENDS</div>
+        <div className="wti-parent-recommendation-content">
+          <div>
+            <h3 id="wti-parent-recommendation-title">{inv?.name || 'Selected investment category'}</h3>
+            <p>
+              This category passed the backend Financial Profile suitability check. The verified options below are a deeper product view inside it.
+            </p>
+          </div>
+          {Number.isFinite(Number(inv?.allocation_pct)) && (
+            <div className="wti-parent-recommendation-allocation">
+              <span>Plan allocation</span>
+              <strong>{inv.allocation_pct}%</strong>
+            </div>
+          )}
+        </div>
+      </section>
+
       {/* ─── Section Header & Sorting ─── */}
       <div className="wti-section-header-row">
         <div>
-          <h3 className="wti-section-title">Top verified choices in this category</h3>
+          <h3 className="wti-section-title">Verified options inside this category</h3>
           <p className="wti-section-subtitle">
-            Up to 5 source-verified Direct-plan options ranked using verified historical NAV evidence.{' '}
+            {isEvidenceRanked
+              ? 'Up to 5 source-verified Direct-plan options ranked using verified historical NAV evidence.'
+              : isComparableSet
+                ? 'Source-verified options in this suitable category. Display order is not a merit ranking.'
+                : 'No source-qualified product facts are available for this category.'}{' '}
             <span className="wti-status-label">({headerLabel})</span>
           </p>
         </div>
@@ -723,15 +773,14 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
       {/* Sub-Category Sector/Theme Drill-Down Tabs */}
       {subKeys.length > 0 && (
         <div className="wti-sub-pills">
+          <span className="wti-sub-pills-label">Category context</span>
           {subKeys.map(key => (
-            <button
+            <span
               key={key}
-              type="button"
-              onClick={() => setActiveSubTab(key)}
-              className={`wti-sub-pill ${activeSubTab === key ? 'wti-sub-pill--active' : ''}`}
+              className="wti-sub-pill wti-sub-pill--context"
             >
               {SUB_TAB_LABELS[key] || key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
-            </button>
+            </span>
           ))}
         </div>
       )}
@@ -869,6 +918,12 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
         {products.map((product) => {
           const riskStyle = getRiskTierColor(product.beginnerSuitability?.riskTier);
           const postTax = product.postTaxAnalysis;
+          const productObservedAt = formatMarketTimestamp(
+            product.officialRate?.observedAt
+              || product.nav?.observedAt
+              || product.valuationDate
+              || product.historicalReturn?.endDate,
+          );
 
           return (
             <div
@@ -904,6 +959,10 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                     <span className="wti-provider">
                       {product.provider || 'Provider unavailable'} · {product.source?.provider || 'Source unavailable'}
                     </span>
+                    <div className="wti-card-evidence-row">
+                      <span>Source: {product.source?.provider || 'Unavailable'}</span>
+                      <span>As of: {productObservedAt || 'Unavailable'}</span>
+                    </div>
 
                     {/* Risk & Access Chips */}
                     <div className="wti-card-chips">
@@ -915,10 +974,10 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                           borderColor: riskStyle.border,
                         }}
                       >
-                        {product.beginnerSuitability?.riskTier || 'Moderate Risk'}
+                        {product.beginnerSuitability?.riskTier || 'Risk classification unavailable'}
                       </span>
                       <span className="wti-access-chip">
-                        {product.beginnerSuitability?.accessToMoney || 'Easy access'}
+                        {product.beginnerSuitability?.accessToMoney || 'Access terms unavailable'}
                       </span>
                     </div>
                   </div>
@@ -949,7 +1008,7 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                     <div className="wti-post-tax-header">
                       <span className="wti-post-tax-title">
                         {postTax.metricLabel}:{' '}
-                        <strong>{postTax.postTaxRatePct !== null ? `${postTax.postTaxRatePct}%` : 'Calculated'}</strong>
+                        <strong>{Number.isFinite(postTax.postTaxRatePct) ? `${postTax.postTaxRatePct}%` : 'Unavailable'}</strong>
                       </span>
                       <span className="wti-badge" style={{ background: 'rgba(52, 211, 153, 0.1)', color: '#34d399', borderColor: 'rgba(52, 211, 153, 0.2)' }}>
                         Defensible Post-Tax
@@ -963,15 +1022,15 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                       </div>
                       <div>
                         <span>Gross return</span>
-                        <strong>₹{postTax.grossGain !== null ? postTax.grossGain.toLocaleString('en-IN') : '—'}</strong>
+                        <strong>₹{Number.isFinite(postTax.grossGain) ? postTax.grossGain.toLocaleString('en-IN') : 'Unavailable'}</strong>
                       </div>
                       <div>
                         <span>Tax on gain</span>
-                        <strong>₹{postTax.incrementalTax !== null ? postTax.incrementalTax.toLocaleString('en-IN') : '0'}</strong>
+                        <strong>₹{Number.isFinite(postTax.incrementalTax) ? postTax.incrementalTax.toLocaleString('en-IN') : 'Unavailable'}</strong>
                       </div>
                       <div className="wti-keep-highlight">
                         <span>You keep</span>
-                        <strong>₹{postTax.netGain !== null ? postTax.netGain.toLocaleString('en-IN') : '—'}</strong>
+                        <strong>₹{Number.isFinite(postTax.netGain) ? postTax.netGain.toLocaleString('en-IN') : 'Unavailable'}</strong>
                       </div>
                     </div>
 
@@ -998,7 +1057,9 @@ const WhereToInvestTab = ({ inv, userProfile }) => {
                 {/* Existing Highlights & Warnings */}
                 <p className="wti-highlights">
                   {product.officialRate
-                    ? product.officialRate.dataClass === 'QUARTERLY_OFFICIAL_RATE'
+                    ? product.officialRate.dataClass === 'OFFICIAL_RBI_FLOATING_COUPON_RATE' || product.parentInstrumentId === 'rbi_bonds'
+                      ? `Current RBI Floating Rate Savings Bond coupon effective ${product.officialRate.effectiveFrom || 'UNAVAILABLE'}${product.officialRate.effectiveTo ? ` to ${product.officialRate.effectiveTo}` : ''}. Interest is paid semiannually and the coupon resets on January 1 and July 1; this is not a fixed 7-year guaranteed rate.`
+                      : product.officialRate.dataClass === 'QUARTERLY_OFFICIAL_RATE'
                       ? `Official Government of India rate effective ${product.officialRate.effectiveFrom || 'UNAVAILABLE'} to ${product.officialRate.effectiveTo || 'UNAVAILABLE'}. This is an official interval fact, not a live market price or expected return.`
                       : `Official bank-published card rate effective from ${product.officialRate.effectiveFrom || 'UNAVAILABLE'} for ${product.tenure?.label || 'the source-established tenure'} and ${product.depositorType?.replaceAll('_', ' ') || 'the source-established depositor class'}. No best-FD claim is made.`
                     : isEvidenceRanked

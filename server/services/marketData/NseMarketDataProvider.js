@@ -7,6 +7,7 @@ import {
   PROVIDERS,
   createMarketFact,
   nullableFiniteNumber,
+  normalizeTimestamp,
 } from './contracts.js';
 import {
   DEFAULT_BENCHMARK_IDS,
@@ -18,6 +19,7 @@ import { getNseJson, safeNseHttpError } from './nseHttp.js';
 import {
   evaluateNseQuoteFreshness,
   fetchNseTradingHolidays,
+  NSE_MARKET_SESSION,
   parseNseMarketTimestamp,
 } from './nseTradingCalendar.js';
 import { readThroughMarketCache } from './requestCache.js';
@@ -124,6 +126,10 @@ export function parseNseIndexQuotes(payload, {
   const availableFactCount = facts.filter(
     fact => fact.availabilityStatus === AVAILABILITY.AVAILABLE,
   ).length;
+  const sessionStatuses = [...new Set(facts.map(fact => fact.freshness?.marketSession).filter(Boolean))];
+  const marketSession = sessionStatuses.length === 1
+    ? sessionStatuses[0]
+    : NSE_MARKET_SESSION.UNKNOWN;
   return {
     schemaVersion: MARKET_DATA_SCHEMA_VERSION,
     provider: PROVIDERS.NSE,
@@ -135,6 +141,11 @@ export function parseNseIndexQuotes(payload, {
     providerTimestamp,
     effectiveTradingDate: isoDateInIndia(providerTimestamp),
     fetchedAt,
+    marketSession: {
+      status: marketSession,
+      tradingDate: facts[0]?.freshness?.tradingDate ?? null,
+      checkedAt: normalizeTimestamp(now),
+    },
     requestedInstrumentCount: normalizedIds.length,
     availableFactCount,
     facts,

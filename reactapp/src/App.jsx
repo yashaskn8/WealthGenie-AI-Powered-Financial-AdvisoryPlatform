@@ -393,6 +393,8 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
             <WhereToInvestScreen
               recommendations={recommendations}
               userProfile={userProfile}
+              recommendationsLoading={isRecommendationLoading}
+              recommendationsError={backendFallback?.message || null}
               onLearnMore={handleLearnMore}
               onSelectInvestment={setDeepDiveInvestment}
             />

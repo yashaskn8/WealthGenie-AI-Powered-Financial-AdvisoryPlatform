@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-const ARTIFACT_DIR = 'C:/Users/prana/.gemini/antigravity-ide/brain/56ce2aaf-db44-4e4c-b03b-12e05009c861/scratch';
+const ARTIFACT_DIR = 'test-results';
 
 /**
  * Market context mock — matches GET /api/regime/current
@@ -39,6 +39,23 @@ const MARKET_CONTEXT_MOCK = {
     { provider: 'NSE', instrumentId: 'INDIA VIX', dataClass: 'LIVE' },
     { provider: 'NSE', instrumentId: 'NIFTY 50', dataClass: 'DAILY' },
   ],
+  marketSnapshot: {
+    schemaVersion: 'market-snapshot-1.0.0',
+    status: 'CURRENT',
+    availability: 'AVAILABLE',
+    providerStatus: {
+      quotes: { provider: 'NSE', status: 'AVAILABLE' },
+      history: { provider: 'NSE', status: 'AVAILABLE' },
+    },
+    observedFacts: [
+      { key: 'nifty50Current', value: 23431.5, dataClass: 'OBSERVED' },
+      { key: 'nifty50PreviousClose', value: 23635.1, dataClass: 'OBSERVED' },
+      { key: 'indiaVixCurrent', value: 11.94, dataClass: 'OBSERVED' },
+    ],
+    derivedFacts: [{ key: 'return20DayPct', value: -4.11, dataClass: 'DERIVED' }],
+    policyOutput: { semanticClass: 'POLICY_OUTPUT', context: 'CAUTIOUS' },
+    observedAt: '2026-09-09T10:00:00.000Z',
+  },
 };
 
 test.describe('Market Today Card Visual & Responsive Review', () => {

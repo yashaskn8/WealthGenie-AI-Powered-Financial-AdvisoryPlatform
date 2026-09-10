@@ -67,7 +67,8 @@ describe('SebiDisclaimer Component', () => {
     expect(screen.getByText('Plan: UNAVAILABLE')).toBeTruthy();
     expect(screen.getByTestId('wti-comparison-universe')).toBeTruthy();
     expect(screen.queryByText('Top Pick')).toBeNull();
-    expect(await screen.findByText('MARKET_CONTEXT_UNAVAILABLE')).toBeTruthy();
+    expect(await screen.findByText('UNAVAILABLE')).toBeTruthy();
+    expect(screen.getByTestId('market-data-status')).toHaveTextContent(/Market data unavailable/i);
     expect(screen.getByText(/PROVIDER_NOT_CONFIGURED/)).toBeTruthy();
   });
 

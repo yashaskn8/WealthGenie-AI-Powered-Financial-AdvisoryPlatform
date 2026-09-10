@@ -1,4 +1,8 @@
-import { AVAILABILITY, FRESHNESS } from './marketData/contracts.js';
+import {
+  AVAILABILITY,
+  FRESHNESS,
+  MARKET_FACT_SEMANTIC_CLASSES,
+} from './marketData/contracts.js';
 import { MARKET_BENCHMARKS } from './marketData/marketBenchmarks.js';
 
 export const NIFTY_50_BENCHMARK_ID = MARKET_BENCHMARKS.NIFTY_50.canonicalProductId;
@@ -15,20 +19,21 @@ function round(value, digits = 6) {
   return Number(Number(value).toFixed(digits));
 }
 
-function signal(value, unit, basis) {
+function signal(value, unit, basis, semanticClass = MARKET_FACT_SEMANTIC_CLASSES.DERIVED) {
   return {
     value: Number.isFinite(value) ? value : null,
     unit,
     basis,
+    semanticClass,
     available: Number.isFinite(value),
   };
 }
 
 function emptySignals() {
   return {
-    nifty50Current: signal(null, 'INDEX_POINTS', 'VERIFIED_CURRENT_NIFTY50_QUOTE'),
-    nifty50PreviousClose: signal(null, 'INDEX_POINTS', 'VERIFIED_PREVIOUS_TRADING_SESSION_CLOSE'),
-    indiaVixCurrent: signal(null, 'INDEX_POINTS', 'VERIFIED_CURRENT_INDIA_VIX_QUOTE'),
+    nifty50Current: signal(null, 'INDEX_POINTS', 'VERIFIED_CURRENT_NIFTY50_QUOTE', MARKET_FACT_SEMANTIC_CLASSES.OBSERVED),
+    nifty50PreviousClose: signal(null, 'INDEX_POINTS', 'VERIFIED_PREVIOUS_TRADING_SESSION_CLOSE', MARKET_FACT_SEMANTIC_CLASSES.OBSERVED),
+    indiaVixCurrent: signal(null, 'INDEX_POINTS', 'VERIFIED_CURRENT_INDIA_VIX_QUOTE', MARKET_FACT_SEMANTIC_CLASSES.OBSERVED),
     return1DayPct: signal(null, 'PERCENT', 'CURRENT_VS_PREVIOUS_TRADING_SESSION_CLOSE'),
     return5DayPct: signal(null, 'PERCENT', 'CURRENT_VS_CLOSE_5_TRADING_SESSIONS_AGO'),
     return20DayPct: signal(null, 'PERCENT', 'CURRENT_VS_CLOSE_20_TRADING_SESSIONS_AGO'),
@@ -81,6 +86,95 @@ function sourceDescriptor(source, observedAt, fetchedAt, freshness, metadata = {
     effectiveTradingDate: metadata?.effectiveTradingDate ?? null,
     dataClass: metadata?.dataClass ?? null,
   };
+}
+
+function combinedFetchedAt(...snapshots) {
+  return snapshots
+    .map(snapshot => snapshot?.fetchedAt)
+    .filter(Boolean)
+    .sort()
+    .at(-1) || null;
+}
+
+function semanticFact({ key, item, semanticClass, dataClass = null, observedAt, fetchedAt, freshness, source, derivation = null, provenance = null }) {
+  const available = item?.available === true && Number.isFinite(item.value);
+  return {
+    key,
+    value: available ? item.value : null,
+    unit: item?.unit ?? null,
+    dataClass,
+    semanticClass,
+    availabilityStatus: available ? AVAILABILITY.AVAILABLE : AVAILABILITY.UNAVAILABLE,
+    observedAt: observedAt ?? null,
+    fetchedAt: fetchedAt ?? null,
+    freshness: freshness ?? { status: FRESHNESS.UNKNOWN, ageSeconds: null, maxAgeSeconds: null },
+    source: source ?? null,
+    derivation,
+    provenance,
+  };
+}
+
+function buildSemanticFacts({ signals, niftyFact, vixFact, quoteSnapshot, historicalSnapshot, sources }) {
+  const quoteFetchedAt = quoteSnapshot?.fetchedAt || niftyFact?.fetchedAt || vixFact?.fetchedAt || null;
+  const observedFacts = [
+    semanticFact({
+      key: 'nifty50Current',
+      item: signals.nifty50Current,
+      semanticClass: MARKET_FACT_SEMANTIC_CLASSES.OBSERVED,
+      dataClass: niftyFact?.dataClass ?? null,
+      observedAt: niftyFact?.observedAt,
+      fetchedAt: quoteFetchedAt,
+      freshness: niftyFact?.freshness,
+      source: niftyFact?.source,
+    }),
+    semanticFact({
+      key: 'nifty50PreviousClose',
+      item: signals.nifty50PreviousClose,
+      semanticClass: MARKET_FACT_SEMANTIC_CLASSES.OBSERVED,
+      dataClass: niftyFact?.dataClass ?? null,
+      observedAt: niftyFact?.observedAt,
+      fetchedAt: quoteFetchedAt,
+      freshness: niftyFact?.freshness,
+      source: niftyFact?.source,
+    }),
+    semanticFact({
+      key: 'indiaVixCurrent',
+      item: signals.indiaVixCurrent,
+      semanticClass: MARKET_FACT_SEMANTIC_CLASSES.OBSERVED,
+      dataClass: vixFact?.dataClass ?? null,
+      observedAt: vixFact?.observedAt,
+      fetchedAt: quoteFetchedAt,
+      freshness: vixFact?.freshness,
+      source: vixFact?.source,
+    }),
+  ];
+
+  const derivedFreshness = [niftyFact?.freshness, vixFact?.freshness, historicalSnapshot?.freshness]
+    .map(value => value?.status)
+    .includes(FRESHNESS.STALE)
+    ? { status: FRESHNESS.STALE, ageSeconds: null, maxAgeSeconds: null }
+    : [niftyFact?.freshness, vixFact?.freshness, historicalSnapshot?.freshness]
+      .every(value => value?.status === FRESHNESS.FRESH)
+      ? { status: FRESHNESS.FRESH, ageSeconds: null, maxAgeSeconds: null }
+      : { status: FRESHNESS.UNKNOWN, ageSeconds: null, maxAgeSeconds: null };
+
+  const derivedFacts = Object.entries(signals)
+    .filter(([, item]) => item?.semanticClass === MARKET_FACT_SEMANTIC_CLASSES.DERIVED)
+    .map(([key, item]) => semanticFact({
+      key,
+      item,
+      semanticClass: MARKET_FACT_SEMANTIC_CLASSES.DERIVED,
+      observedAt: niftyFact?.observedAt || historicalSnapshot?.observedAt,
+      fetchedAt: combinedFetchedAt(quoteSnapshot, historicalSnapshot),
+      freshness: derivedFreshness,
+      derivation: item.basis,
+      provenance: {
+        engine: 'market-context-feature-engine',
+        evidence: sources,
+      },
+    }));
+
+  return { observedFacts, derivedFacts };
 }
 
 function unavailableResult({ quoteSnapshot, historicalSnapshot, signals, reasonCodes, sources }) {
@@ -156,7 +250,26 @@ export function computeMarketContextFeatures({ quoteSnapshot, historicalSnapshot
   }
 
   if (reasonCodes.length > 0) {
-    return unavailableResult({ quoteSnapshot, historicalSnapshot, signals, reasonCodes, sources });
+    return {
+      ...unavailableResult({ quoteSnapshot, historicalSnapshot, signals, reasonCodes, sources }),
+      ...buildSemanticFacts({ signals, niftyFact, vixFact, quoteSnapshot, historicalSnapshot, sources }),
+      providerStatus: {
+        quotes: {
+          provider: quoteSnapshot?.provider ?? null,
+          status: quoteSnapshot?.status ?? AVAILABILITY.UNAVAILABLE,
+          qualification: quoteSnapshot?.qualification ?? null,
+          fetchedAt: quoteSnapshot?.fetchedAt ?? null,
+          cache: quoteSnapshot?.cache ?? null,
+        },
+        history: {
+          provider: historicalSnapshot?.provider ?? null,
+          status: historicalSnapshot?.status ?? AVAILABILITY.UNAVAILABLE,
+          qualification: historicalSnapshot?.qualification ?? null,
+          fetchedAt: historicalSnapshot?.fetchedAt ?? null,
+          cache: historicalSnapshot?.cache ?? null,
+        },
+      },
+    };
   }
 
   const closes = validCandles.map(candle => Number(candle.close));
@@ -201,5 +314,22 @@ export function computeMarketContextFeatures({ quoteSnapshot, historicalSnapshot
       nifty50History: historicalSnapshot.freshness,
     },
     sources,
+    ...buildSemanticFacts({ signals, niftyFact, vixFact, quoteSnapshot, historicalSnapshot, sources }),
+    providerStatus: {
+      quotes: {
+        provider: quoteSnapshot?.provider ?? null,
+        status: quoteSnapshot?.status ?? AVAILABILITY.UNAVAILABLE,
+        qualification: quoteSnapshot?.qualification ?? null,
+        fetchedAt: quoteSnapshot?.fetchedAt ?? null,
+        cache: quoteSnapshot?.cache ?? null,
+      },
+      history: {
+        provider: historicalSnapshot?.provider ?? null,
+        status: historicalSnapshot?.status ?? AVAILABILITY.UNAVAILABLE,
+        qualification: historicalSnapshot?.qualification ?? null,
+        fetchedAt: historicalSnapshot?.fetchedAt ?? null,
+        cache: historicalSnapshot?.cache ?? null,
+      },
+    },
   };
 }

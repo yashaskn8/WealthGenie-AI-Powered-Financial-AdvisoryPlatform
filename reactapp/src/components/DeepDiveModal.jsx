@@ -350,7 +350,7 @@ const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRec
           <div className="ddm-header-top">
             <span className="premium-badge">{inv.category}</span>
             <h2 id="deepdive-modal-title" className="ddm-title">{inv.name}</h2>
-            <span style={{ color: '#94a3b8', fontSize: '0.72rem', letterSpacing: '0.04em' }}>
+            <span className="ddm-data-note">
               {inv.returnDataClass || 'MODEL_ASSUMPTION'} · {inv.returnAssumptionVersion || 'wealthgenie-projection-assumptions-1.0.0'} · not an observed market fact or provider forecast
             </span>
           </div>
@@ -376,14 +376,21 @@ const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRec
             </div>
             <div className="metric-item">
               <span className="metric-label"><JargonTooltip term="Tax Benefit">Reference Tax Tag</JargonTooltip></span>
-              <span className="metric-value">Unavailable — use Tax tab</span>
+              <span className="metric-value">Unavailable · use Tax tab</span>
             </div>
           </div>
 
-          <div className="ddm-tabs-nav">
+          <div className="ddm-tabs-nav" role="tablist" aria-label="Investment detail sections">
             {TABS.map(tab => (
-              <button key={tab.id} className={`ddm-tab-btn ${activeTab === tab.id ? 'ddm-tab-btn--active' : ''}`} onClick={() => setActiveTab(tab.id)}>
-                <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>{tab.icon} {tab.id}</span>
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={activeTab === tab.id}
+                className={`ddm-tab-btn ${activeTab === tab.id ? 'ddm-tab-btn--active' : ''}`}
+                onClick={() => setActiveTab(tab.id)}
+              >
+                <span className="ddm-tab-btn-content">{tab.icon} {tab.id}</span>
               </button>
             ))}
           </div>

@@ -8,7 +8,7 @@ const externalIdSchema = new mongoose.Schema({
 const investmentProductSchema = new mongoose.Schema({
   schemaVersion: { type: String, required: true },
   canonicalProductId: { type: String, required: true, unique: true, index: true },
-  productType: { type: String, enum: ['MUTUAL_FUND', 'MARKET_INSTRUMENT', 'GOVERNMENT_SCHEME', 'BANK_TERM_DEPOSIT'], required: true },
+  productType: { type: String, enum: ['MUTUAL_FUND', 'MARKET_INSTRUMENT', 'GOVERNMENT_SCHEME', 'GOVERNMENT_BOND', 'BANK_TERM_DEPOSIT'], required: true },
   name: { type: String, required: true, trim: true },
   providerName: { type: String, default: null, trim: true },
   schemeCategory: { type: String, default: null, trim: true },
@@ -24,7 +24,7 @@ const investmentProductSchema = new mongoose.Schema({
   riskQuality: { type: String, default: null, trim: true },
   externalIds: { type: [externalIdSchema], default: [] },
   source: {
-    provider: { type: String, enum: ['AMFI', 'NSE', 'UPSTOX', 'GOVERNMENT_OF_INDIA', 'SBI'], required: true },
+    provider: { type: String, enum: ['AMFI', 'NSE', 'UPSTOX', 'GOVERNMENT_OF_INDIA', 'SBI', 'RBI'], required: true },
     url: { type: String, required: true },
   },
   sourceUpdatedAt: { type: Date, default: null },

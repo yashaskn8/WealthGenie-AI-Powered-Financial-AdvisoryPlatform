@@ -81,6 +81,8 @@ test('official NSE allIndices fixture maps current NIFTY, previous close, VIX, a
   assert.equal(snapshot.facts[1].value, 11.1);
   assert.equal(snapshot.facts[0].source.url, NSE_ALL_INDICES_URL);
   assert.equal(snapshot.facts[0].freshness.status, 'FRESH');
+  assert.equal(snapshot.marketSession.status, 'MARKET_CLOSED');
+  assert.equal(snapshot.marketSession.tradingDate, '2026-09-08');
 });
 
 test('NSE quote schema drift and missing required facts fail closed without numeric fallbacks', () => {
@@ -112,6 +114,7 @@ test('NSE quote freshness distinguishes open market, closed market, weekend, and
     now: new Date('2026-09-08T03:30:00.000Z'),
   });
   assert.equal(preMarket.status, 'FRESH');
+  assert.equal(preMarket.marketSession, 'MARKET_CLOSED');
 
   const current = evaluateNseQuoteFreshness({
     observedAt: '2026-09-08T06:30:00.000Z',
@@ -119,6 +122,7 @@ test('NSE quote freshness distinguishes open market, closed market, weekend, and
     now: new Date('2026-09-08T06:31:00.000Z'),
   });
   assert.equal(current.status, 'FRESH');
+  assert.equal(current.marketSession, 'MARKET_OPEN');
 
   const staleDuringMarket = evaluateNseQuoteFreshness({
     observedAt: '2026-09-08T05:30:00.000Z',
@@ -148,6 +152,7 @@ test('NSE quote freshness distinguishes open market, closed market, weekend, and
     holidayDates: ['2026-09-07'],
   });
   assert.equal(mondayHoliday.status, 'FRESH');
+  assert.equal(mondayHoliday.marketSession, 'MARKET_HOLIDAY');
 });
 
 test('NSE capital-market holiday schema is strict and deduplicated', () => {

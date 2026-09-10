@@ -21,7 +21,14 @@ import './WhereToInvestScreen.css';
  * - Defaults to recommendations[0] unless explicitly selected by the user.
  * - Integrates full Deep Dive capabilities (Calculator, Tax, History, Overview, Stress Test).
  */
-const WhereToInvestScreen = ({ recommendations = [], userProfile, onLearnMore, onSelectInvestment }) => {
+const WhereToInvestScreen = ({
+  recommendations = [],
+  userProfile,
+  onLearnMore,
+  onSelectInvestment,
+  recommendationsLoading = false,
+  recommendationsError = null,
+}) => {
   // Recommendations in exact backend order
   const recommendedParents = useMemo(() => recommendations || [], [recommendations]);
 
@@ -62,13 +69,19 @@ const WhereToInvestScreen = ({ recommendations = [], userProfile, onLearnMore, o
     return (
       <div className="wti-screen-container">
         <div className="wti-loading-card">
-          <AlertCircle size={24} className="wti-loading-icon" />
+          <AlertCircle size={24} className="wti-loading-icon" aria-hidden="true" />
           <div>
             <div className="wti-loading-title">
-              Loading personalized recommendations...
+              {recommendationsLoading
+                ? 'Loading personalized recommendations...'
+                : recommendationsError
+                  ? 'Personalized recommendations unavailable'
+                  : 'No personalized recommendations available'}
             </div>
             <div className="wti-loading-subtitle">
-              Your suitable options will appear here once your financial profile evaluation is complete.
+              {recommendationsError
+                ? 'The recommendation service did not publish a safe result. No fallback products are shown.'
+                : 'Your suitable options will appear here once your financial profile evaluation is complete.'}
             </div>
           </div>
         </div>
@@ -85,10 +98,10 @@ const WhereToInvestScreen = ({ recommendations = [], userProfile, onLearnMore, o
           <span>SUITABILITY MATCHED · VERIFIED EXECUTION</span>
         </div>
         <h1 className="wti-title">
-          Top Verified Choices for You
+          Your recommended categories
         </h1>
         <p className="wti-subtitle">
-          Verified options filtered by your risk profile, timeline, and tax considerations.
+          Start with the categories selected by your Financial Profile, then inspect source-verified products inside each one.
         </p>
       </header>
 

@@ -4,6 +4,8 @@ const freshnessSchema = new mongoose.Schema({
   status: { type: String, enum: ['FRESH', 'STALE', 'UNKNOWN'], required: true },
   ageSeconds: { type: Number, default: null, min: 0 },
   maxAgeSeconds: { type: Number, default: null, min: 0 },
+  marketSession: { type: String, enum: ['MARKET_OPEN', 'MARKET_CLOSED', 'MARKET_HOLIDAY', 'UNKNOWN'], default: null },
+  tradingDate: { type: String, default: null },
 }, { _id: false, strict: 'throw' });
 
 const metricsSchema = new mongoose.Schema({
@@ -31,11 +33,12 @@ const marketObservationSchema = new mongoose.Schema({
   publicationDate: { type: String, default: null },
   firstFetchedAt: { type: Date, required: true },
   lastFetchedAt: { type: Date, required: true },
-  dataClass: { type: String, enum: ['LIVE', 'DELAYED', 'DAILY', 'QUARTERLY_OFFICIAL_RATE', 'OFFICIAL_BANK_PUBLISHED_RATE'], default: null },
+  dataClass: { type: String, enum: ['LIVE', 'DELAYED', 'DAILY', 'QUARTERLY_OFFICIAL_RATE', 'OFFICIAL_BANK_PUBLISHED_RATE', 'OFFICIAL_RBI_FLOATING_COUPON_RATE'], default: null },
+  semanticClass: { type: String, enum: ['OBSERVED', 'DERIVED', 'POLICY_OUTPUT'], default: 'OBSERVED' },
   availabilityStatus: { type: String, enum: ['AVAILABLE'], required: true },
   freshness: { type: freshnessSchema, required: true },
   source: {
-    provider: { type: String, enum: ['AMFI', 'NSE', 'UPSTOX', 'GOVERNMENT_OF_INDIA', 'SBI'], required: true },
+    provider: { type: String, enum: ['AMFI', 'NSE', 'UPSTOX', 'GOVERNMENT_OF_INDIA', 'SBI', 'RBI'], required: true },
     instrumentId: { type: String, required: true },
     url: { type: String, required: true },
   },

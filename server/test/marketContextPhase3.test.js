@@ -24,6 +24,7 @@ function quoteFact(instrumentId, canonicalProductId, value, { previousClose = nu
     availabilityStatus: 'AVAILABLE',
     observedAt: '2026-09-08T11:59:00.000Z',
     fetchedAt: NOW.toISOString(),
+    dataClass: 'LIVE',
     freshness: { status: freshness, ageSeconds: 60, maxAgeSeconds: 900 },
     source: { provider: 'NSE', instrumentId, url: 'https://www.nseindia.com/api/allIndices' },
     metrics: { previousClose },
@@ -96,6 +97,10 @@ test('fresh verified NIFTY and VIX observations produce deterministic normal con
   assert.equal(features.signals.return1DayPct.value, 0.628931);
   assert.equal(features.signals.movingAverage50Day.available, true);
   assert.equal(features.signals.movingAverage200Day.available, false);
+  assert.equal(features.observedFacts.find(fact => fact.key === 'nifty50Current').semanticClass, 'OBSERVED');
+  assert.equal(features.observedFacts.find(fact => fact.key === 'nifty50Current').dataClass, 'LIVE');
+  assert.equal(features.derivedFacts.find(fact => fact.key === 'return20DayPct').semanticClass, 'DERIVED');
+  assert.equal(features.derivedFacts.find(fact => fact.key === 'return20DayPct').dataClass, null);
 });
 
 test('risk-off requires verified drawdown, 20-day loss, and price below MA50 evidence', () => {

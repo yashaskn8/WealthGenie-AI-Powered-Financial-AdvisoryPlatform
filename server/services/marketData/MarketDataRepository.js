@@ -46,6 +46,7 @@ export function buildObservationOperations(snapshot) {
             publicationDate: fact.publicationDate ?? null,
             lastFetchedAt: new Date(fact.fetchedAt),
             dataClass: fact.dataClass ?? null,
+            semanticClass: fact.semanticClass ?? 'OBSERVED',
             availabilityStatus: AVAILABILITY.AVAILABLE,
             freshness: fact.freshness,
             source: fact.source,

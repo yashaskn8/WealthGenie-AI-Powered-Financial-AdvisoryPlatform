@@ -14,6 +14,13 @@ export const NSE_TRADING_HOLIDAY_CACHE_TTL_SECONDS = 24 * 60 * 60;
 export const NSE_QUOTE_MAX_AGE_SECONDS = 15 * 60;
 export const NSE_DAILY_HISTORY_MAX_AGE_SECONDS = 4 * 24 * 60 * 60;
 
+export const NSE_MARKET_SESSION = Object.freeze({
+  OPEN: 'MARKET_OPEN',
+  CLOSED: 'MARKET_CLOSED',
+  HOLIDAY: 'MARKET_HOLIDAY',
+  UNKNOWN: 'UNKNOWN',
+});
+
 const IST_OFFSET_MS = 330 * 60 * 1000;
 const MONTHS = Object.freeze({
   JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5,
@@ -87,6 +94,23 @@ function nextTradingSessionOpen(observedAt, holidayDates) {
   return null;
 }
 
+function sessionFor(nowParts, holidayDates) {
+  if (!nowParts?.isoDate) {
+    return { status: NSE_MARKET_SESSION.UNKNOWN, tradingDate: null };
+  }
+  if (new Set(holidayDates).has(nowParts.isoDate)) {
+    return { status: NSE_MARKET_SESSION.HOLIDAY, tradingDate: nowParts.isoDate };
+  }
+  const minutes = nowParts.hour * 60 + nowParts.minute;
+  const tradingDay = isNseTradingDay(nowParts.isoDate, holidayDates);
+  return {
+    status: tradingDay && minutes >= (9 * 60 + 15) && minutes <= (15 * 60 + 30)
+      ? NSE_MARKET_SESSION.OPEN
+      : NSE_MARKET_SESSION.CLOSED,
+    tradingDate: nowParts.isoDate,
+  };
+}
+
 export function evaluateNseQuoteFreshness({
   observedAt,
   fetchedAt,
@@ -97,13 +121,20 @@ export function evaluateNseQuoteFreshness({
   const fetched = normalizeTimestamp(fetchedAt);
   const reference = normalizeTimestamp(now);
   if (!observed || !fetched || !reference) {
-    return { status: FRESHNESS.UNKNOWN, ageSeconds: null, maxAgeSeconds: NSE_QUOTE_MAX_AGE_SECONDS };
+    return {
+      status: FRESHNESS.UNKNOWN,
+      ageSeconds: null,
+      maxAgeSeconds: NSE_QUOTE_MAX_AGE_SECONDS,
+      marketSession: NSE_MARKET_SESSION.UNKNOWN,
+      tradingDate: null,
+    };
   }
   const nowParts = indiaClockParts(reference);
   const observedDate = isoDateInIndia(observed);
   const minutes = nowParts.hour * 60 + nowParts.minute;
   const tradingToday = isNseTradingDay(nowParts.isoDate, holidayDates);
   const marketOpen = tradingToday && minutes >= (9 * 60 + 15) && minutes <= (15 * 60 + 30);
+  const session = sessionFor(nowParts, holidayDates);
   const expectedDate = tradingToday && minutes >= (9 * 60 + 15)
     ? nowParts.isoDate
     : previousNseTradingDate(nowParts.isoDate, holidayDates);
@@ -122,6 +153,8 @@ export function evaluateNseQuoteFreshness({
     status: observedDate === expectedDate && ageSeconds <= maxAgeSeconds ? FRESHNESS.FRESH : FRESHNESS.STALE,
     ageSeconds,
     maxAgeSeconds,
+    marketSession: session.status,
+    tradingDate: session.tradingDate,
   };
 }
 

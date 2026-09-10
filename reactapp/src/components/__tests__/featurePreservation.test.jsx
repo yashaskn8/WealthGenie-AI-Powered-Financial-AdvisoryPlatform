@@ -298,15 +298,15 @@ describe('Feature Preservation: Zero-Feature-Loss Audit', () => {
         />
       );
 
-      const calcTab = screen.getByRole('button', { name: /^calculator$/i });
+      const calcTab = screen.getByRole('tab', { name: /^calculator$/i });
       expect(calcTab).toBeInTheDocument();
       expect(calcTab.className).toContain('ddm-tab-btn--active');
-      expect(screen.getByRole('button', { name: /^overview$/i })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /^where to invest$/i })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /^tax$/i })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /^history$/i })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /^why invest$/i })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /^stress test$/i })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: /^overview$/i })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: /^where to invest$/i })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: /^tax$/i })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: /^history$/i })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: /^why invest$/i })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: /^stress test$/i })).toBeInTheDocument();
     });
   });
 
