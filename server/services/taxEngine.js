@@ -32,15 +32,37 @@ const FY2026_27_NEW_SLABS = defineSlabs([
     { min: 2000000, max: 2400000, rate: 0.25 },
     { min: 2400000, max: Infinity, rate: 0.30 },
 ]);
-const FY2025_26_OLD_SLABS = defineSlabs([
+const FY2025_26_OLD_NON_SENIOR_SLABS = defineSlabs([
     { min: 0, max: 250000, rate: 0 },
     { min: 250000, max: 500000, rate: 0.05 },
     { min: 500000, max: 1000000, rate: 0.20 },
     { min: 1000000, max: Infinity, rate: 0.30 },
 ]);
-const FY2026_27_OLD_SLABS = defineSlabs([
+const FY2025_26_OLD_SENIOR_SLABS = defineSlabs([
+    { min: 0, max: 300000, rate: 0 },
+    { min: 300000, max: 500000, rate: 0.05 },
+    { min: 500000, max: 1000000, rate: 0.20 },
+    { min: 1000000, max: Infinity, rate: 0.30 },
+]);
+const FY2025_26_OLD_SUPER_SENIOR_SLABS = defineSlabs([
+    { min: 0, max: 500000, rate: 0 },
+    { min: 500000, max: 1000000, rate: 0.20 },
+    { min: 1000000, max: Infinity, rate: 0.30 },
+]);
+const FY2026_27_OLD_NON_SENIOR_SLABS = defineSlabs([
     { min: 0, max: 250000, rate: 0 },
     { min: 250000, max: 500000, rate: 0.05 },
+    { min: 500000, max: 1000000, rate: 0.20 },
+    { min: 1000000, max: Infinity, rate: 0.30 },
+]);
+const FY2026_27_OLD_SENIOR_SLABS = defineSlabs([
+    { min: 0, max: 300000, rate: 0 },
+    { min: 300000, max: 500000, rate: 0.05 },
+    { min: 500000, max: 1000000, rate: 0.20 },
+    { min: 1000000, max: Infinity, rate: 0.30 },
+]);
+const FY2026_27_OLD_SUPER_SENIOR_SLABS = defineSlabs([
+    { min: 0, max: 500000, rate: 0 },
     { min: 500000, max: 1000000, rate: 0.20 },
     { min: 1000000, max: Infinity, rate: 0.30 },
 ]);
@@ -49,13 +71,15 @@ const TAX_SOURCES = Object.freeze({
     'FY2025-26': Object.freeze([
         Object.freeze({
             authority: 'Government of India — Union Budget',
-            title: 'Finance Bill 2025 Memorandum',
+            title: 'Finance Bill 2025 Memorandum — AY 2026-27 tax changes',
             url: 'https://www.indiabudget.gov.in/budget2025-26/doc/memo.pdf',
+            role: 'TAX_POLICY',
         }),
         Object.freeze({
             authority: 'Income Tax Department',
-            title: 'AY 2025-26 individual tax guidance',
-            url: 'https://www.incometax.gov.in/iec/foportal/help/individual-business-profession',
+            title: 'AY 2026-27 individual and senior-citizen tax guidance',
+            url: 'https://www.incometax.gov.in/iec/foportal/help/individual/return-applicable-2',
+            role: 'TAX_POLICY',
         }),
     ]),
     'FY2026-27': Object.freeze([
@@ -63,21 +87,27 @@ const TAX_SOURCES = Object.freeze({
             authority: 'Government of India — Union Budget',
             title: 'Finance Bill 2026 Memorandum',
             url: 'https://www.indiabudget.gov.in/doc/memo.pdf',
+            role: 'TAX_POLICY',
         }),
         Object.freeze({
             authority: 'Income Tax Department',
             title: 'Individual return applicability and tax regime guidance',
             url: 'https://www.incometax.gov.in/iec/foportal/help/individual/return-applicable-1?fromCampaign=true',
+            role: 'TAX_POLICY',
         }),
     ]),
 });
 
 const TAX_POLICY_RULES = Object.freeze({
     'FY2025-26': Object.freeze({
-        newRegime87ALimit: 700000,
-        newRegime87ARebate: 25000,
+        newRegime87ALimit: 1200000,
+        newRegime87ARebate: 60000,
         oldRegime87ALimit: 500000,
         oldRegime87ARebate: 12500,
+        standardDeduction: Object.freeze({ salary: Object.freeze({ new: 75000, old: 50000 }), pension: Object.freeze({ new: 75000, old: 50000 }) }),
+        familyPensionDeductionLimit: Object.freeze({ new: 25000, old: 15000 }),
+        employerNpsLimitPct: Object.freeze({ government: 0.14, nonGovernmentOldRegime: 0.10, nonGovernmentNewRegime: 0.14 }),
+        oldRegimeBasicExemption: Object.freeze({ nonSenior: 250000, seniorCitizen: 300000, superSeniorCitizen: 500000 }),
         capitalGains112AExemption: 125000,
         capitalGains111ARate: 0.20,
         capitalGains112ARate: 0.125,
@@ -88,6 +118,10 @@ const TAX_POLICY_RULES = Object.freeze({
         newRegime87ARebate: 60000,
         oldRegime87ALimit: 500000,
         oldRegime87ARebate: 12500,
+        standardDeduction: Object.freeze({ salary: Object.freeze({ new: 75000, old: 50000 }), pension: Object.freeze({ new: 75000, old: 50000 }) }),
+        familyPensionDeductionLimit: Object.freeze({ new: 25000, old: 15000 }),
+        employerNpsLimitPct: Object.freeze({ government: 0.14, nonGovernmentOldRegime: 0.10, nonGovernmentNewRegime: 0.14 }),
+        oldRegimeBasicExemption: Object.freeze({ nonSenior: 250000, seniorCitizen: 300000, superSeniorCitizen: 500000 }),
         capitalGains112AExemption: 125000,
         capitalGains111ARate: 0.20,
         capitalGains112ARate: 0.125,
@@ -107,17 +141,27 @@ export const TAX_DEDUCTION_LIMITS = Object.freeze({
 export const TAX_SLABS_BY_FY = Object.freeze({
     'FY2025-26': Object.freeze({
         verified: true,
-        policyVersion: 'tax-policy-FY2025-26-v1',
+        policyVersion: 'tax-policy-FY2025-26-v2',
         sourceReferences: TAX_SOURCES['FY2025-26'],
         new: FY2025_26_NEW_SLABS,
-        old: FY2025_26_OLD_SLABS,
+        old: FY2025_26_OLD_NON_SENIOR_SLABS,
+        oldByAge: Object.freeze({
+            nonSenior: FY2025_26_OLD_NON_SENIOR_SLABS,
+            seniorCitizen: FY2025_26_OLD_SENIOR_SLABS,
+            superSeniorCitizen: FY2025_26_OLD_SUPER_SENIOR_SLABS,
+        }),
     }),
     'FY2026-27': Object.freeze({
         verified: true,
-        policyVersion: 'tax-policy-FY2026-27-v1',
+        policyVersion: 'tax-policy-FY2026-27-v2',
         sourceReferences: TAX_SOURCES['FY2026-27'],
         new: FY2026_27_NEW_SLABS,
-        old: FY2026_27_OLD_SLABS,
+        old: FY2026_27_OLD_NON_SENIOR_SLABS,
+        oldByAge: Object.freeze({
+            nonSenior: FY2026_27_OLD_NON_SENIOR_SLABS,
+            seniorCitizen: FY2026_27_OLD_SENIOR_SLABS,
+            superSeniorCitizen: FY2026_27_OLD_SUPER_SENIOR_SLABS,
+        }),
     }),
 });
 export const REGULATORY_RULE_VERSION = TAX_SLABS_BY_FY[CURRENT_FY]?.policyVersion ?? null;
@@ -164,9 +208,43 @@ export function isFYVerified(fiscalYear) {
     const entry = TAX_SLABS_BY_FY[fiscalYear];
     return entry ? entry.verified === true : false;
 }
-function getRegimeSlabs(regime, fiscalYear) {
+function getTaxPolicyRules(fiscalYear) {
+    getTaxSlabsForFY(fiscalYear);
+    const rules = TAX_POLICY_RULES[fiscalYear];
+    if (!rules) {
+        const error = new RangeError(`Verified tax policy rules are unavailable for ${fiscalYear}`);
+        error.code = 'FISCAL_YEAR_UNSUPPORTED';
+        throw error;
+    }
+    return rules;
+}
+
+function normalizeUserAge(deductions = {}, explicitUserAge) {
+    const candidate = explicitUserAge ?? deductions.userAge ?? deductions.age;
+    if (candidate === undefined || candidate === null || candidate === '') return null;
+    const numericAge = Number(candidate);
+    return Number.isInteger(numericAge) && numericAge >= 18 && numericAge <= 120 ? numericAge : null;
+}
+
+function requireUserAge(regime, deductions = {}, explicitUserAge) {
+    const userAge = normalizeUserAge(deductions, explicitUserAge);
+    if (regime === 'old' && userAge === null) {
+        throw new TypeError('USER_AGE_REQUIRED_FOR_OLD_REGIME');
+    }
+    return userAge;
+}
+
+function getOldRegimeAgeBand(userAge) {
+    if (userAge >= 80) return 'superSeniorCitizen';
+    if (userAge >= 60) return 'seniorCitizen';
+    return 'nonSenior';
+}
+
+function getRegimeSlabs(regime, fiscalYear, userAge) {
     const slabs = getTaxSlabsForFY(fiscalYear);
-    return regime === 'old' ? slabs.old : slabs.new;
+    if (regime !== 'old') return slabs.new;
+    const resolvedAge = requireUserAge('old', {}, userAge);
+    return slabs.oldByAge[getOldRegimeAgeBand(resolvedAge)];
 }
 /**
  * Calculate tax from slab structure.
@@ -212,7 +290,7 @@ function computeSurcharge(taxBeforeSurcharge, taxableIncome, regime) {
 /**
  * Compute surcharge WITH marginal relief.
  */
-function computeMarginalRelief(baseTax, surcharge, taxableIncome, regime, fiscalYear) {
+function computeMarginalRelief(baseTax, surcharge, taxableIncome, regime, fiscalYear, userAge) {
     if (taxableIncome <= 5000000)
         return 0;
     const SURCHARGE_THRESHOLDS = regime === 'new'
@@ -225,7 +303,7 @@ function computeMarginalRelief(baseTax, surcharge, taxableIncome, regime, fiscal
             threshold = t;
         }
     }
-    const slabs = getRegimeSlabs(regime, fiscalYear);
+    const slabs = getRegimeSlabs(regime, fiscalYear, userAge);
     const baseTaxAtThreshold = calculateFromSlabs(threshold, slabs);
     // Surcharge rate AT exactly the threshold limit
     let thresholdSurchargeRate = 0;
@@ -263,14 +341,16 @@ function validateTaxContext(annualIncome, regime, incomeSource) {
     }
 }
 
-export function calculateTaxableIncome(annualIncome, regime, deductions = {}, incomeSource) {
+export function calculateTaxableIncome(annualIncome, regime, deductions = {}, incomeSource, fiscalYear = CURRENT_FY, explicitUserAge) {
     validateTaxContext(annualIncome, regime, incomeSource);
+    const policyRules = getTaxPolicyRules(fiscalYear);
+    const userAge = requireUserAge(regime, deductions, explicitUserAge);
     let standardDeduction = 0;
     if (incomeSource === 'salary' || incomeSource === 'pension') {
-        standardDeduction = regime === 'new' ? 75000 : 50000;
+        standardDeduction = policyRules.standardDeduction[incomeSource][regime];
     }
     else if (incomeSource === 'family_pension') {
-        standardDeduction = Math.min(annualIncome / 3, 15000);
+        standardDeduction = Math.min(annualIncome / 3, policyRules.familyPensionDeductionLimit[regime]);
     }
     // Section 80CCD(2) - Employer NPS Contribution (available under both regimes)
     const requestedNps80CCD2 = Number(deductions.nps80CCD2 || 0);
@@ -280,7 +360,11 @@ export function calculateTaxableIncome(annualIncome, regime, deductions = {}, in
             || typeof deductions.isGovtEmployee !== 'boolean') {
             throw new TypeError('basicSalary and isGovtEmployee are required for an nps80CCD2 claim');
         }
-        const nps80CCD2LimitPercent = deductions.isGovtEmployee ? 0.14 : 0.10;
+        const nps80CCD2LimitPercent = deductions.isGovtEmployee
+            ? policyRules.employerNpsLimitPct.government
+            : (regime === 'new'
+                ? policyRules.employerNpsLimitPct.nonGovernmentNewRegime
+                : policyRules.employerNpsLimitPct.nonGovernmentOldRegime);
         nps80CCD2 = Math.min(requestedNps80CCD2, deductions.basicSalary * nps80CCD2LimitPercent);
     }
     const section80C = Math.min(deductions.section80C || 0, 150000);
@@ -292,10 +376,10 @@ export function calculateTaxableIncome(annualIncome, regime, deductions = {}, in
         || Number(deductions.savingsInterest || 0) > 0
         || Number(deductions.section80TTA || 0) > 0
         || Number(deductions.section80TTB || 0) > 0;
-    if (healthOrInterestFactsPresent && (!Number.isInteger(deductions.age) || deductions.age < 0)) {
+    if (healthOrInterestFactsPresent && userAge === null) {
         throw new TypeError('age is required for age-dependent deductions');
     }
-    const age = deductions.age ?? 0;
+    const age = userAge ?? 0;
     const selfSenior = age >= 60 || deductions.self_senior === true;
     const parentsSenior = deductions.parents_senior === true;
     const max80D_self = selfSenior ? 50000 : 25000;
@@ -330,20 +414,27 @@ export function calculateTaxableIncome(annualIncome, regime, deductions = {}, in
         ? (section80C + nps80CCD1B + allowed80D + hra + homeLoanInterest + section80EEA + allowed80TTA + allowed80TTB + otherDeductions)
         : 0;
     const taxableIncome = Math.max(0, annualIncome - standardDeduction - nps80CCD2 - oldRegimeDeductions);
-    return { standardDeduction, oldRegimeDeductions, taxableIncome, nps80CCD2, allowed80D };
+    return { standardDeduction, oldRegimeDeductions, taxableIncome, nps80CCD2, allowed80D, userAge };
 }
 /**
  * Compute full tax breakdown for a given annual income.
  */
-export function computeTax(annualIncome, regime, deductions = {}, incomeSource, fiscalYear) {
+export function computeTax(annualIncome, regime, deductions = {}, incomeSource, fiscalYear, explicitUserAge) {
     validateTaxContext(annualIncome, regime, incomeSource);
-    const slabs = getRegimeSlabs(regime, fiscalYear);
-    const { standardDeduction, oldRegimeDeductions, taxableIncome, nps80CCD2, allowed80D } = calculateTaxableIncome(annualIncome, regime, deductions, incomeSource);
+    const policyRules = getTaxPolicyRules(fiscalYear);
+    const { standardDeduction, oldRegimeDeductions, taxableIncome, nps80CCD2, allowed80D, userAge } = calculateTaxableIncome(
+        annualIncome,
+        regime,
+        deductions,
+        incomeSource,
+        fiscalYear,
+        explicitUserAge,
+    );
+    const slabs = getRegimeSlabs(regime, fiscalYear, userAge);
     let taxBeforeCess = calculateFromSlabs(taxableIncome, slabs);
     let rebateApplied = false;
     let marginalReliefApplied = false;
     let marginalReliefAmount87A = 0;
-    const policyRules = TAX_POLICY_RULES[fiscalYear];
     const rebateLimit = regime === 'new'
         ? policyRules.newRegime87ALimit
         : policyRules.oldRegime87ALimit;
@@ -366,7 +457,7 @@ export function computeTax(annualIncome, regime, deductions = {}, incomeSource, 
         }
     }
     const surcharge = computeSurcharge(taxBeforeCess, taxableIncome, regime);
-    const relief = computeMarginalRelief(taxBeforeCess, surcharge, taxableIncome, regime, fiscalYear);
+    const relief = computeMarginalRelief(taxBeforeCess, surcharge, taxableIncome, regime, fiscalYear, userAge);
     const taxAfterSurcharge = taxBeforeCess + surcharge - relief;
     // 4% Health & Education Cess (applied on tax + surcharge)
     const cess = taxAfterSurcharge * CESS_RATE;
@@ -392,6 +483,7 @@ export function computeTax(annualIncome, regime, deductions = {}, incomeSource, 
         oldRegimeDeductions,
         nps80CCD2,
         allowed80D,
+        userAge,
         fiscalYear,
         policyVersion: policy.policyVersion,
         sourceReferences: policy.sourceReferences,
@@ -399,6 +491,7 @@ export function computeTax(annualIncome, regime, deductions = {}, incomeSource, 
             annualIncome,
             regime,
             incomeSource,
+            userAge,
             fiscalYear,
             deductions: { ...deductions },
         },
@@ -407,6 +500,9 @@ export function computeTax(annualIncome, regime, deductions = {}, incomeSource, 
             rebateApplied ? 'SECTION_87A_REBATE' : null,
             (marginalReliefApplied || relief > 0) ? 'MARGINAL_RELIEF' : null,
             surcharge > 0 ? 'SURCHARGE' : null,
+            regime === 'old' ? `OLD_REGIME_${getOldRegimeAgeBand(userAge).toUpperCase()}_SLABS` : null,
+            incomeSource === 'family_pension' ? 'FAMILY_PENSION_VERSIONED_DEDUCTION' : null,
+            nps80CCD2 > 0 ? 'SECTION_80CCD_2_VERSIONED_LIMIT' : null,
             'HEALTH_AND_EDUCATION_CESS',
         ].filter(Boolean),
         assumptions: [],
@@ -439,6 +535,7 @@ export function computeEquityCapitalGainsTax({
     deductions = {},
     incomeSource,
     fiscalYear,
+    userAge,
     section112AExemptionUsed = 0,
 }) {
     if (!Number.isFinite(grossGain) || grossGain < 0) {
@@ -452,8 +549,8 @@ export function computeEquityCapitalGainsTax({
     }
     validateTaxContext(annualIncome, regime, incomeSource);
     const policy = getTaxPolicyMetadata(fiscalYear);
-    const policyRules = TAX_POLICY_RULES[fiscalYear];
-    const ordinary = calculateTaxableIncome(annualIncome, regime, deductions, incomeSource);
+    const policyRules = getTaxPolicyRules(fiscalYear);
+    const ordinary = calculateTaxableIncome(annualIncome, regime, deductions, incomeSource, fiscalYear, userAge);
     const combinedTaxableIncome = ordinary.taxableIncome + grossGain;
 
     if (combinedTaxableIncome > 5000000) {
@@ -469,6 +566,7 @@ export function computeEquityCapitalGainsTax({
             marginalRelief: null,
             policyVersion: policy.policyVersion,
             fiscalYear,
+            userAge: ordinary.userAge,
             sourceReferences: policy.sourceReferences,
             unavailableReasons: ['SPECIAL_RATE_HIGH_INCOME_REQUIRES_FULL_TAX_CONTEXT'],
         };
@@ -505,6 +603,7 @@ export function computeEquityCapitalGainsTax({
         holdingPeriodBasis: 'EXPLICIT_HOLDING_PERIOD_MONTHS',
         fiscalYear,
         policyVersion: policy.policyVersion,
+        userAge: ordinary.userAge,
         sourceReferences: policy.sourceReferences,
         rulesApplied: [
             isLongTerm ? 'SECTION_112A_LTCG_SPECIAL_RATE' : 'SECTION_111A_STCG_SPECIAL_RATE',
@@ -519,16 +618,23 @@ export function computeEquityCapitalGainsTax({
 /**
  * Compute tax with deductions (convenience wrapper/alias).
  */
-export function computeTaxWithDeductions(annualIncome, regime, deductions = {}, incomeSource, fiscalYear) {
-    return computeTax(annualIncome, regime, deductions, incomeSource, fiscalYear);
+export function computeTaxWithDeductions(annualIncome, regime, deductions = {}, incomeSource, fiscalYear, userAge) {
+    return computeTax(annualIncome, regime, deductions, incomeSource, fiscalYear, userAge);
 }
 /**
  * Get the marginal (highest applicable) tax slab percentage.
  */
-export function getTaxSlab(annualIncome, regime, deductions = {}, incomeSource, fiscalYear) {
+export function getTaxSlab(annualIncome, regime, deductions = {}, incomeSource, fiscalYear, userAge) {
     validateTaxContext(annualIncome, regime, incomeSource);
-    const { taxableIncome } = calculateTaxableIncome(annualIncome, regime, deductions, incomeSource);
-    const slabs = getRegimeSlabs(regime, fiscalYear);
+    const { taxableIncome, userAge: resolvedUserAge } = calculateTaxableIncome(
+        annualIncome,
+        regime,
+        deductions,
+        incomeSource,
+        fiscalYear,
+        userAge,
+    );
+    const slabs = getRegimeSlabs(regime, fiscalYear, resolvedUserAge);
     let marginalRate = 0;
     for (const slab of slabs) {
         if (taxableIncome > slab.min) {
@@ -540,15 +646,15 @@ export function getTaxSlab(annualIncome, regime, deductions = {}, incomeSource, 
 /**
  * Compare both regimes and return the better one.
  */
-export function compareTaxRegimes(annualIncome, deductions = {}, incomeSource, fiscalYear) {
+export function compareTaxRegimes(annualIncome, deductions = {}, incomeSource, fiscalYear, userAge) {
     if (!Number.isFinite(annualIncome) || annualIncome < 0) {
         throw new TypeError('annualIncome must be an explicit non-negative finite number');
     }
     if (!['salary', 'pension', 'family_pension', 'business', 'other'].includes(incomeSource)) {
         throw new TypeError('incomeSource must be explicitly provided');
     }
-    const newRegime = computeTax(annualIncome, 'new', deductions, incomeSource, fiscalYear);
-    const oldRegime = computeTax(annualIncome, 'old', deductions, incomeSource, fiscalYear);
+    const newRegime = computeTax(annualIncome, 'new', deductions, incomeSource, fiscalYear, userAge);
+    const oldRegime = computeTax(annualIncome, 'old', deductions, incomeSource, fiscalYear, userAge);
     const recommended = newRegime.taxAmount <= oldRegime.taxAmount ? 'new' : 'old';
     return { newRegime, oldRegime, recommended };
 }
@@ -571,7 +677,7 @@ export function buildTaxSlabBreakdown(computation, fiscalYear) {
     if (!computation || !Number.isFinite(computation.taxableIncome)) {
         throw new TypeError('A completed tax computation is required');
     }
-    const slabs = getRegimeSlabs(computation.regime, fiscalYear);
+    const slabs = getRegimeSlabs(computation.regime, fiscalYear, computation.userAge);
     const rows = [];
     let baseTax = 0;
 
@@ -613,7 +719,7 @@ export function buildTaxSlabBreakdown(computation, fiscalYear) {
  * Computes the old-regime outcome after filling only the remaining 80C and
  * 80CCD(1B) room. No product or suitability recommendation is made here.
  */
-export function analyzeTaxOptimization(annualIncome, deductions = {}, incomeSource, fiscalYear) {
+export function analyzeTaxOptimization(annualIncome, deductions = {}, incomeSource, fiscalYear, userAge) {
     validateTaxContext(annualIncome, 'old', incomeSource);
     const section80C = Math.min(Number(deductions.section80C) || 0, TAX_DEDUCTION_LIMITS.section80C);
     const nps80CCD1B = Math.min(Number(deductions.nps80CCD1B ?? deductions.section80CCD) || 0, TAX_DEDUCTION_LIMITS.section80CCD1B);
@@ -636,14 +742,14 @@ export function analyzeTaxOptimization(annualIncome, deductions = {}, incomeSour
         section80C: Math.max(0, deductionLimits.section80C - section80C),
         section80CCD1B: Math.max(0, deductionLimits.section80CCD1B - nps80CCD1B),
     };
-    const currentOld = computeTax(annualIncome, 'old', deductions, incomeSource, fiscalYear);
+    const currentOld = computeTax(annualIncome, 'old', deductions, incomeSource, fiscalYear, userAge);
     const optimizedDeductions = {
         ...deductions,
         section80C: deductionLimits.section80C,
         nps80CCD1B: deductionLimits.section80CCD1B,
     };
-    const optimizedOld = computeTax(annualIncome, 'old', optimizedDeductions, incomeSource, fiscalYear);
-    const newRegime = computeTax(annualIncome, 'new', deductions, incomeSource, fiscalYear);
+    const optimizedOld = computeTax(annualIncome, 'old', optimizedDeductions, incomeSource, fiscalYear, userAge);
+    const newRegime = computeTax(annualIncome, 'new', deductions, incomeSource, fiscalYear, userAge);
 
     let crossoverBreakpoint = null;
     const currentRelevantDeductions = section80C + nps80CCD1B;
@@ -661,7 +767,7 @@ export function analyzeTaxOptimization(annualIncome, deductions = {}, incomeSour
                 ...deductions,
                 section80C: section80C + add80C,
                 nps80CCD1B: nps80CCD1B + addNps,
-            }, incomeSource, fiscalYear);
+            }, incomeSource, fiscalYear, userAge);
             if (candidate.taxAmount <= newRegime.taxAmount) high = additional;
             else low = additional + 1;
         }
@@ -680,20 +786,20 @@ export function analyzeTaxOptimization(annualIncome, deductions = {}, incomeSour
  * Get the effective marginal tax rate (slab + surcharge + cess) for a given income level.
  * Useful for post-tax drag adjustments on future returns.
  */
-export function getEffectiveMarginalRate(annualIncome, regime, deductions = {}, incomeSource, fiscalYear) {
+export function getEffectiveMarginalRate(annualIncome, regime, deductions = {}, incomeSource, fiscalYear, userAge) {
     validateTaxContext(annualIncome, regime, incomeSource);
     // WG-040: If actual liability at this income is already ₹0 (inside a Section 87A
     // rebate zone), report 0 directly. A finite-difference window straddling the rebate
     // cliff otherwise produces a spurious, ceiling-clamped rate (up to 0.45) for someone
     // who owes no tax at all.
-    const actualTax = computeTax(annualIncome, regime, deductions, incomeSource, fiscalYear).taxAmount;
+    const actualTax = computeTax(annualIncome, regime, deductions, incomeSource, fiscalYear, userAge).taxAmount;
     if (actualTax === 0) return 0;
 
     const delta = 10000;
     const highIncome = annualIncome + delta;
     const lowIncome = Math.max(0, annualIncome - delta);
-    const highRes = computeTax(highIncome, regime, deductions, incomeSource, fiscalYear);
-    const lowRes = computeTax(lowIncome, regime, deductions, incomeSource, fiscalYear);
+    const highRes = computeTax(highIncome, regime, deductions, incomeSource, fiscalYear, userAge);
+    const lowRes = computeTax(lowIncome, regime, deductions, incomeSource, fiscalYear, userAge);
     const deltaIncome = highIncome - lowIncome;
     if (deltaIncome <= 0)
         return 0;

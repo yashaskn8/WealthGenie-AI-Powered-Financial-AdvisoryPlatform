@@ -15,20 +15,23 @@ import {
 } from '../services/taxEngine.js';
 
 const TEST_FISCAL_YEAR = 'FY2026-27';
+const withTaxAge = (regime, deductions = {}) => (
+  regime === 'old' && deductions.age === undefined ? { ...deductions, age: 35 } : deductions
+);
 const computeTax = (income, regime, deductions, incomeSource, fiscalYear = TEST_FISCAL_YEAR) =>
-  computeTaxForFiscalYear(income, regime, deductions, incomeSource, fiscalYear);
+  computeTaxForFiscalYear(income, regime, withTaxAge(regime, deductions), incomeSource, fiscalYear);
 const computeTaxWithDeductions = (income, regime, deductions, incomeSource, fiscalYear = TEST_FISCAL_YEAR) =>
-  computeTaxWithDeductionsForFiscalYear(income, regime, deductions, incomeSource, fiscalYear);
+  computeTaxWithDeductionsForFiscalYear(income, regime, withTaxAge(regime, deductions), incomeSource, fiscalYear);
 const getTaxSlab = (income, regime, deductions, incomeSource, fiscalYear = TEST_FISCAL_YEAR) =>
-  getTaxSlabForFiscalYear(income, regime, deductions, incomeSource, fiscalYear);
+  getTaxSlabForFiscalYear(income, regime, withTaxAge(regime, deductions), incomeSource, fiscalYear);
 const compareTaxRegimes = (income, deductions, incomeSource, fiscalYear = TEST_FISCAL_YEAR) =>
-  compareTaxRegimesForFiscalYear(income, deductions, incomeSource, fiscalYear);
+  compareTaxRegimesForFiscalYear(income, withTaxAge('old', deductions), incomeSource, fiscalYear);
 const getEffectiveMarginalRate = (income, regime, deductions, incomeSource, fiscalYear = TEST_FISCAL_YEAR) =>
-  getEffectiveMarginalRateForFiscalYear(income, regime, deductions, incomeSource, fiscalYear);
+  getEffectiveMarginalRateForFiscalYear(income, regime, withTaxAge(regime, deductions), incomeSource, fiscalYear);
 const buildTaxSlabBreakdown = (computation, fiscalYear = TEST_FISCAL_YEAR) =>
   buildTaxSlabBreakdownForFiscalYear(computation, fiscalYear);
 const analyzeTaxOptimization = (income, deductions, incomeSource, fiscalYear = TEST_FISCAL_YEAR) =>
-  analyzeTaxOptimizationForFiscalYear(income, deductions, incomeSource, fiscalYear);
+  analyzeTaxOptimizationForFiscalYear(income, withTaxAge('old', deductions), incomeSource, fiscalYear);
 
 test('new regime Section 87A rebate zeros tax at the FY2025-26 threshold', () => {
   const result = computeTax(1_275_000, 'new', {}, 'salary');
@@ -83,7 +86,7 @@ test('calculateTaxableIncome computes standard deduction based on income source'
   assert.equal(salNew.standardDeduction, 75_000);
   assert.equal(salNew.taxableIncome, 925_000);
 
-  const salOld = calculateTaxableIncome(1_000_000, 'old', {}, 'salary');
+  const salOld = calculateTaxableIncome(1_000_000, 'old', { age: 35 }, 'salary');
   assert.equal(salOld.standardDeduction, 50_000);
   assert.equal(salOld.taxableIncome, 950_000);
 
@@ -91,12 +94,12 @@ test('calculateTaxableIncome computes standard deduction based on income source'
   const penNew = calculateTaxableIncome(1_000_000, 'new', {}, 'pension');
   assert.equal(penNew.standardDeduction, 75_000);
 
-  // Family Pension (min(income / 3, 15000))
+  // Family Pension (min(income / 3, 25000) under the FY2025-26+ new regime)
   const famPenSmall = calculateTaxableIncome(30_000, 'new', {}, 'family_pension');
   assert.equal(famPenSmall.standardDeduction, 10_000);
 
   const famPenLarge = calculateTaxableIncome(300_000, 'new', {}, 'family_pension');
-  assert.equal(famPenLarge.standardDeduction, 15_000);
+  assert.equal(famPenLarge.standardDeduction, 25_000);
 
   // Business / Other
   const biz = calculateTaxableIncome(1_000_000, 'new', {}, 'business');
@@ -109,14 +112,14 @@ test('calculateTaxableIncome computes Section 80CCD(2) employer NPS contribution
   const pvtDefault = calculateTaxableIncome(1_000_000, 'new', {
     nps80CCD2: 60_000, basicSalary: 500_000, isGovtEmployee: false,
   }, 'salary');
-  assert.equal(pvtDefault.nps80CCD2, 50_000);
+  assert.equal(pvtDefault.nps80CCD2, 60_000);
 
   // Private employee explicit basic salary
   const pvtExplicit = calculateTaxableIncome(1_000_000, 'new', {
     basicSalary: 600_000, nps80CCD2: 70_000, isGovtEmployee: false,
   }, 'salary');
-  // maxLimit = 60,000 -> allowed = 60,000
-  assert.equal(pvtExplicit.nps80CCD2, 60_000);
+  // maxLimit = 84,000 -> allowed = 70,000 (requested contribution is lower)
+  assert.equal(pvtExplicit.nps80CCD2, 70_000);
 
   // Government employee (14% of basic salary)
   const govt = calculateTaxableIncome(1_000_000, 'new', {
@@ -184,6 +187,10 @@ test('computeTax rejects missing and invalid tax context and preserves its expli
   assert.throws(() => computeTax(-500_000, 'new', {}, 'salary'), /annualIncome/);
   assert.throws(() => computeTax(1_000_000, 'invalid-regime', {}, 'salary'), /regime/);
   assert.throws(() => computeTax(1_000_000, 'new'), /incomeSource/);
+  assert.throws(
+    () => computeTaxForFiscalYear(1_000_000, 'old', {}, 'salary', TEST_FISCAL_YEAR),
+    /USER_AGE_REQUIRED_FOR_OLD_REGIME/,
+  );
 
   // Alias wrapper computeTaxWithDeductions returns identical breakdown
   const aliasRes = computeTaxWithDeductions(1_000_000, 'new', {}, 'salary');

@@ -37,21 +37,25 @@ const PPF_SOURCE = Object.freeze({
   authority: 'India Post / Government of India',
   title: 'POSB CBS Manual — PPF tax treatment',
   url: 'https://www.indiapost.gov.in/VAS/DOP_PDFFiles/POSB_CBS_Manual_2021.pdf',
+  role: 'PRODUCT_RULE',
 });
 const SSY_SOURCE = Object.freeze({
   authority: 'India Post / Government of India',
   title: 'Small Savings Scheme tax treatment',
   url: 'https://www.indiapost.gov.in/VAS/DOP_PDFFiles/SB_Order_2021.pdf',
+  role: 'PRODUCT_RULE',
 });
 const FRSB_SOURCE = Object.freeze({
   authority: 'Reserve Bank of India',
   title: 'Floating Rate Savings Bonds 2020 (Taxable) guidelines',
   url: 'https://www.rbi.org.in/scripts/NotificationUser.aspx?Id=11924',
+  role: 'PRODUCT_RULE',
 });
 const FD_SOURCE = Object.freeze({
   authority: 'State Bank of India',
   title: 'Retail domestic term-deposit rate source',
   url: 'https://sbi.co.in/web/interest-rates/deposit-rates/retail-domestic-term-deposits',
+  role: 'PRODUCT_RULE',
 });
 
 const EXACT_PARENT_TAX_METADATA = Object.freeze({
@@ -152,14 +156,15 @@ export function getRequiredTaxInputs(taxClass) {
     PRODUCT_TAX_CLASSES.BANK_DEPOSIT_INTEREST,
     PRODUCT_TAX_CLASSES.RBI_FRSB_INTEREST,
   ].includes(taxClass)) {
-    return ['annualGrossIncome', 'incomeSource', 'regime', 'fiscalYear'];
+    return ['annualGrossIncome', 'incomeSource', 'regime', 'fiscalYear', 'userAge'];
   }
   if (taxClass === PRODUCT_TAX_CLASSES.DEBT_MF_50AA) {
-    return ['annualGrossIncome', 'incomeSource', 'regime', 'fiscalYear', 'holdingPeriodMonths'];
+    return ['annualGrossIncome', 'incomeSource', 'regime', 'fiscalYear', 'userAge', 'holdingPeriodMonths'];
   }
   if ([PRODUCT_TAX_CLASSES.EQUITY_MF_112A, PRODUCT_TAX_CLASSES.EQUITY_MF_ELSS].includes(taxClass)) {
     return [
       'annualGrossIncome', 'incomeSource', 'regime', 'fiscalYear',
+      'userAge',
       'holdingPeriodMonths', 'section112AExemptionUsed',
     ];
   }

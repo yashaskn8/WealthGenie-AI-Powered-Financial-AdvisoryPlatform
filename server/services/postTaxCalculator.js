@@ -345,7 +345,7 @@ export function calculatePostTaxReturn(
   if (!Number.isFinite(holdingYears) || holdingYears <= 0) throw new TypeError('holdingYears must be an explicit positive number');
   if (!['new', 'old'].includes(regime)) throw new TypeError('regime must be new or old');
   if (!Number.isFinite(monthlySIP) || monthlySIP < 0) throw new TypeError('monthlySIP must be an explicit non-negative number');
-  if (!Number.isInteger(userAge) || userAge < 0 || userAge > 120) throw new TypeError('userAge must be an integer from 0 to 120');
+  if (!Number.isInteger(userAge) || userAge < 18 || userAge > 120) throw new TypeError('userAge must be an integer from 18 to 120');
   if (!['salary', 'pension', 'family_pension', 'business', 'other'].includes(incomeSource)) {
     throw new TypeError('incomeSource must be explicitly provided');
   }
@@ -353,7 +353,14 @@ export function calculatePostTaxReturn(
     throw new TypeError('fiscalYear must be explicitly provided');
   }
 
-  const marginalRate = getEffectiveMarginalRate(annualIncome, regime, {}, incomeSource, fiscalYear);
+  const marginalRate = getEffectiveMarginalRate(
+    annualIncome,
+    regime,
+    { age: userAge },
+    incomeSource,
+    fiscalYear,
+    userAge,
+  );
 
   switch (instrumentType) {
     case 'SCSS':

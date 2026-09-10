@@ -28,6 +28,11 @@ export const taxDeductionFields = {
 export const taxDeductionSchema = Joi.object(taxDeductionFields).unknown(false);
 
 export function requireTaxDependencyFacts(value, helpers) {
+  // Regime comparison always computes the old regime, while a single new-regime
+  // request may omit age because the new slabs are age-neutral.
+  if (value.regime !== 'new' && !Number.isInteger(value.age)) {
+    return helpers.message({ custom: 'USER_AGE_REQUIRED_FOR_OLD_REGIME' });
+  }
   if (Number(value.nps80CCD2) > 0
       && (!Number.isFinite(value.basicSalary) || typeof value.isGovtEmployee !== 'boolean')) {
     return helpers.message({ custom: 'basicSalary and isGovtEmployee are required when nps80CCD2 is claimed' });
@@ -68,6 +73,9 @@ export const taxCalculationContextSchema = Joi.object({
     .filter(key => value[key] === undefined);
   if (missing.length > 0) {
     return helpers.message({ custom: `taxCalculationContext requires: ${missing.join(', ')}` });
+  }
+  if (value.regime === 'old' && !Number.isInteger(value.userAge)) {
+    return helpers.message({ custom: 'USER_AGE_REQUIRED_FOR_OLD_REGIME' });
   }
   return value;
 }).unknown(false);

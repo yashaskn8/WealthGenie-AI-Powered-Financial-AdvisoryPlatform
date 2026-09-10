@@ -75,7 +75,7 @@ router.get('/compute', validateQuery(taxComputeSchema), asyncHandler(async (req,
   }
 
   const deductions = _parseTaxDeductionsFromQuery(req.query);
-  const result = computeTax(income, regime, deductions, req.query.incomeSource, fiscalYear);
+  const result = computeTax(income, regime, deductions, req.query.incomeSource, fiscalYear, deductions.age);
   res.json({ ...result, fiscal_year: fiscalYear, ...getTaxPolicyMetadata(fiscalYear) });
 }));
 
@@ -96,8 +96,8 @@ router.get('/compare', validateQuery(taxCompareSchema), asyncHandler(async (req,
   }
 
   const deductions = _parseTaxDeductionsFromQuery(req.query);
-  const { newRegime, oldRegime, recommended } = compareTaxRegimes(income, deductions, req.query.incomeSource, fiscalYear);
-  const optimization = analyzeTaxOptimization(income, deductions, req.query.incomeSource, fiscalYear);
+  const { newRegime, oldRegime, recommended } = compareTaxRegimes(income, deductions, req.query.incomeSource, fiscalYear, deductions.age);
+  const optimization = analyzeTaxOptimization(income, deductions, req.query.incomeSource, fiscalYear, deductions.age);
   const saving = Math.abs(newRegime.taxAmount - oldRegime.taxAmount);
 
   const response = {

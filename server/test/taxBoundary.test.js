@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import { computeTax as computeTaxForFiscalYear } from '../services/taxEngine.js';
 
 const computeTax = (income, regime, deductions, incomeSource) =>
-  computeTaxForFiscalYear(income, regime, deductions, incomeSource, 'FY2026-27');
+  computeTaxForFiscalYear(
+    income,
+    regime,
+    regime === 'old' && deductions?.age === undefined ? { ...(deductions || {}), age: 35 } : deductions,
+    incomeSource,
+    'FY2026-27',
+  );
 
 test('PHASE 1.2 & 1.3 — Exact Boundary & Rounding Verification at Statutory Thresholds', async (t) => {
 

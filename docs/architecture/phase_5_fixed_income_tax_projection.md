@@ -41,13 +41,18 @@ The adapter uses only the revised official columns. It does not infer credit qua
 
 ## Tax policy
 
-- Supported policy versions: `tax-policy-FY2025-26-v1` and `tax-policy-FY2026-27-v1`.
+- Supported policy versions: `tax-policy-FY2025-26-v2` and `tax-policy-FY2026-27-v2`.
+- Fiscal-year semantics are explicit: FY2024-25 maps to AY2025-26, while FY2025-26 maps to AY2026-27. The FY2025-26 new-regime Section 87A policy is a ₹12,00,000 taxable-income limit with a maximum ₹60,000 rebate; it must not inherit the prior FY's ₹7,00,000/₹25,000 policy.
 - Each fiscal year owns a separate frozen policy entry and slab array even where rates happen to be equal.
+- Old-regime slabs are age-sensitive: non-senior (<60) basic exemption ₹2,50,000, senior citizen (60–79) ₹3,00,000, and super-senior (80+) ₹5,00,000. Old-regime calculations fail closed with `USER_AGE_REQUIRED_FOR_OLD_REGIME` when age is unavailable.
+- Family-pension deduction is the lower of one-third of family pension and the fiscal-year/regime policy cap: ₹15,000 old regime and ₹25,000 new regime for FY2025-26 and FY2026-27.
+- Section 80CCD(2) employer NPS limits are policy-owned: government employer 14%; non-government employer 10% old regime and 14% new regime for the supported fiscal years.
 - Official references are returned in the API response from the Government of India Union Budget material and Income Tax Department guidance.
 - Annual income, income source, and regime are mandatory separate tax inputs. The Financial Profile's monthly take-home, savings, lump sum, and portfolio value are never used to infer them.
 - Post-tax UI also requests an explicit fiscal year and inflation assumption.
 - For both supported fiscal years, bank-interest TDS applicability uses the Finance Act 2025 thresholds: ₹50,000 for non-senior depositors and ₹1,00,000 for senior citizens. TDS is withholding, not final tax liability.
 - Responses include `policyVersion`, `fiscalYear`, `inputsUsed`, `rulesApplied`, `sourceReferences`, `assumptions`, and `unavailableReasons`.
+- Product post-tax `sourceReferences` are deduplicated and role-aware: qualified product/rate evidence is marked `PRODUCT_RULE`, while the fiscal-year tax policy evidence is marked `TAX_POLICY`. Calculated outcomes include both.
 - The backend exposes `GET /api/tax/policies` with `currentFiscalYear`, `verifiedFiscalYears`, and policy metadata. WTI does not hardcode a prior fiscal year.
 - The current calendar date in production (September 2026) resolves to FY2026-27; future or unverified fiscal years return `FISCAL_YEAR_UNSUPPORTED`.
 - Product WTI outcomes use the explicit `postTaxAnalysis` DTO. The generic WTI `postTaxReturn` field remains `null` and is never overloaded with tax authority.

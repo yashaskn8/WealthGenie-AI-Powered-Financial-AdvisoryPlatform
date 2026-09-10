@@ -530,11 +530,19 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
     ...referenceMetadata(parent, whereToInvestCatalog[catalog.id]),
     providerCoverage: getWhereToInvestProviderCoverageMatrix().find(item => item.parentInstrumentId === catalog.id),
   };
+  const taxCalculationContext = options.taxCalculationContext
+    ? {
+      ...options.taxCalculationContext,
+      // The persisted Financial Profile is the server-owned age fact used for
+      // old-regime slab selection; do not trust a client override.
+      userAge: canonical.age,
+    }
+    : null;
   const formatOutput = (resultProducts, metadata) => {
     const enriched = enrichProductsWithPostTaxAndSuitability(resultProducts, {
       profile: canonical,
       parentCatalog: catalog,
-      taxCalculationContext: options.taxCalculationContext,
+      taxCalculationContext,
     });
     return attachWtiMetadata(enriched, metadata);
   };

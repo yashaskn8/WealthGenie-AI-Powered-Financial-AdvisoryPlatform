@@ -86,7 +86,7 @@ test('instruments route validates public query inputs', async () => {
 test('tax route computes and compares regimes without authentication', async () => {
   await withServer(buildApp(), async (baseUrl) => {
     const compute = await jsonFetch(`${baseUrl}/api/tax/compute?income=1200000&regime=new&incomeSource=salary&fiscalYear=FY2026-27`);
-    const compare = await jsonFetch(`${baseUrl}/api/tax/compare?income=1200000&incomeSource=salary&fiscalYear=FY2026-27`);
+    const compare = await jsonFetch(`${baseUrl}/api/tax/compare?income=1200000&incomeSource=salary&age=35&fiscalYear=FY2026-27`);
 
     assert.equal(compute.response.status, 200);
     assert.ok(Number.isFinite(compute.body.taxAmount));

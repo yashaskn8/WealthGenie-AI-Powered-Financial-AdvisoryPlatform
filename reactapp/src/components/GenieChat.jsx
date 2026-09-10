@@ -157,7 +157,13 @@ const GenieChat = ({ profile, onNavigate }) => {
     let cancelled = false;
     const timer = setTimeout(() => {
       setTaxComparisonError(null);
-      api.compareTax(taxGrossIncome, { section80C: tax80C, nps80CCD1B: taxNPS, incomeSource: taxIncomeSource, fiscalYear: taxFiscalYear })
+      api.compareTax(taxGrossIncome, {
+        section80C: tax80C,
+        nps80CCD1B: taxNPS,
+        age: profile?.age,
+        incomeSource: taxIncomeSource,
+        fiscalYear: taxFiscalYear,
+      })
         .then(result => {
           if (cancelled) return;
           setTaxComparison({
@@ -184,7 +190,7 @@ const GenieChat = ({ profile, onNavigate }) => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [activeWorkspace, taxFiscalYear, taxGrossIncome, taxIncomeSource, tax80C, taxNPS]);
+  }, [activeWorkspace, profile?.age, taxFiscalYear, taxGrossIncome, taxIncomeSource, tax80C, taxNPS]);
 
   const lastUserMessage = messages.filter(m => m.role === 'user').slice(-1)[0]?.content || '';
   const lastAssistantMsg = messages.filter(m => m.role === 'assistant').slice(-1)[0];

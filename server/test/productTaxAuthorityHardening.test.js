@@ -15,6 +15,7 @@ const taxContext = {
   incomeSource: 'salary',
   regime: 'new',
   fiscalYear: 'FY2026-27',
+  userAge: 35,
   holdingPeriodMonths: 12,
   section112AExemptionUsed: 125000,
   illustrativePrincipal: 1000000,
@@ -25,7 +26,8 @@ test('policy metadata exposes the current authority and future years fail closed
   assert.equal(catalog.currentFiscalYear, 'FY2026-27');
   assert.ok(catalog.verifiedFiscalYears.includes('FY2026-27'));
   assert.equal(getTaxPolicyMetadata('FY2026-27').rules.newRegime87ARebate, 60000);
-  assert.equal(getTaxPolicyMetadata('FY2025-26').rules.newRegime87ALimit, 700000);
+  assert.equal(getTaxPolicyMetadata('FY2025-26').rules.newRegime87ALimit, 1200000);
+  assert.equal(getTaxPolicyMetadata('FY2025-26').rules.newRegime87ARebate, 60000);
   assert.throws(() => getTaxPolicyMetadata('FY2027-28'), error => error.code === 'FISCAL_YEAR_UNSUPPORTED');
 });
 

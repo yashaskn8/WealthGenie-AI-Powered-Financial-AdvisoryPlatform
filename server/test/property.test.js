@@ -25,7 +25,14 @@ test('Property: taxable income is always bounded by annual income', () => {
         hra: fc.double({ min: 0, max: 500000, noNaN: true, noInfinity: true }),
       }),
       (annualIncome, regime, deductions) => {
-        const result = calculateTaxableIncome(annualIncome, regime, deductions, 'salary');
+        const result = calculateTaxableIncome(
+          annualIncome,
+          regime,
+          deductions,
+          'salary',
+          'FY2026-27',
+          regime === 'old' ? 35 : undefined,
+        );
         assert.ok(result.taxableIncome >= 0, 'Taxable income cannot be negative');
         assert.ok(result.taxableIncome <= annualIncome, 'Taxable income cannot exceed annual income');
       }
@@ -39,8 +46,8 @@ test('Property: tax engine recommended regime is always "new" when deductions ar
       fc.double({ min: 400000, max: 100000000, noNaN: true, noInfinity: true }), // Income above tax-free threshold
       (annualIncome) => {
         const deductions = {}; // No deductions
-        const resultNew = calculateTaxableIncome(annualIncome, 'new', deductions, 'salary');
-        const resultOld = calculateTaxableIncome(annualIncome, 'old', deductions, 'salary');
+        const resultNew = calculateTaxableIncome(annualIncome, 'new', deductions, 'salary', 'FY2026-27');
+        const resultOld = calculateTaxableIncome(annualIncome, 'old', deductions, 'salary', 'FY2026-27', 35);
         
         // Under no deductions, taxable income for new regime is strictly less than or equal to old regime
         // because new regime standard deduction is ₹75,000 while old regime is ₹50,000.

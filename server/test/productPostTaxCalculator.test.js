@@ -75,6 +75,7 @@ test('Taxable SBI FD calculates incremental tax using versioned taxEngine', () =
       regime: 'new',
       fiscalYear: 'FY2025-26',
       incomeSource: 'salary',
+      userAge: 35,
       illustrativePrincipal: 10000,
     },
   });
@@ -86,6 +87,14 @@ test('Taxable SBI FD calculates incremental tax using versioned taxEngine', () =
   assert.ok(outcome.netGain < 700);
   assert.ok(outcome.postTaxRatePct < 7.0);
   assert.ok(outcome.postTaxRatePct > 0);
+  assert.deepEqual(
+    [...new Set(outcome.sourceReferences.map(source => source.role))].sort(),
+    ['PRODUCT_RULE', 'TAX_POLICY'],
+  );
+  assert.equal(
+    outcome.sourceReferences.length,
+    new Set(outcome.sourceReferences.map(source => [source.authority, source.title, source.url, source.role].join('|'))).size,
+  );
   assert.equal(outcome.isHistoricalEstimate, false);
 });
 
@@ -104,6 +113,7 @@ test('RBI FRSB labels outcome as Current coupon after tax and disclaims 6-month 
       regime: 'new',
       fiscalYear: 'FY2025-26',
       incomeSource: 'salary',
+      userAge: 40,
       illustrativePrincipal: 10000,
     },
   });
@@ -137,6 +147,7 @@ test('Mutual fund returns are labelled HISTORICAL and NOT A FORECAST', () => {
       regime: 'new',
       fiscalYear: 'FY2025-26',
       incomeSource: 'salary',
+      userAge: 30,
       holdingPeriodMonths: 12,
       section112AExemptionUsed: 0,
       illustrativePrincipal: 10000,
@@ -148,6 +159,8 @@ test('Mutual fund returns are labelled HISTORICAL and NOT A FORECAST', () => {
   assert.ok(outcome.disclosure.includes('HISTORICAL — NOT A FORECAST'));
   assert.equal(outcome.isHistoricalEstimate, true);
   assert.ok(outcome.postTaxRatePct <= 15.0);
+  assert.ok(outcome.sourceReferences.some(source => source.role === 'TAX_POLICY'));
+  assert.ok(outcome.sourceReferences.some(source => source.authority === 'AMFI' && source.role === 'PRODUCT_RULE'));
 });
 
 test('generateBeginnerSuitability produces deterministic plain-English reasons, risk tiers, and liquidity copy', () => {
@@ -198,6 +211,7 @@ test('enrichProductsWithPostTaxAndSuitability enriches product array without mut
       regime: 'new',
       fiscalYear: 'FY2025-26',
       incomeSource: 'salary',
+      userAge: 30,
       holdingPeriodMonths: 12,
       section112AExemptionUsed: 0,
     },

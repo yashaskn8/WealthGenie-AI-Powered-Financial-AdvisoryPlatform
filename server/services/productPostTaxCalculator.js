@@ -49,6 +49,7 @@ export function classifyProductTaxType(product, parentInstrumentId) {
 function createAnalysis({
   status,
   taxMetadata,
+  policy = null,
   fiscalYear = null,
   policyVersion = null,
   principal,
@@ -73,6 +74,25 @@ function createAnalysis({
   isHistoricalEstimate = false,
   rulesApplied = [],
 }) {
+  const sourceReferences = [];
+  const seenReferences = new Set();
+  const addReferences = (references, fallbackRole) => {
+    for (const source of Array.isArray(references) ? references : []) {
+      if (!source || typeof source !== 'object') continue;
+      const normalized = {
+        ...source,
+        role: source.role || fallbackRole,
+      };
+      const key = [normalized.authority, normalized.title, normalized.url, normalized.role]
+        .map(value => String(value ?? '')).join('|');
+      if (seenReferences.has(key)) continue;
+      seenReferences.add(key);
+      sourceReferences.push(normalized);
+    }
+  };
+  addReferences(taxMetadata?.sourceReferences, 'PRODUCT_RULE');
+  addReferences(policy?.sourceReferences, 'TAX_POLICY');
+
   return {
     status,
     calculationClass,
@@ -95,9 +115,7 @@ function createAnalysis({
     dataClass,
     assumptions,
     unavailableReasons,
-    sourceReferences: [
-      ...(taxMetadata?.sourceReferences || []),
-    ],
+    sourceReferences,
     rulesApplied: [
       ...(taxMetadata?.rulesApplied || []),
       ...rulesApplied,
@@ -130,6 +148,7 @@ function missingRequiredTaxInputs(taxCalculationContext, requiredTaxInputs) {
   const context = taxCalculationContext || {};
   return requiredTaxInputs.filter(key => {
     if (key === 'annualGrossIncome') return !Number.isFinite(Number(context.annualGrossIncome));
+    if (key === 'userAge') return !Number.isInteger(Number(context.userAge)) || Number(context.userAge) < 18 || Number(context.userAge) > 120;
     if (key === 'holdingPeriodMonths') return !Number.isFinite(Number(context.holdingPeriodMonths));
     if (key === 'section112AExemptionUsed') return !Number.isFinite(Number(context.section112AExemptionUsed));
     return context[key] === undefined || context[key] === null || context[key] === '';
@@ -137,12 +156,16 @@ function missingRequiredTaxInputs(taxCalculationContext, requiredTaxInputs) {
 }
 
 function taxContextValues(taxCalculationContext) {
+  const userAge = Number(taxCalculationContext?.userAge);
+  const deductions = { ...(taxCalculationContext?.deductions || {}) };
+  if (Number.isInteger(userAge) && userAge >= 18 && userAge <= 120) deductions.age = userAge;
   return {
     annualIncome: Number(taxCalculationContext?.annualGrossIncome),
     regime: taxCalculationContext?.regime,
     fiscalYear: taxCalculationContext?.fiscalYear,
     incomeSource: taxCalculationContext?.incomeSource,
-    deductions: taxCalculationContext?.deductions || {},
+    userAge: Number.isInteger(userAge) ? userAge : null,
+    deductions,
   };
 }
 
@@ -195,6 +218,7 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
       return createAnalysis({
         status: PRODUCT_TAX_STATUSES.PRODUCT_FACTS_UNAVAILABLE,
         taxMetadata,
+        policy,
         fiscalYear,
         policyVersion: policy.policyVersion,
         principal,
@@ -209,6 +233,7 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
     return createAnalysis({
       status: PRODUCT_TAX_STATUSES.CALCULATED,
       taxMetadata,
+      policy,
       fiscalYear,
       policyVersion: policy.policyVersion,
       principal,
@@ -232,6 +257,7 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
     return createAnalysis({
       status: PRODUCT_TAX_STATUSES.REQUIRES_TAX_INPUTS,
       taxMetadata,
+      policy,
       fiscalYear: taxCalculationContext?.fiscalYear || null,
       principal,
       requiredTaxInputs: missingInputs,
@@ -246,12 +272,13 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
     });
   }
 
-  const { annualIncome, regime, incomeSource, deductions } = taxContextValues(taxCalculationContext);
+  const { annualIncome, regime, incomeSource, userAge, deductions } = taxContextValues(taxCalculationContext);
   if ([PRODUCT_TAX_CLASSES.BANK_DEPOSIT_INTEREST, PRODUCT_TAX_CLASSES.RBI_FRSB_INTEREST].includes(taxType)) {
     if (!Number.isFinite(annualRate) || annualRate <= 0) {
       return createAnalysis({
         status: PRODUCT_TAX_STATUSES.PRODUCT_FACTS_UNAVAILABLE,
         taxMetadata,
+        policy,
         fiscalYear,
         policyVersion: policy.policyVersion,
         principal,
@@ -265,13 +292,14 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
       });
     }
     const grossGain = Math.round(principal * (annualRate / 100));
-    const baseline = computeTax(annualIncome, regime, deductions, incomeSource, fiscalYear);
-    const withGain = computeTax(annualIncome + grossGain, regime, deductions, incomeSource, fiscalYear);
+    const baseline = computeTax(annualIncome, regime, deductions, incomeSource, fiscalYear, userAge);
+    const withGain = computeTax(annualIncome + grossGain, regime, deductions, incomeSource, fiscalYear, userAge);
     const incrementalTax = Math.max(0, withGain.taxAmount - baseline.taxAmount);
     const netGain = grossGain - incrementalTax;
     return createAnalysis({
       status: PRODUCT_TAX_STATUSES.CALCULATED,
       taxMetadata,
+      policy,
       fiscalYear,
       policyVersion: policy.policyVersion,
       principal,
@@ -299,6 +327,7 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
     return createAnalysis({
       status: PRODUCT_TAX_STATUSES.PRODUCT_FACTS_UNAVAILABLE,
       taxMetadata,
+      policy,
       fiscalYear,
       policyVersion: policy.policyVersion,
       principal,
@@ -314,13 +343,14 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
   const holdingPeriodMonths = Number(taxCalculationContext.holdingPeriodMonths);
 
   if (taxType === PRODUCT_TAX_CLASSES.DEBT_MF_50AA) {
-    const baseline = computeTax(annualIncome, regime, deductions, incomeSource, fiscalYear);
-    const withGain = computeTax(annualIncome + grossGain, regime, deductions, incomeSource, fiscalYear);
+    const baseline = computeTax(annualIncome, regime, deductions, incomeSource, fiscalYear, userAge);
+    const withGain = computeTax(annualIncome + grossGain, regime, deductions, incomeSource, fiscalYear, userAge);
     const incrementalTax = Math.max(0, withGain.taxAmount - baseline.taxAmount);
     const netGain = grossGain - incrementalTax;
     return createAnalysis({
       status: PRODUCT_TAX_STATUSES.CALCULATED,
       taxMetadata,
+      policy,
       fiscalYear,
       policyVersion: policy.policyVersion,
       principal,
@@ -347,6 +377,7 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
     return createAnalysis({
       status: PRODUCT_TAX_STATUSES.TAX_CLASSIFICATION_UNAVAILABLE,
       taxMetadata,
+      policy,
       fiscalYear,
       policyVersion: policy.policyVersion,
       principal,
@@ -366,12 +397,14 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
     deductions,
     incomeSource,
     fiscalYear,
+    userAge,
     section112AExemptionUsed: Number(taxCalculationContext.section112AExemptionUsed),
   });
   if (capitalGains.status !== 'CALCULATED') {
     return createAnalysis({
       status: PRODUCT_TAX_STATUSES.UNAVAILABLE,
       taxMetadata,
+      policy,
       fiscalYear,
       policyVersion: policy.policyVersion,
       principal,
@@ -390,6 +423,7 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
   return createAnalysis({
     status: PRODUCT_TAX_STATUSES.CALCULATED,
     taxMetadata,
+    policy,
     fiscalYear,
     policyVersion: policy.policyVersion,
     principal,

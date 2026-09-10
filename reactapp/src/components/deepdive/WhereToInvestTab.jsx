@@ -193,6 +193,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const [taxIncomeSource, setTaxIncomeSource] = useState('');
   const [taxRegime, setTaxRegime] = useState('');
   const [taxFiscalYear, setTaxFiscalYear] = useState('');
+  const [taxUserAge, setTaxUserAge] = useState(userProfile?.age ?? '');
   const [holdingPeriodMonths, setHoldingPeriodMonths] = useState('');
   const [section112AExemptionUsed, setSection112AExemptionUsed] = useState('');
   const [taxPolicyMetadata, setTaxPolicyMetadata] = useState(null);
@@ -220,6 +221,12 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
     setContextPreview(null);
     setContextPreviewError(null);
   }, [parentInstrumentId]);
+
+  useEffect(() => {
+    if (userProfile?.age !== undefined && userProfile?.age !== null) {
+      setTaxUserAge(userProfile.age);
+    }
+  }, [userProfile?.age]);
 
   const currentMarketSnapshot = marketContext?.marketSnapshot || null;
   const currentSnapshotFingerprint = marketSnapshotFingerprint(currentMarketSnapshot);
@@ -327,12 +334,15 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const handleApplyTaxInputs = (e) => {
     e.preventDefault();
     const incomeNum = Number(taxAnnualIncome);
-    if (!Number.isFinite(incomeNum) || incomeNum < 0 || !taxIncomeSource || !taxRegime || !taxFiscalYear) return;
+    const ageNum = Number(taxUserAge);
+    if (!Number.isFinite(incomeNum) || incomeNum < 0 || !Number.isInteger(ageNum) || ageNum < 18 || ageNum > 120
+      || !taxIncomeSource || !taxRegime || !taxFiscalYear) return;
     const nextContext = {
       annualGrossIncome: incomeNum,
       regime: taxRegime,
       fiscalYear: taxFiscalYear,
       incomeSource: taxIncomeSource,
+      userAge: ageNum,
       illustrativePrincipal,
     };
     if (holdingPeriodMonths !== '') nextContext.holdingPeriodMonths = Number(holdingPeriodMonths);
@@ -764,6 +774,23 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
               ))}
             </select>
           </div>}
+
+          {requiredTaxInputs.includes('userAge') && (
+            <div className="wti-tax-input-group">
+              <label htmlFor="wti-user-age">Your age</label>
+              <input
+                id="wti-user-age"
+                type="number"
+                min="18"
+                max="120"
+                step="1"
+                className="wti-tax-input"
+                value={taxUserAge}
+                onChange={(e) => setTaxUserAge(e.target.value)}
+                required
+              />
+            </div>
+          )}
 
           {requiredTaxInputs.includes('holdingPeriodMonths') && (
             <div className="wti-tax-input-group">

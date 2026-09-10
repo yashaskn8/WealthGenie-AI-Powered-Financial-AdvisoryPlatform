@@ -56,7 +56,7 @@ const postTaxInstrumentSchema = Joi.object({
 export const postTaxReturnSchema = postTaxInstrumentSchema.keys({
   annualIncome: Joi.number().min(0).max(1000000000).required(),
   regime: Joi.string().valid('new', 'old').required(),
-  userAge: Joi.number().integer().min(0).max(120).required(),
+  userAge: Joi.number().integer().min(18).max(120).required(),
   incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').required(),
   fiscalYear: Joi.string().pattern(FISCAL_YEAR_PATTERN).required(),
 });
@@ -65,7 +65,7 @@ export const postTaxReturnBatchSchema = Joi.object({
   instruments: Joi.array().items(postTaxInstrumentSchema).min(1).max(50).required(),
   annualIncome: Joi.number().min(0).max(1000000000).required(),
   regime: Joi.string().valid('new', 'old').required(),
-  userAge: Joi.number().integer().min(0).max(120).required(),
+  userAge: Joi.number().integer().min(18).max(120).required(),
   incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').required(),
   inflationRate: Joi.number().min(0).max(1).required(),
   fiscalYear: Joi.string().pattern(FISCAL_YEAR_PATTERN).required(),

@@ -28,8 +28,8 @@ import { assessSuitabilityRisk } from '../services/riskProfiler.js';
 test('tax policies are independently versioned by fiscal year with official references', () => {
   const fy2025 = getTaxPolicyMetadata('FY2025-26');
   const fy2026 = getTaxPolicyMetadata('FY2026-27');
-  assert.equal(fy2025.policyVersion, 'tax-policy-FY2025-26-v1');
-  assert.equal(fy2026.policyVersion, 'tax-policy-FY2026-27-v1');
+  assert.equal(fy2025.policyVersion, 'tax-policy-FY2025-26-v2');
+  assert.equal(fy2026.policyVersion, 'tax-policy-FY2026-27-v2');
   assert.notStrictEqual(getTaxSlabsForFY('FY2025-26').new, getTaxSlabsForFY('FY2026-27').new);
   assert.ok(fy2025.sourceReferences.some(source => source.url.startsWith('https://www.indiabudget.gov.in/')));
   assert.ok(fy2026.sourceReferences.some(source => source.url.includes('incometax.gov.in')));
@@ -42,7 +42,7 @@ test('tax engine requires explicit income, regime and income source and exposes 
   assert.throws(() => computeTax(1_000_000, 'new', {}, undefined, 'FY2026-27'), /incomeSource/);
   assert.throws(() => computeTax(1_000_000, 'new', {}, 'salary'), /unavailable/);
   const result = computeTax(1_000_000, 'new', {}, 'salary', 'FY2026-27');
-  assert.equal(result.policyVersion, 'tax-policy-FY2026-27-v1');
+  assert.equal(result.policyVersion, 'tax-policy-FY2026-27-v2');
   assert.equal(result.inputsUsed.annualIncome, 1_000_000);
   assert.equal(result.inputsUsed.incomeSource, 'salary');
   assert.equal(result.assumptions.length, 0);
@@ -91,6 +91,18 @@ test('supported fiscal years use Finance Act 2025 bank-interest TDS thresholds',
   assert.equal(generalAbove.tdsApplicable, true);
   assert.equal(seniorBelow.tdsApplicable, false);
   assert.equal(seniorAbove.tdsApplicable, true);
+});
+
+test('TDS is withholding metadata and does not create a second final-tax charge', () => {
+  const nominalRate = 0.06;
+  const result = calculatePostTaxReturn(
+    'FD', nominalRate, 2_000_000, 1, 'new', 100_000, 35, 'salary', true, 'FY2026-27',
+  );
+
+  assert.equal(result.tdsApplicable, true);
+  assert.equal(result.tdsRate, 0.10);
+  assert.equal(result.postTaxReturn, Number((nominalRate * (1 - result.taxRate)).toFixed(4)));
+  assert.match(result.notes, /not an extra tax/);
 });
 
 test('projection parameters are immutable model assumptions and never provider forecasts', async () => {
