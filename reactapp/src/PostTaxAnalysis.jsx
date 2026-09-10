@@ -1,9 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } from 'recharts';
 import { motion, AnimatePresence } from 'framer-motion';
 import { AlertCircle, TrendingUp, TrendingDown, ShieldCheck, Layers, Award, ChevronDown, Zap, ArrowRight, Sparkles, Target } from 'lucide-react';
 import { formatINR } from './utils/recommendationPresentation';
-import { computePostTaxReturnBatch } from './services/api';
+import * as api from './services/api';
 import './PostTaxAnalysis.css';
 
 const PostTaxAnalysis = ({ profile, recommendations }) => {
@@ -14,8 +14,27 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
   const [fiscalYear, setFiscalYear] = useState('');
   const [inflationRate, setInflationRate] = useState('');
   const [backendPostTaxData, setBackendPostTaxData] = useState(null);
+  const [taxPolicyMetadata, setTaxPolicyMetadata] = useState(null);
+  const [taxPolicyError, setTaxPolicyError] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (typeof api.getTaxPolicyMetadata !== 'function') return undefined;
+    let cancelled = false;
+    api.getTaxPolicyMetadata()
+      .then(metadata => {
+        if (cancelled) return;
+        setTaxPolicyMetadata(metadata);
+        if (metadata?.currentFiscalYearVerified && metadata.currentFiscalYear) {
+          setFiscalYear(current => current || metadata.currentFiscalYear);
+        }
+      })
+      .catch(requestError => {
+        if (!cancelled) setTaxPolicyError(requestError?.message || 'Verified tax policy metadata is unavailable.');
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   const calculate = async event => {
     event.preventDefault();
@@ -26,7 +45,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
     const horizon = Number(profile?.investment_horizon_years);
     const age = Number(profile?.age);
     if (!Number.isFinite(annualIncome) || annualIncome < 0 || !incomeSource || !regime || !fiscalYear) {
-      setError('Enter gross annual taxable income, income source, tax regime, and fiscal year explicitly.');
+      setError('Enter gross annual income before allowed deductions, income source, tax regime, and fiscal year explicitly.');
       return;
     }
     if (!Number.isFinite(explicitInflationRate) || inflationRate === '' || explicitInflationRate < 0 || explicitInflationRate > 100) {
@@ -50,7 +69,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
     }
     try {
       setLoading(true);
-      const data = await computePostTaxReturnBatch(
+      const data = await api.computePostTaxReturnBatch(
         instruments,
         annualIncome,
         regime,
@@ -195,9 +214,9 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
         }}
       >
         <label style={{ display: 'grid', gap: 7, color: '#cbd5e1', fontSize: '0.8rem', fontWeight: 700 }}>
-          Gross annual taxable income (₹)
+          Gross annual income before allowed deductions (₹)
           <input
-            aria-label="Gross annual taxable income"
+            aria-label="Gross annual income before allowed deductions"
             type="number"
             min="0"
             value={grossAnnualIncome}
@@ -229,8 +248,9 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
           Fiscal year
           <select aria-label="Fiscal year" value={fiscalYear} onChange={event => setFiscalYear(event.target.value)} className="tax-input">
             <option value="">Choose explicitly</option>
-            <option value="FY2026-27">FY2026-27</option>
-            <option value="FY2025-26">FY2025-26</option>
+            {(taxPolicyMetadata?.verifiedFiscalYears || []).map(year => (
+              <option key={year} value={year}>{year}</option>
+            ))}
           </select>
         </label>
         <label style={{ display: 'grid', gap: 7, color: '#cbd5e1', fontSize: '0.8rem', fontWeight: 700 }}>
@@ -251,8 +271,9 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
           {loading ? 'Calculating…' : 'Calculate explicit tax what-if'}
         </button>
         <small style={{ gridColumn: '1 / -1', color: '#64748b', lineHeight: 1.5 }}>
-          SEPARATE_TAX_WHAT_IF: these inputs are not stored in or inferred from your Financial Profile and do not alter suitability.
-        </small>
+           MODELLED_POST_TAX_PROJECTION: this investor what-if uses the supplied nominal rates and does not estimate an actual transaction tax or alter suitability.
+         </small>
+         {taxPolicyError && <small role="alert" style={{ gridColumn: '1 / -1', color: '#fbbf24' }}>{taxPolicyError}</small>}
         {backendPostTaxData?.policyVersion && (
           <small style={{ gridColumn: '1 / -1', color: '#94a3b8', lineHeight: 1.5 }}>
             Estimated under {backendPostTaxData.fiscalYear} policy ({backendPostTaxData.policyVersion}) using only the supplied tax inputs.

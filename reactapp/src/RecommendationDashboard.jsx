@@ -1869,7 +1869,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                     background: 'rgba(129, 140, 248, 0.12)', border: '1px solid rgba(129, 140, 248, 0.3)',
                     padding: '5px 12px', borderRadius: 20
                   }}>
-                    FY2025-26 TAX CODE
+                    VERIFIED TAX POLICY
                   </span>
                 </div>
               </div>
@@ -1955,7 +1955,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <Shield size={14} color="#38bdf8" />
-                  <span>SEBI Regulatory Framework & IT Act FY2025-26 Compliant</span>
+                  <span>SEBI Regulatory Framework & verified tax-policy compliant</span>
                 </div>
                 <div>
                   Deterministic 5-Stage Verification • 100% Citation Grounding

@@ -48,7 +48,14 @@ The adapter uses only the revised official columns. It does not infer credit qua
 - Post-tax UI also requests an explicit fiscal year and inflation assumption.
 - For both supported fiscal years, bank-interest TDS applicability uses the Finance Act 2025 thresholds: ₹50,000 for non-senior depositors and ₹1,00,000 for senior citizens. TDS is withholding, not final tax liability.
 - Responses include `policyVersion`, `fiscalYear`, `inputsUsed`, `rulesApplied`, `sourceReferences`, `assumptions`, and `unavailableReasons`.
-- Unsupported instrument tax classifications fail closed. Mutual-fund tax treatment is never inferred from an AMFI scheme name.
+- The backend exposes `GET /api/tax/policies` with `currentFiscalYear`, `verifiedFiscalYears`, and policy metadata. WTI does not hardcode a prior fiscal year.
+- The current calendar date in production (September 2026) resolves to FY2026-27; future or unverified fiscal years return `FISCAL_YEAR_UNSUPPORTED`.
+- Product WTI outcomes use the explicit `postTaxAnalysis` DTO. The generic WTI `postTaxReturn` field remains `null` and is never overloaded with tax authority.
+- Product statuses include `CALCULATED`, `REQUIRES_TAX_INPUTS`, `TAX_CLASSIFICATION_UNAVAILABLE`, `FISCAL_YEAR_UNSUPPORTED`, `PRODUCT_FACTS_UNAVAILABLE`, and `UNAVAILABLE`.
+- Source-qualified current-rate illustrations, historical-return illustrations, modelled investor what-ifs, and transaction estimates are separate calculation classes. WTI does not claim full-tenure IRR without verified cash-flow facts.
+- The current qualified product matrix activates PPF EEE, Sukanya EEE, SBI deposit interest, and RBI FRSB interest. SCSS/NSC/KVP/POMIS/Post Office term products and AMFI mutual funds remain unavailable until a qualified adapter supplies their tax metadata.
+- Mutual-fund tax treatment is never inferred from an AMFI scheme name or category. Equity special-rate calculations require explicit holding period and taxpayer-level Section 112A exemption usage; a product comparison cannot consume the exemption independently for every product.
+- The portfolio what-if endpoint remains a separate `MODELLED_POST_TAX_PROJECTION` path. It uses caller-supplied nominal return assumptions and is not an actual transaction tax estimate.
 
 This is an educational MVP estimate, not a complete return-filing or capital-gains-lot engine. Users must verify product tax classification and personal circumstances with a qualified tax professional.
 

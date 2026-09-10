@@ -12,6 +12,7 @@ import {
   computeTax,
   compareTaxRegimes,
   isFYVerified,
+  getTaxPolicyCatalog,
   getTaxPolicyMetadata,
   buildTaxSlabBreakdown,
   analyzeTaxOptimization,
@@ -20,6 +21,15 @@ import { CESS_RATE } from '../services/instrumentConstants.js';
 import { calculatePostTaxReturnSafe, calculatePostTaxProjection } from '../services/postTaxCalculator.js';
 
 const router = Router();
+
+/**
+ * GET /api/tax/policies
+ * The browser consumes this metadata instead of carrying a fiscal-year list
+ * or current-year assumption of its own.
+ */
+router.get('/policies', asyncHandler(async (req, res) => {
+  res.json(getTaxPolicyCatalog());
+}));
 
 function _parseTaxDeductionsFromQuery(query) {
   return {
@@ -183,6 +193,8 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
   res.json({
     ...result,
     calculation_classification: 'SEPARATE_TAX_WHAT_IF',
+    calculationClass: 'MODELLED_POST_TAX_PROJECTION',
+    dataClass: 'MODEL_ASSUMPTION',
     what_if_principal: whatIfPrincipal,
     what_if_nominal_gain: nominalGain,
     what_if_estimated_tax: Math.max(0, nominalGain - netGain),
@@ -193,7 +205,10 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
       nominalRate,
     },
     rulesApplied: [result.taxType],
-    assumptions: ['NOMINAL_RATE_IS_CALLER_SUPPLIED; ITS EVIDENCE CLASS MUST BE ESTABLISHED BY THE CALLER'],
+    assumptions: [
+      'NOMINAL_RATE_IS_CALLER_SUPPLIED; ITS EVIDENCE CLASS MUST BE ESTABLISHED BY THE CALLER',
+      'THIS_IS_A_MODELLED_INVESTOR_WHAT_IF_NOT_AN_ACTUAL_TRANSACTION_TAX_ESTIMATE',
+    ],
     unavailableReasons: [],
   });
 }));
@@ -226,6 +241,8 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
     return {
       instrumentType: inv.instrumentType,
       ...taxResult,
+      calculationClass: 'MODELLED_POST_TAX_PROJECTION',
+      dataClass: 'MODEL_ASSUMPTION',
       ...calculatePostTaxProjection(taxResult, inv, inflationRate),
     };
   });
@@ -275,6 +292,8 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
       fiscalYear,
       deductions: 0,
       contributionGrowthRate: 0,
+      calculationClass: 'MODELLED_POST_TAX_PROJECTION',
+      dataClass: 'MODEL_ASSUMPTION',
     },
     inputsUsed: {
       annualIncome, incomeSource, regime, userAge, inflationRate, fiscalYear,

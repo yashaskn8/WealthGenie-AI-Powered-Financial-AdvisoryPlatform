@@ -5,7 +5,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import PostTaxAnalysis from '../PostTaxAnalysis';
 import * as apiModule from '../services/api';
 
-vi.mock('../services/api', () => ({ computePostTaxReturnBatch: vi.fn() }));
+vi.mock('../services/api', () => ({
+  computePostTaxReturnBatch: vi.fn(),
+  getTaxPolicyMetadata: vi.fn(async () => ({
+    currentFiscalYear: 'FY2026-27',
+    currentFiscalYearVerified: true,
+    verifiedFiscalYears: ['FY2025-26', 'FY2026-27'],
+  })),
+}));
 
 describe('PostTaxAnalysis separate tax what-if', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -42,7 +49,8 @@ describe('PostTaxAnalysis separate tax what-if', () => {
       }]}
     />);
     expect(apiModule.computePostTaxReturnBatch).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText(/Gross annual taxable income/i), { target: { value: '1000000' } });
+    await waitFor(() => expect(screen.getByLabelText(/Fiscal year/i).value).toBe('FY2026-27'));
+    fireEvent.change(screen.getByLabelText(/Gross annual income before allowed deductions/i), { target: { value: '1000000' } });
     fireEvent.change(screen.getByLabelText(/Income source/i), { target: { value: 'salary' } });
     fireEvent.change(screen.getByLabelText(/Tax regime/i), { target: { value: 'new' } });
     fireEvent.change(screen.getByLabelText(/Fiscal year/i), { target: { value: 'FY2026-27' } });
@@ -53,6 +61,6 @@ describe('PostTaxAnalysis separate tax what-if', () => {
       1000000, 'new', 30, 'salary', 0.06, 'FY2026-27',
     ));
     expect((await screen.findAllByText('7.0%')).length).toBeGreaterThan(0);
-    expect(screen.getByText(/SEPARATE_TAX_WHAT_IF/i)).toBeInTheDocument();
+    expect(screen.getByText(/MODELLED_POST_TAX_PROJECTION/i)).toBeInTheDocument();
   });
 });

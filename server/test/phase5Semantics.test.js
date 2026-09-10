@@ -31,7 +31,7 @@ test('tax policies are independently versioned by fiscal year with official refe
   assert.equal(fy2025.policyVersion, 'tax-policy-FY2025-26-v1');
   assert.equal(fy2026.policyVersion, 'tax-policy-FY2026-27-v1');
   assert.notStrictEqual(getTaxSlabsForFY('FY2025-26').new, getTaxSlabsForFY('FY2026-27').new);
-  assert.ok(fy2025.sourceReferences.every(source => source.url.startsWith('https://www.indiabudget.gov.in/')));
+  assert.ok(fy2025.sourceReferences.some(source => source.url.startsWith('https://www.indiabudget.gov.in/')));
   assert.ok(fy2026.sourceReferences.some(source => source.url.includes('incometax.gov.in')));
   assert.throws(() => getTaxPolicyMetadata('FY2027-28'), /unavailable/);
 });

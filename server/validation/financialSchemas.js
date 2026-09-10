@@ -1,4 +1,5 @@
 import Joi from 'joi';
+import { taxCalculationContextSchema } from './taxSchemas.js';
 
 const objectId = Joi.string().pattern(/^[0-9a-fA-F]{24}$/).message('Invalid ID format');
 const investmentGoals = ['Retirement', 'Wealth Growth', 'Tax Saving', 'Emergency Fund'];
@@ -59,15 +60,7 @@ export const financialProfileUpdateSchema = financialProfileSchema.keys({
 export const rankWtiProfileSchema = Joi.object({
   profileId: objectId.required(),
   parentInstrumentId: Joi.string().trim().max(50).required(),
-  taxCalculationContext: Joi.object({
-    fiscalYear: Joi.string().valid('FY2025-26', 'FY2026-27').optional(),
-    incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').optional(),
-    annualGrossIncome: Joi.number().min(0).max(1000000000).optional(),
-    regime: Joi.string().valid('new', 'old').optional(),
-    userAge: Joi.number().integer().min(0).max(120).optional(),
-    deductions: Joi.object().optional(),
-    illustrativePrincipal: Joi.number().valid(5000, 10000, 25000, 50000, 100000).optional(),
-  }).optional(),
+  taxCalculationContext: taxCalculationContextSchema.optional(),
 }).unknown(false);
 
 export const personalizedProjectionSchema = Joi.object({

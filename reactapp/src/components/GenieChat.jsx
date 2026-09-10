@@ -66,6 +66,24 @@ const GenieChat = ({ profile, onNavigate }) => {
   const [taxNPS, setTaxNPS] = useState(0);
   const [taxComparison, setTaxComparison] = useState(null);
   const [taxComparisonError, setTaxComparisonError] = useState(null);
+  const [taxPolicyMetadata, setTaxPolicyMetadata] = useState(null);
+
+  useEffect(() => {
+    if (typeof api.getTaxPolicyMetadata !== 'function') return undefined;
+    let cancelled = false;
+    api.getTaxPolicyMetadata()
+      .then(metadata => {
+        if (cancelled) return;
+        setTaxPolicyMetadata(metadata);
+        if (metadata?.currentFiscalYearVerified && metadata.currentFiscalYear) {
+          setTaxFiscalYear(current => current || metadata.currentFiscalYear);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTaxPolicyMetadata(null);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (profile) {
@@ -622,8 +640,9 @@ const GenieChat = ({ profile, onNavigate }) => {
                         </div>
                         <select value={taxFiscalYear} onChange={e => setTaxFiscalYear(e.target.value)} className="genie-input" aria-label="Tax fiscal year">
                           <option value="">Choose explicitly</option>
-                          <option value="FY2026-27">FY2026-27</option>
-                          <option value="FY2025-26">FY2025-26</option>
+                          {(taxPolicyMetadata?.verifiedFiscalYears || []).map(year => (
+                            <option key={year} value={year}>{year}</option>
+                          ))}
                         </select>
                       </div>
 

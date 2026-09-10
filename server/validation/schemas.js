@@ -1,5 +1,11 @@
 import Joi from 'joi';
 import { sendError } from '../middleware/errorHandler.js';
+import {
+  FISCAL_YEAR_PATTERN,
+  incomeSourceValues,
+  requireTaxDependencyFacts,
+  taxDeductionFields,
+} from './taxSchemas.js';
 
 /**
  * Validation for non-Financial-Profile APIs.
@@ -29,39 +35,10 @@ export const chatMessageSchema = Joi.object({
 
 const taxFields = {
   income: Joi.number().min(0).max(1000000000).required(),
-  incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').required(),
-  section80C: Joi.number().min(0).max(150000).optional(),
-  nps80CCD1B: Joi.number().min(0).max(50000).optional(),
-  nps80CCD2: Joi.number().min(0).max(100000000).optional(),
-  basicSalary: Joi.number().min(0).max(1000000000).optional(),
-  isGovtEmployee: Joi.boolean().optional(),
-  section80D: Joi.number().min(0).max(100000).optional(),
-  section80D_self: Joi.number().min(0).max(50000).optional(),
-  section80D_parents: Joi.number().min(0).max(50000).optional(),
-  parents_senior: Joi.boolean().optional(),
-  self_senior: Joi.boolean().optional(),
-  hra: Joi.number().min(0).max(100000000).optional(),
-  homeLoanInterest: Joi.number().min(0).max(200000).optional(),
-  other: Joi.number().min(0).max(100000000).optional(),
-  age: Joi.number().integer().min(18).max(120).optional(),
-  fiscalYear: Joi.string().valid('FY2025-26', 'FY2026-27').required(),
+  incomeSource: Joi.string().valid(...incomeSourceValues).required(),
+  ...taxDeductionFields,
+  fiscalYear: Joi.string().pattern(FISCAL_YEAR_PATTERN).required(),
 };
-
-function requireTaxDependencyFacts(value, helpers) {
-  if (Number(value.nps80CCD2) > 0
-      && (!Number.isFinite(value.basicSalary) || typeof value.isGovtEmployee !== 'boolean')) {
-    return helpers.message({ custom: 'basicSalary and isGovtEmployee are required when nps80CCD2 is claimed' });
-  }
-  const healthDeduction = Number(value.section80D || 0)
-    + Number(value.section80D_self || 0) + Number(value.section80D_parents || 0);
-  if (healthDeduction > 0 && !Number.isInteger(value.age)) {
-    return helpers.message({ custom: 'age is required when a Section 80D deduction is claimed' });
-  }
-  if (Number(value.section80D_parents) > 0 && typeof value.parents_senior !== 'boolean') {
-    return helpers.message({ custom: 'parents_senior is required when a parents Section 80D deduction is claimed' });
-  }
-  return value;
-}
 
 export const taxCompareSchema = Joi.object(taxFields).custom(requireTaxDependencyFacts).unknown(false);
 export const taxComputeSchema = Joi.object({
@@ -81,7 +58,7 @@ export const postTaxReturnSchema = postTaxInstrumentSchema.keys({
   regime: Joi.string().valid('new', 'old').required(),
   userAge: Joi.number().integer().min(0).max(120).required(),
   incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').required(),
-  fiscalYear: Joi.string().valid('FY2025-26', 'FY2026-27').required(),
+  fiscalYear: Joi.string().pattern(FISCAL_YEAR_PATTERN).required(),
 });
 
 export const postTaxReturnBatchSchema = Joi.object({
@@ -91,7 +68,7 @@ export const postTaxReturnBatchSchema = Joi.object({
   userAge: Joi.number().integer().min(0).max(120).required(),
   incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').required(),
   inflationRate: Joi.number().min(0).max(1).required(),
-  fiscalYear: Joi.string().valid('FY2025-26', 'FY2026-27').required(),
+  fiscalYear: Joi.string().pattern(FISCAL_YEAR_PATTERN).required(),
 }).unknown(false);
 
 export const marketContextQuerySchema = Joi.object({}).unknown(false);

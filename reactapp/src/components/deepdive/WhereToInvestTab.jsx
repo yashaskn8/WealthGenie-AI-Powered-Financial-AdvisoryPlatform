@@ -190,9 +190,31 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const [taxAnnualIncome, setTaxAnnualIncome] = useState(
     userProfile?.annualGrossIncome ?? userProfile?.annual_gross_income ?? ''
   );
-  const [taxRegime, setTaxRegime] = useState('new');
-  const [taxFiscalYear, setTaxFiscalYear] = useState('FY2025-26');
+  const [taxIncomeSource, setTaxIncomeSource] = useState('');
+  const [taxRegime, setTaxRegime] = useState('');
+  const [taxFiscalYear, setTaxFiscalYear] = useState('');
+  const [holdingPeriodMonths, setHoldingPeriodMonths] = useState('');
+  const [section112AExemptionUsed, setSection112AExemptionUsed] = useState('');
+  const [taxPolicyMetadata, setTaxPolicyMetadata] = useState(null);
+  const [taxPolicyError, setTaxPolicyError] = useState(null);
   const [activeTaxContext, setActiveTaxContext] = useState(null);
+
+  useEffect(() => {
+    if (typeof api.getTaxPolicyMetadata !== 'function') return undefined;
+    let cancelled = false;
+    api.getTaxPolicyMetadata()
+      .then((metadata) => {
+        if (cancelled) return;
+        setTaxPolicyMetadata(metadata);
+        if (!taxFiscalYear && metadata?.currentFiscalYearVerified && metadata.currentFiscalYear) {
+          setTaxFiscalYear(metadata.currentFiscalYear);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) setTaxPolicyError(error?.message || 'Verified tax policy metadata is unavailable.');
+      });
+    return () => { cancelled = true; };
+  }, [taxFiscalYear]);
 
   useEffect(() => {
     setContextPreview(null);
@@ -298,17 +320,24 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
     return () => controller.abort();
   }, [parentInstrumentId, profileId, requestKey, activeTaxContext, illustrativePrincipal]);
 
+  const requiredTaxInputs = useMemo(() => (
+    [...new Set((rankingResult.products || []).flatMap(product => product.postTaxAnalysis?.requiredTaxInputs || []))]
+  ), [rankingResult.products]);
+
   const handleApplyTaxInputs = (e) => {
     e.preventDefault();
     const incomeNum = Number(taxAnnualIncome);
-    if (!Number.isFinite(incomeNum) || incomeNum < 0) return;
-    setActiveTaxContext({
+    if (!Number.isFinite(incomeNum) || incomeNum < 0 || !taxIncomeSource || !taxRegime || !taxFiscalYear) return;
+    const nextContext = {
       annualGrossIncome: incomeNum,
       regime: taxRegime,
       fiscalYear: taxFiscalYear,
-      incomeSource: 'salary',
+      incomeSource: taxIncomeSource,
       illustrativePrincipal,
-    });
+    };
+    if (holdingPeriodMonths !== '') nextContext.holdingPeriodMonths = Number(holdingPeriodMonths);
+    if (section112AExemptionUsed !== '') nextContext.section112AExemptionUsed = Number(section112AExemptionUsed);
+    setActiveTaxContext(nextContext);
   };
 
   if (!wtiData) {
@@ -671,7 +700,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
       {/* ─── Expandable Tax Inputs Drawer ─── */}
       {showTaxDrawer && (
         <form className="wti-tax-drawer" onSubmit={handleApplyTaxInputs}>
-          <div className="wti-tax-input-group">
+          {requiredTaxInputs.includes('annualGrossIncome') && <div className="wti-tax-input-group">
             <label htmlFor="wti-annual-income">Annual Gross Income (₹)</label>
             <input
               id="wti-annual-income"
@@ -685,37 +714,97 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
               onChange={(e) => setTaxAnnualIncome(e.target.value)}
               required
             />
-          </div>
+          </div>}
 
-          <div className="wti-tax-input-group">
+          {requiredTaxInputs.includes('incomeSource') && <div className="wti-tax-input-group">
+            <label htmlFor="wti-income-source">Income source</label>
+            <select
+              id="wti-income-source"
+              className="wti-tax-input"
+              value={taxIncomeSource}
+              onChange={(e) => setTaxIncomeSource(e.target.value)}
+              required
+            >
+              <option value="">Select income source</option>
+              <option value="salary">Salary</option>
+              <option value="pension">Pension</option>
+              <option value="family_pension">Family pension</option>
+              <option value="business">Business or profession</option>
+              <option value="other">Other</option>
+            </select>
+          </div>}
+
+          {requiredTaxInputs.includes('regime') && <div className="wti-tax-input-group">
             <label htmlFor="wti-tax-regime">Tax Regime</label>
             <select
               id="wti-tax-regime"
               className="wti-tax-input"
               value={taxRegime}
               onChange={(e) => setTaxRegime(e.target.value)}
+              required
             >
-              <option value="new">New Tax Regime (Default)</option>
+              <option value="">Select regime</option>
+              <option value="new">New Tax Regime</option>
               <option value="old">Old Tax Regime</option>
             </select>
-          </div>
+          </div>}
 
-          <div className="wti-tax-input-group">
+          {requiredTaxInputs.includes('fiscalYear') && <div className="wti-tax-input-group">
             <label htmlFor="wti-fiscal-year">Fiscal Year</label>
             <select
               id="wti-fiscal-year"
               className="wti-tax-input"
               value={taxFiscalYear}
               onChange={(e) => setTaxFiscalYear(e.target.value)}
+              required
             >
-              <option value="FY2025-26">FY 2025-26</option>
-              <option value="FY2026-27">FY 2026-27</option>
+              <option value="">Select verified fiscal year</option>
+              {(taxPolicyMetadata?.verifiedFiscalYears || []).map(year => (
+                <option key={year} value={year}>{year.replace('FY', 'FY ')}</option>
+              ))}
             </select>
-          </div>
+          </div>}
 
-          <button type="submit" className="wti-apply-tax-btn">
-            Apply & Calculate
-          </button>
+          {requiredTaxInputs.includes('holdingPeriodMonths') && (
+            <div className="wti-tax-input-group">
+              <label htmlFor="wti-holding-period">Your holding period (months)</label>
+              <input
+                id="wti-holding-period"
+                type="number"
+                min="0"
+                max="1200"
+                step="1"
+                className="wti-tax-input"
+                value={holdingPeriodMonths}
+                onChange={(e) => setHoldingPeriodMonths(e.target.value)}
+                required
+              />
+            </div>
+          )}
+
+          {requiredTaxInputs.includes('section112AExemptionUsed') && (
+            <div className="wti-tax-input-group">
+              <label htmlFor="wti-112a-exemption">Section 112A exemption already used this year (₹)</label>
+              <input
+                id="wti-112a-exemption"
+                type="number"
+                min="0"
+                max="125000"
+                step="1000"
+                className="wti-tax-input"
+                value={section112AExemptionUsed}
+                onChange={(e) => setSection112AExemptionUsed(e.target.value)}
+                required
+              />
+              <small>Share the amount already used across your other qualifying equity gains; it is not reset for each product.</small>
+            </div>
+          )}
+
+          {taxPolicyError && <p role="alert" className="wti-preview-error">{taxPolicyError}</p>}
+
+          {requiredTaxInputs.length > 0
+            ? <button type="submit" className="wti-apply-tax-btn">Apply & Calculate</button>
+            : <p className="wti-preview-error">No tax inputs are required for the currently qualified product data.</p>}
         </form>
       )}
 
@@ -1090,6 +1179,13 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
                     >
                       Calculate after tax
                     </button>
+                  </div>
+                )}
+
+                {postTax && ['TAX_CLASSIFICATION_UNAVAILABLE', 'FISCAL_YEAR_UNSUPPORTED', 'PRODUCT_FACTS_UNAVAILABLE', 'UNAVAILABLE'].includes(postTax.status) && (
+                  <div className="wti-post-tax-cta-box">
+                    <span>After-tax result: {postTax.status.replaceAll('_', ' ').toLowerCase()}.</span>
+                    {postTax.disclosure && <small>{postTax.disclosure}</small>}
                   </div>
                 )}
 

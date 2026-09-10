@@ -55,7 +55,8 @@ function _buildEquityLTCGPostTaxResult(nominalRate, monthlySIP, holdingYears, in
     effectiveYield: round4(postTax * 100),
     taxType: `Equity LTCG with Exemption (effective ${(effectiveTaxRate*100).toFixed(2)}%)`,
     taxRate: effectiveTaxRate,
-    notes: `${notePrefix}${notePrefix ? 'Factored in ₹1.25L LTCG exemption and 4% cess.' : 'LTCG with ₹1.25L exemption and 4% cess.'}`,
+    taxModel: 'MODELLED_FIFO_TAX_WHAT_IF',
+    notes: `${notePrefix}${notePrefix ? 'Factored in ₹1.25L LTCG exemption and 4% cess.' : 'LTCG with ₹1.25L exemption and 4% cess.'} This is a modelled FIFO what-if, not an actual transaction tax estimate without transaction lots.`,
   }, nominalRate, instrumentType);
 }
 
@@ -198,8 +199,9 @@ function _calculateFDPostTax(nominalRate, marginalRate, monthlySIP, userAge, ins
     taxRate: marginalRate,
     tdsApplicable: tdsApplies,
     tdsRate: effectiveTDSRate,
+    taxModel: 'MODELLED_POST_TAX_PROJECTION',
     notes: tdsApplies
-      ? `TDS at 10% deducted at source. Net slab rate: ${(marginalRate*100).toFixed(0)}%.`
+      ? `TDS at 10% is withheld at source and credited against final liability; it is not an extra tax. Net slab rate: ${(marginalRate*100).toFixed(0)}%.`
       : `Annual interest ₹${Math.round(annualInterest).toLocaleString('en-IN')} below TDS threshold.`,
   }, nominalRate, instrumentType === 'SCSS' ? 'SCSS' : 'FD');
 }
@@ -214,6 +216,8 @@ function _calculateEquityMFPostTax(nominalRate, holdingYears, monthlySIP, instru
       effectiveYield: round4(postTax * 100),
       taxType: 'STCG 20.8% (with Cess)',
       taxRate: stcgRate,
+      taxModel: 'MODELLED_FIFO_TAX_WHAT_IF',
+      notes: 'Modelled SIP what-if; actual transaction tax requires transaction lots and dates.',
     }, nominalRate, instrumentType);
   }
 

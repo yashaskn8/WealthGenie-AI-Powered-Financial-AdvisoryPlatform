@@ -19,311 +19,398 @@
  * 7. Generate deterministic, plain-English "Why this fits you", risk tier, and access-to-money copy.
  */
 
-import { computeTax } from './taxEngine.js';
+import {
+  computeEquityCapitalGainsTax,
+  computeTax,
+  getCurrentFiscalYear,
+  getTaxPolicyMetadata,
+} from './taxEngine.js';
+import {
+  classifySourceQualifiedProductTaxType,
+  getProductTaxMetadata,
+  getRequiredTaxInputs,
+  POST_TAX_CALCULATION_CLASSES,
+  PRODUCT_TAX_CLASSES,
+  PRODUCT_TAX_STATUSES,
+} from './productTaxAuthority.js';
 
-export const POST_TAX_SERVICE_VERSION = 'product-post-tax-calculator-1.0.0';
+export const POST_TAX_SERVICE_VERSION = 'product-post-tax-calculator-2.0.0';
 
 /**
  * Classify product tax category from product DTO and parent category
  */
 export function classifyProductTaxType(product, parentInstrumentId) {
-  const id = String(parentInstrumentId || product?.parentInstrumentId || product?.id || '').toLowerCase();
-  const name = String(product?.name || '').toLowerCase();
-  const canonicalId = String(product?.canonicalProductId || '').toLowerCase();
+  return classifySourceQualifiedProductTaxType(
+    product,
+    parentInstrumentId || product?.parentInstrumentId,
+  );
+}
 
-  // EEE Exempt-Exempt-Exempt
-  if (id === 'ppf' || canonicalId.includes('ppf') || name.includes('public provident fund')) {
-    return 'EEE_TAX_FREE';
-  }
-  if (id === 'sukanya' || canonicalId.includes('sukanya') || name.includes('sukanya samriddhi')) {
-    return 'EEE_TAX_FREE';
-  }
+function createAnalysis({
+  status,
+  taxMetadata,
+  fiscalYear = null,
+  policyVersion = null,
+  principal,
+  grossGain = null,
+  taxableGain = null,
+  exemptionApplied = null,
+  incrementalTax = null,
+  cess = null,
+  surcharge = null,
+  netGain = null,
+  postTaxRatePct = null,
+  calculationClass = POST_TAX_CALCULATION_CLASSES.CURRENT_RATE_POST_TAX_ILLUSTRATION,
+  inputBasis = 'PROVIDER_FACT',
+  holdingPeriodBasis = null,
+  dataClass = 'PROVIDER_FACT',
+  assumptions = [],
+  unavailableReasons = [],
+  requiredTaxInputs = [],
+  metricLabel = 'After-tax result',
+  disclosure = null,
+  message = null,
+  isHistoricalEstimate = false,
+  rulesApplied = [],
+}) {
+  return {
+    status,
+    calculationClass,
+    taxClass: taxMetadata?.taxClass || null,
+    taxClassification: taxMetadata?.taxClass || null,
+    fiscalYear,
+    policyVersion,
+    inputBasis,
+    principal,
+    illustrativePrincipal: principal,
+    grossGain,
+    taxableGain,
+    exemptionApplied,
+    incrementalTax,
+    cess,
+    surcharge,
+    netGain,
+    postTaxRatePct,
+    holdingPeriodBasis,
+    dataClass,
+    assumptions,
+    unavailableReasons,
+    sourceReferences: [
+      ...(taxMetadata?.sourceReferences || []),
+    ],
+    rulesApplied: [
+      ...(taxMetadata?.rulesApplied || []),
+      ...rulesApplied,
+    ],
+    requiredTaxInputs,
+    metricLabel,
+    disclosure,
+    message,
+    isHistoricalEstimate,
+  };
+}
 
-  // RBI Floating Rate Savings Bonds
-  if (id === 'rbi_bonds' || canonicalId.includes('rbi') || name.includes('floating rate savings bond')) {
-    return 'RBI_FLOATING_RATE_BOND';
-  }
+function getPrincipal(taxCalculationContext) {
+  const supplied = Number(taxCalculationContext?.illustrativePrincipal);
+  return Number.isFinite(supplied) && supplied > 0 ? supplied : 10000;
+}
 
-  // Bank Fixed Deposits
-  if (id === 'fd' || id === 'sbi_fd' || canonicalId.includes('sbi') || name.includes('fixed deposit') || name.includes('term deposit')) {
-    return 'BANK_FIXED_DEPOSIT';
+function getTaxPolicyOrUnavailable(fiscalYear) {
+  try {
+    return { policy: getTaxPolicyMetadata(fiscalYear), unavailable: null };
+  } catch (error) {
+    if (error?.code === 'FISCAL_YEAR_UNSUPPORTED' || error instanceof RangeError) {
+      return { policy: null, unavailable: 'FISCAL_YEAR_UNSUPPORTED' };
+    }
+    throw error;
   }
+}
 
-  // Government Small Savings (Taxable at slab)
-  if (['scss', 'nsc', 'kvp', 'pomis', 'po_rd', 'po_td_1yr'].includes(id) ||
-      canonicalId.includes('nsc') || canonicalId.includes('scss') || canonicalId.includes('kvp') || canonicalId.includes('pomis')) {
-    return 'GOVERNMENT_TAXABLE_SAVINGS';
-  }
+function missingRequiredTaxInputs(taxCalculationContext, requiredTaxInputs) {
+  const context = taxCalculationContext || {};
+  return requiredTaxInputs.filter(key => {
+    if (key === 'annualGrossIncome') return !Number.isFinite(Number(context.annualGrossIncome));
+    if (key === 'holdingPeriodMonths') return !Number.isFinite(Number(context.holdingPeriodMonths));
+    if (key === 'section112AExemptionUsed') return !Number.isFinite(Number(context.section112AExemptionUsed));
+    return context[key] === undefined || context[key] === null || context[key] === '';
+  });
+}
 
-  // ELSS Mutual Funds (Section 80C + Section 112A)
-  if (id === 'elss' || id === 'elss_mf' || name.includes('elss') || name.includes('tax saver')) {
-    return 'EQUITY_MF_ELSS';
-  }
-
-  // Debt Mutual Funds (Section 50AA - slab rate STCG)
-  if (id.includes('debt') || id.includes('liquid') || id.includes('gilt') || id.includes('corporate_bond') ||
-      id.includes('banking_psu') || id.includes('dynamic_bond') || id.includes('credit_risk')) {
-    return 'DEBT_MF_SECTION_50AA';
-  }
-
-  // Default for Mutual Funds: Equity LTCG (Section 112A)
-  if (product?.productType === 'MUTUAL_FUND' || product?.historicalReturn || id.includes('mf') || id.includes('equity')) {
-    return 'EQUITY_MF_SECTION_112A';
-  }
-
-  return 'STANDARD_TAXABLE';
+function taxContextValues(taxCalculationContext) {
+  return {
+    annualIncome: Number(taxCalculationContext?.annualGrossIncome),
+    regime: taxCalculationContext?.regime,
+    fiscalYear: taxCalculationContext?.fiscalYear,
+    incomeSource: taxCalculationContext?.incomeSource,
+    deductions: taxCalculationContext?.deductions || {},
+  };
 }
 
 /**
  * Calculate defensible after-tax outcome for a single product.
  * Returns postTaxAnalysis object.
  */
-export function calculateProductPostTaxOutcome({ product, profile = {}, taxCalculationContext = null }) {
-  const principal = Number(taxCalculationContext?.illustrativePrincipal) || 10000;
-  const taxType = classifyProductTaxType(product, product?.parentInstrumentId);
+export function calculateProductPostTaxOutcome({ product, profile: _profile = {}, taxCalculationContext = null }) {
+  const principal = getPrincipal(taxCalculationContext);
+  const parentInstrumentId = product?.parentInstrumentId;
+  const taxMetadata = getProductTaxMetadata(product, parentInstrumentId);
+  const taxType = taxMetadata.taxClass;
+  const requiredTaxInputs = getRequiredTaxInputs(taxType);
+  const assumptions = taxCalculationContext?.illustrativePrincipal
+    ? []
+    : ['ILLUSTRATIVE_PRINCIPAL_DEFAULT_10000'];
 
-  // 1. EEE Tax-Free Products (PPF, SSY) — Section 10(11) / 10(11A)
-  if (taxType === 'EEE_TAX_FREE') {
-    const annualRate = Number(product?.officialRate?.value);
+  if (!taxMetadata.sourceQualified || !taxType) {
+    return createAnalysis({
+      status: PRODUCT_TAX_STATUSES.TAX_CLASSIFICATION_UNAVAILABLE,
+      taxMetadata,
+      principal,
+      calculationClass: POST_TAX_CALCULATION_CLASSES.CURRENT_RATE_POST_TAX_ILLUSTRATION,
+      dataClass: 'UNAVAILABLE',
+      assumptions,
+      unavailableReasons: [taxMetadata.unavailableReason || 'TAX_CLASSIFICATION_UNAVAILABLE'],
+      disclosure: 'The qualified provider did not supply a tax classification for this product. No post-tax result is shown.',
+    });
+  }
+
+  const fiscalYear = taxCalculationContext?.fiscalYear || getCurrentFiscalYear();
+  const { policy, unavailable } = getTaxPolicyOrUnavailable(fiscalYear);
+  if (unavailable) {
+    return createAnalysis({
+      status: PRODUCT_TAX_STATUSES.FISCAL_YEAR_UNSUPPORTED,
+      taxMetadata,
+      fiscalYear,
+      principal,
+      requiredTaxInputs,
+      assumptions,
+      unavailableReasons: [unavailable],
+      disclosure: 'The requested fiscal-year tax policy is not verified by the backend.',
+    });
+  }
+
+  const annualRate = Number(product?.officialRate?.value);
+  const isEee = [PRODUCT_TAX_CLASSES.PPF_EEE, PRODUCT_TAX_CLASSES.SSY_EEE].includes(taxType);
+  if (isEee) {
     if (!Number.isFinite(annualRate) || annualRate <= 0) {
-      return {
-        status: 'UNAVAILABLE',
-        illustrativePrincipal: principal,
-        grossGain: null,
-        incrementalTax: null,
-        netGain: null,
-        postTaxRatePct: null,
+      return createAnalysis({
+        status: PRODUCT_TAX_STATUSES.PRODUCT_FACTS_UNAVAILABLE,
+        taxMetadata,
+        fiscalYear,
+        policyVersion: policy.policyVersion,
+        principal,
+        dataClass: 'UNAVAILABLE',
+        assumptions,
+        unavailableReasons: ['CURRENT_OFFICIAL_RATE_UNAVAILABLE'],
         metricLabel: 'Current after-tax rate',
-        taxClassification: 'EEE_TAX_FREE',
-        disclosure: 'Exempt under Section 10(11) / 10(11A) (EEE). Interest and maturity proceeds are 100% tax-free.',
-        isHistoricalEstimate: false,
-      };
+        disclosure: 'The current official rate is unavailable.',
+      });
     }
-
     const grossGain = Math.round(principal * (annualRate / 100));
-    return {
-      status: 'CALCULATED',
-      illustrativePrincipal: principal,
+    return createAnalysis({
+      status: PRODUCT_TAX_STATUSES.CALCULATED,
+      taxMetadata,
+      fiscalYear,
+      policyVersion: policy.policyVersion,
+      principal,
       grossGain,
+      taxableGain: 0,
+      exemptionApplied: grossGain,
       incrementalTax: 0,
+      cess: 0,
+      surcharge: 0,
       netGain: grossGain,
       postTaxRatePct: Number(annualRate.toFixed(2)),
+      assumptions,
       metricLabel: 'Current after-tax rate',
-      taxClassification: 'EEE_TAX_FREE',
-      disclosure: 'Exempt under Section 10(11) / 10(11A) of the Income Tax Act (EEE status). 100% tax-free interest.',
-      isHistoricalEstimate: false,
-    };
+      disclosure: 'Current provider rate illustration. The qualified scheme treatment is tax-exempt under the cited official source; this is not a full-tenure maturity IRR.',
+      rulesApplied: ['CURRENT_RATE_ONLY_NOT_FULL_TENURE_IRR'],
+    });
   }
 
-  // For all taxable products, we need explicit tax calculation context
-  const annualIncome = Number(taxCalculationContext?.annualGrossIncome);
-  const regime = taxCalculationContext?.regime;
-  const fiscalYear = taxCalculationContext?.fiscalYear || 'FY2025-26';
-  const incomeSource = taxCalculationContext?.incomeSource || 'salary';
-  const _userAge = Number(taxCalculationContext?.userAge || profile?.age || 30);
-  const deductions = taxCalculationContext?.deductions || {};
-
-  // If explicit tax inputs are missing, do NOT calculate fake 0% or fail; invite user to add tax details
-  if (!Number.isFinite(annualIncome) || !regime || !['new', 'old'].includes(regime)) {
-    return {
-      status: 'REQUIRES_TAX_INPUTS',
-      illustrativePrincipal: principal,
-      grossGain: null,
-      incrementalTax: null,
-      netGain: null,
-      postTaxRatePct: null,
-      metricLabel: taxType === 'RBI_FLOATING_RATE_BOND' ? 'Current coupon after tax' : 'After-tax return',
-      taxClassification: taxType,
-      disclosure: 'Add tax details (income and regime) to calculate your personalized after-tax return.',
-      isHistoricalEstimate: product?.productType === 'MUTUAL_FUND',
-      message: 'Add tax details to calculate your after-tax return',
-    };
+  const missingInputs = missingRequiredTaxInputs(taxCalculationContext, requiredTaxInputs);
+  if (missingInputs.length > 0) {
+    return createAnalysis({
+      status: PRODUCT_TAX_STATUSES.REQUIRES_TAX_INPUTS,
+      taxMetadata,
+      fiscalYear: taxCalculationContext?.fiscalYear || null,
+      principal,
+      requiredTaxInputs: missingInputs,
+      assumptions,
+      unavailableReasons: [],
+      metricLabel: taxType === PRODUCT_TAX_CLASSES.RBI_FRSB_INTEREST
+        ? 'Current coupon after tax'
+        : 'After-tax result',
+      disclosure: 'Add the backend-declared tax inputs to calculate this result.',
+      message: 'Additional tax inputs are required for this product.',
+      isHistoricalEstimate: taxType.includes('MF'),
+    });
   }
 
-  // 2. RBI Floating Rate Savings Bonds (RBI FRSB)
-  if (taxType === 'RBI_FLOATING_RATE_BOND') {
-    const annualRate = Number(product?.officialRate?.value);
+  const { annualIncome, regime, incomeSource, deductions } = taxContextValues(taxCalculationContext);
+  if ([PRODUCT_TAX_CLASSES.BANK_DEPOSIT_INTEREST, PRODUCT_TAX_CLASSES.RBI_FRSB_INTEREST].includes(taxType)) {
     if (!Number.isFinite(annualRate) || annualRate <= 0) {
-      return {
-        status: 'UNAVAILABLE',
-        illustrativePrincipal: principal,
-        grossGain: null,
-        incrementalTax: null,
-        netGain: null,
-        postTaxRatePct: null,
-        metricLabel: 'Current coupon after tax',
-        taxClassification: 'RBI_FLOATING_RATE_BOND',
-        disclosure: 'Current coupon rate is unavailable.',
-        isHistoricalEstimate: false,
-      };
+      return createAnalysis({
+        status: PRODUCT_TAX_STATUSES.PRODUCT_FACTS_UNAVAILABLE,
+        taxMetadata,
+        fiscalYear,
+        policyVersion: policy.policyVersion,
+        principal,
+        requiredTaxInputs,
+        dataClass: 'UNAVAILABLE',
+        assumptions,
+        unavailableReasons: ['CURRENT_OFFICIAL_RATE_UNAVAILABLE'],
+        metricLabel: taxType === PRODUCT_TAX_CLASSES.RBI_FRSB_INTEREST
+          ? 'Current coupon after tax'
+          : 'Current after-tax rate',
+      });
     }
-
     const grossGain = Math.round(principal * (annualRate / 100));
     const baseline = computeTax(annualIncome, regime, deductions, incomeSource, fiscalYear);
     const withGain = computeTax(annualIncome + grossGain, regime, deductions, incomeSource, fiscalYear);
     const incrementalTax = Math.max(0, withGain.taxAmount - baseline.taxAmount);
-    const netGain = Math.max(0, grossGain - incrementalTax);
-    const postTaxRatePct = Number(Math.min(annualRate, (netGain / principal) * 100).toFixed(2));
-
-    return {
-      status: 'CALCULATED',
-      illustrativePrincipal: principal,
+    const netGain = grossGain - incrementalTax;
+    return createAnalysis({
+      status: PRODUCT_TAX_STATUSES.CALCULATED,
+      taxMetadata,
+      fiscalYear,
+      policyVersion: policy.policyVersion,
+      principal,
       grossGain,
+      taxableGain: grossGain,
+      exemptionApplied: 0,
       incrementalTax,
+      cess: Math.max(0, withGain.cess - baseline.cess),
+      surcharge: Math.max(0, withGain.surchargeAmount - baseline.surchargeAmount),
       netGain,
-      postTaxRatePct,
-      metricLabel: 'Current coupon after tax',
-      taxClassification: 'TAXABLE_SLAB_RATE',
-      disclosure: 'Coupon resets every six months (1 Jan & 1 Jul), so future rates may differ. Not a guaranteed 7-year return.',
-      isHistoricalEstimate: false,
-    };
+      postTaxRatePct: Number(((netGain / principal) * 100).toFixed(2)),
+      assumptions: [...assumptions, 'INCREMENTAL_TAX_BASELINE_AND_WITH_PRODUCT_INCOME'],
+      metricLabel: taxType === PRODUCT_TAX_CLASSES.RBI_FRSB_INTEREST
+        ? 'Current coupon after tax'
+        : 'Current after-tax rate',
+      disclosure: taxType === PRODUCT_TAX_CLASSES.RBI_FRSB_INTEREST
+        ? 'Current coupon after-tax illustration. Coupon resets every six months (1 Jan and 1 Jul); it is not a fixed 7-year return or maturity IRR. TDS is withholding, not an additional final tax.'
+        : 'Current annual rate after incremental tax using the backend tax policy. TDS, where applicable, is withholding at source and is not added as a second tax charge.',
+      rulesApplied: ['CURRENT_RATE_ONLY_NOT_FULL_TENURE_IRR'],
+    });
   }
 
-  // 3. Bank Fixed Deposits & Taxable Government Savings
-  if (taxType === 'BANK_FIXED_DEPOSIT' || taxType === 'GOVERNMENT_TAXABLE_SAVINGS' || taxType === 'STANDARD_TAXABLE') {
-    const annualRate = Number(product?.officialRate?.value);
-    if (!Number.isFinite(annualRate) || annualRate <= 0) {
-      return {
-        status: 'UNAVAILABLE',
-        illustrativePrincipal: principal,
-        grossGain: null,
-        incrementalTax: null,
-        netGain: null,
-        postTaxRatePct: null,
-        metricLabel: 'Current after-tax rate',
-        taxClassification: 'TAXABLE_SLAB_RATE',
-        disclosure: 'Official rate unavailable.',
-        isHistoricalEstimate: false,
-      };
-    }
-
-    const grossGain = Math.round(principal * (annualRate / 100));
-    const baseline = computeTax(annualIncome, regime, deductions, incomeSource, fiscalYear);
-    const withGain = computeTax(annualIncome + grossGain, regime, deductions, incomeSource, fiscalYear);
-    const incrementalTax = Math.max(0, withGain.taxAmount - baseline.taxAmount);
-    const netGain = Math.max(0, grossGain - incrementalTax);
-    const postTaxRatePct = Number(Math.min(annualRate, (netGain / principal) * 100).toFixed(2));
-
-    return {
-      status: 'CALCULATED',
-      illustrativePrincipal: principal,
-      grossGain,
-      incrementalTax,
-      netGain,
-      postTaxRatePct,
-      metricLabel: 'Current after-tax rate',
-      taxClassification: 'TAXABLE_SLAB_RATE',
-      disclosure: 'Calculated using your tax slab with backend incremental tax method. TDS may apply at source.',
-      isHistoricalEstimate: false,
-    };
-  }
-
-  // 4. Mutual Funds (AMFI) — Historical 1Y After-Tax Only
-  if (product?.historicalReturn?.valuePct !== undefined && product?.historicalReturn?.valuePct !== null) {
-    const historicalRate = Number(product.historicalReturn.valuePct);
-    if (!Number.isFinite(historicalRate)) {
-      return {
-        status: 'UNAVAILABLE',
-        illustrativePrincipal: principal,
-        grossGain: null,
-        incrementalTax: null,
-        netGain: null,
-        postTaxRatePct: null,
-        metricLabel: 'Historical 1Y after-tax return',
-        taxClassification: taxType,
-        disclosure: 'Historical return is unavailable.',
-        isHistoricalEstimate: true,
-      };
-    }
-
-    const grossGain = Math.round(principal * (historicalRate / 100));
-
-    // For Debt Mutual Funds under Section 50AA: Slab rate STCG
-    if (taxType === 'DEBT_MF_SECTION_50AA') {
-      if (grossGain <= 0) {
-        return {
-          status: 'CALCULATED',
-          illustrativePrincipal: principal,
-          grossGain,
-          incrementalTax: 0,
-          netGain: grossGain,
-          postTaxRatePct: Number(historicalRate.toFixed(2)),
-          metricLabel: 'Historical 1Y after-tax return',
-          taxClassification: 'DEBT_MF_SECTION_50AA',
-          disclosure: 'HISTORICAL — NOT A FORECAST. Taxed at your income tax slab rate under Section 50AA.',
-          isHistoricalEstimate: true,
-        };
-      }
-
-      const baseline = computeTax(annualIncome, regime, deductions, incomeSource, fiscalYear);
-      const withGain = computeTax(annualIncome + grossGain, regime, deductions, incomeSource, fiscalYear);
-      const incrementalTax = Math.max(0, withGain.taxAmount - baseline.taxAmount);
-      const netGain = Math.max(0, grossGain - incrementalTax);
-      const postTaxRatePct = Number(Math.min(historicalRate, (netGain / principal) * 100).toFixed(2));
-
-      return {
-        status: 'CALCULATED',
-        illustrativePrincipal: principal,
-        grossGain,
-        incrementalTax,
-        netGain,
-        postTaxRatePct,
-        metricLabel: 'Historical 1Y after-tax return',
-        taxClassification: 'DEBT_MF_SECTION_50AA',
-        disclosure: 'HISTORICAL — NOT A FORECAST. Debt mutual fund gains are taxed at slab rates under Section 50AA.',
-        isHistoricalEstimate: true,
-      };
-    }
-
-    // For Equity Mutual Funds (Section 112A LTCG: 12.5% + 4% cess = 13.0%)
-    if (grossGain <= 0) {
-      return {
-        status: 'CALCULATED',
-        illustrativePrincipal: principal,
-        grossGain,
-        incrementalTax: 0,
-        netGain: grossGain,
-        postTaxRatePct: Number(historicalRate.toFixed(2)),
-        metricLabel: 'Historical 1Y after-tax return',
-        taxClassification: 'EQUITY_LTCG_SECTION_112A',
-        disclosure: 'HISTORICAL — NOT A FORECAST. Negative or zero historical return incurs no capital gains tax.',
-        isHistoricalEstimate: true,
-      };
-    }
-
-    // Standard Section 112A equity LTCG rate is 12.5% + 4% cess = 13.0%
-    const ltcgTaxRate = 0.13;
-    const incrementalTax = Math.round(grossGain * ltcgTaxRate);
-    const netGain = Math.max(0, grossGain - incrementalTax);
-    const postTaxRatePct = Number(Math.min(historicalRate, (netGain / principal) * 100).toFixed(2));
-
-    return {
-      status: 'CALCULATED',
-      illustrativePrincipal: principal,
-      grossGain,
-      incrementalTax,
-      netGain,
-      postTaxRatePct,
+  const historicalRate = Number(product?.historicalReturn?.valuePct);
+  if (!Number.isFinite(historicalRate)) {
+    return createAnalysis({
+      status: PRODUCT_TAX_STATUSES.PRODUCT_FACTS_UNAVAILABLE,
+      taxMetadata,
+      fiscalYear,
+      policyVersion: policy.policyVersion,
+      principal,
+      requiredTaxInputs,
+      dataClass: 'UNAVAILABLE',
+      assumptions,
+      unavailableReasons: ['QUALIFIED_HISTORICAL_RETURN_UNAVAILABLE'],
       metricLabel: 'Historical 1Y after-tax return',
-      taxClassification: 'EQUITY_LTCG_SECTION_112A',
-      disclosure: 'HISTORICAL — NOT A FORECAST. Assumes 12.5% LTCG + 4% cess under Section 112A for units held at least 1 year. Annual exemption up to ₹1.25L applies across total equity gains.',
       isHistoricalEstimate: true,
-    };
+    });
+  }
+  const grossGain = Math.round(principal * (historicalRate / 100));
+  const holdingPeriodMonths = Number(taxCalculationContext.holdingPeriodMonths);
+
+  if (taxType === PRODUCT_TAX_CLASSES.DEBT_MF_50AA) {
+    const baseline = computeTax(annualIncome, regime, deductions, incomeSource, fiscalYear);
+    const withGain = computeTax(annualIncome + grossGain, regime, deductions, incomeSource, fiscalYear);
+    const incrementalTax = Math.max(0, withGain.taxAmount - baseline.taxAmount);
+    const netGain = grossGain - incrementalTax;
+    return createAnalysis({
+      status: PRODUCT_TAX_STATUSES.CALCULATED,
+      taxMetadata,
+      fiscalYear,
+      policyVersion: policy.policyVersion,
+      principal,
+      grossGain,
+      taxableGain: grossGain,
+      exemptionApplied: 0,
+      incrementalTax,
+      cess: Math.max(0, withGain.cess - baseline.cess),
+      surcharge: Math.max(0, withGain.surchargeAmount - baseline.surchargeAmount),
+      netGain,
+      postTaxRatePct: Number(((netGain / principal) * 100).toFixed(2)),
+      calculationClass: POST_TAX_CALCULATION_CLASSES.HISTORICAL_RETURN_POST_TAX_ILLUSTRATION,
+      inputBasis: 'HISTORICAL_PROVIDER_FACT_PLUS_EXPLICIT_TAX_INPUTS',
+      holdingPeriodBasis: 'EXPLICIT_HOLDING_PERIOD_MONTHS',
+      dataClass: 'HISTORICAL_PROVIDER_FACT',
+      assumptions: [...assumptions, 'HISTORICAL_RETURN_IS_NOT_A_FORECAST'],
+      metricLabel: 'Historical 1Y after-tax return',
+      disclosure: 'HISTORICAL — NOT A FORECAST. Qualified Section 50AA metadata establishes slab treatment; the comparison uses the explicit holding period and current tax inputs. No future return is claimed.',
+      isHistoricalEstimate: true,
+    });
   }
 
-  return {
-    status: 'REQUIRES_TAX_INPUTS',
-    illustrativePrincipal: principal,
-    grossGain: null,
-    incrementalTax: null,
-    netGain: null,
-    postTaxRatePct: null,
-    metricLabel: 'After-tax return',
-    taxClassification: taxType,
-    disclosure: 'Add tax details to calculate your after-tax return.',
-    isHistoricalEstimate: product?.productType === 'MUTUAL_FUND',
-    message: 'Add tax details to calculate your after-tax return',
-  };
+  if (![PRODUCT_TAX_CLASSES.EQUITY_MF_112A, PRODUCT_TAX_CLASSES.EQUITY_MF_ELSS].includes(taxType)) {
+    return createAnalysis({
+      status: PRODUCT_TAX_STATUSES.TAX_CLASSIFICATION_UNAVAILABLE,
+      taxMetadata,
+      fiscalYear,
+      policyVersion: policy.policyVersion,
+      principal,
+      requiredTaxInputs,
+      dataClass: 'UNAVAILABLE',
+      assumptions,
+      unavailableReasons: ['TAX_CLASSIFICATION_UNAVAILABLE'],
+      isHistoricalEstimate: true,
+    });
+  }
+
+  const capitalGains = computeEquityCapitalGainsTax({
+    grossGain,
+    holdingPeriodMonths,
+    annualIncome,
+    regime,
+    deductions,
+    incomeSource,
+    fiscalYear,
+    section112AExemptionUsed: Number(taxCalculationContext.section112AExemptionUsed),
+  });
+  if (capitalGains.status !== 'CALCULATED') {
+    return createAnalysis({
+      status: PRODUCT_TAX_STATUSES.UNAVAILABLE,
+      taxMetadata,
+      fiscalYear,
+      policyVersion: policy.policyVersion,
+      principal,
+      grossGain,
+      taxableGain: capitalGains.taxableGain,
+      exemptionApplied: capitalGains.exemptionApplied,
+      requiredTaxInputs,
+      dataClass: 'UNAVAILABLE',
+      assumptions: [...assumptions, 'SPECIAL_RATE_BUCKET_REQUIRES_COMPLETE_HIGH_INCOME_CONTEXT'],
+      unavailableReasons: capitalGains.unavailableReasons,
+      metricLabel: 'Historical after-tax return',
+      isHistoricalEstimate: true,
+    });
+  }
+  const netGain = grossGain - capitalGains.taxAmount;
+  return createAnalysis({
+    status: PRODUCT_TAX_STATUSES.CALCULATED,
+    taxMetadata,
+    fiscalYear,
+    policyVersion: policy.policyVersion,
+    principal,
+    grossGain,
+    taxableGain: capitalGains.taxableGain,
+    exemptionApplied: capitalGains.exemptionApplied,
+    incrementalTax: capitalGains.taxAmount,
+    cess: capitalGains.cess,
+    surcharge: capitalGains.surcharge,
+    netGain,
+    postTaxRatePct: Number(((netGain / principal) * 100).toFixed(2)),
+    calculationClass: POST_TAX_CALCULATION_CLASSES.HISTORICAL_RETURN_POST_TAX_ILLUSTRATION,
+    inputBasis: 'HISTORICAL_PROVIDER_FACT_PLUS_EXPLICIT_TAX_INPUTS',
+    holdingPeriodBasis: capitalGains.holdingPeriodBasis,
+    dataClass: 'HISTORICAL_PROVIDER_FACT',
+    assumptions: [...assumptions, 'HISTORICAL_RETURN_IS_NOT_A_FORECAST'],
+    metricLabel: 'Historical 1Y after-tax return',
+    disclosure: `HISTORICAL — NOT A FORECAST. ${capitalGains.taxClass === 'EQUITY_LTCG_SECTION_112A' ? 'Section 112A LTCG treatment uses the explicit holding period and the remaining taxpayer-level annual exemption.' : 'Section 111A STCG treatment uses the explicit holding period.'} Special-rate tax is separate from ordinary slabs and Section 87A is not applied to it.`,
+    isHistoricalEstimate: true,
+    rulesApplied: capitalGains.rulesApplied,
+  });
 }
 
 /**
@@ -445,13 +532,16 @@ export function enrichProductsWithPostTaxAndSuitability(products, { profile = {}
   return products.map((product) => {
     const beginnerSuitability = generateBeginnerSuitability({ product, profile, parentCatalog });
     const postTaxAnalysis = calculateProductPostTaxOutcome({ product, profile, taxCalculationContext });
+    const taxMetadata = getProductTaxMetadata(product, product?.parentInstrumentId);
 
     return {
       ...product,
       beginnerSuitability,
+      taxMetadata,
       postTaxAnalysis,
-      // If postTaxAnalysis calculated a valid post-tax rate, store it in postTaxReturn
-      postTaxReturn: postTaxAnalysis.postTaxRatePct !== null ? postTaxAnalysis.postTaxRatePct : product.postTaxReturn,
+      // WTI's generic postTaxReturn field is intentionally not overloaded with
+      // product tax authority. Consumers must use postTaxAnalysis explicitly.
+      postTaxReturn: null,
     };
   });
 }

@@ -541,6 +541,10 @@ export async function compareTax(income, deductions = {}) {
   return request('GET', `/tax/compare?${params.toString()}`);
 }
 
+export async function getTaxPolicyMetadata(options = {}) {
+  return request('GET', '/tax/policies', null, options);
+}
+
 export async function getCurrentMarketContext(options = {}) {
   return request('GET', '/regime/current', null, options);
 }
@@ -605,7 +609,7 @@ const api = {
   getMarketRates, getBenchmarkMarketFacts, getMutualFundNavFacts, refreshMarketRates,
   sendChatMessage, getChatHistory, clearChatSession, rebalancePortfolio,
   updateRecommendationWeights, optimisePortfolio,
-  computeTax, compareTax, getCurrentMarketContext, previewMarketContextAdjustment, computePostTaxReturn, computePostTaxReturnBatch,
+  computeTax, compareTax, getTaxPolicyMetadata, getCurrentMarketContext, previewMarketContextAdjustment, computePostTaxReturn, computePostTaxReturnBatch,
 };
 
 export default api;

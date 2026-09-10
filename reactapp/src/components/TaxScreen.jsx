@@ -26,6 +26,24 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
   const [serverTaxData, setServerTaxData] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [apiError, setApiError] = useState(null);
+  const [taxPolicyMetadata, setTaxPolicyMetadata] = useState(null);
+
+  useEffect(() => {
+    if (typeof api.getTaxPolicyMetadata !== 'function') return undefined;
+    let cancelled = false;
+    api.getTaxPolicyMetadata()
+      .then(metadata => {
+        if (cancelled) return;
+        setTaxPolicyMetadata(metadata);
+        if (metadata?.currentFiscalYearVerified && metadata.currentFiscalYear) {
+          setFiscalYear(current => current || metadata.currentFiscalYear);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTaxPolicyMetadata(null);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   // ── Debounced API Synchronisation ──
   useEffect(() => {
@@ -337,8 +355,9 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
             aria-label="Fiscal year for tax calculation"
           >
             <option value="">Select fiscal year</option>
-            <option value="FY2026-27">FY2026-27</option>
-            <option value="FY2025-26">FY2025-26</option>
+            {(taxPolicyMetadata?.verifiedFiscalYears || []).map(year => (
+              <option key={year} value={year}>{year}</option>
+            ))}
           </select>
         </div>
 

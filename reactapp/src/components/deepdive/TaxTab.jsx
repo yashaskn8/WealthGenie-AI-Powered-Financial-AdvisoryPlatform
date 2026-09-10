@@ -124,10 +124,28 @@ const InteractiveTaxSimulator = ({ inv, calcAmount, calcYears, userProfile }) =>
   const [result, setResult] = React.useState(null);
   const [error, setError] = React.useState(null);
   const [loading, setLoading] = React.useState(false);
+  const [policyMetadata, setPolicyMetadata] = React.useState(null);
+  const [policyError, setPolicyError] = React.useState(null);
   const nominalReturn = Number(inv?.nominalReturn);
   const userAge = Number(userProfile?.age);
   const isReady = Number(annualIncome) >= 0 && annualIncome !== '' && regime && incomeSource && fiscalYear
     && Number.isFinite(nominalReturn) && Number.isFinite(userAge) && Number.isFinite(calcYears) && Number.isFinite(calcAmount);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    api.getTaxPolicyMetadata()
+      .then(metadata => {
+        if (cancelled) return;
+        setPolicyMetadata(metadata);
+        if (metadata?.currentFiscalYearVerified && metadata.currentFiscalYear) {
+          setFiscalYear(current => current || metadata.currentFiscalYear);
+        }
+      })
+      .catch(requestError => {
+        if (!cancelled) setPolicyError(requestError?.message || 'Verified tax policy metadata is unavailable.');
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   React.useEffect(() => {
     if (!isReady) return undefined;
@@ -178,7 +196,7 @@ const InteractiveTaxSimulator = ({ inv, calcAmount, calcYears, userProfile }) =>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <Zap size={20} color="#a855f7" />
           <h4 style={{ margin: 0, color: '#f8fafc', fontSize: '1rem', fontWeight: 800 }}>
-            Interactive Post-Tax Net Yield Simulator
+            Modelled Investor What-If
           </h4>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -206,7 +224,7 @@ const InteractiveTaxSimulator = ({ inv, calcAmount, calcYears, userProfile }) =>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 10 }}>
         <label style={{ color: '#94a3b8', fontSize: '0.75rem', fontWeight: 600 }}>
-          Annual gross income (₹)
+          Gross annual income before allowed deductions (₹)
           <input type="number" min="0" value={annualIncome} onChange={event => setAnnualIncome(event.target.value)} placeholder="Enter gross income" style={{ width: '100%', marginTop: 6, padding: '9px 10px', borderRadius: 8, color: '#f8fafc', background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)' }} />
         </label>
         <label style={{ color: '#94a3b8', fontSize: '0.75rem', fontWeight: 600 }}>
@@ -224,12 +242,14 @@ const InteractiveTaxSimulator = ({ inv, calcAmount, calcYears, userProfile }) =>
           Fiscal year
           <select value={fiscalYear} onChange={event => setFiscalYear(event.target.value)} style={{ width: '100%', marginTop: 6, padding: '9px 10px', borderRadius: 8, color: '#f8fafc', background: '#111827', border: '1px solid rgba(255,255,255,0.1)' }}>
             <option value="">Select fiscal year</option>
-            <option value="FY2026-27">FY2026-27</option>
-            <option value="FY2025-26">FY2025-26</option>
+            {(policyMetadata?.verifiedFiscalYears || []).map(year => (
+              <option key={year} value={year}>{year}</option>
+            ))}
           </select>
         </label>
       </div>
-      {!isReady && <p style={{ color: '#94a3b8', fontSize: '0.75rem', margin: '10px 0 0' }}>Enter the separate tax facts above to run this server calculation. WealthGenie does not infer them from your Financial Profile.</p>}
+      {!isReady && <p style={{ color: '#94a3b8', fontSize: '0.75rem', margin: '10px 0 0' }}>Enter the separate tax facts above to run this server calculation. It uses the supplied nominal rate as a model assumption and is not an actual transaction tax estimate.</p>}
+      {policyError && <p role="alert" style={{ color: '#fbbf24', fontSize: '0.75rem', margin: '10px 0 0' }}>{policyError}</p>}
       {error && <p role="alert" style={{ color: '#f87171', fontSize: '0.75rem', margin: '10px 0 0' }}>{error}</p>}
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginTop: 16 }}>
@@ -240,7 +260,7 @@ const InteractiveTaxSimulator = ({ inv, calcAmount, calcYears, userProfile }) =>
           </div>
         </div>
         <div style={{ padding: '14px', background: 'rgba(255,255,255,0.03)', borderRadius: '10px', border: '1px solid rgba(239, 68, 68, 0.15)' }}>
-          <span style={{ fontSize: '0.75rem', color: '#f87171', fontWeight: 600 }}>Estimated Tax Liability</span>
+          <span style={{ fontSize: '0.75rem', color: '#f87171', fontWeight: 600 }}>Modelled Tax Drag</span>
           <div style={{ fontSize: '1.25rem', fontWeight: 800, color: '#f87171', marginTop: 4 }}>
             {result ? `- ₹${Number(result.what_if_estimated_tax).toLocaleString('en-IN')} (${(Number(result.taxRate) * 100).toFixed(2)}%)` : loading ? 'Calculating…' : '—'}
           </div>

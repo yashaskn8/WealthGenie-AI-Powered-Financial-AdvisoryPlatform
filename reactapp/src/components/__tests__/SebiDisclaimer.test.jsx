@@ -47,6 +47,11 @@ vi.mock('../../services/api', () => ({
     sources: [],
   })),
   previewMarketContextAdjustment: vi.fn(async () => ({ applied: false, explanations: [] })),
+  getTaxPolicyMetadata: vi.fn(async () => ({
+    currentFiscalYear: 'FY2026-27',
+    currentFiscalYearVerified: true,
+    verifiedFiscalYears: ['FY2025-26', 'FY2026-27'],
+  })),
 }));
 
 describe('SebiDisclaimer Component', () => {

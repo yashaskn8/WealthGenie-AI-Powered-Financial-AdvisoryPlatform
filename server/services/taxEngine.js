@@ -52,6 +52,11 @@ const TAX_SOURCES = Object.freeze({
             title: 'Finance Bill 2025 Memorandum',
             url: 'https://www.indiabudget.gov.in/budget2025-26/doc/memo.pdf',
         }),
+        Object.freeze({
+            authority: 'Income Tax Department',
+            title: 'AY 2025-26 individual tax guidance',
+            url: 'https://www.incometax.gov.in/iec/foportal/help/individual-business-profession',
+        }),
     ]),
     'FY2026-27': Object.freeze([
         Object.freeze({
@@ -65,6 +70,29 @@ const TAX_SOURCES = Object.freeze({
             url: 'https://www.incometax.gov.in/iec/foportal/help/individual/return-applicable-1?fromCampaign=true',
         }),
     ]),
+});
+
+const TAX_POLICY_RULES = Object.freeze({
+    'FY2025-26': Object.freeze({
+        newRegime87ALimit: 700000,
+        newRegime87ARebate: 25000,
+        oldRegime87ALimit: 500000,
+        oldRegime87ARebate: 12500,
+        capitalGains112AExemption: 125000,
+        capitalGains111ARate: 0.20,
+        capitalGains112ARate: 0.125,
+        specialRateSurchargeCap: 0.15,
+    }),
+    'FY2026-27': Object.freeze({
+        newRegime87ALimit: 1200000,
+        newRegime87ARebate: 60000,
+        oldRegime87ALimit: 500000,
+        oldRegime87ARebate: 12500,
+        capitalGains112AExemption: 125000,
+        capitalGains111ARate: 0.20,
+        capitalGains112ARate: 0.125,
+        specialRateSurchargeCap: 0.15,
+    }),
 });
 
 export const TAX_DEDUCTION_LIMITS = Object.freeze({
@@ -96,17 +124,35 @@ export const REGULATORY_RULE_VERSION = TAX_SLABS_BY_FY[CURRENT_FY]?.policyVersio
 
 export function getTaxPolicyMetadata(fiscalYear) {
     const policy = getTaxSlabsForFY(fiscalYear);
+    const rules = TAX_POLICY_RULES[fiscalYear];
     return {
         policyVersion: policy.policyVersion,
         fiscalYear,
         verified: true,
         sourceReferences: policy.sourceReferences.map(source => ({ ...source })),
+        rules: {
+            ...rules,
+            healthAndEducationCessRate: CESS_RATE,
+        },
+    };
+}
+export function getSupportedFiscalYears() {
+    return Object.keys(TAX_SLABS_BY_FY).filter(fiscalYear => TAX_SLABS_BY_FY[fiscalYear].verified === true);
+}
+export function getTaxPolicyCatalog() {
+    return {
+        currentFiscalYear: CURRENT_FY,
+        currentFiscalYearVerified: isFYVerified(CURRENT_FY),
+        verifiedFiscalYears: getSupportedFiscalYears(),
+        policies: getSupportedFiscalYears().map(fiscalYear => getTaxPolicyMetadata(fiscalYear)),
     };
 }
 export function getTaxSlabsForFY(fiscalYear) {
     const slabs = TAX_SLABS_BY_FY[fiscalYear];
     if (!slabs || slabs.verified !== true) {
-        throw new RangeError(`Verified tax slabs are unavailable for ${fiscalYear}`);
+        const error = new RangeError(`Verified tax slabs are unavailable for ${fiscalYear}`);
+        error.code = 'FISCAL_YEAR_UNSUPPORTED';
+        throw error;
     }
     return slabs;
 }
@@ -297,10 +343,17 @@ export function computeTax(annualIncome, regime, deductions = {}, incomeSource, 
     let rebateApplied = false;
     let marginalReliefApplied = false;
     let marginalReliefAmount87A = 0;
-    const rebateLimit = regime === 'new' ? 1200000 : 500000;
+    const policyRules = TAX_POLICY_RULES[fiscalYear];
+    const rebateLimit = regime === 'new'
+        ? policyRules.newRegime87ALimit
+        : policyRules.oldRegime87ALimit;
+    const rebateMaximum = regime === 'new'
+        ? policyRules.newRegime87ARebate
+        : policyRules.oldRegime87ARebate;
     if (taxableIncome <= rebateLimit) {
-        taxBeforeCess = 0;
-        rebateApplied = true;
+        const rebate = Math.min(taxBeforeCess, rebateMaximum);
+        taxBeforeCess = Math.max(0, taxBeforeCess - rebate);
+        rebateApplied = rebate > 0;
     }
     else if (regime === 'new') {
         // Section 87A Proviso (Marginal relief under Section 115BAC):
@@ -357,6 +410,109 @@ export function computeTax(annualIncome, regime, deductions = {}, incomeSource, 
             'HEALTH_AND_EDUCATION_CESS',
         ].filter(Boolean),
         assumptions: [],
+        unavailableReasons: [],
+    };
+}
+
+function getSpecialRateSurchargeRate(totalTaxableIncome) {
+    if (totalTaxableIncome <= 5000000) return 0;
+    if (totalTaxableIncome <= 10000000) return 0.10;
+    return 0.15;
+}
+
+/**
+ * Compute a qualified equity capital-gains bucket without applying ordinary
+ * slab tax or Section 87A to the special-rate gain. This is intentionally
+ * separate from computeTax: product capital gains must never be folded into
+ * ordinary salary/business income by accident.
+ *
+ * For combined taxable income above ₹50 lakh, the current product contract
+ * fails closed because surcharge marginal-relief interaction requires the
+ * taxpayer's complete special-rate return context and cannot be inferred from
+ * a product comparison card.
+ */
+export function computeEquityCapitalGainsTax({
+    grossGain,
+    holdingPeriodMonths,
+    annualIncome,
+    regime,
+    deductions = {},
+    incomeSource,
+    fiscalYear,
+    section112AExemptionUsed = 0,
+}) {
+    if (!Number.isFinite(grossGain) || grossGain < 0) {
+        throw new TypeError('grossGain must be an explicit non-negative finite number');
+    }
+    if (!Number.isFinite(holdingPeriodMonths) || holdingPeriodMonths < 0) {
+        throw new TypeError('holdingPeriodMonths must be an explicit non-negative finite number');
+    }
+    if (!Number.isFinite(section112AExemptionUsed) || section112AExemptionUsed < 0) {
+        throw new TypeError('section112AExemptionUsed must be an explicit non-negative finite number');
+    }
+    validateTaxContext(annualIncome, regime, incomeSource);
+    const policy = getTaxPolicyMetadata(fiscalYear);
+    const policyRules = TAX_POLICY_RULES[fiscalYear];
+    const ordinary = calculateTaxableIncome(annualIncome, regime, deductions, incomeSource);
+    const combinedTaxableIncome = ordinary.taxableIncome + grossGain;
+
+    if (combinedTaxableIncome > 5000000) {
+        return {
+            status: 'UNAVAILABLE',
+            taxClass: holdingPeriodMonths < 12 ? 'EQUITY_STCG_SECTION_111A' : 'EQUITY_LTCG_SECTION_112A',
+            grossGain,
+            taxableGain: null,
+            exemptionApplied: null,
+            taxAmount: null,
+            cess: null,
+            surcharge: null,
+            marginalRelief: null,
+            policyVersion: policy.policyVersion,
+            fiscalYear,
+            sourceReferences: policy.sourceReferences,
+            unavailableReasons: ['SPECIAL_RATE_HIGH_INCOME_REQUIRES_FULL_TAX_CONTEXT'],
+        };
+    }
+
+    const isLongTerm = holdingPeriodMonths >= 12;
+    const taxClass = isLongTerm ? 'EQUITY_LTCG_SECTION_112A' : 'EQUITY_STCG_SECTION_111A';
+    const availableExemption = isLongTerm
+        ? Math.max(0, policyRules.capitalGains112AExemption - section112AExemptionUsed)
+        : 0;
+    const exemptionApplied = Math.min(grossGain, availableExemption);
+    const taxableGain = Math.max(0, grossGain - exemptionApplied);
+    const rate = isLongTerm ? policyRules.capitalGains112ARate : policyRules.capitalGains111ARate;
+    const taxBeforeSurcharge = taxableGain * rate;
+    const surchargeRate = getSpecialRateSurchargeRate(combinedTaxableIncome);
+    const surcharge = taxBeforeSurcharge * Math.min(surchargeRate, policyRules.specialRateSurchargeCap);
+    const taxAfterSurcharge = taxBeforeSurcharge + surcharge;
+    const cess = taxAfterSurcharge * CESS_RATE;
+    const taxAmount = Math.round(taxAfterSurcharge + cess);
+
+    return {
+        status: 'CALCULATED',
+        taxClass,
+        grossGain,
+        taxableGain,
+        exemptionApplied,
+        taxAmount,
+        cess: Math.round(cess),
+        surcharge: Math.round(surcharge),
+        surchargeRate,
+        marginalRelief: 0,
+        rebateApplied: false,
+        rate,
+        holdingPeriodBasis: 'EXPLICIT_HOLDING_PERIOD_MONTHS',
+        fiscalYear,
+        policyVersion: policy.policyVersion,
+        sourceReferences: policy.sourceReferences,
+        rulesApplied: [
+            isLongTerm ? 'SECTION_112A_LTCG_SPECIAL_RATE' : 'SECTION_111A_STCG_SPECIAL_RATE',
+            isLongTerm && exemptionApplied > 0 ? 'SECTION_112A_ANNUAL_EXEMPTION' : null,
+            surcharge > 0 ? 'SPECIAL_RATE_SURCHARGE_CAPPED_AT_15_PERCENT' : null,
+            'SPECIAL_RATE_INCOME_EXCLUDED_FROM_87A_REBATE',
+            'HEALTH_AND_EDUCATION_CESS',
+        ].filter(Boolean),
         unavailableReasons: [],
     };
 }

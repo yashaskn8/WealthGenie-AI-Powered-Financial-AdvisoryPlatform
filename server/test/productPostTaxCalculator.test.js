@@ -8,15 +8,16 @@ import {
 } from '../services/productPostTaxCalculator.js';
 
 test('classifyProductTaxType identifies correct tax categories', () => {
-  assert.equal(classifyProductTaxType({}, 'ppf'), 'EEE_TAX_FREE');
-  assert.equal(classifyProductTaxType({}, 'sukanya'), 'EEE_TAX_FREE');
-  assert.equal(classifyProductTaxType({}, 'rbi_bonds'), 'RBI_FLOATING_RATE_BOND');
-  assert.equal(classifyProductTaxType({}, 'fd'), 'BANK_FIXED_DEPOSIT');
-  assert.equal(classifyProductTaxType({}, 'sbi_fd'), 'BANK_FIXED_DEPOSIT');
-  assert.equal(classifyProductTaxType({}, 'scss'), 'GOVERNMENT_TAXABLE_SAVINGS');
-  assert.equal(classifyProductTaxType({}, 'nsc'), 'GOVERNMENT_TAXABLE_SAVINGS');
-  assert.equal(classifyProductTaxType({}, 'corporate_bond_mf'), 'DEBT_MF_SECTION_50AA');
-  assert.equal(classifyProductTaxType({}, 'large_cap_mf'), 'EQUITY_MF_SECTION_112A');
+  assert.equal(classifyProductTaxType({}, 'ppf'), 'PPF_EEE');
+  assert.equal(classifyProductTaxType({}, 'sukanya'), 'SSY_EEE');
+  assert.equal(classifyProductTaxType({}, 'rbi_bonds'), 'RBI_FRSB_INTEREST');
+  assert.equal(classifyProductTaxType({}, 'fd'), 'BANK_DEPOSIT_INTEREST');
+  assert.equal(classifyProductTaxType({}, 'sbi_fd'), 'BANK_DEPOSIT_INTEREST');
+  assert.equal(classifyProductTaxType({}, 'scss'), 'TAX_CLASSIFICATION_UNAVAILABLE');
+  assert.equal(classifyProductTaxType({}, 'nsc'), 'TAX_CLASSIFICATION_UNAVAILABLE');
+  assert.equal(classifyProductTaxType({}, 'corporate_bond_mf'), 'TAX_CLASSIFICATION_UNAVAILABLE');
+  assert.equal(classifyProductTaxType({}, 'large_cap_mf'), 'TAX_CLASSIFICATION_UNAVAILABLE');
+  assert.equal(classifyProductTaxType({ name: 'Public Provident Fund' }, 'unknown'), 'TAX_CLASSIFICATION_UNAVAILABLE');
 });
 
 test('PPF & SSY EEE tax-exemption yields 0 incremental tax and postTaxRatePct = officialRate', () => {
@@ -37,7 +38,7 @@ test('PPF & SSY EEE tax-exemption yields 0 incremental tax and postTaxRatePct = 
   assert.equal(outcome.postTaxRatePct, 7.1);
   assert.equal(outcome.grossGain, 710);
   assert.equal(outcome.netGain, 710);
-  assert.equal(outcome.taxClassification, 'EEE_TAX_FREE');
+  assert.equal(outcome.taxClassification, 'PPF_EEE');
   assert.equal(outcome.isHistoricalEstimate, false);
 });
 
@@ -56,7 +57,7 @@ test('Taxable product without explicit tax context returns REQUIRES_TAX_INPUTS w
 
   assert.equal(outcome.status, 'REQUIRES_TAX_INPUTS');
   assert.equal(outcome.postTaxRatePct, null);
-  assert.equal(outcome.message, 'Add tax details to calculate your after-tax return');
+  assert.equal(outcome.message, 'Additional tax inputs are required for this product.');
 });
 
 test('Taxable SBI FD calculates incremental tax using versioned taxEngine', () => {
@@ -110,7 +111,7 @@ test('RBI FRSB labels outcome as Current coupon after tax and disclaims 6-month 
   assert.equal(outcome.status, 'CALCULATED');
   assert.equal(outcome.metricLabel, 'Current coupon after tax');
   assert.ok(outcome.disclosure.includes('resets every six months'));
-  assert.ok(outcome.disclosure.includes('Not a guaranteed 7-year return'));
+  assert.ok(outcome.disclosure.includes('not a fixed 7-year return'));
   assert.equal(outcome.isHistoricalEstimate, false);
 });
 
@@ -121,6 +122,12 @@ test('Mutual fund returns are labelled HISTORICAL and NOT A FORECAST', () => {
     productType: 'MUTUAL_FUND',
     parentInstrumentId: 'large_cap_mf',
     historicalReturn: { valuePct: 15.0 },
+    taxMetadata: {
+      sourceQualified: true,
+      taxClass: 'EQUITY_MF_SECTION_112A',
+      sourceReferences: [{ authority: 'AMFI', title: 'Qualified product tax adapter', url: 'https://www.amfiindia.com/' }],
+      rulesApplied: ['SECTION_112A_LTCG_SPECIAL_RATE'],
+    },
   };
   const outcome = calculateProductPostTaxOutcome({
     product: equityMf,
@@ -130,6 +137,8 @@ test('Mutual fund returns are labelled HISTORICAL and NOT A FORECAST', () => {
       regime: 'new',
       fiscalYear: 'FY2025-26',
       incomeSource: 'salary',
+      holdingPeriodMonths: 12,
+      section112AExemptionUsed: 0,
       illustrativePrincipal: 10000,
     },
   });
@@ -169,9 +178,15 @@ test('enrichProductsWithPostTaxAndSuitability enriches product array without mut
     {
       id: 'amfi:101',
       name: 'Test Fund',
-      productType: 'MUTUAL_FUND',
-      parentInstrumentId: 'large_cap_mf',
-      historicalReturn: { valuePct: 18.25 },
+    productType: 'MUTUAL_FUND',
+    parentInstrumentId: 'large_cap_mf',
+    historicalReturn: { valuePct: 18.25 },
+    taxMetadata: {
+      sourceQualified: true,
+      taxClass: 'EQUITY_MF_SECTION_112A',
+      sourceReferences: [{ authority: 'AMFI', title: 'Qualified product tax adapter', url: 'https://www.amfiindia.com/' }],
+      rulesApplied: ['SECTION_112A_LTCG_SPECIAL_RATE'],
+    },
       postTaxReturn: null,
     },
   ];
@@ -182,6 +197,9 @@ test('enrichProductsWithPostTaxAndSuitability enriches product array without mut
       annualGrossIncome: 1200000,
       regime: 'new',
       fiscalYear: 'FY2025-26',
+      incomeSource: 'salary',
+      holdingPeriodMonths: 12,
+      section112AExemptionUsed: 0,
     },
   });
 
@@ -189,6 +207,6 @@ test('enrichProductsWithPostTaxAndSuitability enriches product array without mut
   assert.equal(enriched[0].historicalReturn.valuePct, 18.25); // Invariant: historicalReturn is untouched
   assert.ok(enriched[0].beginnerSuitability);
   assert.ok(enriched[0].postTaxAnalysis);
-  assert.ok(enriched[0].postTaxReturn > 0);
-  assert.ok(enriched[0].postTaxReturn <= 18.25);
+  assert.equal(enriched[0].postTaxReturn, null);
+  assert.equal(enriched[0].postTaxAnalysis.calculationClass, 'HISTORICAL_RETURN_POST_TAX_ILLUSTRATION');
 });

@@ -12,6 +12,11 @@ vi.mock('../../services/api', () => ({
   getCurrentMarketContext: vi.fn(),
   rankInvestmentCandidates: vi.fn(),
   previewMarketContextAdjustment: vi.fn(),
+  getTaxPolicyMetadata: vi.fn(async () => ({
+    currentFiscalYear: 'FY2026-27',
+    currentFiscalYearVerified: true,
+    verifiedFiscalYears: ['FY2025-26', 'FY2026-27'],
+  })),
 }));
 
 describe('Beginner-First Where-To-Invest UX', () => {
@@ -386,10 +391,10 @@ describe('Beginner-First Where-To-Invest UX', () => {
     expect(taxBtns.length).toBeGreaterThanOrEqual(1);
     fireEvent.click(taxBtns[0]);
 
-    expect(screen.getByLabelText(/Annual Gross Income/i)).toBeTruthy();
-    expect(screen.getByLabelText(/Annual Gross Income/i).value).toBe('');
-    expect(screen.getByLabelText(/Tax Regime/i)).toBeTruthy();
-    expect(screen.getByLabelText(/Fiscal Year/i)).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Apply & Calculate/i })).toBeTruthy();
+    expect(screen.queryByLabelText(/Annual Gross Income/i)).toBeNull();
+    expect(screen.getByText(/No tax inputs are required/i)).toBeTruthy();
+    expect(screen.queryByLabelText(/Tax Regime/i)).toBeNull();
+    expect(screen.queryByLabelText(/Fiscal Year/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Apply & Calculate/i })).toBeNull();
   });
 });
