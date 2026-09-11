@@ -148,7 +148,7 @@ test('Mutual fund returns are labelled HISTORICAL and NOT A FORECAST', () => {
       fiscalYear: 'FY2025-26',
       incomeSource: 'salary',
       userAge: 30,
-      holdingPeriodMonths: 12,
+      holdingPeriodMonths: 13,
       section112AExemptionUsed: 0,
       illustrativePrincipal: 10000,
     },
@@ -161,6 +161,37 @@ test('Mutual fund returns are labelled HISTORICAL and NOT A FORECAST', () => {
   assert.ok(outcome.postTaxRatePct <= 15.0);
   assert.ok(outcome.sourceReferences.some(source => source.role === 'TAX_POLICY'));
   assert.ok(outcome.sourceReferences.some(source => source.authority === 'AMFI' && source.role === 'PRODUCT_RULE'));
+});
+
+test('exact-date WTI tax classification keeps the anniversary short-term without fake month conversion', () => {
+  const outcome = calculateProductPostTaxOutcome({
+    product: {
+      name: 'Qualified equity fund',
+      parentInstrumentId: 'large_cap_mf',
+      historicalReturn: { valuePct: 15 },
+      taxMetadata: {
+        sourceQualified: true,
+        taxClass: 'EQUITY_MF_SECTION_112A',
+        sourceReferences: [{ authority: 'AMFI', title: 'Qualified product tax adapter', url: 'https://www.amfiindia.com/' }],
+      },
+    },
+    taxCalculationContext: {
+      annualGrossIncome: 1500000,
+      regime: 'new',
+      fiscalYear: 'FY2026-27',
+      incomeSource: 'salary',
+      userAge: 35,
+      acquisitionDate: '2024-04-01',
+      redemptionDate: '2025-04-01',
+      section112AExemptionUsed: 125000,
+      illustrativePrincipal: 10000,
+    },
+  });
+
+  assert.equal(outcome.status, 'CALCULATED');
+  assert.equal(outcome.holdingPeriodBasis, 'EXACT_TRANSACTION_DATES');
+  assert.ok(outcome.rulesApplied.includes('SECTION_111A_STCG_SPECIAL_RATE'));
+  assert.ok(!outcome.rulesApplied.includes('SECTION_112A_LTCG_SPECIAL_RATE'));
 });
 
 test('generateBeginnerSuitability produces deterministic plain-English reasons, risk tiers, and liquidity copy', () => {

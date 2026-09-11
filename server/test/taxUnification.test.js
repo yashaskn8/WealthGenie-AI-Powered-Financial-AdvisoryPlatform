@@ -26,7 +26,7 @@ test('holding-period classification uses exact calendar dates at the boundary', 
     acquisitionDate: '2024-04-01', redemptionDate: '2025-04-02', thresholdMonths: 12,
   });
   assert.equal(before.isLongTerm, false);
-  assert.equal(exact.isLongTerm, true);
+  assert.equal(exact.isLongTerm, false);
   assert.equal(after.isLongTerm, true);
   assert.equal(exact.holdingPeriodBasis, 'EXACT_TRANSACTION_DATES');
 });
@@ -51,7 +51,7 @@ test('SIP lots retain FIFO acquisition order and produce mixed short/long bucket
   assert.equal(lots[0].lotNumber, 1);
   assert.equal(lots.at(-1).lotNumber, 24);
   assert.ok(lots.some(lot => lot.holdingPeriodMonths < 12));
-  assert.ok(lots.some(lot => lot.holdingPeriodMonths >= 12));
+  assert.ok(lots.some(lot => lot.holdingPeriodMonths > 12));
   const outcome = calculateCanonicalPostTaxOutcome({
     instrumentType: 'Equity_MF', nominalRate: 0.12, annualIncome: 1_500_000,
     holdingYears: 2, regime: 'new', monthlySIP: 10_000, userAge: 35,
@@ -61,6 +61,25 @@ test('SIP lots retain FIFO acquisition order and produce mixed short/long bucket
   assert.ok(outcome.shortTermGain > 0);
   assert.ok(outcome.longTermGain > 0);
   assert.ok(outcome.lots.every(lot => lot.cost === 10_000));
+});
+
+test('exact-date SIP horizon owns the lot window and never creates a post-redemption lot', () => {
+  const lots = buildMonthlySipLots({
+    monthlySIP: 10_000,
+    annualRate: 0.12,
+    holdingYears: 5,
+    acquisitionDate: '2024-01-31',
+    redemptionDate: '2025-02-28',
+  });
+  assert.equal(lots.length, 13);
+  assert.ok(lots.every(lot => lot.acquisitionDate <= lot.redemptionDate));
+  assert.equal(lots.at(-1).acquisitionDate, '2025-01-31');
+});
+
+test('Gold ETF remains unavailable without source-qualified product composition metadata', () => {
+  const result = calculatePostTaxReturn('Gold_ETF', 0.1, 1_500_000, 5, 'new', 10_000, 35, 'salary', undefined, FY);
+  assert.equal(result.status, 'MODEL_TAX_CLASS_UNAVAILABLE');
+  assert.equal(result.postTaxReturn, null);
 });
 
 test('ordinary-interest projection applies annual tax events after gross cash flows', () => {

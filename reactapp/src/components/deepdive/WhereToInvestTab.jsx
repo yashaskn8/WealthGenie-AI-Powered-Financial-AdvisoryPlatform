@@ -27,6 +27,7 @@ import {
   getMarketEvidenceSource,
   nullableMarketNumber,
 } from '../../utils/marketDataDisplay';
+import { toOptionalNumber } from '../../utils/financialValues';
 import { useMarketContext } from '../../state/useMarketContext';
 
 const RISK_LEVELS = [
@@ -195,9 +196,14 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const [taxFiscalYear, setTaxFiscalYear] = useState('');
   const [taxUserAge, setTaxUserAge] = useState(userProfile?.age ?? '');
   const [holdingPeriodMonths, setHoldingPeriodMonths] = useState('');
+  const [useExactTransactionDates, setUseExactTransactionDates] = useState(false);
+  const [acquisitionDate, setAcquisitionDate] = useState('');
+  const [redemptionDate, setRedemptionDate] = useState('');
   const [section112AExemptionUsed, setSection112AExemptionUsed] = useState('');
-  const [taxSection80C, setTaxSection80C] = useState('0');
-  const [taxNps80CCD1B, setTaxNps80CCD1B] = useState('0');
+  const [taxSection80C, setTaxSection80C] = useState('');
+  const [taxNps80CCD1B, setTaxNps80CCD1B] = useState('');
+  const [taxAdvancedDeductions, setTaxAdvancedDeductions] = useState({});
+  const [taxFormError, setTaxFormError] = useState('');
   const [taxPolicyMetadata, setTaxPolicyMetadata] = useState(null);
   const [taxPolicyError, setTaxPolicyError] = useState(null);
   const [activeTaxContext, setActiveTaxContext] = useState(null);
@@ -335,10 +341,38 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
 
   const handleApplyTaxInputs = (e) => {
     e.preventDefault();
+    setTaxFormError('');
     const incomeNum = Number(taxAnnualIncome);
     const ageNum = Number(taxUserAge);
     if (!Number.isFinite(incomeNum) || incomeNum < 0 || !Number.isInteger(ageNum) || ageNum < 18 || ageNum > 120
-      || !taxIncomeSource || !taxRegime || !taxFiscalYear) return;
+      || !taxIncomeSource || !taxRegime || !taxFiscalYear) {
+      setTaxFormError('Enter the required income, age, regime, income source, and fiscal year facts.');
+      return;
+    }
+    if (useExactTransactionDates && (!acquisitionDate || !redemptionDate || redemptionDate < acquisitionDate)) {
+      setTaxFormError('Enter both exact transaction dates, with redemption on or after acquisition.');
+      return;
+    }
+    if (!useExactTransactionDates && requiredTaxInputs.includes('holdingPeriodMonths') && holdingPeriodMonths === '') {
+      setTaxFormError('Enter a holding period in months, or switch on exact transaction dates.');
+      return;
+    }
+    const deductions = Object.fromEntries(Object.entries({
+      section80C: toOptionalNumber(taxSection80C),
+      nps80CCD1B: toOptionalNumber(taxNps80CCD1B),
+      nps80CCD2: toOptionalNumber(taxAdvancedDeductions.nps80CCD2),
+      basicSalary: toOptionalNumber(taxAdvancedDeductions.basicSalary),
+      isGovtEmployee: taxAdvancedDeductions.isGovtEmployee === undefined || taxAdvancedDeductions.isGovtEmployee === ''
+        ? undefined : taxAdvancedDeductions.isGovtEmployee === 'true',
+      section80D_self: toOptionalNumber(taxAdvancedDeductions.section80D_self),
+      section80D_parents: toOptionalNumber(taxAdvancedDeductions.section80D_parents),
+      parents_senior: taxAdvancedDeductions.parents_senior === undefined || taxAdvancedDeductions.parents_senior === ''
+        ? undefined : taxAdvancedDeductions.parents_senior === 'true',
+      hra: toOptionalNumber(taxAdvancedDeductions.hra),
+      homeLoanInterest: toOptionalNumber(taxAdvancedDeductions.homeLoanInterest),
+      section80TTA: toOptionalNumber(taxAdvancedDeductions.section80TTA),
+      section80TTB: toOptionalNumber(taxAdvancedDeductions.section80TTB),
+    }).filter(([, value]) => value !== undefined));
     const nextContext = {
       annualGrossIncome: incomeNum,
       regime: taxRegime,
@@ -346,12 +380,14 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
       incomeSource: taxIncomeSource,
       userAge: ageNum,
       illustrativePrincipal,
-      deductions: {
-        section80C: Number(taxSection80C),
-        nps80CCD1B: Number(taxNps80CCD1B),
-      },
+      deductions,
     };
-    if (holdingPeriodMonths !== '') nextContext.holdingPeriodMonths = Number(holdingPeriodMonths);
+    if (useExactTransactionDates) {
+      nextContext.acquisitionDate = acquisitionDate;
+      nextContext.redemptionDate = redemptionDate;
+    } else if (holdingPeriodMonths !== '') {
+      nextContext.holdingPeriodMonths = Number(holdingPeriodMonths);
+    }
     if (section112AExemptionUsed !== '') nextContext.section112AExemptionUsed = Number(section112AExemptionUsed);
     setActiveTaxContext(nextContext);
   };
@@ -799,6 +835,46 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
           )}
 
           {requiredTaxInputs.includes('holdingPeriodMonths') && (
+            <>
+            <div className="wti-tax-input-group">
+              <label htmlFor="wti-exact-dates">
+                <input
+                  id="wti-exact-dates"
+                  type="checkbox"
+                  checked={useExactTransactionDates}
+                  onChange={(e) => setUseExactTransactionDates(e.target.checked)}
+                />{' '}
+                Use exact transaction dates
+              </label>
+              <small>Use this when the tax result depends on the actual acquisition and redemption dates.</small>
+            </div>
+            {useExactTransactionDates ? (
+              <>
+                <div className="wti-tax-input-group">
+                  <label htmlFor="wti-acquisition-date">Acquisition date</label>
+                  <input
+                    id="wti-acquisition-date"
+                    type="date"
+                    className="wti-tax-input"
+                    value={acquisitionDate}
+                    onChange={(e) => setAcquisitionDate(e.target.value)}
+                    required
+                  />
+                </div>
+                <div className="wti-tax-input-group">
+                  <label htmlFor="wti-redemption-date">Redemption date</label>
+                  <input
+                    id="wti-redemption-date"
+                    type="date"
+                    className="wti-tax-input"
+                    value={redemptionDate}
+                    min={acquisitionDate || undefined}
+                    onChange={(e) => setRedemptionDate(e.target.value)}
+                    required
+                  />
+                </div>
+              </>
+            ) : (
             <div className="wti-tax-input-group">
               <label htmlFor="wti-holding-period">Your holding period (months)</label>
               <input
@@ -813,6 +889,8 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
                 required
               />
             </div>
+            )}
+            </>
           )}
 
           {requiredTaxInputs.includes('section112AExemptionUsed') && (
@@ -861,7 +939,63 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
             />
           </div>
 
+          <details className="wti-tax-input-group">
+            <summary style={{ cursor: 'pointer' }}>Advanced deductions (optional)</summary>
+            <small>Leave blank when not claimed. Supporting facts are required for dependency-sensitive deductions.</small>
+            {[
+              ['nps80CCD2', 'NPS 80CCD(2) (₹)', '100000000'],
+              ['basicSalary', 'Basic salary for 80CCD(2) (₹)', '1000000000'],
+              ['section80D_self', '80D self / family (₹)', '50000'],
+              ['section80D_parents', '80D parents (₹)', '50000'],
+              ['hra', 'HRA deduction (₹)', '100000000'],
+              ['homeLoanInterest', 'Home-loan interest (₹)', '200000'],
+              ['section80TTA', '80TTA interest (₹)', '10000'],
+              ['section80TTB', '80TTB interest (₹)', '50000'],
+            ].map(([key, label, max]) => (
+              <label key={key} htmlFor={`wti-${key}`}>
+                {label}
+                <input
+                  id={`wti-${key}`}
+                  type="number"
+                  min="0"
+                  max={max}
+                  className="wti-tax-input"
+                  value={taxAdvancedDeductions[key] || ''}
+                  onChange={(e) => setTaxAdvancedDeductions(current => ({ ...current, [key]: e.target.value }))}
+                  placeholder="Leave blank…"
+                />
+              </label>
+            ))}
+            <label htmlFor="wti-govt-employee">
+              Government employee for 80CCD(2)?
+              <select
+                id="wti-govt-employee"
+                className="wti-tax-input"
+                value={taxAdvancedDeductions.isGovtEmployee || ''}
+                onChange={(e) => setTaxAdvancedDeductions(current => ({ ...current, isGovtEmployee: e.target.value }))}
+              >
+                <option value="">Not supplied</option>
+                <option value="true">Yes</option>
+                <option value="false">No</option>
+              </select>
+            </label>
+            <label htmlFor="wti-parents-senior">
+              Parents senior citizen for 80D?
+              <select
+                id="wti-parents-senior"
+                className="wti-tax-input"
+                value={taxAdvancedDeductions.parents_senior || ''}
+                onChange={(e) => setTaxAdvancedDeductions(current => ({ ...current, parents_senior: e.target.value }))}
+              >
+                <option value="">Not supplied</option>
+                <option value="true">Yes</option>
+                <option value="false">No</option>
+              </select>
+            </label>
+          </details>
+
           {taxPolicyError && <p role="alert" className="wti-preview-error">{taxPolicyError}</p>}
+          {taxFormError && <p role="alert" className="wti-preview-error">{taxFormError}</p>}
 
           {requiredTaxInputs.length > 0
             ? <button type="submit" className="wti-apply-tax-btn">Apply & Calculate</button>

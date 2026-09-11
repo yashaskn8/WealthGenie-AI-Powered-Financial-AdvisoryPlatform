@@ -3,6 +3,7 @@ import { sendError } from '../middleware/errorHandler.js';
 import {
   FISCAL_YEAR_PATTERN,
   incomeSourceValues,
+  requirePostTaxDependencyFacts,
   requireTaxDependencyFacts,
   taxDeductionFields,
   taxDeductionSchema,
@@ -61,6 +62,14 @@ function validatePostTaxTransactionDates(value, helpers) {
   if (hasAcquisition && value.redemptionDate < value.acquisitionDate) {
     return helpers.message({ custom: 'redemptionDate cannot precede acquisitionDate' });
   }
+  for (const [key, dateValue] of [['acquisitionDate', value.acquisitionDate], ['redemptionDate', value.redemptionDate]]) {
+    if (dateValue === undefined) continue;
+    const [year, month, day] = dateValue.split('-').map(Number);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 || parsed.getUTCDate() !== day) {
+      return helpers.message({ custom: `${key} must be a real calendar date` });
+    }
+  }
   return value;
 }
 
@@ -89,7 +98,7 @@ export const postTaxReturnSchema = postTaxInstrumentSchema.keys({
   annuityFraction: Joi.number().min(0).max(1).optional(),
   retirementTiming: Joi.string().trim().min(2).max(100).optional(),
   section112AExemptionUsed: Joi.number().min(0).max(125000).optional(),
-}).custom(validatePostTaxTransactionDates).unknown(false);
+}).custom(validatePostTaxTransactionDates).custom(requirePostTaxDependencyFacts).unknown(false);
 
 export const postTaxReturnBatchSchema = Joi.object({
   instruments: Joi.array().items(postTaxInstrumentSchema).min(1).max(50).required(),
@@ -101,7 +110,7 @@ export const postTaxReturnBatchSchema = Joi.object({
   fiscalYear: Joi.string().pattern(FISCAL_YEAR_PATTERN).required(),
   deductions: taxDeductionSchema.optional(),
   section112AExemptionUsed: Joi.number().min(0).max(125000).optional(),
-}).unknown(false);
+}).custom(requirePostTaxDependencyFacts).unknown(false);
 
 export const marketContextQuerySchema = Joi.object({}).unknown(false);
 

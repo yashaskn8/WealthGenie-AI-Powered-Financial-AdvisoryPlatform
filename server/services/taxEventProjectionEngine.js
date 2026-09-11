@@ -43,7 +43,6 @@ const SERVER_MODEL_TAX_CLASS_BY_INSTRUMENT = Object.freeze({
   Equity_MF: MODEL_TAX_CLASSES.EQUITY_112A,
   Gold: MODEL_TAX_CLASSES.OTHER_CAPITAL_GAINS,
   Gold_Physical: MODEL_TAX_CLASSES.OTHER_CAPITAL_GAINS,
-  Gold_ETF: MODEL_TAX_CLASSES.OTHER_CAPITAL_GAINS,
   SGB: MODEL_TAX_CLASSES.SGB,
   NPS: MODEL_TAX_CLASSES.NPS_EXIT,
 });
@@ -53,7 +52,7 @@ const SERVER_MODEL_TAX_CLASS_BY_INSTRUMENT = Object.freeze({
 // to equity or Section 50AA merely because of a familiar product name.
 const AMBIGUOUS_MODEL_INSTRUMENT_TYPES = new Set([
   'ETF', 'Debt_MF', 'Liquid_MF', 'Arbitrage_MF', 'Index_MF', 'Midcap_MF',
-  'Smallcap_MF', 'Balanced_Advantage', 'Hybrid_MF',
+  'Smallcap_MF', 'Balanced_Advantage', 'Hybrid_MF', 'Gold_ETF',
 ]);
 
 export function resolveServerModelTaxClass(instrumentType) {
@@ -107,6 +106,7 @@ function taxContext(context = {}) {
     userAge: Number.isInteger(userAge) ? userAge : undefined,
     deductions,
     section112AExemptionUsed: Number(context.section112AExemptionUsed || 0),
+    section112AExemptionAppliedOverride: context.section112AExemptionAppliedOverride ?? null,
   };
 }
 
@@ -154,10 +154,10 @@ function holdingClassification({ context, options, fiscalYear, assetType = 'othe
     return { unavailable: 'EXPLICIT_HOLDING_PERIOD_REQUIRED' };
   }
   return {
-    isLongTerm: holdingPeriodMonths >= thresholdMonths,
+    isLongTerm: holdingPeriodMonths > thresholdMonths,
     holdingPeriodMonths,
     thresholdMonths,
-    holdingPeriodBasis: 'EXPLICIT_HOLDING_PERIOD_MONTHS',
+    holdingPeriodBasis: 'MODELLED_HOLDING_PERIOD',
   };
 }
 
@@ -165,7 +165,6 @@ export function buildMonthlySipLots({ monthlySIP, annualRate, holdingYears, acqu
   requireNumber(monthlySIP, 'monthlySIP');
   requireNumber(annualRate, 'annualRate', { min: 0, max: 1 });
   requireNumber(holdingYears, 'holdingYears', { min: 0.01, max: 100 });
-  const totalMonths = Math.max(1, Math.round(holdingYears * 12));
   const monthlyRate = toMonthlyRate(annualRate);
   const acquired = acquisitionDate ? parseDate(acquisitionDate, 'acquisitionDate') : null;
   const redeemed = redemptionDate ? parseDate(redemptionDate, 'redemptionDate') : null;
@@ -173,9 +172,22 @@ export function buildMonthlySipLots({ monthlySIP, annualRate, holdingYears, acqu
     throw new TypeError('acquisitionDate and redemptionDate must be supplied together');
   }
   if (acquired && redeemed < acquired) throw new RangeError('redemptionDate cannot precede acquisitionDate');
+  let totalMonths = Math.max(1, Math.round(holdingYears * 12));
+  if (acquired) {
+    // Exact transaction dates own the modeled SIP horizon. Count completed
+    // calendar anniversaries, so no generated lot can be acquired after exit.
+    totalMonths = 0;
+    while (totalMonths < 1200 && addMonths(acquired, totalMonths + 1) <= redeemed) {
+      totalMonths += 1;
+    }
+    totalMonths = Math.max(1, totalMonths);
+  }
 
   return Array.from({ length: totalMonths }, (_, index) => {
     const lotAcquisitionDate = acquired ? addMonths(acquired, index) : null;
+    if (lotAcquisitionDate && lotAcquisitionDate > redeemed) {
+      throw new RangeError('modeled SIP lot acquisition cannot occur after redemption');
+    }
     const monthsHeld = totalMonths - index;
     const cost = monthlySIP;
     const value = cost * Math.pow(1 + monthlyRate, monthsHeld);
@@ -285,7 +297,7 @@ export function calculateCanonicalPostTaxOutcome({ instrumentType, nominalRate, 
   if (!Number.isInteger(userAge) || userAge < 18 || userAge > 120) throw new TypeError('userAge must be an integer from 18 to 120');
   if (!['salary', 'pension', 'family_pension', 'business', 'other'].includes(incomeSource)) throw new TypeError('incomeSource must be explicitly provided');
   const policy = getTaxPolicyMetadata(fiscalYear);
-  const context = { annualGrossIncome: annualIncome, regime, incomeSource, fiscalYear, userAge, deductions, holdingPeriodMonths: options.holdingPeriodMonths, acquisitionDate: options.acquisitionDate, redemptionDate: options.redemptionDate, section112AExemptionUsed: options.section112AExemptionUsed };
+  const context = { annualGrossIncome: annualIncome, regime, incomeSource, fiscalYear, userAge, deductions, holdingPeriodMonths: options.holdingPeriodMonths, acquisitionDate: options.acquisitionDate, redemptionDate: options.redemptionDate, section112AExemptionUsed: options.section112AExemptionUsed, section112AExemptionAppliedOverride: options.section112AExemptionAppliedOverride };
   const taxInputs = taxContext(context);
   const missing = missingContext(context, modelTaxClass, { ...options, holdingYears });
   if (missing.length > 0) {
@@ -397,7 +409,7 @@ export function calculateCanonicalPostTaxOutcome({ instrumentType, nominalRate, 
     taxType: modelTaxClass === MODEL_TAX_CLASSES.EQUITY_112A ? 'FIFO capital-gain buckets (111A / 112A)' : 'FIFO capital-gain buckets (Section 112 / slab short-term path)',
     holdingPeriodBasis: holding.holdingPeriodBasis,
     assumptions: ['MODELLED_MONTHLY_FIFO_LOTS', 'SPECIAL_RATE_BUCKETS_SEPARATE_FROM_ORDINARY_INCOME'],
-    details: { shortTermGain, longTermGain, fiscalYear: policy.fiscalYear, policyVersion: policy.policyVersion, lots },
+    details: { shortTermGain, longTermGain, exemptionApplied: capitalTax.exemptionApplied, fiscalYear: policy.fiscalYear, policyVersion: policy.policyVersion, lots },
     notes: 'This is a modeled SIP lot illustration. An actual transaction tax requires the taxpayer’s complete transaction ledger and filing context.',
   });
 }
@@ -431,17 +443,34 @@ export function projectPostTaxCashFlows({ postTaxResult, instrument, context = {
   requireNumber(instrument.nominalRate, 'nominalRate', { min: 0, max: 1 });
   requireNumber(instrument.holdingYears, 'holdingYears', { min: 0.01, max: 100 });
   requireNumber(inflationRate, 'inflationRate', { min: 0, max: 1 });
+  const exactAcquisitionDate = context.acquisitionDate ?? instrument.acquisitionDate;
+  const exactRedemptionDate = context.redemptionDate ?? instrument.redemptionDate;
+  const exactDatesSupplied = Boolean(exactAcquisitionDate || exactRedemptionDate);
+  let exactDateError = null;
+  let projectionHoldingYears = instrument.holdingYears;
+  if (exactDatesSupplied) {
+    if (!exactAcquisitionDate || !exactRedemptionDate) {
+      exactDateError = 'ACQUISITION_AND_REDEMPTION_DATES_REQUIRED_TOGETHER';
+    } else {
+      const acquired = parseDate(exactAcquisitionDate, 'acquisitionDate');
+      const redeemed = parseDate(exactRedemptionDate, 'redemptionDate');
+      if (redeemed < acquired) throw new RangeError('redemptionDate cannot precede acquisitionDate');
+      let horizonMonths = 0;
+      while (horizonMonths < 1200 && addMonths(acquired, horizonMonths + 1) <= redeemed) horizonMonths += 1;
+      projectionHoldingYears = Math.max(1, horizonMonths) / 12;
+    }
+  }
   const gross = projectGrossCashFlows({
     monthlySIP: instrument.monthlySIP,
     annualRate: instrument.nominalRate,
-    holdingYears: instrument.holdingYears,
+    holdingYears: projectionHoldingYears,
   });
   let postTaxFutureValue = null;
   let taxEvents = [];
   let taxTotal = null;
   let taxEventModel = null;
   const modelTaxClass = postTaxResult.modelTaxClass;
-  if (postTaxResult.status !== MODEL_POST_TAX_STATUSES.CALCULATED) {
+  if (postTaxResult.status !== MODEL_POST_TAX_STATUSES.CALCULATED || exactDateError) {
     return {
       status: MODEL_POST_TAX_STATUSES.PROJECTION_MODEL_UNAVAILABLE,
       totalInvested: Math.round(gross.totalInvested),
@@ -459,6 +488,10 @@ export function projectPostTaxCashFlows({ postTaxResult, instrument, context = {
       taxEvents,
       taxEventModel: 'UNAVAILABLE',
       assumptions: ['MODELLED_POST_TAX_PROJECTION_UNAVAILABLE'],
+      unavailableReasons: [
+        ...(postTaxResult.unavailableReasons || []),
+        ...(exactDateError ? [exactDateError] : []),
+      ],
     };
   }
 
@@ -489,7 +522,7 @@ export function projectPostTaxCashFlows({ postTaxResult, instrument, context = {
     const shortTermGain = lots.filter(lot => {
       const isLongTerm = lot.holdingPeriodBasis === 'EXACT_TRANSACTION_DATES'
         ? classifyHoldingPeriodByDates({ acquisitionDate: lot.acquisitionDate, redemptionDate: lot.redemptionDate, thresholdMonths: threshold }).isLongTerm
-        : lot.holdingPeriodMonths >= threshold;
+        : lot.holdingPeriodMonths > threshold;
       return !isLongTerm;
     }).reduce((sum, lot) => sum + lot.gain, 0);
     const longTermGain = lots.reduce((sum, lot) => sum + lot.gain, 0) - shortTermGain;
@@ -529,11 +562,11 @@ export function projectPostTaxCashFlows({ postTaxResult, instrument, context = {
     return { ...projectPostTaxCashFlows({ postTaxResult: { ...postTaxResult, status: 'UNAVAILABLE' }, instrument, context, inflationRate }), status: MODEL_POST_TAX_STATUSES.PROJECTION_MODEL_UNAVAILABLE, taxEvents: [] };
   }
 
-  const nominalCagr = calculateCagr(gross.balance, gross.totalInvested, instrument.holdingYears);
-  const postTaxCagr = calculateCagr(postTaxFutureValue, gross.totalInvested, instrument.holdingYears);
+  const nominalCagr = calculateCagr(gross.balance, gross.totalInvested, projectionHoldingYears);
+  const postTaxCagr = calculateCagr(postTaxFutureValue, gross.totalInvested, projectionHoldingYears);
   const realFutureValue = postTaxFutureValue === null
     ? null
-    : postTaxFutureValue / Math.pow(1 + inflationRate, instrument.holdingYears);
+    : postTaxFutureValue / Math.pow(1 + inflationRate, projectionHoldingYears);
   const postTaxGain = postTaxFutureValue === null ? null : Math.max(0, postTaxFutureValue - gross.totalInvested);
   return {
     status: 'CALCULATED',
@@ -554,6 +587,10 @@ export function projectPostTaxCashFlows({ postTaxResult, instrument, context = {
     nominalCAGR: nominalCagr,
     taxEvents,
     taxEventModel,
-    assumptions: ['GROSS_CASH_FLOWS_FIRST_THEN_TAX_EVENTS_THEN_POST_TAX_FLOWS', 'TAX_POLICY_HELD_CONSTANT_FOR_PROJECTION'],
+    assumptions: [
+      'GROSS_CASH_FLOWS_FIRST_THEN_TAX_EVENTS_THEN_POST_TAX_FLOWS',
+      'TAX_POLICY_HELD_CONSTANT_FOR_PROJECTION',
+      ...(exactDatesSupplied ? ['EXACT_TRANSACTION_DATES_OWN_PROJECTION_HORIZON'] : ['MODELLED_MONTHLY_LOTS']),
+    ],
   };
 }

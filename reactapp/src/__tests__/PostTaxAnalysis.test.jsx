@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import PostTaxAnalysis from '../PostTaxAnalysis';
 import * as apiModule from '../services/api';
@@ -15,11 +15,12 @@ vi.mock('../services/api', () => ({
 }));
 
 describe('PostTaxAnalysis separate tax what-if', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => { cleanup(); vi.clearAllMocks(); });
 
   it('does not infer gross income and submits every explicit tax input', async () => {
     apiModule.computePostTaxReturnBatch.mockResolvedValue({
       calculation_classification: 'SEPARATE_TAX_WHAT_IF',
+      portfolioStatus: 'COMPLETE',
       assumptions: { inflationRate: 0.06 },
       results: [{
         status: 'CALCULATED',
@@ -60,9 +61,39 @@ describe('PostTaxAnalysis separate tax what-if', () => {
     await waitFor(() => expect(apiModule.computePostTaxReturnBatch).toHaveBeenCalledWith(
       [{ instrumentType: 'FD', nominalRate: 0.07, holdingYears: 3, monthlySIP: 10000 }],
       1000000, 'new', 30, 'salary', 0.06, 'FY2026-27',
-      { body: { deductions: { section80C: 0, nps80CCD1B: 0 }, section112AExemptionUsed: 0 } },
+      { body: { deductions: {} } },
     ));
     expect((await screen.findAllByText('7.0%')).length).toBeGreaterThan(0);
     expect(screen.getByText(/MODELLED_POST_TAX_PROJECTION/i)).toBeInTheDocument();
+  });
+
+  it('keeps an unavailable portfolio summary unavailable in the UI', async () => {
+    apiModule.computePostTaxReturnBatch.mockResolvedValue({
+      portfolioStatus: 'UNAVAILABLE',
+      assumptions: { inflationRate: 0.06 },
+      results: [{ status: 'MODEL_TAX_CLASS_UNAVAILABLE' }],
+      summary: {
+        status: 'UNAVAILABLE',
+        totalTaxDrag: null,
+        keptPerThousand: null,
+        erodedPerThousand: null,
+        retentionEfficiencyPercent: null,
+        maxTaxRate: null,
+      },
+      insights: [{ title: 'Post-Tax Projection Unavailable', body: 'Unavailable.', icon: 'shield', color: 'amber' }],
+    });
+    render(<PostTaxAnalysis
+      profile={{ age: 30, investment_horizon_years: 3 }}
+      recommendations={[{ id: 'etf', name: 'Generic ETF', type: 'ETF', nominalReturn: 12, monthly_allocation: 10000 }]}
+    />);
+    await waitFor(() => expect(screen.getByLabelText(/Fiscal year/i).value).toBe('FY2026-27'));
+    fireEvent.change(screen.getByLabelText(/Gross annual income before allowed deductions/i), { target: { value: '1000000' } });
+    fireEvent.change(screen.getByLabelText(/Income source/i), { target: { value: 'salary' } });
+    fireEvent.change(screen.getByLabelText(/Tax regime/i), { target: { value: 'new' } });
+    fireEvent.change(screen.getByLabelText(/Fiscal year/i), { target: { value: 'FY2026-27' } });
+    fireEvent.change(screen.getByLabelText(/Inflation assumption/i), { target: { value: '6' } });
+    fireEvent.click(screen.getByRole('button', { name: /calculate explicit tax what-if/i }));
+    expect(await screen.findByText(/Profit retention unavailable/i)).toBeInTheDocument();
+    expect(screen.queryByText('RETAINED')).not.toBeInTheDocument();
   });
 });

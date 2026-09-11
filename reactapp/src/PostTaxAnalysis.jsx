@@ -3,6 +3,7 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Responsive
 import { motion, AnimatePresence } from 'framer-motion';
 import { AlertCircle, TrendingUp, TrendingDown, ShieldCheck, Layers, Award, ChevronDown, Zap, ArrowRight, Sparkles, Target } from 'lucide-react';
 import { formatINR } from './utils/recommendationPresentation';
+import { isPresentFiniteNumber, toOptionalNumber } from './utils/financialValues';
 import * as api from './services/api';
 import './PostTaxAnalysis.css';
 
@@ -13,9 +14,10 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
   const [regime, setRegime] = useState('');
   const [fiscalYear, setFiscalYear] = useState('');
   const [inflationRate, setInflationRate] = useState('');
-  const [section80C, setSection80C] = useState('0');
-  const [nps80CCD1B, setNps80CCD1B] = useState('0');
-  const [section112AExemptionUsed, setSection112AExemptionUsed] = useState('0');
+  const [section80C, setSection80C] = useState('');
+  const [nps80CCD1B, setNps80CCD1B] = useState('');
+  const [section112AExemptionUsed, setSection112AExemptionUsed] = useState('');
+  const [advancedDeductions, setAdvancedDeductions] = useState({});
   const [backendPostTaxData, setBackendPostTaxData] = useState(null);
   const [taxPolicyMetadata, setTaxPolicyMetadata] = useState(null);
   const [taxPolicyError, setTaxPolicyError] = useState('');
@@ -72,6 +74,22 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
     }
     try {
       setLoading(true);
+      const deductions = Object.fromEntries(Object.entries({
+        section80C: toOptionalNumber(section80C),
+        nps80CCD1B: toOptionalNumber(nps80CCD1B),
+        nps80CCD2: toOptionalNumber(advancedDeductions.nps80CCD2),
+        basicSalary: toOptionalNumber(advancedDeductions.basicSalary),
+        isGovtEmployee: advancedDeductions.isGovtEmployee === undefined || advancedDeductions.isGovtEmployee === ''
+          ? undefined : advancedDeductions.isGovtEmployee === 'true',
+        section80D_self: toOptionalNumber(advancedDeductions.section80D_self),
+        section80D_parents: toOptionalNumber(advancedDeductions.section80D_parents),
+        parents_senior: advancedDeductions.parents_senior === undefined || advancedDeductions.parents_senior === ''
+          ? undefined : advancedDeductions.parents_senior === 'true',
+        hra: toOptionalNumber(advancedDeductions.hra),
+        homeLoanInterest: toOptionalNumber(advancedDeductions.homeLoanInterest),
+        section80TTA: toOptionalNumber(advancedDeductions.section80TTA),
+        section80TTB: toOptionalNumber(advancedDeductions.section80TTB),
+      }).filter(([, value]) => value !== undefined));
       const data = await api.computePostTaxReturnBatch(
         instruments,
         annualIncome,
@@ -81,11 +99,10 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
         explicitInflationRate / 100,
         fiscalYear,
         { body: {
-          deductions: {
-            section80C: Number(section80C),
-            nps80CCD1B: Number(nps80CCD1B),
-          },
-          section112AExemptionUsed: Number(section112AExemptionUsed),
+          deductions,
+          ...(toOptionalNumber(section112AExemptionUsed) !== undefined
+            ? { section112AExemptionUsed: toOptionalNumber(section112AExemptionUsed) }
+            : {}),
         } },
       );
       const requiredResultFields = [
@@ -95,7 +112,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
       if (!Array.isArray(data?.results) || data.results.length !== recommendations.length
           || data.results.some(result => !result?.status
             || (result.status === 'CALCULATED' && (!result.taxType || requiredResultFields.some(
-              field => !Number.isFinite(Number(result[field])),
+              field => !isPresentFiniteNumber(result[field]),
             ))))) {
         throw new TypeError('The tax service returned an incomplete instrument analysis.');
       }
@@ -103,8 +120,15 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
         'totalTaxDrag', 'keptPerThousand', 'erodedPerThousand',
         'retentionEfficiencyPercent', 'maxTaxRate',
       ];
-      if (requiredSummaryFields.some(field => !Number.isFinite(Number(data?.summary?.[field])))) {
+      const portfolioStatus = data?.portfolioStatus || data?.summary?.status;
+      if (!['COMPLETE', 'PARTIAL', 'UNAVAILABLE'].includes(portfolioStatus)) {
+        throw new TypeError('The tax service returned no truthful portfolio status.');
+      }
+      if (portfolioStatus === 'COMPLETE' && requiredSummaryFields.some(field => !isPresentFiniteNumber(data?.summary?.[field]))) {
         throw new TypeError('The tax service returned an incomplete portfolio summary.');
+      }
+      if (portfolioStatus === 'UNAVAILABLE' && requiredSummaryFields.some(field => data?.summary?.[field] !== null)) {
+        throw new TypeError('Unavailable tax summaries must remain null.');
       }
       setBackendPostTaxData(data);
     } catch (requestError) {
@@ -127,10 +151,10 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
           taxRatePercent: result.effectiveTaxPercent,
           postTaxGain: result.postTaxGain,
           taxDragWealth: result.taxDragWealth,
-          taxDragCAGR: Number.isFinite(Number(result.taxDragCAGR)) ? result.taxDragCAGR * 100 : null,
+          taxDragCAGR: isPresentFiniteNumber(result.taxDragCAGR) ? Number(result.taxDragCAGR) * 100 : null,
         },
         totalInvested: result.totalInvested,
-        wealthGained: result.postTaxGain,
+        wealthGained: isPresentFiniteNumber(result.postTaxGain) ? Number(result.postTaxGain) : null,
         nominalReturn: result.nominalReturnPercent,
         postTaxReturn: result.postTaxReturnPercent,
         realReturn: result.realReturnPercent,
@@ -139,11 +163,14 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
     });
   }, [recommendations, backendPostTaxData]);
 
-  const totalTaxDragRupees = backendPostTaxData?.summary?.totalTaxDrag ?? null;
-  const keptAmount = backendPostTaxData?.summary?.keptPerThousand ?? null;
-  const erodedAmount = backendPostTaxData?.summary?.erodedPerThousand ?? null;
-  const efficiencyPercent = backendPostTaxData?.summary?.retentionEfficiencyPercent ?? null;
-  const marginalRate = backendPostTaxData?.summary?.maxTaxRate ?? null;
+  const readNumeric = value => (isPresentFiniteNumber(value) ? Number(value) : null);
+  const totalTaxDragRupees = readNumeric(backendPostTaxData?.summary?.totalTaxDrag);
+  const keptAmount = readNumeric(backendPostTaxData?.summary?.keptPerThousand);
+  const erodedAmount = readNumeric(backendPostTaxData?.summary?.erodedPerThousand);
+  const efficiencyPercent = readNumeric(backendPostTaxData?.summary?.retentionEfficiencyPercent);
+  const marginalRate = readNumeric(backendPostTaxData?.summary?.maxTaxRate);
+  const portfolioStatus = backendPostTaxData?.portfolioStatus || backendPostTaxData?.summary?.status || null;
+  const calculatedCount = backendPostTaxData?.results?.filter(result => result.status === 'CALCULATED').length || 0;
 
   const strokeDashoffset = useMemo(() => {
     return efficiencyPercent === null ? 251.2 : 251.2 - (251.2 * efficiencyPercent) / 100;
@@ -282,7 +309,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
           />
         </label>
         <label style={{ display: 'grid', gap: 7, color: '#cbd5e1', fontSize: '0.8rem', fontWeight: 700 }}>
-          Section 80C used (₹)
+          Section 80C already used (₹)
           <input
             aria-label="Section 80C used"
             type="number"
@@ -291,10 +318,11 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
             value={section80C}
             onChange={event => setSection80C(event.target.value)}
             className="tax-input"
+            placeholder="Leave blank if none…"
           />
         </label>
         <label style={{ display: 'grid', gap: 7, color: '#cbd5e1', fontSize: '0.8rem', fontWeight: 700 }}>
-          NPS 80CCD(1B) used (₹)
+          NPS 80CCD(1B) already used (₹)
           <input
             aria-label="NPS 80CCD(1B) used"
             type="number"
@@ -303,6 +331,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
             value={nps80CCD1B}
             onChange={event => setNps80CCD1B(event.target.value)}
             className="tax-input"
+            placeholder="Leave blank if none…"
           />
         </label>
         <label style={{ display: 'grid', gap: 7, color: '#cbd5e1', fontSize: '0.8rem', fontWeight: 700 }}>
@@ -315,8 +344,67 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
             value={section112AExemptionUsed}
             onChange={event => setSection112AExemptionUsed(event.target.value)}
             className="tax-input"
+            placeholder="Leave blank if none…"
           />
         </label>
+        <details style={{ gridColumn: '1 / -1', borderTop: '1px solid rgba(148,163,184,0.16)', paddingTop: 10 }}>
+          <summary style={{ cursor: 'pointer', color: '#cbd5e1', fontWeight: 700 }}>Advanced deductions (optional)</summary>
+          <p style={{ color: '#64748b', fontSize: '0.78rem', margin: '8px 0 12px' }}>
+            Leave a field blank when you are not claiming it. The backend rejects deductions that need supporting facts.
+          </p>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 12, marginTop: 10 }}>
+            {[
+              ['nps80CCD2', 'NPS 80CCD(2) (₹)', '100000000'],
+              ['basicSalary', 'Basic salary for 80CCD(2) (₹)', '1000000000'],
+              ['section80D_self', '80D self/ family (₹)', '50000'],
+              ['section80D_parents', '80D parents (₹)', '50000'],
+              ['hra', 'HRA deduction (₹)', '100000000'],
+              ['homeLoanInterest', 'Home-loan interest (₹)', '200000'],
+              ['section80TTA', '80TTA interest (₹)', '10000'],
+              ['section80TTB', '80TTB interest (₹)', '50000'],
+            ].map(([key, label, max]) => (
+              <label key={key} style={{ display: 'grid', gap: 6, color: '#94a3b8', fontSize: '0.76rem', fontWeight: 700 }}>
+                {label}
+                <input
+                  aria-label={label}
+                  type="number"
+                  min="0"
+                  max={max}
+                  value={advancedDeductions[key] || ''}
+                  onChange={event => setAdvancedDeductions(current => ({ ...current, [key]: event.target.value }))}
+                  className="tax-input"
+                  placeholder="Leave blank…"
+                />
+              </label>
+            ))}
+            <label style={{ display: 'grid', gap: 6, color: '#94a3b8', fontSize: '0.76rem', fontWeight: 700 }}>
+              Government employee for 80CCD(2)?
+              <select
+                aria-label="Government employee for 80CCD(2)?"
+                value={advancedDeductions.isGovtEmployee || ''}
+                onChange={event => setAdvancedDeductions(current => ({ ...current, isGovtEmployee: event.target.value }))}
+                className="tax-input"
+              >
+                <option value="">Not supplied</option>
+                <option value="true">Yes</option>
+                <option value="false">No</option>
+              </select>
+            </label>
+            <label style={{ display: 'grid', gap: 6, color: '#94a3b8', fontSize: '0.76rem', fontWeight: 700 }}>
+              Parents senior citizen for 80D?
+              <select
+                aria-label="Parents senior citizen for 80D?"
+                value={advancedDeductions.parents_senior || ''}
+                onChange={event => setAdvancedDeductions(current => ({ ...current, parents_senior: event.target.value }))}
+                className="tax-input"
+              >
+                <option value="">Not supplied</option>
+                <option value="true">Yes</option>
+                <option value="false">No</option>
+              </select>
+            </label>
+          </div>
+        </details>
         <button type="submit" className="hud-profile-btn" disabled={loading} style={{ minHeight: 42 }}>
           {loading ? 'Calculating…' : 'Calculate explicit tax what-if'}
         </button>
@@ -337,6 +425,15 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
           </small>
         )}
         {error && <p role="alert" style={{ gridColumn: '1 / -1', color: '#fda4af', margin: 0 }}>{error}</p>}
+        {backendPostTaxData && (
+          <small role="status" style={{ gridColumn: '1 / -1', color: portfolioStatus === 'COMPLETE' ? '#86efac' : '#fbbf24', lineHeight: 1.5 }}>
+            Portfolio status: {portfolioStatus}. {portfolioStatus === 'PARTIAL'
+              ? `${calculatedCount} of ${backendPostTaxData.results.length} instruments are included; unavailable instruments are excluded from totals.`
+              : portfolioStatus === 'UNAVAILABLE'
+                ? 'No summary number or zero has been substituted.'
+                : 'All selected instruments have complete qualified projections.'}
+          </small>
+        )}
       </motion.form>
 
       {/* ═══════ HERO KPI STRIP ═══════ */}
@@ -359,7 +456,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
           </div>
           <div className="pta-kpi-content">
             <span className="pta-kpi-label">Max Tax Bracket</span>
-            <span className="pta-kpi-value">{marginalRate === null ? 'Not calculated' : `${(marginalRate * 100).toFixed(0)}%`}</span>
+            <span className="pta-kpi-value">{!isPresentFiniteNumber(marginalRate) ? 'Not calculated' : `${(marginalRate * 100).toFixed(0)}%`}</span>
           </div>
         </div>
 
@@ -508,7 +605,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
                               </span>
                             </td>
                             <td className="pta-td--mono pta-td--right pta-td--blue pta-td--bold">
-                              {data.wealthGained === null ? '—' : formatINR(data.wealthGained)}
+                              {!isPresentFiniteNumber(data.wealthGained) ? '—' : formatINR(data.wealthGained)}
                             </td>
                           </tr>
                         ))}
@@ -524,7 +621,12 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
         {/* ─── RIGHT COLUMN ─── */}
         <div className="pta-col">
           {/* Profit Retention Efficiency - Hero Widget */}
-          <motion.div className="pta-card pta-retention-hero" variants={itemVariants}>
+          {portfolioStatus === 'UNAVAILABLE' ? (
+            <motion.div className="pta-card pta-retention-hero" variants={itemVariants}>
+              <h3 className="pta-retention-label">Profit retention unavailable</h3>
+              <p className="pta-retention-footnote">The selected instruments do not have complete qualified tax projections. No gauge or zero value is shown.</p>
+            </motion.div>
+          ) : <motion.div className="pta-card pta-retention-hero" variants={itemVariants}>
             <h3 className="pta-retention-label">Profit Retention Efficiency</h3>
 
             <div className="pta-donut-container">
@@ -573,7 +675,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
               </div>
             </div>
             <p className="pta-retention-footnote">Per ₹1,000 of gross profits</p>
-          </motion.div>
+          </motion.div>}
 
           {/* Tax Erosion Warning */}
           {totalTaxDragRupees > 0 && (

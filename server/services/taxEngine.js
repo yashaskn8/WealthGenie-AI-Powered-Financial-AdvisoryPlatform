@@ -61,7 +61,9 @@ export function classifyHoldingPeriodByDates({ acquisitionDate, redemptionDate, 
     const thresholdDate = addCalendarMonths(acquired, thresholdMonths);
     const dayCount = Math.round((redeemed.getTime() - acquired.getTime()) / 86400000);
     return {
-        isLongTerm: redeemed >= thresholdDate,
+        // The statutory test is strictly greater than the minimum holding
+        // period. The anniversary itself is still short-term.
+        isLongTerm: redeemed > thresholdDate,
         thresholdMonths,
         thresholdDate: thresholdDate.toISOString().slice(0, 10),
         holdingDays: dayCount,
@@ -617,6 +619,7 @@ export function computeCapitalGainsTaxBuckets({
     fiscalYear,
     userAge,
     section112AExemptionUsed = 0,
+    section112AExemptionAppliedOverride = null,
 }) {
     for (const [name, value] of Object.entries({ shortTerm111AGain, longTerm112AGain, longTermOtherGain })) {
         if (!Number.isFinite(value) || value < 0) {
@@ -625,6 +628,10 @@ export function computeCapitalGainsTaxBuckets({
     }
     if (!Number.isFinite(section112AExemptionUsed) || section112AExemptionUsed < 0) {
         throw new TypeError('section112AExemptionUsed must be an explicit non-negative finite number');
+    }
+    if (section112AExemptionAppliedOverride !== null
+        && (!Number.isFinite(section112AExemptionAppliedOverride) || section112AExemptionAppliedOverride < 0)) {
+        throw new TypeError('section112AExemptionAppliedOverride must be an explicit non-negative finite number when supplied');
     }
     validateTaxContext(annualIncome, regime, incomeSource);
     const policy = getTaxPolicyMetadata(fiscalYear);
@@ -652,7 +659,12 @@ export function computeCapitalGainsTaxBuckets({
     }
 
     const available112AExemption = Math.max(0, policyRules.capitalGains112AExemption - section112AExemptionUsed);
-    const exemptionApplied = Math.min(longTerm112AGain, available112AExemption);
+    if (section112AExemptionAppliedOverride !== null && section112AExemptionAppliedOverride > available112AExemption) {
+        throw new RangeError('section112AExemptionAppliedOverride exceeds the remaining verified Section 112A exemption');
+    }
+    const exemptionApplied = section112AExemptionAppliedOverride === null
+        ? Math.min(longTerm112AGain, available112AExemption)
+        : Math.min(longTerm112AGain, section112AExemptionAppliedOverride);
     const taxable112A = Math.max(0, longTerm112AGain - exemptionApplied);
     const taxableGain = shortTerm111AGain + taxable112A + longTermOtherGain;
     const taxBeforeSurcharge = (shortTerm111AGain * policyRules.capitalGains111ARate)
@@ -704,17 +716,25 @@ export function computeEquityCapitalGainsTax({
     fiscalYear,
     userAge,
     section112AExemptionUsed = 0,
+    holdingPeriodClassification = null,
+    section112AExemptionAppliedOverride = null,
 }) {
     if (!Number.isFinite(grossGain) || grossGain < 0) {
         throw new TypeError('grossGain must be an explicit non-negative finite number');
     }
-    if (!Number.isFinite(holdingPeriodMonths) || holdingPeriodMonths < 0) {
+    if (holdingPeriodClassification === null
+        && (!Number.isFinite(holdingPeriodMonths) || holdingPeriodMonths < 0)) {
         throw new TypeError('holdingPeriodMonths must be an explicit non-negative finite number');
     }
     if (!Number.isFinite(section112AExemptionUsed) || section112AExemptionUsed < 0) {
         throw new TypeError('section112AExemptionUsed must be an explicit non-negative finite number');
     }
-    const isLongTerm = holdingPeriodMonths >= 12;
+    if (holdingPeriodClassification !== null
+        && typeof holdingPeriodClassification.isLongTerm !== 'boolean') {
+        throw new TypeError('holdingPeriodClassification.isLongTerm must be explicit when supplied');
+    }
+    const isLongTerm = holdingPeriodClassification?.isLongTerm
+        ?? (holdingPeriodMonths > getCapitalGainsHoldingPeriodMonths(fiscalYear, 'listed'));
     const result = computeCapitalGainsTaxBuckets({
         shortTerm111AGain: isLongTerm ? 0 : grossGain,
         longTerm112AGain: isLongTerm ? grossGain : 0,
@@ -725,6 +745,7 @@ export function computeEquityCapitalGainsTax({
         fiscalYear,
         userAge,
         section112AExemptionUsed,
+        section112AExemptionAppliedOverride,
     });
     return {
         ...result,

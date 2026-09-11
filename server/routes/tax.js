@@ -243,7 +243,21 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
     return sendError(req, res, 422, `Verified tax rules are unavailable for ${fiscalYear}.`, 'FISCAL_YEAR_UNSUPPORTED');
   }
 
-  const results = instruments.map(inv => {
+  const calculateBatchInstrument = (inv, section112AExemptionAppliedOverride) => {
+    const section112AUsed = section112AExemptionUsed ?? inv.section112AExemptionUsed;
+    const options = {
+      deductions,
+      acquisitionDate: inv.acquisitionDate,
+      redemptionDate: inv.redemptionDate,
+      redemptionChannel: inv.redemptionChannel,
+      couponRate: inv.couponRate,
+      annuityFraction: inv.annuityFraction,
+      retirementTiming: inv.retirementTiming,
+      section112AExemptionUsed: section112AUsed,
+    };
+    if (section112AExemptionAppliedOverride !== undefined) {
+      options.section112AExemptionAppliedOverride = section112AExemptionAppliedOverride;
+    }
     const taxResult = calculatePostTaxReturnSafe(
       inv.instrumentType,
       inv.nominalRate,
@@ -255,16 +269,7 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
       incomeSource,
       undefined,
       fiscalYear,
-      {
-        deductions,
-        acquisitionDate: inv.acquisitionDate,
-        redemptionDate: inv.redemptionDate,
-        redemptionChannel: inv.redemptionChannel,
-        couponRate: inv.couponRate,
-        annuityFraction: inv.annuityFraction,
-        retirementTiming: inv.retirementTiming,
-        section112AExemptionUsed: section112AExemptionUsed ?? inv.section112AExemptionUsed,
-      },
+      options,
     );
     const projectionContext = {
       annualGrossIncome: annualIncome,
@@ -273,7 +278,10 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
       fiscalYear,
       userAge,
       deductions,
-      section112AExemptionUsed: section112AExemptionUsed ?? inv.section112AExemptionUsed,
+      section112AExemptionUsed: section112AUsed,
+      ...(section112AExemptionAppliedOverride !== undefined
+        ? { section112AExemptionAppliedOverride }
+        : {}),
       acquisitionDate: inv.acquisitionDate,
       redemptionDate: inv.redemptionDate,
     };
@@ -284,9 +292,60 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
       dataClass: 'MODEL_ASSUMPTION',
       ...calculatePostTaxProjection(taxResult, inv, inflationRate, projectionContext),
     };
-  });
+  };
 
-  const calculatedResults = results.filter(item => item.status === 'CALCULATED' && Number.isFinite(item.taxDragWealth));
+  let results = instruments.map(inv => calculateBatchInstrument(inv, undefined));
+  const equityResultIndexes = results
+    .map((result, index) => ({ result, index }))
+    .filter(({ result }) => result.modelTaxClass === 'MODEL_TAX_CLASS_EQUITY_112A');
+  const calculatedEquityResults = equityResultIndexes.filter(({ result }) => (
+    result.status === 'CALCULATED' && Number.isFinite(result.longTermGain) && result.longTermGain >= 0
+  ));
+  let section112APortfolioAllocation = null;
+  if (calculatedEquityResults.length > 0) {
+    const policy = getTaxPolicyMetadata(fiscalYear);
+    const requestedUsed = Number(section112AExemptionUsed ?? 0);
+    const remainingExemption = Math.max(0, policy.rules.capitalGains112AExemption - requestedUsed);
+    const totalQualifyingGain = calculatedEquityResults.reduce((sum, { result }) => sum + result.longTermGain, 0);
+    const exemptionApplied = Math.min(remainingExemption, totalQualifyingGain);
+    const allocationComplete = calculatedEquityResults.length === equityResultIndexes.length;
+    const allocations = new Map();
+    if (totalQualifyingGain > 0) {
+      for (const { index, result } of calculatedEquityResults) {
+        allocations.set(index, exemptionApplied * (result.longTermGain / totalQualifyingGain));
+      }
+      results = results.map((result, index) => allocations.has(index)
+        ? calculateBatchInstrument(instruments[index], allocations.get(index))
+        : result);
+    }
+    section112APortfolioAllocation = {
+      policy: 'PROPORTIONAL_QUALIFYING_LTCG_ALLOCATED_ONCE_PER_BATCH',
+      exemptionLimit: policy.rules.capitalGains112AExemption,
+      exemptionUsedBeforeBatch: requestedUsed,
+      exemptionAppliedAcrossBatch: exemptionApplied,
+      qualifyingLongTermGain: totalQualifyingGain,
+      allocationComplete,
+      unavailableEquityInstruments: equityResultIndexes.length - calculatedEquityResults.length,
+    };
+  }
+
+  const projectionFields = [
+    'effectiveTaxPercent', 'postTaxGain', 'taxDragWealth', 'taxDragCAGR',
+    'totalInvested', 'nominalReturnPercent', 'postTaxReturnPercent', 'realReturnPercent',
+  ];
+  const calculatedResults = results.filter(item => item.status === 'CALCULATED'
+    && projectionFields.every(field => Number.isFinite(item[field])));
+  const excludedInstruments = results.map((item, index) => ({ item, index }))
+    .filter(({ item }) => !calculatedResults.includes(item))
+    .map(({ item, index }) => ({
+      index,
+      instrumentType: instruments[index].instrumentType,
+      status: item.status || 'UNAVAILABLE',
+      unavailableReasons: item.unavailableReasons || ['PROJECTION_FIELDS_UNAVAILABLE'],
+    }));
+  const portfolioStatus = calculatedResults.length === results.length
+    ? 'COMPLETE'
+    : calculatedResults.length > 0 ? 'PARTIAL' : 'UNAVAILABLE';
   const totalTaxDrag = calculatedResults.length > 0
     ? calculatedResults.reduce((sum, item) => sum + item.taxDragWealth, 0)
     : null;
@@ -298,13 +357,28 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
   const maxTaxRate = calculatedResults.length === 0 ? null : calculatedResults.reduce((max, item) => Math.max(max, item.taxRate || 0), 0);
   const nonPositiveRealCount = calculatedResults.filter(item => item.realReturnPercent <= 0).length;
   const insights = [];
-  if (totalTaxDrag === null) {
+  if (portfolioStatus === 'UNAVAILABLE') {
     insights.push({
       title: 'Post-Tax Projection Unavailable',
-      body: 'One or more selected instruments do not have a qualified server tax class or complete projection inputs. No tax number has been substituted.',
+      body: 'No selected instrument has a complete qualified tax projection. No tax number has been substituted.',
       icon: 'shield',
       color: 'amber',
     });
+  } else if (portfolioStatus === 'PARTIAL') {
+    insights.push({
+      title: 'Partial Post-Tax Projection',
+      body: `${calculatedResults.length} of ${results.length} selected instruments have complete qualified tax projections. ${excludedInstruments.length} instrument${excludedInstruments.length === 1 ? '' : 's'} remain unavailable and are excluded from the summary totals.`,
+      icon: 'shield',
+      color: 'amber',
+    });
+    if (totalTaxDrag > 0) {
+      insights.push({
+        title: 'Tax Drag on Calculated Instruments',
+        body: `The calculated subset loses an estimated ₹${Math.round(totalTaxDrag).toLocaleString('en-IN')} to tax over this horizon.`,
+        icon: 'shield',
+        color: 'blue',
+      });
+    }
   } else if (totalTaxDrag > 0) {
     insights.push({
       title: 'Review Tax Drag',
@@ -344,6 +418,7 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
       calculationClass: 'MODELLED_POST_TAX_PROJECTION',
       dataClass: 'MODEL_ASSUMPTION',
       taxEventModel: 'GROSS_FLOWS_THEN_EXPLICIT_TAX_EVENTS',
+      section112APortfolioAllocation,
     },
     inputsUsed: {
       annualIncome, incomeSource, regime, userAge, inflationRate, fiscalYear,
@@ -352,11 +427,14 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
     rulesApplied: [...new Set(results.map(result => result.taxType))],
     unavailableReasons: [],
     results,
+    portfolioStatus,
+    excludedInstruments,
     summary: {
+      status: portfolioStatus,
       totalTaxDrag,
       keptPerThousand,
-      erodedPerThousand: 1000 - keptPerThousand,
-      retentionEfficiencyPercent: keptPerThousand / 10,
+      erodedPerThousand: keptPerThousand === null ? null : 1000 - keptPerThousand,
+      retentionEfficiencyPercent: keptPerThousand === null ? null : keptPerThousand / 10,
       maxTaxRate,
     },
     insights,

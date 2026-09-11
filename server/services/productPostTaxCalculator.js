@@ -150,13 +150,17 @@ function getTaxPolicyOrUnavailable(fiscalYear) {
 
 function missingRequiredTaxInputs(taxCalculationContext, requiredTaxInputs) {
   const context = taxCalculationContext || {};
+  const hasBothExactDates = Boolean(context.acquisitionDate && context.redemptionDate);
+  const hasPartialExactDates = Boolean(context.acquisitionDate || context.redemptionDate) && !hasBothExactDates;
   return requiredTaxInputs.filter(key => {
     if (key === 'annualGrossIncome') return !Number.isFinite(Number(context.annualGrossIncome));
     if (key === 'userAge') return !Number.isInteger(Number(context.userAge)) || Number(context.userAge) < 18 || Number(context.userAge) > 120;
-    if (key === 'holdingPeriodMonths') return !Number.isFinite(Number(context.holdingPeriodMonths));
+    if (key === 'holdingPeriodMonths') return hasBothExactDates
+      ? false
+      : !Number.isFinite(Number(context.holdingPeriodMonths));
     if (key === 'section112AExemptionUsed') return !Number.isFinite(Number(context.section112AExemptionUsed));
     return context[key] === undefined || context[key] === null || context[key] === '';
-  });
+  }).concat(hasPartialExactDates ? ['acquisitionDate', 'redemptionDate'] : []);
 }
 
 function taxContextValues(taxCalculationContext) {
@@ -347,8 +351,9 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
     });
   }
   const grossGain = Math.round(principal * (historicalRate / 100));
-  let holdingPeriodMonths = Number(taxCalculationContext.holdingPeriodMonths);
-  let holdingPeriodBasis = 'EXPLICIT_HOLDING_PERIOD_MONTHS';
+  const holdingPeriodMonths = Number(taxCalculationContext.holdingPeriodMonths);
+  let holdingPeriodBasis = 'MODELLED_HOLDING_PERIOD';
+  let holdingPeriodClassification = null;
   if ([PRODUCT_TAX_CLASSES.EQUITY_MF_112A, PRODUCT_TAX_CLASSES.EQUITY_MF_ELSS].includes(taxType)
       && (taxCalculationContext.acquisitionDate || taxCalculationContext.redemptionDate)) {
     if (!taxCalculationContext.acquisitionDate || !taxCalculationContext.redemptionDate) {
@@ -371,7 +376,7 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
       redemptionDate: taxCalculationContext.redemptionDate,
       thresholdMonths: getCapitalGainsHoldingPeriodMonths(fiscalYear, 'listed'),
     });
-    holdingPeriodMonths = dateClassification.isLongTerm ? 12 : 0;
+    holdingPeriodClassification = dateClassification;
     holdingPeriodBasis = dateClassification.holdingPeriodBasis;
   }
 
@@ -433,6 +438,7 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
     fiscalYear,
     userAge,
     section112AExemptionUsed: Number(taxCalculationContext.section112AExemptionUsed),
+    holdingPeriodClassification,
   });
   if (capitalGains.status !== 'CALCULATED') {
     return createAnalysis({

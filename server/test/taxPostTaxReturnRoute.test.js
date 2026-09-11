@@ -108,4 +108,103 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
       assert.equal(invalidBatch.body.error, 'Validation failed');
     });
   });
+
+  test('Batch summary is truthful for partial and unavailable portfolios', async () => {
+    await withServer(app, async (baseUrl) => {
+      const partial = await jsonRequest(`${baseUrl}/api/tax/post-tax-return/batch`, {
+        method: 'POST',
+        body: JSON.stringify({
+          instruments: [
+            { instrumentType: 'FD', nominalRate: 0.07, holdingYears: 3, monthlySIP: 10000 },
+            { instrumentType: 'ETF', nominalRate: 0.12, holdingYears: 3, monthlySIP: 10000 },
+          ],
+          annualIncome: 1000000,
+          regime: 'new',
+          incomeSource: 'salary',
+          userAge: 30,
+          inflationRate: 0.06,
+          fiscalYear: 'FY2026-27',
+        }),
+      });
+      assert.equal(partial.response.status, 200);
+      assert.equal(partial.body.portfolioStatus, 'PARTIAL');
+      assert.equal(partial.body.summary.status, 'PARTIAL');
+      assert.equal(partial.body.summary.totalTaxDrag !== null, true);
+      assert.equal(partial.body.excludedInstruments.length, 1);
+
+      const unavailable = await jsonRequest(`${baseUrl}/api/tax/post-tax-return/batch`, {
+        method: 'POST',
+        body: JSON.stringify({
+          instruments: [{ instrumentType: 'Gold_ETF', nominalRate: 0.1, holdingYears: 3, monthlySIP: 10000 }],
+          annualIncome: 1000000,
+          regime: 'new',
+          incomeSource: 'salary',
+          userAge: 30,
+          inflationRate: 0.06,
+          fiscalYear: 'FY2026-27',
+        }),
+      });
+      assert.equal(unavailable.response.status, 200);
+      assert.equal(unavailable.body.portfolioStatus, 'UNAVAILABLE');
+      assert.equal(unavailable.body.summary.totalTaxDrag, null);
+      assert.equal(unavailable.body.summary.keptPerThousand, null);
+      assert.equal(unavailable.body.summary.erodedPerThousand, null);
+      assert.equal(unavailable.body.summary.retentionEfficiencyPercent, null);
+      assert.equal(unavailable.body.summary.maxTaxRate, null);
+    });
+  });
+
+  test('Batch Section 112A exemption is allocated once and is permutation-stable', async () => {
+    await withServer(app, async (baseUrl) => {
+      const shared = {
+        annualIncome: 3000000,
+        regime: 'new',
+        incomeSource: 'salary',
+        userAge: 35,
+        inflationRate: 0.06,
+        fiscalYear: 'FY2026-27',
+      };
+      const instruments = [
+        { instrumentType: 'Equity_MF', nominalRate: 0.12, holdingYears: 2, monthlySIP: 10000 },
+        { instrumentType: 'Equity_MF', nominalRate: 0.15, holdingYears: 2, monthlySIP: 5000 },
+      ];
+      const first = await jsonRequest(`${baseUrl}/api/tax/post-tax-return/batch`, {
+        method: 'POST', body: JSON.stringify({ ...shared, instruments }),
+      });
+      const reversed = await jsonRequest(`${baseUrl}/api/tax/post-tax-return/batch`, {
+        method: 'POST', body: JSON.stringify({ ...shared, instruments: [...instruments].reverse() }),
+      });
+      assert.equal(first.response.status, 200);
+      assert.equal(reversed.response.status, 200);
+      assert.equal(first.body.portfolioStatus, 'COMPLETE');
+      assert.equal(first.body.assumptions.section112APortfolioAllocation.policy, 'PROPORTIONAL_QUALIFYING_LTCG_ALLOCATED_ONCE_PER_BATCH');
+      assert.equal(first.body.assumptions.section112APortfolioAllocation.allocationComplete, true);
+      assert.equal(first.body.summary.totalTaxDrag, reversed.body.summary.totalTaxDrag);
+      assert.equal(first.body.summary.retentionEfficiencyPercent, reversed.body.summary.retentionEfficiencyPercent);
+      assert.ok(Math.abs(
+        first.body.results.reduce((sum, item) => sum + item.exemptionApplied, 0)
+        - first.body.assumptions.section112APortfolioAllocation.exemptionAppliedAcrossBatch,
+      ) < 0.001);
+    });
+  });
+
+  test('Validation - rejects dependency-sensitive deductions without supporting facts', async () => {
+    await withServer(app, async (baseUrl) => {
+      const invalid = await jsonRequest(`${baseUrl}/api/tax/post-tax-return/batch`, {
+        method: 'POST',
+        body: JSON.stringify({
+          instruments: [{ instrumentType: 'FD', nominalRate: 0.07, holdingYears: 3, monthlySIP: 10000 }],
+          annualIncome: 1000000,
+          regime: 'new',
+          incomeSource: 'salary',
+          userAge: 30,
+          inflationRate: 0.06,
+          fiscalYear: 'FY2026-27',
+          deductions: { nps80CCD2: 10000 },
+        }),
+      });
+      assert.equal(invalid.response.status, 400);
+      assert.equal(invalid.body.error, 'Validation failed');
+    });
+  });
 });

@@ -34,7 +34,7 @@ test('policy metadata exposes the current authority and future years fail closed
 test('special-rate equity tax is separate from ordinary slabs and does not consume 87A', () => {
   const result = computeEquityCapitalGainsTax({
     grossGain: 100000,
-    holdingPeriodMonths: 12,
+    holdingPeriodMonths: 13,
     annualIncome: 500000,
     regime: 'new',
     incomeSource: 'salary',
