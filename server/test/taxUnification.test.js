@@ -63,6 +63,48 @@ test('SIP lots retain FIFO acquisition order and produce mixed short/long bucket
   assert.ok(outcome.lots.every(lot => lot.cost === 10_000));
 });
 
+test('modeled SIP lots use more-than threshold for 11, 12, and 13 month listed holdings', () => {
+  const outcome = calculateCanonicalPostTaxOutcome({
+    instrumentType: 'Equity_MF', nominalRate: 0.12, annualIncome: 1_500_000,
+    holdingYears: 13 / 12, regime: 'new', monthlySIP: 10_000, userAge: 35,
+    incomeSource: 'salary', fiscalYear: FY, deductions: {}, options: {},
+  });
+  const thresholdMonths = 12;
+  const edgeLots = outcome.lots.filter(lot => [11, 12, 13].includes(lot.holdingPeriodMonths));
+  assert.deepEqual(edgeLots.map(lot => lot.holdingPeriodMonths).sort((a, b) => a - b), [11, 12, 13]);
+  const expectedShortTermGain = outcome.lots
+    .filter(lot => lot.holdingPeriodMonths <= thresholdMonths)
+    .reduce((sum, lot) => sum + lot.gain, 0);
+  const totalGain = outcome.lots.reduce((sum, lot) => sum + lot.gain, 0);
+  const expectedLongTermGain = totalGain - expectedShortTermGain;
+  assert.equal(outcome.shortTermGain, expectedShortTermGain);
+  assert.equal(outcome.longTermGain, expectedLongTermGain);
+  assert.equal(outcome.lots.find(lot => lot.holdingPeriodMonths === 11).holdingPeriodMonths <= thresholdMonths, true);
+  assert.equal(outcome.lots.find(lot => lot.holdingPeriodMonths === 12).holdingPeriodMonths <= thresholdMonths, true);
+  assert.equal(outcome.lots.find(lot => lot.holdingPeriodMonths === 13).holdingPeriodMonths > thresholdMonths, true);
+});
+
+test('modeled SIP lots use more-than threshold for 23, 24, and 25 month other holdings', () => {
+  const outcome = calculateCanonicalPostTaxOutcome({
+    instrumentType: 'Gold', nominalRate: 0.12, annualIncome: 1_500_000,
+    holdingYears: 25 / 12, regime: 'new', monthlySIP: 10_000, userAge: 35,
+    incomeSource: 'salary', fiscalYear: FY, deductions: {}, options: {},
+  });
+  const thresholdMonths = 24;
+  const edgeLots = outcome.lots.filter(lot => [23, 24, 25].includes(lot.holdingPeriodMonths));
+  assert.deepEqual(edgeLots.map(lot => lot.holdingPeriodMonths).sort((a, b) => a - b), [23, 24, 25]);
+  const expectedShortTermGain = outcome.lots
+    .filter(lot => lot.holdingPeriodMonths <= thresholdMonths)
+    .reduce((sum, lot) => sum + lot.gain, 0);
+  const totalGain = outcome.lots.reduce((sum, lot) => sum + lot.gain, 0);
+  const expectedLongTermGain = totalGain - expectedShortTermGain;
+  assert.equal(outcome.shortTermGain, expectedShortTermGain);
+  assert.equal(outcome.longTermGain, expectedLongTermGain);
+  assert.equal(outcome.lots.find(lot => lot.holdingPeriodMonths === 23).holdingPeriodMonths <= thresholdMonths, true);
+  assert.equal(outcome.lots.find(lot => lot.holdingPeriodMonths === 24).holdingPeriodMonths <= thresholdMonths, true);
+  assert.equal(outcome.lots.find(lot => lot.holdingPeriodMonths === 25).holdingPeriodMonths > thresholdMonths, true);
+});
+
 test('exact-date SIP horizon owns the lot window and never creates a post-redemption lot', () => {
   const lots = buildMonthlySipLots({
     monthlySIP: 10_000,

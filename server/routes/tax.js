@@ -21,6 +21,7 @@ import { CESS_RATE } from '../services/instrumentConstants.js';
 import { calculatePostTaxReturnSafe, calculatePostTaxProjection } from '../services/postTaxCalculator.js';
 
 const router = Router();
+const SECTION_112A_PORTFOLIO_ALLOCATION_INCOMPLETE = 'SECTION_112A_PORTFOLIO_ALLOCATION_INCOMPLETE';
 
 /**
  * GET /api/tax/policies
@@ -302,31 +303,52 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
     result.status === 'CALCULATED' && Number.isFinite(result.longTermGain) && result.longTermGain >= 0
   ));
   let section112APortfolioAllocation = null;
-  if (calculatedEquityResults.length > 0) {
+  if (equityResultIndexes.length > 0) {
     const policy = getTaxPolicyMetadata(fiscalYear);
     const requestedUsed = Number(section112AExemptionUsed ?? 0);
     const remainingExemption = Math.max(0, policy.rules.capitalGains112AExemption - requestedUsed);
-    const totalQualifyingGain = calculatedEquityResults.reduce((sum, { result }) => sum + result.longTermGain, 0);
-    const exemptionApplied = Math.min(remainingExemption, totalQualifyingGain);
     const allocationComplete = calculatedEquityResults.length === equityResultIndexes.length;
-    const allocations = new Map();
-    if (totalQualifyingGain > 0) {
-      for (const { index, result } of calculatedEquityResults) {
-        allocations.set(index, exemptionApplied * (result.longTermGain / totalQualifyingGain));
-      }
-      results = results.map((result, index) => allocations.has(index)
-        ? calculateBatchInstrument(instruments[index], allocations.get(index))
+    if (!allocationComplete) {
+      const calculableEquityIndexes = new Set(calculatedEquityResults.map(({ index }) => index));
+      // The taxpayer-level exemption cannot be safely allocated from a partial
+      // equity universe. Recalculate known holdings without any additional
+      // exemption rather than presenting a subset as the complete portfolio.
+      results = results.map((result, index) => calculableEquityIndexes.has(index)
+        ? calculateBatchInstrument(instruments[index], 0)
         : result);
+      section112APortfolioAllocation = {
+        policy: 'CONSERVATIVE_PARTIAL_PORTFOLIO_112A_ASSUMPTION',
+        exemptionLimit: policy.rules.capitalGains112AExemption,
+        exemptionUsedBeforeBatch: requestedUsed,
+        exemptionAppliedAcrossBatch: 0,
+        qualifyingLongTermGain: null,
+        calculableQualifyingLongTermGain: calculatedEquityResults.reduce((sum, { result }) => sum + result.longTermGain, 0),
+        allocationComplete: false,
+        unavailableEquityInstruments: equityResultIndexes.length - calculatedEquityResults.length,
+        unavailableReasons: [SECTION_112A_PORTFOLIO_ALLOCATION_INCOMPLETE],
+      };
+    } else {
+      const totalQualifyingGain = calculatedEquityResults.reduce((sum, { result }) => sum + result.longTermGain, 0);
+      const exemptionApplied = Math.min(remainingExemption, totalQualifyingGain);
+      const allocations = new Map();
+      if (totalQualifyingGain > 0) {
+        for (const { index, result } of calculatedEquityResults) {
+          allocations.set(index, exemptionApplied * (result.longTermGain / totalQualifyingGain));
+        }
+        results = results.map((result, index) => allocations.has(index)
+          ? calculateBatchInstrument(instruments[index], allocations.get(index))
+          : result);
+      }
+      section112APortfolioAllocation = {
+        policy: 'PROPORTIONAL_QUALIFYING_LTCG_ALLOCATED_ONCE_PER_BATCH',
+        exemptionLimit: policy.rules.capitalGains112AExemption,
+        exemptionUsedBeforeBatch: requestedUsed,
+        exemptionAppliedAcrossBatch: exemptionApplied,
+        qualifyingLongTermGain: totalQualifyingGain,
+        allocationComplete: true,
+        unavailableEquityInstruments: 0,
+      };
     }
-    section112APortfolioAllocation = {
-      policy: 'PROPORTIONAL_QUALIFYING_LTCG_ALLOCATED_ONCE_PER_BATCH',
-      exemptionLimit: policy.rules.capitalGains112AExemption,
-      exemptionUsedBeforeBatch: requestedUsed,
-      exemptionAppliedAcrossBatch: exemptionApplied,
-      qualifyingLongTermGain: totalQualifyingGain,
-      allocationComplete,
-      unavailableEquityInstruments: equityResultIndexes.length - calculatedEquityResults.length,
-    };
   }
 
   const projectionFields = [

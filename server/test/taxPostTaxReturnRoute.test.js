@@ -181,10 +181,100 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
       assert.equal(first.body.assumptions.section112APortfolioAllocation.allocationComplete, true);
       assert.equal(first.body.summary.totalTaxDrag, reversed.body.summary.totalTaxDrag);
       assert.equal(first.body.summary.retentionEfficiencyPercent, reversed.body.summary.retentionEfficiencyPercent);
+      assert.equal(
+        first.body.assumptions.section112APortfolioAllocation.exemptionAppliedAcrossBatch,
+        reversed.body.assumptions.section112APortfolioAllocation.exemptionAppliedAcrossBatch,
+      );
       assert.ok(Math.abs(
         first.body.results.reduce((sum, item) => sum + item.exemptionApplied, 0)
         - first.body.assumptions.section112APortfolioAllocation.exemptionAppliedAcrossBatch,
       ) < 0.001);
+    });
+  });
+
+  test('Partial equity portfolio does not grant the full 112A exemption to the known subset', async () => {
+    await withServer(app, async (baseUrl) => {
+      const { response, body } = await jsonRequest(`${baseUrl}/api/tax/post-tax-return/batch`, {
+        method: 'POST',
+        body: JSON.stringify({
+          instruments: [
+            { instrumentType: 'Equity_MF', nominalRate: 0.12, holdingYears: 2, monthlySIP: 100000 },
+            { instrumentType: 'Equity_MF', nominalRate: 0.12, holdingYears: 2, monthlySIP: 3000000 },
+          ],
+          annualIncome: 3000000,
+          regime: 'new',
+          incomeSource: 'salary',
+          userAge: 35,
+          inflationRate: 0.06,
+          fiscalYear: 'FY2026-27',
+        }),
+      });
+      const allocation = body.assumptions.section112APortfolioAllocation;
+      assert.equal(response.status, 200);
+      assert.equal(body.portfolioStatus, 'PARTIAL');
+      assert.equal(allocation.allocationComplete, false);
+      assert.equal(allocation.policy, 'CONSERVATIVE_PARTIAL_PORTFOLIO_112A_ASSUMPTION');
+      assert.equal(allocation.exemptionAppliedAcrossBatch, 0);
+      assert.deepEqual(allocation.unavailableReasons, ['SECTION_112A_PORTFOLIO_ALLOCATION_INCOMPLETE']);
+      assert.equal(body.results[0].status, 'CALCULATED');
+      assert.equal(body.results[0].exemptionApplied, 0);
+      assert.equal(body.results[1].status, 'MODELLED_POST_TAX_PROJECTION_UNAVAILABLE');
+    });
+  });
+
+  test('Mixed partial portfolio keeps non-equity results while marking 112A allocation incomplete', async () => {
+    await withServer(app, async (baseUrl) => {
+      const { response, body } = await jsonRequest(`${baseUrl}/api/tax/post-tax-return/batch`, {
+        method: 'POST',
+        body: JSON.stringify({
+          instruments: [
+            { instrumentType: 'FD', nominalRate: 0.07, holdingYears: 3, monthlySIP: 10000 },
+            { instrumentType: 'Equity_MF', nominalRate: 0.12, holdingYears: 2, monthlySIP: 100000 },
+            { instrumentType: 'Equity_MF', nominalRate: 0.12, holdingYears: 2, monthlySIP: 3000000 },
+          ],
+          annualIncome: 3000000,
+          regime: 'new',
+          incomeSource: 'salary',
+          userAge: 35,
+          inflationRate: 0.06,
+          fiscalYear: 'FY2026-27',
+        }),
+      });
+      assert.equal(response.status, 200);
+      assert.equal(body.portfolioStatus, 'PARTIAL');
+      assert.equal(body.results[0].status, 'CALCULATED');
+      assert.equal(body.assumptions.section112APortfolioAllocation.allocationComplete, false);
+      assert.equal(body.assumptions.section112APortfolioAllocation.exemptionAppliedAcrossBatch, 0);
+      assert.equal(body.summary.status, 'PARTIAL');
+    });
+  });
+
+  test('All equity unavailable keeps the portfolio summary numeric fields null', async () => {
+    await withServer(app, async (baseUrl) => {
+      const { response, body } = await jsonRequest(`${baseUrl}/api/tax/post-tax-return/batch`, {
+        method: 'POST',
+        body: JSON.stringify({
+          instruments: [
+            { instrumentType: 'Equity_MF', nominalRate: 0.12, holdingYears: 2, monthlySIP: 3000000 },
+            { instrumentType: 'Equity_MF', nominalRate: 0.12, holdingYears: 2, monthlySIP: 4000000 },
+          ],
+          annualIncome: 3000000,
+          regime: 'new',
+          incomeSource: 'salary',
+          userAge: 35,
+          inflationRate: 0.06,
+          fiscalYear: 'FY2026-27',
+        }),
+      });
+      assert.equal(response.status, 200);
+      assert.equal(body.portfolioStatus, 'UNAVAILABLE');
+      assert.equal(body.summary.totalTaxDrag, null);
+      assert.equal(body.summary.keptPerThousand, null);
+      assert.equal(body.summary.erodedPerThousand, null);
+      assert.equal(body.summary.retentionEfficiencyPercent, null);
+      assert.equal(body.summary.maxTaxRate, null);
+      assert.equal(body.assumptions.section112APortfolioAllocation.allocationComplete, false);
+      assert.deepEqual(body.assumptions.section112APortfolioAllocation.unavailableReasons, ['SECTION_112A_PORTFOLIO_ALLOCATION_INCOMPLETE']);
     });
   });
 

@@ -136,6 +136,10 @@ function missingContext(context, modelTaxClass, options = {}) {
   return [...new Set(missing)];
 }
 
+function isLongTermForModeledMonths(holdingPeriodMonths, thresholdMonths) {
+  return holdingPeriodMonths > thresholdMonths;
+}
+
 function holdingClassification({ context, options, fiscalYear, assetType = 'other', holdingYears }) {
   const acquisitionDate = context?.acquisitionDate ?? options?.acquisitionDate;
   const redemptionDate = context?.redemptionDate ?? options?.redemptionDate;
@@ -154,7 +158,7 @@ function holdingClassification({ context, options, fiscalYear, assetType = 'othe
     return { unavailable: 'EXPLICIT_HOLDING_PERIOD_REQUIRED' };
   }
   return {
-    isLongTerm: holdingPeriodMonths > thresholdMonths,
+    isLongTerm: isLongTermForModeledMonths(holdingPeriodMonths, thresholdMonths),
     holdingPeriodMonths,
     thresholdMonths,
     holdingPeriodBasis: 'MODELLED_HOLDING_PERIOD',
@@ -390,7 +394,7 @@ export function calculateCanonicalPostTaxOutcome({ instrumentType, nominalRate, 
       const lotHolding = classifyHoldingPeriodByDates({ acquisitionDate: lot.acquisitionDate, redemptionDate: lot.redemptionDate, thresholdMonths: holding.thresholdMonths });
       return !lotHolding.isLongTerm;
     }
-    return lot.holdingPeriodMonths < holding.thresholdMonths;
+    return !isLongTermForModeledMonths(lot.holdingPeriodMonths, holding.thresholdMonths);
   }).reduce((sum, lot) => sum + lot.gain, 0);
   const longTermGain = lots.reduce((sum, lot) => sum + lot.gain, 0) - shortTermGain;
   let capitalTax;
@@ -522,7 +526,7 @@ export function projectPostTaxCashFlows({ postTaxResult, instrument, context = {
     const shortTermGain = lots.filter(lot => {
       const isLongTerm = lot.holdingPeriodBasis === 'EXACT_TRANSACTION_DATES'
         ? classifyHoldingPeriodByDates({ acquisitionDate: lot.acquisitionDate, redemptionDate: lot.redemptionDate, thresholdMonths: threshold }).isLongTerm
-        : lot.holdingPeriodMonths > threshold;
+        : isLongTermForModeledMonths(lot.holdingPeriodMonths, threshold);
       return !isLongTerm;
     }).reduce((sum, lot) => sum + lot.gain, 0);
     const longTermGain = lots.reduce((sum, lot) => sum + lot.gain, 0) - shortTermGain;
