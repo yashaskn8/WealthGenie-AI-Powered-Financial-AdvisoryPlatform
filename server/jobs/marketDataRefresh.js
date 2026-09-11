@@ -11,13 +11,55 @@ import {
   fetchAmfiProductSnapshot,
 } from '../services/marketDataService.js';
 import { getLiveMarketContext } from '../services/marketContextService.js';
+import { redisAvailable, redisClient, releaseCacheNX, setCacheNX } from '../config/redis.js';
 import logger from '../utils/logger.js';
+import crypto from 'node:crypto';
 
 let activeJobStopper = null;
 
 export const MARKET_CONTEXT_OPEN_REFRESH_MS = 8 * 60 * 1000;
 export const MARKET_CONTEXT_CLOSED_REFRESH_MS = 30 * 60 * 1000;
 export const MARKET_CONTEXT_HOLIDAY_REFRESH_MS = 2 * 60 * 60 * 1000;
+export const AMFI_REFRESH_LOCK_TTL_SECONDS = 15 * 60;
+export const MARKET_CONTEXT_REFRESH_LOCK_TTL_SECONDS = 5 * 60;
+
+const MARKET_REFRESH_LOCK_PREFIX = 'wealthgenie:market-refresh:';
+
+/**
+ * Run one scheduled refresh under a Redis lease. Redis is required by the
+ * production server, so losing it after startup must skip the external
+ * refresh rather than let every replica call AMFI/NSE independently. Local
+ * development and tests retain the existing single-process behavior.
+ */
+export async function withMarketRefreshLease(
+  jobName,
+  fn,
+  { ttlSeconds = AMFI_REFRESH_LOCK_TTL_SECONDS, token = `${process.pid}:${crypto.randomUUID()}` } = {},
+) {
+  if (typeof fn !== 'function') throw new TypeError('A refresh function is required');
+
+  if (!redisAvailable || !redisClient) {
+    if (process.env.NODE_ENV !== 'production') return fn();
+    logger.warn(`${jobName}: distributed refresh lease unavailable; skipping refresh`);
+    return null;
+  }
+
+  const key = `${MARKET_REFRESH_LOCK_PREFIX}${jobName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+  const acquired = await setCacheNX(key, token, ttlSeconds);
+  if (!acquired) {
+    logger.info(`${jobName}: refresh lease is held by another replica; skipping refresh`);
+    return null;
+  }
+
+  try {
+    return await fn();
+  } finally {
+    const released = await releaseCacheNX(key, token);
+    if (!released) {
+      logger.warn(`${jobName}: refresh lease was not released because ownership changed or Redis became unavailable`);
+    }
+  }
+}
 
 /**
  * Start all scheduled market data refresh jobs.
@@ -29,16 +71,18 @@ export function startMarketDataRefreshJobs() {
   // Daily AMFI NAV refresh at 23:30 IST (18:00 UTC)
   // AMFI publishes updated NAVs around 23:00 IST
   cancellations.push(scheduleJob('0 18 * * *', 'AMFI NAV Refresh', async () => {
-    const [current, historical] = await Promise.all([
-      fetchAmfiProductSnapshot({ forceRefresh: true }),
-      fetchAmfiHistoricalNavSnapshot({ forceRefresh: true }),
-    ]);
-    logger.info('AMFI refresh completed', {
-      currentProductCount: current.productCount,
-      currentStatus: current.status,
-      historicalProductCount: historical.productCount,
-      historicalStatus: historical.status,
-    });
+    await withMarketRefreshLease('AMFI NAV Refresh', async () => {
+      const [current, historical] = await Promise.all([
+        fetchAmfiProductSnapshot({ forceRefresh: true }),
+        fetchAmfiHistoricalNavSnapshot({ forceRefresh: true }),
+      ]);
+      logger.info('AMFI refresh completed', {
+        currentProductCount: current.productCount,
+        currentStatus: current.status,
+        historicalProductCount: historical.productCount,
+        historicalStatus: historical.status,
+      });
+    }, { ttlSeconds: AMFI_REFRESH_LOCK_TTL_SECONDS });
   }));
 
   // During an NSE session, refresh the batched quote set frequently enough to
@@ -46,14 +90,16 @@ export function startMarketDataRefreshJobs() {
   // contract. Outside a session, the scheduler backs off; the provider's
   // calendar remains the authority for holidays and session status.
   cancellations.push(scheduleAdaptiveJob('Primary Market Context', async () => {
-    const result = await getLiveMarketContext({ forceQuoteRefresh: true });
-    logger.info('Primary market context refresh completed', {
-      context: result.context || null,
-      status: result.status,
-      marketSession: result.marketSnapshot?.marketSession?.status || 'UNKNOWN',
-      recommendationUsability: result.recommendationUsability?.status || 'NOT_USABLE',
-    });
-    return result;
+    return withMarketRefreshLease('Primary Market Context', async () => {
+      const result = await getLiveMarketContext({ forceQuoteRefresh: true });
+      logger.info('Primary market context refresh completed', {
+        context: result.context || null,
+        status: result.status,
+        marketSession: result.marketSnapshot?.marketSession?.status || 'UNKNOWN',
+        recommendationUsability: result.recommendationUsability?.status || 'NOT_USABLE',
+      });
+      return result;
+    }, { ttlSeconds: MARKET_CONTEXT_REFRESH_LOCK_TTL_SECONDS });
   }));
 
   logger.info('Market data refresh jobs scheduled');

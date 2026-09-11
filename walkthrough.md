@@ -1,19 +1,24 @@
 # WealthGenie: FinTech Correctness & Compliance Hardening Walkthrough
 
+> Historical note: the phase excerpts below document earlier work. The current
+> runtime uses fiscal-year tax identifiers such as `tax-policy-FY2026-27-v2`
+> for statutory metadata and `suitability-freeze-1.1.0` for recommendation
+> policy metadata; these fields are intentionally separate.
+
 This document records the engineering accomplishments, statutory defect discovery & remediation, adversarial suitability hardening, live audit verification, and documentation updates executed under the **FinTech Correctness & Compliance Hardening** protocol.
 
 ---
 
 ## 1. Summary of Accomplishments & Pushed Commits
 
-All changes were implemented incrementally, verified with raw test logs and live HTTP endpoints, committed to `main`, and pushed to [`origin/main`](https://github.com/yashaskn8/WealthGenie-AI-Powered-Financial-Advisory-Platform.git):
+The historical changes were implemented incrementally and verified with raw test logs and live HTTP endpoints. The authoritative repository is [`yashaskn8/WealthGenie-Architecture-Restoration`](https://github.com/yashaskn8/WealthGenie-Architecture-Restoration).
 
 | Phase | Description | Commit Hash | Key Files Modified / Created |
 |---|---|---|---|
-| **Phase 1** | **Adversarial Fuzzing & Statutory Cliff Fix**: Discovered & fixed real Old Regime Section 87A statutory cliff bug; created 7-property `fast-check` fuzz suite (7,000+ cases) & exact rupee boundary suite. | [`9cd1782`](https://github.com/yashaskn8/WealthGenie-AI-Powered-Financial-Advisory-Platform/commit/9cd1782) | `server/services/taxEngine.js`, `server/test/taxEngineFuzz.test.js`, `server/test/taxBoundary.test.js` |
-| **Phase 2** | **Regulatory Data Versioning in Audit Trail**: Added `REGULATORY_RULE_VERSION = 'FY2025-26-v1.0'` to `AuditRecord` schema and recommendation generation; verified live via `/api/recommend/audit`. | [`d8dfec2`](https://github.com/yashaskn8/WealthGenie-AI-Powered-Financial-Advisory-Platform/commit/d8dfec2) | `server/models/AuditRecord.js`, `server/routes/recommend.js`, `server/scripts/verify_regulatory_audit_live.js` |
-| **Phase 3** | **Adversarial Suitability & Multi-Instrument Concentration Defense**: Hardened capacity pull-down safeguards and anti-gaming aggregate category concentration caps; verified against adversarial senior-citizen and multi-fund attack profiles. | [`d3ee7dc`](https://github.com/yashaskn8/WealthGenie-AI-Powered-Financial-Advisory-Platform/commit/d3ee7dc) | `server/services/RecommendationPipeline.js`, `server/test/suitabilityAdversarial.test.js`, `server/scripts/verify_suitability_live.js` |
-| **Phase 4** | **Explicit Scope & RIA Compliance Documentation**: Added explicit jurisdictional scope limitations (Indian retail only), RIA educational disclaimers, and Union Budget tax engine update protocols to `PROJECT_STATUS.md` and `README.md`. | [`4cfe42c`](https://github.com/yashaskn8/WealthGenie-AI-Powered-Financial-Advisory-Platform/commit/4cfe42c) | `PROJECT_STATUS.md`, `README.md` |
+| **Phase 1** | **Adversarial Fuzzing & Statutory Cliff Fix**: Discovered & fixed real Old Regime Section 87A statutory cliff bug; created 7-property `fast-check` fuzz suite (7,000+ cases) & exact rupee boundary suite. | [`9cd1782`](https://github.com/yashaskn8/WealthGenie-Architecture-Restoration/commit/9cd1782) | `server/services/taxEngine.js`, `server/test/taxEngineFuzz.test.js`, `server/test/taxBoundary.test.js` |
+| **Phase 2** | **Regulatory Data Versioning in Audit Trail**: Added statutory rule metadata to the audit path; the current implementation resolves `regulatory_rule_version` from the tax engine and keeps it separate from `recommendation_policy_version`. | [`d8dfec2`](https://github.com/yashaskn8/WealthGenie-Architecture-Restoration/commit/d8dfec2) | `server/models/AuditRecord.js`, `server/routes/recommend.js`, `server/scripts/verify_regulatory_audit_live.js` |
+| **Phase 3** | **Adversarial Suitability & Multi-Instrument Concentration Defense**: Hardened capacity pull-down safeguards and anti-gaming aggregate category concentration caps; verified against adversarial senior-citizen and multi-fund attack profiles. | [`d3ee7dc`](https://github.com/yashaskn8/WealthGenie-Architecture-Restoration/commit/d3ee7dc) | `server/services/RecommendationPipeline.js`, `server/test/suitabilityAdversarial.test.js`, `server/scripts/verify_suitability_live.js` |
+| **Phase 4** | **Explicit Scope & RIA Compliance Documentation**: Added explicit jurisdictional scope limitations (Indian retail only), RIA educational disclaimers, and Union Budget tax engine update protocols to `PROJECT_STATUS.md` and `README.md`. | [`4cfe42c`](https://github.com/yashaskn8/WealthGenie-Architecture-Restoration/commit/4cfe42c) | `PROJECT_STATUS.md`, `README.md` |
 
 ---
 
@@ -72,7 +77,6 @@ Guarded Section 87A marginal relief so it only triggers for `safeRegime === 'new
   regulatory_rule_version: {
     type: String,
     required: true,
-    default: 'FY2025-26-v1.0',
     index: true,
   },
 ```
@@ -91,7 +95,7 @@ Recommendation ID: 6a82ab0f529d2323160c9c28
 Audit ID: 6a82ab0f529d2323160c9c2a
 Audit Hash: 87a776678c836c51f37e2a094aa2c6eac43c8dbc1b8b173c58f7aaa7036c97ee
 Model Version: rule_fallback
-Regulatory Rule Version: FY2025-26-v1.0
+Regulatory Rule Version: tax-policy-FY2026-27-v2
 Instruments Count: 5
 Portfolio Yield: 6.56%
 
@@ -102,14 +106,14 @@ Record ID: 6a82ab0f529d2323160c9c2a
 User ID: b0dfcafecc598e19d6717a50
 Profile ID: 6a82ab0c529d2323160c9c24
 Version ID: rule_fallback
-Regulatory Rule Version: FY2025-26-v1.0
+Regulatory Rule Version: tax-policy-FY2026-27-v2
 Input Hash: 87a776678c836c51f37e2a094aa2c6eac43c8dbc1b8b173c58f7aaa7036c97ee
 Engine: rule_fallback
 Timestamp: 2026-08-17T06:32:47.638Z
 Recommendations Count: 5
 ==================================================================
 
-✅ Verified: Regulatory rule version 'FY2025-26-v1.0' is successfully captured in recommendation responses and immutable AuditRecords!
+✅ Verified: statutory tax policy version 'tax-policy-FY2026-27-v2' is captured separately from the recommendation policy in new AuditRecords.
 ```
 
 ---

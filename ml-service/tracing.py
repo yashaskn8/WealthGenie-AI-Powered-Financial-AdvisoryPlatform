@@ -1,4 +1,6 @@
 import json
+import logging
+import os
 import time
 from pathlib import Path
 from typing import Sequence
@@ -14,14 +16,25 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 BASE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = BASE_DIR.parent
-TRACE_LOG_PATH = ROOT_DIR / "traces.jsonl"
+DEFAULT_TRACE_LOG_PATH = ROOT_DIR / "traces.jsonl"
+
+
+def resolve_trace_log_path(env=None) -> Path:
+    """Resolve a writable trace path without changing the local default."""
+    configured_path = (env or os.environ).get("TRACE_LOG_PATH")
+    return Path(configured_path).expanduser() if configured_path else DEFAULT_TRACE_LOG_PATH
+
+
+TRACE_LOG_PATH = resolve_trace_log_path()
+logger = logging.getLogger("wealthgenie.tracing")
 
 
 class FileSpanExporter(SpanExporter):
     """Exports spans directly to a local traces.jsonl file."""
 
     def __init__(self, file_path: Path = TRACE_LOG_PATH):
-        self.file_path = file_path
+        self.file_path = Path(file_path).expanduser()
+        self.write_failure_reported = False
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         try:
@@ -55,11 +68,15 @@ class FileSpanExporter(SpanExporter):
                 records.append(json.dumps(record, default=str))
 
             if records:
+                self.file_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(self.file_path, "a", encoding="utf-8") as f:
                     f.write("\n".join(records) + "\n")
+            self.write_failure_reported = False
             return SpanExportResult.SUCCESS
         except Exception as e:
-            print(f"[Tracing] Failed to export spans to file: {e}")
+            if not self.write_failure_reported:
+                logger.warning("Failed to export spans to file path=%s: %s", self.file_path, e)
+                self.write_failure_reported = True
             return SpanExportResult.FAILURE
 
     def shutdown(self):

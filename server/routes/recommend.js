@@ -45,6 +45,7 @@ import {
 } from '../services/instrumentConstants.js';
 import { verifyAuditChain } from '../services/auditChain.js';
 import { generatePortfolioProjection } from '../services/projectionEngine.js';
+import { REGULATORY_RULE_VERSION } from '../services/taxEngine.js';
 
 const router = Router();
 
@@ -60,6 +61,7 @@ function canonicalAuditInputs(profile, suitability, modelVersion) {
   return {
     financial_profile_schema_version: FINANCIAL_PROFILE_SCHEMA_VERSION,
     recommendation_policy_version: RECOMMENDATION_POLICY_VERSION,
+    regulatory_rule_version: REGULATORY_RULE_VERSION,
     risk_capacity_policy_version: RISK_CAPACITY_POLICY.version,
     model_version: modelVersion,
     monthly_take_home: profile.monthlyTakeHome,
@@ -272,7 +274,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       correlationId,
       traceId: req.traceId || req.correlationId || '',
       version_id: modelVersion,
-      regulatory_rule_version: RECOMMENDATION_POLICY_VERSION,
+      regulatory_rule_version: REGULATORY_RULE_VERSION,
       input_hash: inputHash,
       inputs,
       recommendations: {

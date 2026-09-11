@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import assert from 'node:assert/strict';
 import { RECOMMENDATION_POLICY_VERSION } from '../services/recommendationProfile.js';
+import { REGULATORY_RULE_VERSION } from '../services/taxEngine.js';
 
 const BASE_URL = 'http://127.0.0.1:5000';
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -87,11 +88,12 @@ async function runLiveRegulatoryAuditVerification() {
   console.log(`Recommendations Count: ${latestRecord.recommendations?.instruments?.length}`);
   console.log(`==================================================================\n`);
 
-  assert.equal(latestRecord.regulatory_rule_version, RECOMMENDATION_POLICY_VERSION);
+  assert.equal(latestRecord.regulatory_rule_version, REGULATORY_RULE_VERSION);
+  assert.notEqual(REGULATORY_RULE_VERSION, RECOMMENDATION_POLICY_VERSION);
   assert.ok(latestRecord.version_id, 'version_id must be present');
   assert.ok(latestRecord.input_hash, 'input_hash must be present');
 
-  console.log(`✅ Verified: Recommendation policy version '${RECOMMENDATION_POLICY_VERSION}' is captured in the tamper-evident advisory audit chain.`);
+  console.log(`✅ Verified: recommendation policy '${RECOMMENDATION_POLICY_VERSION}' and statutory tax policy '${REGULATORY_RULE_VERSION}' remain distinct in the tamper-evident advisory audit chain.`);
 }
 
 runLiveRegulatoryAuditVerification().catch(err => {

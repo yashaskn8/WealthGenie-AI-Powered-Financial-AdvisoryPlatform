@@ -9,6 +9,7 @@ import {
   releaseAdvisoryIdempotency,
 } from '../middleware/idempotency.js';
 import { persistAdvisoryAtomically } from '../services/advisoryPersistence.js';
+import { REGULATORY_RULE_VERSION } from '../services/taxEngine.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 
 const userId = new mongoose.Types.ObjectId();
@@ -53,7 +54,7 @@ function makeOperation(claim, suffix = '') {
       correlationId: `atomic-test-${suffix}`,
       traceId: '',
       version_id: 'rule_fallback',
-      regulatory_rule_version: 'FY2025-26-v1.0',
+      regulatory_rule_version: REGULATORY_RULE_VERSION,
       input_hash: `input-hash-${suffix}`,
       inputs: {
         financial_profile_schema_version: 'financial-profile-1.0.0',

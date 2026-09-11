@@ -9,11 +9,11 @@
 | **Unified State Handling** | [`reactapp/src/components/StateMessages.jsx`](reactapp/src/components/StateMessages.jsx) | Standardized `LoadingState`, `ErrorState`, and `EmptyState` components with ARIA live regions (`role="status"`, `role="alert"`) |
 | **Accessibility (0 Violations)** | [`reactapp/src/__tests__/a11y.test.jsx`](reactapp/src/__tests__/a11y.test.jsx) | Automated `axe-core` testing verifying 0 accessibility violations across all 5 audited core screens |
 | **Playwright Full-Lifecycle E2E Suite** | [`reactapp/e2e/full-flow.spec.ts`](reactapp/e2e/full-flow.spec.ts) & [`scripts/run_e2e_stack.ps1`](scripts/run_e2e_stack.ps1) | Full end-to-end integration test (Signup -> Profile -> Recommendations & DeepDive -> Goal Planning -> GenieChat grounded advice) passing in ~21s with automated stack orchestrator |
-| **OpenTelemetry Distributed Tracing** | [`server/config/tracing.js`](server/config/tracing.js) & [`ml-service/tracing.py`](ml-service/tracing.py) | End-to-end W3C `traceparent` and `X-Correlation-ID` propagation across Express <-> FastAPI microservice boundary; exports spans to `traces.jsonl` ([`scripts/verify_distributed_tracing.js`](scripts/verify_distributed_tracing.js)) |
+| **OpenTelemetry Distributed Tracing** | [`server/config/tracing.js`](server/config/tracing.js) & [`ml-service/tracing.py`](ml-service/tracing.py) | End-to-end W3C `traceparent` and `X-Correlation-ID` propagation across Express <-> FastAPI; local runs default to the repository `traces.jsonl`, while containers explicitly use writable `/app/traces.jsonl` ([`scripts/verify_distributed_tracing.js`](scripts/verify_distributed_tracing.js)) |
 | **Tamper-Evident Advisory Audit Chain** | [`server/models/AuditRecord.js`](server/models/AuditRecord.js) & [`server/routes/recommend.js`](server/routes/recommend.js) | Transactional canonical SHA-256 hash chain recording inputs, outputs, model/rule versions, cited RAG chunks, and correlation metadata, with verification tests ([`server/test/auditChain.test.js`](server/test/auditChain.test.js)) |
 | **Multi-Tenant RAG Isolation** | [`ml-service/rag/`](ml-service/rag/) | Multi-tenant namespace isolation across vector storage, BM25 indexing, ingestion, and retrieval queries ([`ml-service/tests/test_rag_tenant_isolation.py`](ml-service/tests/test_rag_tenant_isolation.py)) |
-| **Kind Cluster CD Pipeline** | [`.github/workflows/cd.yml`](.github/workflows/cd.yml) | Automated CD workflow executing in GitHub Actions: spins up Kind cluster, installs `metrics-server`, deploys manifests via Kustomize, runs live smoke tests (`/health/live`, `/health/ready`, `/health/deep`, `/api/tax/compare`), and verifies HPA metrics |
-| **Horizontal Pod Autoscaling (HPA)** | [`k8s/hpa/server-hpa.yaml`](k8s/hpa/server-hpa.yaml) | CPU-based autoscaling (70% utilization target, 1 min / 4 max replicas) wired with `metrics-server` |
+| **Kind Cluster CD Pipeline** | [`.github/workflows/cd.yml`](.github/workflows/cd.yml) | GitHub Actions CD workflow configured to spin up Kind, install `metrics-server`, deploy manifests via Kustomize, run live smoke tests (`/health/live`, `/health/ready`, `/health/deep`, `/api/tax/compare`), and verify HPA metrics; this host lacks Docker/Kind/kubectl, so the workflow was not run locally in this task |
+| **Horizontal Pod Autoscaling (HPA)** | [`k8s/server/hpa.yaml`](k8s/server/hpa.yaml) | CPU-based autoscaling (70% utilization target, 1 min / 4 max replicas) wired with `metrics-server` |
 | **Terraform IaC (Validated)** | [`terraform/`](terraform/) | Modular IaC for AWS VPC (3-AZ, public/private subnets, NAT Gateway), Amazon DocumentDB (3-node cluster, KMS encrypted), ALB, and Route53 DNS. Validated via `terraform validate` ("Success! The configuration is valid") & `terraform plan` ("Plan: 22 to add, 0 to change, 0 to destroy") |
 | **Random Forest classifier** | Production-serving `model.pkl` with TreeSHAP explainability | 95.63% rule-approx. fidelity (independent CFP benchmark: 25.26%) |
 | **FT-Transformer benchmark** | [`multi_model_benchmark.json`](ml-service/reports/multi_model_benchmark.json) | 97.05% rule-approx. fidelity (independent CFP benchmark: 15.83%) |
@@ -125,8 +125,8 @@ Automated testing conducted via `axe-core` and `@testing-library/react` in `reac
 
 ### What is real & locally verified
 1. **Kubernetes Manifests ([`k8s/`](k8s/))**: Full declarative manifests using Kustomize (`k8s/kustomization.yaml`), including Deployments with liveness/readiness/startup probes, resource quotas, ConfigMaps, Secrets, PersistentVolumeClaims, and Services.
-2. **Local Cluster Verification (Kind)**: Verified via automated Kind cluster deployment in GitHub Actions ([`.github/workflows/cd.yml`](.github/workflows/cd.yml)), including smoke tests against `/health/live`, `/health/ready`, `/health/deep`, and `/api/tax/compare`.
-3. **Autoscaling (HPA)**: Kubernetes `HorizontalPodAutoscaler` manifest ([`k8s/hpa/server-hpa.yaml`](k8s/hpa/server-hpa.yaml)) scaling `wealthgenie-server` from 1 to 4 replicas based on CPU target utilization.
+2. **Kind Cluster Verification (workflow-configured)**: The GitHub Actions workflow ([`.github/workflows/cd.yml`](.github/workflows/cd.yml)) owns the Kind deployment and smoke tests against `/health/live`, `/health/ready`, `/health/deep`, and `/api/tax/compare`. It was not locally executable during this task because Docker, Kind, and kubectl are unavailable on the current host.
+3. **Autoscaling (HPA)**: Kubernetes `HorizontalPodAutoscaler` manifest ([`k8s/server/hpa.yaml`](k8s/server/hpa.yaml)) scales `wealthgenie-server` from 1 to 4 replicas based on CPU target utilization.
 4. **Continuous Deployment**: Dedicated CD workflow executing on every push to `main` and manual dispatch.
 
 ### What is written but unapplied
@@ -149,11 +149,10 @@ To transition from the Kind-based verification to a live production AWS/GCP clou
 - **Rate limiter in-memory fallback**: `passOnStoreError: false` is enforced for `authLimiter` (fail-closed), but `apiLimiter` still falls back to in-memory `Map` counters if Redis disconnects, effectively multiplying rate limits across independent replicas during an outage.
 - **LoRA/QLoRA fine-tuning**: interface exists in code, but is not functional. Deferred indefinitely due to CPU compute constraints. Phase 4 evaluation was run against the base (non-fine-tuned) `Qwen/Qwen2.5-0.5B-Instruct` model.
 - **Model Version Registry Live Wiring & Cold-Start Bootstrapping**: The model version registry (`mongo_registry_store.py`, `registry_store.py`, SHA-256 tamper-evident integrity, and rollback) is wired directly into the FastAPI application lifespan via `store_factory.get_model_registry()`, resolving active versions, artifacts, and rigor metrics dynamically upon startup and exposing live HTTP endpoints (`/model/registry/versions`, `/model/registry/active`, `/model/registry/integrity/{id}`, `/model/registry/register`, `/model/registry/rollback/{id}`) with hot reload support.
-- **Cold-Start Bootstrapping vs. Pre-Baked Artifacts (Architecture Breakdown)**:
+- **Cold-Start Bootstrapping vs. Production Artifact Build**: The ML Dockerfile now invokes the RF, MLP, and FT-Transformer trainers as Python modules and fails the image build if any required serving artifact is missing or empty. The application retains the explicit cold-start fallback for local/unbaked images, but production images are expected to use deterministic build-time artifacts and must not hide training failures.
   - **RandomForest**: Possesses a zero-dependency cold-start fallback (`model.training.train_rf.train_random_forest_model`). If pre-baked `model.pkl` and `label_encoder.pkl` are absent (e.g. on fresh `git clone` or un-baked k8s image), the lifespan automatically generates synthetic investment profiles, trains the baseline classifier pipeline with TreeSHAP compatibility, exports the artifacts, and seeds them into the registry.
   - **PyTorch MLP**: Possesses a zero-dependency cold-start fallback (`model.training.train_pytorch.train_pytorch_model`). If `mlp_model.pt` is missing, it auto-trains a baseline MLP on synthetic profiles, saves weights to `model/saved_models/mlp_model.pt`, and seeds into the registry.
   - **FT-Transformer**: Possesses a zero-dependency cold-start fallback (`model.training.train_pytorch.train_ft_transformer_model`). If `ft_transformer.pt` is missing, it auto-trains a baseline FT-Transformer, saves weights to `model/saved_models/ft_transformer.pt`, and seeds into the registry.
-  - **Kubernetes Pod Health Impact**: Because all three architectures support automated cold-start bootstrapping, a fresh k8s pod comes up healthy on `/healthz` and `/readiness` even if launched without pre-baked image layers. In production CI/CD, pre-baked artifact image layers bypass the cold-start training time.
 
 ---
 
@@ -196,8 +195,7 @@ WealthGenie is purpose-built and scoped strictly to **Indian personal income tax
 - **Regulatory Registration Notice**: WealthGenie is an **educational technology and algorithmic decision-support project**, **NOT a SEBI-registered Investment Adviser (RIA)** or research analyst. All outputs are educational projections and algorithmic simulations, not certified financial advice.
 
 ### 3. Active Statutory Tax Rules & Update Instructions
-- **Active Statutory Rule Version**: `REGULATORY_RULE_VERSION = 'FY2025-26-v1.0'`
-  - **Fiscal Year / Assessment Year**: **FY 2025-26 (AY 2026-27)**.
+- **Active Statutory Rule Version**: `REGULATORY_RULE_VERSION` is exported by `server/services/taxEngine.js` from the verified current-fiscal-year policy entry. At this baseline, the current date resolves to **FY2026-27 (AY2027-28)** and the identifier is `tax-policy-FY2026-27-v2`; the supported historical entry is `tax-policy-FY2025-26-v2`.
   - **New Tax Regime (Section 115BAC)**: ₹0–4L: 0%, ₹4–8L: 5%, ₹8–12L: 10%, ₹12–16L: 15%, ₹16–20L: 20%, ₹20–24L: 25%, >₹24L: 30%. Standard deduction ₹75,000. Section 87A rebate up to ₹12,00,000 with statutory marginal relief.
   - **Old Tax Regime**: ₹0–2.5L: 0%, ₹2.5–5L: 5%, ₹5–10L: 20%, >₹10L: 30%. Standard deduction ₹50,000. Section 87A rebate up to ₹5,00,000 (statutory cliff; no 87A marginal relief).
   - **Capital Gains (Finance Act 2024 / 2025)**: Section 112A LTCG: 12.5% on gains exceeding ₹1,25,000; Section 111A STCG: 20%; Section 288A/288B rounding to nearest ₹10.
@@ -207,7 +205,7 @@ WealthGenie is purpose-built and scoped strictly to **Indian personal income tax
      - Update `STANDARD_NEW_SLABS` or `STANDARD_OLD_SLABS` arrays.
      - Update standard deduction amounts in `calculateTaxableIncome`.
      - Update Section 87A rebate limits in `computeTax`.
-     - Update `REGULATORY_RULE_VERSION` string (e.g. `'FY2026-27-v1.0'`).
+     - Add the new fiscal-year entry, policy identifier, and official source references; do not hardcode a prior-year default into `AuditRecord`.
   2. Open [`server/services/instrumentConstants.js`](server/services/instrumentConstants.js):
      - Update statutory tax rates (e.g. `CESS_RATE`, `LTCG_EQUITY_RATE`, `STCG_EQUITY_RATE`, `LTCG_EXEMPTION_LIMIT`).
   3. Validate using Property Fuzzing and Exact Boundaries:

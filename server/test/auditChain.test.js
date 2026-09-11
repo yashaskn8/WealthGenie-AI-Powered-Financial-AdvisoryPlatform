@@ -8,6 +8,7 @@ import IdempotencyKey from '../models/IdempotencyKey.js';
 import { claimAdvisoryIdempotency } from '../middleware/idempotency.js';
 import { persistAdvisoryAtomically } from '../services/advisoryPersistence.js';
 import { verifyAuditChain } from '../services/auditChain.js';
+import { REGULATORY_RULE_VERSION } from '../services/taxEngine.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 
 const userId = new mongoose.Types.ObjectId();
@@ -53,7 +54,7 @@ async function createAdvisory(index) {
       correlationId: `audit-chain-correlation-${index}`,
       traceId: `trace-${index}`,
       version_id: `model-${index}`,
-      regulatory_rule_version: 'FY2025-26-v1.0',
+      regulatory_rule_version: REGULATORY_RULE_VERSION,
       input_hash: `legacy-input-hash-${index}`,
       inputs: {
         financial_profile_schema_version: 'financial-profile-1.0.0',

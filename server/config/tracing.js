@@ -9,14 +9,21 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '../..');
-const TRACE_LOG_PATH = path.join(ROOT_DIR, 'traces.jsonl');
+const DEFAULT_TRACE_LOG_PATH = path.join(ROOT_DIR, 'traces.jsonl');
+
+export function resolveTraceLogPath(env = process.env) {
+  return path.resolve(env.TRACE_LOG_PATH || DEFAULT_TRACE_LOG_PATH);
+}
+
+const TRACE_LOG_PATH = resolveTraceLogPath();
 
 /**
  * Custom FileSpanExporter that appends OpenTelemetry spans to traces.jsonl
  */
-class FileSpanExporter {
+export class FileSpanExporter {
   constructor(filePath = TRACE_LOG_PATH) {
-    this.filePath = filePath;
+    this.filePath = path.resolve(filePath);
+    this.writeFailureReported = false;
   }
 
   export(spans, resultCallback) {
@@ -42,11 +49,16 @@ class FileSpanExporter {
       });
 
       if (records.length > 0) {
+        fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
         fs.appendFileSync(this.filePath, records.join('\n') + '\n', 'utf8');
       }
+      this.writeFailureReported = false;
       resultCallback({ code: 0 }); // ExportResultCode.SUCCESS
     } catch (err) {
-      console.warn('[Tracing] Failed to export spans to file:', err.message);
+      if (!this.writeFailureReported) {
+        console.warn('[Tracing] Failed to export spans to file:', err.message, `path=${this.filePath}`);
+        this.writeFailureReported = true;
+      }
       resultCallback({ code: 1, error: err }); // ExportResultCode.FAILED
     }
   }

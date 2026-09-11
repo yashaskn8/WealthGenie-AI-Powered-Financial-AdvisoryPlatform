@@ -28,6 +28,8 @@ spec:
           env:
             - name: PORT
               value: "8000"
+            - name: TRACE_LOG_PATH
+              value: "/app/traces.jsonl"
             - name: ENVIRONMENT
               value: "production"
             - name: MONGODB_URI

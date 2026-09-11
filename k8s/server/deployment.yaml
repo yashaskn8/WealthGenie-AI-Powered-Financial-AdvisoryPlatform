@@ -28,6 +28,8 @@ spec:
           env:
             - name: PORT
               value: "5000"
+            - name: TRACE_LOG_PATH
+              value: "/app/traces.jsonl"
             - name: MONGODB_URI
               valueFrom:
                 secretKeyRef:

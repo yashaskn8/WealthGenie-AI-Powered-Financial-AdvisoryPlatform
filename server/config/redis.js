@@ -115,6 +115,25 @@ const setCacheNX = async (key, value, ttlSeconds) => {
   }
 };
 
+/**
+ * Delete a SET NX lease only when the stored value still belongs to the
+ * caller. The compare-and-delete must be atomic so an expired lease that has
+ * already been acquired by another process cannot be removed by the former
+ * owner during cleanup.
+ */
+const releaseCacheNX = async (key, value) => {
+  if (!redisAvailable || !redisClient) return false;
+  try {
+    const result = await redisClient.eval(
+      "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+      { keys: [key], arguments: [JSON.stringify(value)] },
+    );
+    return Number(result) === 1;
+  } catch {
+    return false;
+  }
+};
+
 const testBlacklist = new Set();
 
 /**
@@ -174,6 +193,7 @@ export {
   getCache,
   setCache,
   setCacheNX,
+  releaseCacheNX,
   delCache,
   blacklistToken,
   isTokenBlacklisted,

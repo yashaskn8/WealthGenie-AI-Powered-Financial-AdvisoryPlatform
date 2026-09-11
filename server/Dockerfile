@@ -11,6 +11,7 @@ EXPOSE 5000
 
 ENV NODE_ENV=production
 ENV PORT=5000
+ENV TRACE_LOG_PATH=/app/traces.jsonl
 
 RUN chown -R node:node /app
 USER node

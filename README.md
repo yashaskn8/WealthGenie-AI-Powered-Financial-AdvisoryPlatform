@@ -24,7 +24,7 @@
 
 * **5-Stage Mathematical Portfolio Optimization**: Combines mean-variance quadratic optimization (`numeric` solver), rule-based heuristic fallback, policy concentration caps (`CONCENTRATION_CAPS`), and emergency fund floor protection.
 * **Source-Backed Product and Market Data**: Normalized provider-neutral facts from NSE, AMFI, India Post/Department of Posts, and SBI, with timestamps, freshness, caching, request coalescing, and explicit unavailable states.
-* **OpenTelemetry Distributed Tracing**: Full W3C `traceparent` and `X-Correlation-ID` context propagation across Express and FastAPI microservices exporting spans to local `traces.jsonl`.
+* **OpenTelemetry Distributed Tracing**: Full W3C `traceparent` and `X-Correlation-ID` context propagation across Express and FastAPI; local runs use the repository `traces.jsonl`, while containers use writable `/app/traces.jsonl`.
 * **Tamper-Evident Advisory Audit Chain**: Transactional SHA-256 hash chaining binds advisory inputs, outputs, model/rule versions, provenance, timestamps, and correlation data. MongoDB records are not described as immutable.
 * **Multi-Model Tabular Deep Learning**: Comparative suitability modeling benchmarking **Random Forest** (95.63% test rule-approximation fidelity, TreeSHAP explainability), **PyTorch MLP** (95.60%), and **FT-Transformer** (*NeurIPS 2021*, 97.05% test rule-approximation fidelity).
 * **Grounded Explanation Boundary**: NVIDIA NIM is preferred only for explaining a minimal read-only backend evidence packet. Gemini and Groq are optional fallback providers; every model response is validated, and a deterministic grounded template remains available without changing financial decisions.
@@ -40,7 +40,7 @@
 | :--- | :--- | :--- |
 | **Portfolio Recommendation** | 5-stage pipeline: Risk scoring → Asset allocation → Quadratic solver / Heuristic fallback → Policy caps → Rebalancing | [`server/services/RecommendationPipeline.js`](server/services/RecommendationPipeline.js), [`server/test/recommendationPipeline.test.js`](server/test/recommendationPipeline.test.js) |
 | **RAG Research Subsystem** | Standalone FastAPI hybrid retrieval evaluation with tenant isolation; it is not the active financial authority for chat | Document Hit Rate: **98.7%**, Precision@4: **0.7367**, MRR: **0.9022** ([`real_corpus_evaluation_report.json`](ml-service/reports/real_corpus_evaluation_report.json), [`test_rag_tenant_isolation.py`](ml-service/tests/test_rag_tenant_isolation.py)) |
-| **Distributed Tracing** | OpenTelemetry SDK with W3C `traceparent` propagation across Express <-> FastAPI microservices exporting to `traces.jsonl` | [`server/config/tracing.js`](server/config/tracing.js), [`ml-service/tracing.py`](ml-service/tracing.py), [`scripts/verify_distributed_tracing.js`](scripts/verify_distributed_tracing.js) |
+| **Distributed Tracing** | OpenTelemetry SDK with W3C `traceparent` propagation across Express <-> FastAPI; `TRACE_LOG_PATH` is configurable and container deployments use `/app/traces.jsonl` | [`server/config/tracing.js`](server/config/tracing.js), [`ml-service/tracing.py`](ml-service/tracing.py), [`scripts/verify_distributed_tracing.js`](scripts/verify_distributed_tracing.js) |
 | **Tamper-Evident Advisory Audit Chain** | Transactional canonical SHA-256 record chain with fail-loudly guarantees and verification endpoint | [`server/models/AuditRecord.js`](server/models/AuditRecord.js), [`server/test/auditChain.test.js`](server/test/auditChain.test.js) |
 | **Playwright Full-Lifecycle E2E Suite** | Real-service user lifecycle against replica-set MongoDB, Redis, FastAPI, Express, and Vite | [`reactapp/e2e/full-flow.spec.ts`](reactapp/e2e/full-flow.spec.ts), [`.github/workflows/ci.yml`](.github/workflows/ci.yml) |
 | **Investor Classification** | Random Forest (`model.pkl`), PyTorch MLP, and FT-Transformer tabular neural network | FT-Transformer: **97.05%** rule-approx. (independent CFP: 15.83%), RF: **95.63%** rule-approx. (independent CFP: 25.26%) ([`multi_model_benchmark.json`](ml-service/reports/multi_model_benchmark.json)) |
@@ -374,7 +374,7 @@ node scripts/docs/check_docs_sync.js
 ## Project Structure
 
 ```text
-WealthGenie-AI-Powered-Financial-Advisory-Platform/
+WealthGenie-Architecture-Restoration/
 ├── .github/
 │   └── workflows/
 │       └── ci.yml                 # Quality, security, contract, and real-service browser gates
@@ -424,7 +424,7 @@ WealthGenie-AI-Powered-Financial-Advisory-Platform/
 
 1. **Jurisdiction & Tax Scope**: Scoped strictly to Indian individual personal income tax (Income Tax Act, 1961) and retail investment instruments (PPF, SCSS, SSY, NPS, SGB, Mutual Funds, ETFs, FD). Does not support corporate taxation, HUF, NRI/DTAA provisions, crypto (VDA), or derivative trading (F&O).
 2. **"Compliance-Inspired Controls" vs. Regulatory Registration**: WealthGenie applies algorithmic principles inspired by SEBI (Investment Advisers) Regulations, 2013 (risk capacity reconciliation, multi-instrument concentration caps, tamper-evident SHA-256 audit chains) and AMFI risk-o-meter classifications. WealthGenie is an educational research and decision-support platform, **NOT a SEBI-registered Investment Adviser (RIA)**. All outputs are educational projections, not certified investment advice.
-3. **Statutory Tax Versioning (`FY2025-26-v1.0`)**: Tax engine reflects FY 2025-26 (AY 2026-27) slabs under Finance Act 2024 / 2025 revisions, including Section 87A rebate (₹12L New Regime with statutory marginal relief vs ₹5L Old Regime statutory cliff), Section 112A LTCG 12.5% rate (>₹1.25L exemption), and Section 288A/288B rounding conventions. When new budgets are announced, update `server/services/taxEngine.js` and bump `REGULATORY_RULE_VERSION`.
+3. **Fiscal-year-versioned tax policy**: The tax engine exposes verified policy identifiers such as `tax-policy-FY2025-26-v2` and `tax-policy-FY2026-27-v2`, selected by the explicit fiscal year. At this baseline, `REGULATORY_RULE_VERSION` resolves from the current fiscal-year entry (`tax-policy-FY2026-27-v2`); it is distinct from the suitability `recommendation_policy_version`. When a new budget is enacted, add a verified fiscal-year policy entry and official source references in `server/services/taxEngine.js`, then update its boundary tests and documentation.
 4. **Local Load Test Disclosure**: Load test benchmarks were conducted on a single host (`localhost:5000` / `127.0.0.1:8000`). They measure single-node event loop throughput and microservice latency, not multi-region cloud network conditions.
 5. **Fine-Tuning Scope**: LoRA/QLoRA LLM fine-tuning pipelines are defined in code interfaces but were deferred due to CPU compute constraints during evaluation. Base `Qwen/Qwen2.5-0.5B-Instruct` was used for LLM evaluation.
 6. **Computer Vision**: The platform intentionally focuses on tabular ML, text RAG, and financial tax algorithms. Computer vision (VLM) is explicitly out of scope.

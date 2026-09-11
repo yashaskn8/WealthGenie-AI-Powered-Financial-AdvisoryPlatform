@@ -34,7 +34,6 @@ const auditRecordSchema = new mongoose.Schema({
   regulatory_rule_version: {
     type: String,
     required: true,
-    default: 'FY2025-26-v1.0',
     index: true,
   },
   input_hash: {

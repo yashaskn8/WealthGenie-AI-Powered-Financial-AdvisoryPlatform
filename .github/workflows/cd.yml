@@ -137,6 +137,7 @@ jobs:
 
       - name: Execute Live Smoke Tests & Prove Request Flow (Step 2)
         run: |
+          set -euo pipefail
           echo "### Live Endpoint Smoke Test Verification (Step 2)" >> $GITHUB_STEP_SUMMARY
 
           echo "Starting scoped port-forward from Service to runner localhost:5000..."
@@ -144,19 +145,45 @@ jobs:
           PORT_FORWARD_PID=$!
           trap 'kill "$PORT_FORWARD_PID" 2>/dev/null || true' EXIT
 
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:5000/health/live > /dev/null; then
-              break
-            fi
-            if [ "$attempt" -eq 30 ]; then
-              echo "ERROR: server port-forward did not become ready"
-              cat port-forward.log
-              kubectl get pods -n wealthgenie -o wide
-              kubectl get endpoints -n wealthgenie wealthgenie-server
-              exit 1
-            fi
-            sleep 2
-          done
+          print_server_diagnostics() {
+            echo "--- port-forward log ---"
+            cat port-forward.log || true
+            echo "--- server pods ---"
+            kubectl get pods -n wealthgenie -l app=wealthgenie-server -o wide || true
+            echo "--- server endpoints ---"
+            kubectl get endpoints -n wealthgenie wealthgenie-server -o yaml || true
+            echo "--- recent server logs ---"
+            kubectl logs -n wealthgenie -l app=wealthgenie-server --tail=100 || true
+          }
+
+          wait_for_http_2xx() {
+            local url="$1"
+            local attempts="$2"
+            local delay_seconds="$3"
+            local response_file
+            local status
+            response_file=$(mktemp)
+            for attempt in $(seq 1 "$attempts"); do
+              status=$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' "$url" || true)
+              if [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
+                cat "$response_file"
+                rm -f "$response_file"
+                return 0
+              fi
+              if [ "$attempt" -lt "$attempts" ]; then
+                sleep "$delay_seconds"
+              fi
+            done
+            echo "ERROR: $url did not return a successful response after $attempts attempts (last status: $status)"
+            cat "$response_file" || true
+            rm -f "$response_file"
+            return 1
+          }
+
+          if ! wait_for_http_2xx http://127.0.0.1:5000/health/live 30 2 > /dev/null; then
+            print_server_diagnostics
+            exit 1
+          fi
 
           echo "1. Testing /health/live..."
           LIVE_RES=$(curl -s -f http://127.0.0.1:5000/health/live)
@@ -164,47 +191,117 @@ jobs:
           echo "- **Liveness Probe (/health/live)**: \`$LIVE_RES\`" >> $GITHUB_STEP_SUMMARY
 
           echo "2. Testing /health/ready..."
+          if ! wait_for_http_2xx http://127.0.0.1:5000/health/ready 30 2 > /dev/null; then
+            print_server_diagnostics
+            exit 1
+          fi
           READY_RES=$(curl -s -f http://127.0.0.1:5000/health/ready)
           echo "Ready Response: $READY_RES"
           echo "- **Readiness Probe (/health/ready)**: \`$READY_RES\`" >> $GITHUB_STEP_SUMMARY
 
-          echo "3. Testing /health/deep (with retry for dependency warmup)..."
-          for i in 1 2 3 4 5; do
-            DEEP_RES=$(curl -s -f http://127.0.0.1:5000/health/deep) && break
-            echo "  Attempt $i failed, waiting 10s for dependencies to warm up..."
-            sleep 10
-          done
-          if [ -z "$DEEP_RES" ]; then
-            echo "ERROR: /health/deep failed after 5 retries"
-            curl -s http://127.0.0.1:5000/health/deep || true
+          echo "3. Testing /health/deep (with bounded dependency readiness retry)..."
+          if ! wait_for_http_2xx http://127.0.0.1:5000/health/deep 30 2 > /dev/null; then
+            print_server_diagnostics
             exit 1
           fi
+          DEEP_RES=$(curl -s -f http://127.0.0.1:5000/health/deep)
           echo "Deep Response: $DEEP_RES"
           echo "- **Deep Health Probe (/health/deep)**: \`$DEEP_RES\`" >> $GITHUB_STEP_SUMMARY
 
           echo "4. Testing Business Endpoint /api/tax/compare..."
-          TAX_RES=$(curl -s -f "http://127.0.0.1:5000/api/tax/compare?income=1200000&incomeSource=salary&fiscalYear=FY2026-27")
+          TAX_URL="http://127.0.0.1:5000/api/tax/compare?income=1200000&incomeSource=salary&fiscalYear=FY2026-27&age=30"
+          if ! TAX_RES=$(curl -s -f "$TAX_URL"); then
+            echo "ERROR: tax compare smoke request failed: $TAX_URL"
+            curl -s "$TAX_URL" || true
+            print_server_diagnostics
+            exit 1
+          fi
           echo "Tax Compare Response: $TAX_RES"
           echo "- **Business Tax Endpoint (/api/tax/compare)**: \`$TAX_RES\`" >> $GITHUB_STEP_SUMMARY
 
       - name: Verify Horizontal Pod Autoscaler & Load Response (Step 3)
         run: |
+          set -euo pipefail
           echo "### Horizontal Pod Autoscaler (HPA) Verification (Step 3)" >> $GITHUB_STEP_SUMMARY
 
-          echo "Waiting 15s for metrics-server to sample metrics..."
-          sleep 15
-          kubectl top pods -n wealthgenie || true
-          kubectl get hpa -n wealthgenie
+          echo "Starting a port-forward scoped to the HPA/load step..."
+          kubectl port-forward --address=127.0.0.1 -n wealthgenie svc/wealthgenie-server 5000:5000 > hpa-port-forward.log 2>&1 &
+          HPA_PORT_FORWARD_PID=$!
+          trap 'kill "$HPA_PORT_FORWARD_PID" 2>/dev/null || true' EXIT
+
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:5000/health/live > /dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              echo "ERROR: HPA-step server port-forward did not become ready"
+              cat hpa-port-forward.log || true
+              kubectl get pods -n wealthgenie -o wide || true
+              kubectl get endpoints -n wealthgenie wealthgenie-server -o yaml || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+          if ! kubectl get hpa wealthgenie-server-hpa -n wealthgenie > /dev/null; then
+            echo "ERROR: expected HPA wealthgenie-server-hpa does not exist"
+            kubectl get hpa -n wealthgenie || true
+            exit 1
+          fi
+
+          echo "Waiting until metrics-server reports server pod metrics..."
+          SERVER_METRICS=""
+          for attempt in $(seq 1 30); do
+            SERVER_METRICS=$(kubectl top pods -n wealthgenie -l app=wealthgenie-server --no-headers 2>/tmp/wealthgenie-metrics-error || true)
+            if echo "$SERVER_METRICS" | awk 'NF >= 3 { found = 1 } END { exit(found ? 0 : 1) }'; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              echo "ERROR: server pod metrics were not available after bounded retries"
+              cat /tmp/wealthgenie-metrics-error || true
+              kubectl get pods -n wealthgenie -o wide || true
+              kubectl describe deployment metrics-server -n kube-system || true
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "Initial server metrics: $SERVER_METRICS"
+
+          LOAD_URL="http://127.0.0.1:5000/api/tax/compare?income=1200000&incomeSource=salary&fiscalYear=FY2026-27&age=30"
+          if ! curl --fail --silent "$LOAD_URL" > /dev/null; then
+            echo "ERROR: valid HPA load probe failed: $LOAD_URL"
+            cat hpa-port-forward.log || true
+            exit 1
+          fi
 
           echo "Generating 15s synthetic compute load against cluster..."
-          npx autocannon -c 40 -d 15 "http://127.0.0.1:5000/api/tax/compare?income=1200000"
+          npx autocannon -c 40 -d 15 "$LOAD_URL"
 
-          sleep 5
+          HPA_TARGET=$(kubectl get hpa wealthgenie-server-hpa -n wealthgenie -o jsonpath='{.spec.metrics[0].resource.target.averageUtilization}')
+          HPA_CURRENT=""
+          for attempt in $(seq 1 30); do
+            HPA_CURRENT=$(kubectl get hpa wealthgenie-server-hpa -n wealthgenie -o jsonpath='{.status.currentMetrics[0].resource.current.averageUtilization}' 2>/dev/null || true)
+            if [[ "$HPA_CURRENT" =~ ^[0-9]+$ ]] && [[ "$HPA_TARGET" =~ ^[0-9]+$ ]]; then
+              break
+            fi
+            if [ "$attempt" -lt 30 ]; then
+              sleep 2
+            fi
+          done
+          if ! [[ "$HPA_CURRENT" =~ ^[0-9]+$ ]] || ! [[ "$HPA_TARGET" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: HPA did not publish numeric current/target CPU utilization after load"
+            kubectl describe hpa wealthgenie-server-hpa -n wealthgenie || true
+            kubectl top pods -n wealthgenie -l app=wealthgenie-server || true
+            exit 1
+          fi
+
           HPA_STATUS=$(kubectl get hpa wealthgenie-server-hpa -n wealthgenie)
           echo "HPA Status after load:"
           echo "$HPA_STATUS"
+          echo "HPA current CPU utilization: ${HPA_CURRENT}% / target: ${HPA_TARGET}%"
           echo '```text' >> $GITHUB_STEP_SUMMARY
           echo "$HPA_STATUS" >> $GITHUB_STEP_SUMMARY
+          echo "Current CPU utilization: ${HPA_CURRENT}% / target: ${HPA_TARGET}%" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Capture Cluster Logs on Failure

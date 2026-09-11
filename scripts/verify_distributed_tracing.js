@@ -10,7 +10,7 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..');
-const TRACE_FILE = path.join(ROOT_DIR, 'traces.jsonl');
+const TRACE_FILE = path.resolve(process.env.TRACE_LOG_PATH || path.join(ROOT_DIR, 'traces.jsonl'));
 
 async function main() {
   console.log('=== Distributed Tracing Cross-Service Verification ===\n');

@@ -95,6 +95,37 @@ test('Kind smoke verification owns and cleans up its server port-forward', () =>
   assert.match(smokeStep, /kubectl port-forward[^\n]+svc\/wealthgenie-server 5000:5000/);
   assert.match(smokeStep, /PORT_FORWARD_PID=\$!/);
   assert.match(smokeStep, /trap 'kill "\$PORT_FORWARD_PID"[^\n]+EXIT/);
-  assert.match(smokeStep, /for attempt in \$\(seq 1 30\)/);
+  assert.match(smokeStep, /for attempt in \$\(seq 1 "\$attempts"\)/);
+  assert.match(smokeStep, /income=1200000&incomeSource=salary&fiscalYear=FY2026-27&age=30/);
   assert.doesNotMatch(cdWorkflow, /- name: Port-Forward Express Server for Live Request Verification/);
+});
+
+test('Kind HPA verification owns a separate port-forward and uses a valid tax contract', () => {
+  const rootDir = fs.existsSync(path.join(process.cwd(), 'docker-compose.yml'))
+    ? process.cwd()
+    : path.resolve(process.cwd(), '..');
+  const cdWorkflow = fs.readFileSync(path.join(rootDir, '.github', 'workflows', 'cd.yml'), 'utf8');
+  const hpaStep = cdWorkflow.match(
+    /- name: Verify Horizontal Pod Autoscaler & Load Response \(Step 3\)[\s\S]*?(?=\n\s{6}- name:|$)/,
+  )?.[0];
+
+  assert.ok(hpaStep, 'Kind HPA verification step is missing');
+  assert.match(hpaStep, /kubectl port-forward[^\n]+svc\/wealthgenie-server 5000:5000/);
+  assert.match(hpaStep, /HPA_PORT_FORWARD_PID=\$!/);
+  assert.match(hpaStep, /income=1200000&incomeSource=salary&fiscalYear=FY2026-27&age=30/);
+  assert.match(hpaStep, /kubectl top pods[^\n]+--no-headers/);
+  assert.match(hpaStep, /currentMetrics\[0\]\.resource\.current\.averageUtilization/);
+});
+
+test('ML Docker build invokes trainers as modules and fails on missing artifacts', () => {
+  const rootDir = fs.existsSync(path.join(process.cwd(), 'docker-compose.yml'))
+    ? process.cwd()
+    : path.resolve(process.cwd(), '..');
+  const dockerfile = fs.readFileSync(path.join(rootDir, 'ml-service', 'Dockerfile'), 'utf8');
+
+  assert.match(dockerfile, /RUN python -m model\.training\.train\b/);
+  assert.match(dockerfile, /RUN python -m model\.training\.train_pytorch\b/);
+  assert.doesNotMatch(dockerfile, /train\.py\s*\|\|\s*true/);
+  assert.doesNotMatch(dockerfile, /train_pytorch[^\n]*\|\|\s*true/);
+  assert.match(dockerfile, /test -s "\$artifact"/);
 });
