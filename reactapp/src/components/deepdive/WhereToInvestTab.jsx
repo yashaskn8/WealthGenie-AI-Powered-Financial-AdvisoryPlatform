@@ -196,6 +196,8 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const [taxUserAge, setTaxUserAge] = useState(userProfile?.age ?? '');
   const [holdingPeriodMonths, setHoldingPeriodMonths] = useState('');
   const [section112AExemptionUsed, setSection112AExemptionUsed] = useState('');
+  const [taxSection80C, setTaxSection80C] = useState('0');
+  const [taxNps80CCD1B, setTaxNps80CCD1B] = useState('0');
   const [taxPolicyMetadata, setTaxPolicyMetadata] = useState(null);
   const [taxPolicyError, setTaxPolicyError] = useState(null);
   const [activeTaxContext, setActiveTaxContext] = useState(null);
@@ -344,6 +346,10 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
       incomeSource: taxIncomeSource,
       userAge: ageNum,
       illustrativePrincipal,
+      deductions: {
+        section80C: Number(taxSection80C),
+        nps80CCD1B: Number(taxNps80CCD1B),
+      },
     };
     if (holdingPeriodMonths !== '') nextContext.holdingPeriodMonths = Number(holdingPeriodMonths);
     if (section112AExemptionUsed !== '') nextContext.section112AExemptionUsed = Number(section112AExemptionUsed);
@@ -826,6 +832,34 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
               <small>Share the amount already used across your other qualifying equity gains; it is not reset for each product.</small>
             </div>
           )}
+
+          <div className="wti-tax-input-group">
+            <label htmlFor="wti-80c-used">Section 80C already used (₹)</label>
+            <input
+              id="wti-80c-used"
+              type="number"
+              min="0"
+              max="150000"
+              step="1000"
+              className="wti-tax-input"
+              value={taxSection80C}
+              onChange={(e) => setTaxSection80C(e.target.value)}
+            />
+          </div>
+
+          <div className="wti-tax-input-group">
+            <label htmlFor="wti-nps-80ccd1b-used">NPS 80CCD(1B) already used (₹)</label>
+            <input
+              id="wti-nps-80ccd1b-used"
+              type="number"
+              min="0"
+              max="50000"
+              step="1000"
+              className="wti-tax-input"
+              value={taxNps80CCD1B}
+              onChange={(e) => setTaxNps80CCD1B(e.target.value)}
+            />
+          </div>
 
           {taxPolicyError && <p role="alert" className="wti-preview-error">{taxPolicyError}</p>}
 

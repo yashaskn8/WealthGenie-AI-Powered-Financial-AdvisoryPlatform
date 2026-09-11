@@ -22,6 +22,7 @@ describe('PostTaxAnalysis separate tax what-if', () => {
       calculation_classification: 'SEPARATE_TAX_WHAT_IF',
       assumptions: { inflationRate: 0.06 },
       results: [{
+        status: 'CALCULATED',
         postTaxReturn: 0.07,
         taxType: 'Slab Rate (0%)',
         effectiveTaxPercent: 0,
@@ -59,6 +60,7 @@ describe('PostTaxAnalysis separate tax what-if', () => {
     await waitFor(() => expect(apiModule.computePostTaxReturnBatch).toHaveBeenCalledWith(
       [{ instrumentType: 'FD', nominalRate: 0.07, holdingYears: 3, monthlySIP: 10000 }],
       1000000, 'new', 30, 'salary', 0.06, 'FY2026-27',
+      { body: { deductions: { section80C: 0, nps80CCD1B: 0 }, section112AExemptionUsed: 0 } },
     ));
     expect((await screen.findAllByText('7.0%')).length).toBeGreaterThan(0);
     expect(screen.getByText(/MODELLED_POST_TAX_PROJECTION/i)).toBeInTheDocument();

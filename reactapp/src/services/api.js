@@ -589,12 +589,14 @@ export async function optimisePortfolio(profileId, assets, strategy) {
 export async function computePostTaxReturn(instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource, fiscalYear, options = {}) {
   return request('POST', '/tax/post-tax-return', {
     instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource, fiscalYear,
+    ...(options.body || {}),
   }, options);
 }
 
-export async function computePostTaxReturnBatch(instruments, annualIncome, regime, userAge, incomeSource, inflationRate, fiscalYear) {
+export async function computePostTaxReturnBatch(instruments, annualIncome, regime, userAge, incomeSource, inflationRate, fiscalYear, options = {}) {
   return request('POST', '/tax/post-tax-return/batch', {
     instruments, annualIncome, regime, userAge, incomeSource, inflationRate, fiscalYear,
+    ...(options.body || options),
   });
 }
 

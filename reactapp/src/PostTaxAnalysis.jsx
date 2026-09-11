@@ -13,6 +13,9 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
   const [regime, setRegime] = useState('');
   const [fiscalYear, setFiscalYear] = useState('');
   const [inflationRate, setInflationRate] = useState('');
+  const [section80C, setSection80C] = useState('0');
+  const [nps80CCD1B, setNps80CCD1B] = useState('0');
+  const [section112AExemptionUsed, setSection112AExemptionUsed] = useState('0');
   const [backendPostTaxData, setBackendPostTaxData] = useState(null);
   const [taxPolicyMetadata, setTaxPolicyMetadata] = useState(null);
   const [taxPolicyError, setTaxPolicyError] = useState('');
@@ -77,15 +80,23 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
         incomeSource,
         explicitInflationRate / 100,
         fiscalYear,
+        { body: {
+          deductions: {
+            section80C: Number(section80C),
+            nps80CCD1B: Number(nps80CCD1B),
+          },
+          section112AExemptionUsed: Number(section112AExemptionUsed),
+        } },
       );
       const requiredResultFields = [
         'effectiveTaxPercent', 'postTaxGain', 'taxDragWealth', 'taxDragCAGR',
         'totalInvested', 'nominalReturnPercent', 'postTaxReturnPercent', 'realReturnPercent',
       ];
       if (!Array.isArray(data?.results) || data.results.length !== recommendations.length
-          || data.results.some(result => !result?.taxType || requiredResultFields.some(
-            field => !Number.isFinite(Number(result[field])),
-          ))) {
+          || data.results.some(result => !result?.status
+            || (result.status === 'CALCULATED' && (!result.taxType || requiredResultFields.some(
+              field => !Number.isFinite(Number(result[field])),
+            ))))) {
         throw new TypeError('The tax service returned an incomplete instrument analysis.');
       }
       const requiredSummaryFields = [
@@ -110,17 +121,20 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
       return {
         ...inv,
         taxDetails: {
+          status: result.status,
           taxType: result.taxType,
+          calculationClass: result.calculationClass,
           taxRatePercent: result.effectiveTaxPercent,
           postTaxGain: result.postTaxGain,
           taxDragWealth: result.taxDragWealth,
-          taxDragCAGR: result.taxDragCAGR * 100,
+          taxDragCAGR: Number.isFinite(Number(result.taxDragCAGR)) ? result.taxDragCAGR * 100 : null,
         },
         totalInvested: result.totalInvested,
         wealthGained: result.postTaxGain,
         nominalReturn: result.nominalReturnPercent,
         postTaxReturn: result.postTaxReturnPercent,
         realReturn: result.realReturnPercent,
+        resultStatus: result.status,
       };
     });
   }, [recommendations, backendPostTaxData]);
@@ -267,11 +281,47 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
             className="tax-input"
           />
         </label>
+        <label style={{ display: 'grid', gap: 7, color: '#cbd5e1', fontSize: '0.8rem', fontWeight: 700 }}>
+          Section 80C used (₹)
+          <input
+            aria-label="Section 80C used"
+            type="number"
+            min="0"
+            max="150000"
+            value={section80C}
+            onChange={event => setSection80C(event.target.value)}
+            className="tax-input"
+          />
+        </label>
+        <label style={{ display: 'grid', gap: 7, color: '#cbd5e1', fontSize: '0.8rem', fontWeight: 700 }}>
+          NPS 80CCD(1B) used (₹)
+          <input
+            aria-label="NPS 80CCD(1B) used"
+            type="number"
+            min="0"
+            max="50000"
+            value={nps80CCD1B}
+            onChange={event => setNps80CCD1B(event.target.value)}
+            className="tax-input"
+          />
+        </label>
+        <label style={{ display: 'grid', gap: 7, color: '#cbd5e1', fontSize: '0.8rem', fontWeight: 700 }}>
+          112A exemption already used (₹)
+          <input
+            aria-label="112A exemption already used"
+            type="number"
+            min="0"
+            max="125000"
+            value={section112AExemptionUsed}
+            onChange={event => setSection112AExemptionUsed(event.target.value)}
+            className="tax-input"
+          />
+        </label>
         <button type="submit" className="hud-profile-btn" disabled={loading} style={{ minHeight: 42 }}>
           {loading ? 'Calculating…' : 'Calculate explicit tax what-if'}
         </button>
         <small style={{ gridColumn: '1 / -1', color: '#64748b', lineHeight: 1.5 }}>
-           MODELLED_POST_TAX_PROJECTION: this investor what-if uses the supplied nominal rates and does not estimate an actual transaction tax or alter suitability.
+           MODELLED_POST_TAX_PROJECTION: gross cash flows are projected first, then backend tax events are applied. Generic product classes remain unavailable unless qualified.
          </small>
          {taxPolicyError && <small role="alert" style={{ gridColumn: '1 / -1', color: '#fbbf24' }}>{taxPolicyError}</small>}
         {backendPostTaxData?.policyVersion && (
@@ -333,7 +383,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
           </div>
           <div className="pta-kpi-content">
             <span className="pta-kpi-label">Total Tax Drag</span>
-            <span className="pta-kpi-value pta-kpi-value--rose">{formatINR(totalTaxDragRupees)}</span>
+          <span className="pta-kpi-value pta-kpi-value--rose">{totalTaxDragRupees === null ? 'Unavailable' : formatINR(totalTaxDragRupees)}</span>
           </div>
         </div>
       </motion.div>
@@ -439,23 +489,26 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
                             </td>
                             <td>
                               <span className={`pta-badge ${getTaxBadgeClass(data.taxDetails.taxType)}`}>
-                                {data.taxDetails.taxType}
+                                {data.resultStatus === 'CALCULATED' ? data.taxDetails.taxType : 'Unavailable — tax class or inputs required'}
                               </span>
+                              {data.resultStatus !== 'CALCULATED' && (
+                                <span className="pta-asset-cat">No zero substituted</span>
+                              )}
                             </td>
                             <td className="pta-td--mono pta-td--center pta-td--dim">
-                              {data.nominalReturn.toFixed(1)}%
+                              {Number.isFinite(data.nominalReturn) ? `${data.nominalReturn.toFixed(1)}%` : '—'}
                             </td>
                             <td className="pta-td--mono pta-td--center pta-td--purple">
-                              {data.postTaxReturn.toFixed(1)}%
+                              {Number.isFinite(data.postTaxReturn) ? `${data.postTaxReturn.toFixed(1)}%` : '—'}
                             </td>
                             <td className={`pta-td--mono pta-td--center ${data.realReturn > 0 ? 'pta-td--green' : 'pta-td--rose'}`}>
                               <span className="pta-real-cell">
-                                {data.realReturn > 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
-                                {data.realReturn > 0 ? '+' : ''}{data.realReturn.toFixed(1)}%
+                                {Number.isFinite(data.realReturn) && (data.realReturn > 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />)}
+                                {Number.isFinite(data.realReturn) ? `${data.realReturn > 0 ? '+' : ''}${data.realReturn.toFixed(1)}%` : '—'}
                               </span>
                             </td>
                             <td className="pta-td--mono pta-td--right pta-td--blue pta-td--bold">
-                              {formatINR(data.wealthGained)}
+                              {data.wealthGained === null ? '—' : formatINR(data.wealthGained)}
                             </td>
                           </tr>
                         ))}

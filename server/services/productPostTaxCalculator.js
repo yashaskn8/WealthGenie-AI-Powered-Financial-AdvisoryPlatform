@@ -20,9 +20,11 @@
  */
 
 import {
+  classifyHoldingPeriodByDates,
   computeEquityCapitalGainsTax,
   computeTax,
   getCurrentFiscalYear,
+  getCapitalGainsHoldingPeriodMonths,
   getTaxPolicyMetadata,
 } from './taxEngine.js';
 import {
@@ -72,6 +74,7 @@ function createAnalysis({
   disclosure = null,
   message = null,
   isHistoricalEstimate = false,
+  historicalObservationWindowMonths = null,
   rulesApplied = [],
 }) {
   const sourceReferences = [];
@@ -125,6 +128,7 @@ function createAnalysis({
     disclosure,
     message,
     isHistoricalEstimate,
+    historicalObservationWindowMonths,
   };
 }
 
@@ -182,6 +186,9 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
   const assumptions = taxCalculationContext?.illustrativePrincipal
     ? []
     : ['ILLUSTRATIVE_PRINCIPAL_DEFAULT_10000'];
+  if (taxCalculationContext && taxCalculationContext.deductions === undefined && taxType) {
+    assumptions.push('DEDUCTIONS_NOT_SUPPLIED; NO_DEDUCTION_ASSUMPTION_USED');
+  }
 
   if (!taxMetadata.sourceQualified || !taxType) {
     return createAnalysis({
@@ -340,7 +347,33 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
     });
   }
   const grossGain = Math.round(principal * (historicalRate / 100));
-  const holdingPeriodMonths = Number(taxCalculationContext.holdingPeriodMonths);
+  let holdingPeriodMonths = Number(taxCalculationContext.holdingPeriodMonths);
+  let holdingPeriodBasis = 'EXPLICIT_HOLDING_PERIOD_MONTHS';
+  if ([PRODUCT_TAX_CLASSES.EQUITY_MF_112A, PRODUCT_TAX_CLASSES.EQUITY_MF_ELSS].includes(taxType)
+      && (taxCalculationContext.acquisitionDate || taxCalculationContext.redemptionDate)) {
+    if (!taxCalculationContext.acquisitionDate || !taxCalculationContext.redemptionDate) {
+      return createAnalysis({
+        status: PRODUCT_TAX_STATUSES.REQUIRES_TAX_INPUTS,
+        taxMetadata,
+        policy,
+        fiscalYear,
+        policyVersion: policy.policyVersion,
+        principal,
+        requiredTaxInputs: ['acquisitionDate', 'redemptionDate'],
+        assumptions,
+        disclosure: 'Both exact transaction dates are required to classify the holding period.',
+        message: 'Acquisition and redemption dates are required together.',
+        isHistoricalEstimate: true,
+      });
+    }
+    const dateClassification = classifyHoldingPeriodByDates({
+      acquisitionDate: taxCalculationContext.acquisitionDate,
+      redemptionDate: taxCalculationContext.redemptionDate,
+      thresholdMonths: getCapitalGainsHoldingPeriodMonths(fiscalYear, 'listed'),
+    });
+    holdingPeriodMonths = dateClassification.isLongTerm ? 12 : 0;
+    holdingPeriodBasis = dateClassification.holdingPeriodBasis;
+  }
 
   if (taxType === PRODUCT_TAX_CLASSES.DEBT_MF_50AA) {
     const baseline = computeTax(annualIncome, regime, deductions, incomeSource, fiscalYear, userAge);
@@ -364,10 +397,11 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
       postTaxRatePct: Number(((netGain / principal) * 100).toFixed(2)),
       calculationClass: POST_TAX_CALCULATION_CLASSES.HISTORICAL_RETURN_POST_TAX_ILLUSTRATION,
       inputBasis: 'HISTORICAL_PROVIDER_FACT_PLUS_EXPLICIT_TAX_INPUTS',
-      holdingPeriodBasis: 'EXPLICIT_HOLDING_PERIOD_MONTHS',
+      holdingPeriodBasis,
       dataClass: 'HISTORICAL_PROVIDER_FACT',
       assumptions: [...assumptions, 'HISTORICAL_RETURN_IS_NOT_A_FORECAST'],
       metricLabel: 'Historical 1Y after-tax return',
+      historicalObservationWindowMonths: 12,
       disclosure: 'HISTORICAL — NOT A FORECAST. Qualified Section 50AA metadata establishes slab treatment; the comparison uses the explicit holding period and current tax inputs. No future return is claimed.',
       isHistoricalEstimate: true,
     });
@@ -437,12 +471,15 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
     postTaxRatePct: Number(((netGain / principal) * 100).toFixed(2)),
     calculationClass: POST_TAX_CALCULATION_CLASSES.HISTORICAL_RETURN_POST_TAX_ILLUSTRATION,
     inputBasis: 'HISTORICAL_PROVIDER_FACT_PLUS_EXPLICIT_TAX_INPUTS',
-    holdingPeriodBasis: capitalGains.holdingPeriodBasis,
+    holdingPeriodBasis: holdingPeriodBasis === 'EXACT_TRANSACTION_DATES'
+      ? holdingPeriodBasis
+      : capitalGains.holdingPeriodBasis,
     dataClass: 'HISTORICAL_PROVIDER_FACT',
     assumptions: [...assumptions, 'HISTORICAL_RETURN_IS_NOT_A_FORECAST'],
     metricLabel: 'Historical 1Y after-tax return',
-    disclosure: `HISTORICAL — NOT A FORECAST. ${capitalGains.taxClass === 'EQUITY_LTCG_SECTION_112A' ? 'Section 112A LTCG treatment uses the explicit holding period and the remaining taxpayer-level annual exemption.' : 'Section 111A STCG treatment uses the explicit holding period.'} Special-rate tax is separate from ordinary slabs and Section 87A is not applied to it.`,
+    disclosure: `HISTORICAL — NOT A FORECAST. The provider return window is a verified 1-year observation; it is not the user's realized gain or a future return. ${capitalGains.taxClass === 'EQUITY_LTCG_SECTION_112A' ? 'Section 112A LTCG treatment uses the explicit holding period and the remaining taxpayer-level annual exemption.' : 'Section 111A STCG treatment uses the explicit holding period.'} Special-rate tax is separate from ordinary slabs and Section 87A is not applied to it.`,
     isHistoricalEstimate: true,
+    historicalObservationWindowMonths: 12,
     rulesApplied: capitalGains.rulesApplied,
   });
 }

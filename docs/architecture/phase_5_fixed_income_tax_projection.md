@@ -62,7 +62,18 @@ The adapter uses only the revised official columns. It does not infer credit qua
 - Mutual-fund tax treatment is never inferred from an AMFI scheme name or category. Equity special-rate calculations require explicit holding period and taxpayer-level Section 112A exemption usage; a product comparison cannot consume the exemption independently for every product.
 - The portfolio what-if endpoint remains a separate `MODELLED_POST_TAX_PROJECTION` path. It uses caller-supplied nominal return assumptions and is not an actual transaction tax estimate.
 
-This is an educational MVP estimate, not a complete return-filing or capital-gains-lot engine. Users must verify product tax classification and personal circumstances with a qualified tax professional.
+### Canonical post-tax and projection contract
+
+- `taxEngine.js` is the sole statutory policy authority. The legacy positional `postTaxCalculator.js` API is now a compatibility adapter into `taxEventProjectionEngine.js`; it contains no slab rates, cess multipliers, holding-period thresholds, or product-name tax heuristics.
+- Ordinary interest uses baseline-versus-with-income incremental tax. The marginal shortcut `nominalRate × (1 - marginalRate)` is not an authority and is not used by the post-tax path.
+- Capital gains are maintained in separate short-term and long-term buckets. SIP illustrations preserve monthly FIFO lots, while Section 112A exemption usage is supplied once at taxpayer context level rather than reset per product.
+- Exact acquisition/redemption dates use calendar-anniversary classification. If dates are not available, the response says `MODELLED_MONTHLY_LOTS` or `EXPLICIT_HOLDING_PERIOD_MONTHS`; it must not imply an actual transaction ledger.
+- Projection ordering is deterministic: gross contributions/returns → tax events → post-tax cash flows. Ordinary-interest models apply annual incremental-tax events; capital-gain models apply an exit event. `TAX_POLICY_HELD_CONSTANT_FOR_PROJECTION` is disclosed and `postTaxCAGR` is derived from the final post-tax value.
+- Generic `ETF`, `Debt_MF`, `Balanced_Advantage`, and similar labels do not establish a statutory class. They return `MODEL_TAX_CLASS_UNAVAILABLE` until provider-qualified metadata or an explicit server-owned model class exists. Unknown timing/model data returns `MODELLED_POST_TAX_PROJECTION_UNAVAILABLE`; it is never converted to zero.
+- SGB calculations require an explicit redemption channel and an explicit coupon input. RBI redemption, maturity, and secondary-market paths are separate; no RBI redemption exemption is the default. NPS exit results are explicitly modeled scenarios and require annuity fraction and retirement timing.
+- The frontend sends deductions and tax interaction inputs to the backend and renders status/classification. It does not calculate tax or replace an unavailable result with ₹0 or 0%.
+
+This is an educational MVP estimate, not a complete return-filing engine. Its SIP lot model is a projection illustration, not a substitute for a taxpayer's transaction ledger. Users must verify product tax classification and personal circumstances with a qualified tax professional.
 
 ## Projection and Monte Carlo semantics
 

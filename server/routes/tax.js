@@ -169,7 +169,10 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
   const {
     instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource,
   } = req.body;
-  const { fiscalYear } = req.body;
+  const {
+    fiscalYear, deductions = {}, acquisitionDate, redemptionDate, redemptionChannel,
+    couponRate, annuityFraction, retirementTiming, section112AExemptionUsed,
+  } = req.body;
   if (!isFYVerified(fiscalYear)) {
     return sendError(req, res, 422, `Verified tax rules are unavailable for ${fiscalYear}.`, 'FISCAL_YEAR_UNSUPPORTED');
   }
@@ -183,13 +186,25 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
     monthlySIP,
     userAge,
     incomeSource,
-    true,
+    undefined,
     fiscalYear,
+    {
+      deductions,
+      acquisitionDate,
+      redemptionDate,
+      redemptionChannel,
+      couponRate,
+      annuityFraction,
+      retirementTiming,
+      section112AExemptionUsed,
+    },
   );
 
   const whatIfPrincipal = 100000;
   const nominalGain = Math.round(whatIfPrincipal * nominalRate);
-  const netGain = Math.round(whatIfPrincipal * result.postTaxReturn);
+  const netGain = Number.isFinite(result.postTaxReturn)
+    ? Math.round(whatIfPrincipal * result.postTaxReturn)
+    : null;
   res.json({
     ...result,
     calculation_classification: 'SEPARATE_TAX_WHAT_IF',
@@ -197,12 +212,12 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
     dataClass: 'MODEL_ASSUMPTION',
     what_if_principal: whatIfPrincipal,
     what_if_nominal_gain: nominalGain,
-    what_if_estimated_tax: Math.max(0, nominalGain - netGain),
+    what_if_estimated_tax: netGain === null ? null : Math.max(0, nominalGain - netGain),
     what_if_net_gain: netGain,
     ...getTaxPolicyMetadata(fiscalYear),
     inputsUsed: {
       annualIncome, incomeSource, regime, fiscalYear, holdingYears, monthlySIP, userAge,
-      nominalRate,
+      nominalRate, deductions, acquisitionDate, redemptionDate, redemptionChannel,
     },
     rulesApplied: [result.taxType],
     assumptions: [
@@ -219,7 +234,10 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
  * Used by PostTaxAnalysis.jsx to compute all instrument post-tax returns in one call.
  */
 router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncHandler(async (req, res) => {
-  const { instruments, annualIncome, regime, userAge, incomeSource, inflationRate } = req.body;
+  const {
+    instruments, annualIncome, regime, userAge, incomeSource, inflationRate,
+    deductions = {}, section112AExemptionUsed,
+  } = req.body;
   const { fiscalYear } = req.body;
   if (!isFYVerified(fiscalYear)) {
     return sendError(req, res, 422, `Verified tax rules are unavailable for ${fiscalYear}.`, 'FISCAL_YEAR_UNSUPPORTED');
@@ -235,28 +253,59 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
       inv.monthlySIP,
       userAge,
       incomeSource,
-      true,
+      undefined,
       fiscalYear,
+      {
+        deductions,
+        acquisitionDate: inv.acquisitionDate,
+        redemptionDate: inv.redemptionDate,
+        redemptionChannel: inv.redemptionChannel,
+        couponRate: inv.couponRate,
+        annuityFraction: inv.annuityFraction,
+        retirementTiming: inv.retirementTiming,
+        section112AExemptionUsed: section112AExemptionUsed ?? inv.section112AExemptionUsed,
+      },
     );
+    const projectionContext = {
+      annualGrossIncome: annualIncome,
+      regime,
+      incomeSource,
+      fiscalYear,
+      userAge,
+      deductions,
+      section112AExemptionUsed: section112AExemptionUsed ?? inv.section112AExemptionUsed,
+      acquisitionDate: inv.acquisitionDate,
+      redemptionDate: inv.redemptionDate,
+    };
     return {
       instrumentType: inv.instrumentType,
       ...taxResult,
       calculationClass: 'MODELLED_POST_TAX_PROJECTION',
       dataClass: 'MODEL_ASSUMPTION',
-      ...calculatePostTaxProjection(taxResult, inv, inflationRate),
+      ...calculatePostTaxProjection(taxResult, inv, inflationRate, projectionContext),
     };
   });
 
-  const totalTaxDrag = results.reduce((sum, item) => sum + item.taxDragWealth, 0);
-  const grossProfit = results.reduce((sum, item) => sum + Math.max(0, item.nominalFutureValue - item.totalInvested), 0);
-  const retainedProfit = results.reduce((sum, item) => sum + Math.max(0, item.postTaxFutureValue - item.totalInvested), 0);
-  const keptPerThousand = grossProfit > 0
+  const calculatedResults = results.filter(item => item.status === 'CALCULATED' && Number.isFinite(item.taxDragWealth));
+  const totalTaxDrag = calculatedResults.length > 0
+    ? calculatedResults.reduce((sum, item) => sum + item.taxDragWealth, 0)
+    : null;
+  const grossProfit = calculatedResults.reduce((sum, item) => sum + Math.max(0, item.nominalFutureValue - item.totalInvested), 0);
+  const retainedProfit = calculatedResults.reduce((sum, item) => sum + Math.max(0, item.postTaxFutureValue - item.totalInvested), 0);
+  const keptPerThousand = calculatedResults.length === 0 ? null : grossProfit > 0
     ? Math.max(0, Math.min(1000, Math.round((retainedProfit / grossProfit) * 1000)))
     : 1000;
-  const maxTaxRate = results.reduce((max, item) => Math.max(max, item.taxRate || 0), 0);
-  const nonPositiveRealCount = results.filter(item => item.realReturnPercent <= 0).length;
+  const maxTaxRate = calculatedResults.length === 0 ? null : calculatedResults.reduce((max, item) => Math.max(max, item.taxRate || 0), 0);
+  const nonPositiveRealCount = calculatedResults.filter(item => item.realReturnPercent <= 0).length;
   const insights = [];
-  if (totalTaxDrag > 0) {
+  if (totalTaxDrag === null) {
+    insights.push({
+      title: 'Post-Tax Projection Unavailable',
+      body: 'One or more selected instruments do not have a qualified server tax class or complete projection inputs. No tax number has been substituted.',
+      icon: 'shield',
+      color: 'amber',
+    });
+  } else if (totalTaxDrag > 0) {
     insights.push({
       title: 'Review Tax Drag',
       body: `The selected suitable portfolio loses an estimated ₹${Math.round(totalTaxDrag).toLocaleString('en-IN')} to tax over this horizon. Review the explicit tax assumptions with a qualified adviser.`,
@@ -290,10 +339,11 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
       userAge,
       inflationRate,
       fiscalYear,
-      deductions: 0,
+      deductions,
       contributionGrowthRate: 0,
       calculationClass: 'MODELLED_POST_TAX_PROJECTION',
       dataClass: 'MODEL_ASSUMPTION',
+      taxEventModel: 'GROSS_FLOWS_THEN_EXPLICIT_TAX_EVENTS',
     },
     inputsUsed: {
       annualIncome, incomeSource, regime, userAge, inflationRate, fiscalYear,

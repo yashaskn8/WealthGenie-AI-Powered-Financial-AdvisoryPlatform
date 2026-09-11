@@ -5,6 +5,7 @@ import {
   incomeSourceValues,
   requireTaxDependencyFacts,
   taxDeductionFields,
+  taxDeductionSchema,
 } from './taxSchemas.js';
 
 /**
@@ -46,12 +47,34 @@ export const taxComputeSchema = Joi.object({
   regime: Joi.string().valid('new', 'old').required(),
 }).custom(requireTaxDependencyFacts).unknown(false);
 
+const transactionDateFields = {
+  acquisitionDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  redemptionDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
+};
+
+function validatePostTaxTransactionDates(value, helpers) {
+  const hasAcquisition = value.acquisitionDate !== undefined;
+  const hasRedemption = value.redemptionDate !== undefined;
+  if (hasAcquisition !== hasRedemption) {
+    return helpers.message({ custom: 'acquisitionDate and redemptionDate must be supplied together' });
+  }
+  if (hasAcquisition && value.redemptionDate < value.acquisitionDate) {
+    return helpers.message({ custom: 'redemptionDate cannot precede acquisitionDate' });
+  }
+  return value;
+}
+
 const postTaxInstrumentSchema = Joi.object({
   instrumentType: Joi.string().trim().min(1).max(50).required(),
   nominalRate: Joi.number().min(0).max(1).required(),
   holdingYears: Joi.number().min(0.01).max(100).required(),
   monthlySIP: Joi.number().min(0).max(100000000).required(),
-}).unknown(false);
+  ...transactionDateFields,
+  redemptionChannel: Joi.string().valid('RBI_REDEMPTION', 'MATURITY_REDEMPTION', 'SECONDARY_MARKET_SALE').optional(),
+  couponRate: Joi.number().min(0).max(1).optional(),
+  annuityFraction: Joi.number().min(0).max(1).optional(),
+  retirementTiming: Joi.string().trim().min(2).max(100).optional(),
+}).custom(validatePostTaxTransactionDates).unknown(false);
 
 export const postTaxReturnSchema = postTaxInstrumentSchema.keys({
   annualIncome: Joi.number().min(0).max(1000000000).required(),
@@ -59,7 +82,14 @@ export const postTaxReturnSchema = postTaxInstrumentSchema.keys({
   userAge: Joi.number().integer().min(18).max(120).required(),
   incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').required(),
   fiscalYear: Joi.string().pattern(FISCAL_YEAR_PATTERN).required(),
-});
+  deductions: taxDeductionSchema.optional(),
+  ...transactionDateFields,
+  redemptionChannel: Joi.string().valid('RBI_REDEMPTION', 'MATURITY_REDEMPTION', 'SECONDARY_MARKET_SALE').optional(),
+  couponRate: Joi.number().min(0).max(1).optional(),
+  annuityFraction: Joi.number().min(0).max(1).optional(),
+  retirementTiming: Joi.string().trim().min(2).max(100).optional(),
+  section112AExemptionUsed: Joi.number().min(0).max(125000).optional(),
+}).custom(validatePostTaxTransactionDates).unknown(false);
 
 export const postTaxReturnBatchSchema = Joi.object({
   instruments: Joi.array().items(postTaxInstrumentSchema).min(1).max(50).required(),
@@ -69,6 +99,8 @@ export const postTaxReturnBatchSchema = Joi.object({
   incomeSource: Joi.string().valid('salary', 'pension', 'family_pension', 'business', 'other').required(),
   inflationRate: Joi.number().min(0).max(1).required(),
   fiscalYear: Joi.string().pattern(FISCAL_YEAR_PATTERN).required(),
+  deductions: taxDeductionSchema.optional(),
+  section112AExemptionUsed: Joi.number().min(0).max(125000).optional(),
 }).unknown(false);
 
 export const marketContextQuerySchema = Joi.object({}).unknown(false);

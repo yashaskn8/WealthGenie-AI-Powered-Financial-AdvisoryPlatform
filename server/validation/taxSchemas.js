@@ -65,6 +65,12 @@ export const taxCalculationContextSchema = Joi.object({
   illustrativePrincipal: Joi.number().greater(0).max(1000000000).optional(),
   holdingPeriodMonths: Joi.number().min(0).max(1200).optional(),
   section112AExemptionUsed: Joi.number().min(0).max(125000).optional(),
+  acquisitionDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  redemptionDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  redemptionChannel: Joi.string().valid('RBI_REDEMPTION', 'MATURITY_REDEMPTION', 'SECONDARY_MARKET_SALE').optional(),
+  couponRate: Joi.number().min(0).max(1).optional(),
+  annuityFraction: Joi.number().min(0).max(1).optional(),
+  retirementTiming: Joi.string().trim().min(2).max(100).optional(),
 }).custom((value, helpers) => {
   const taxKeys = ['annualGrossIncome', 'incomeSource', 'regime', 'fiscalYear', 'deductions', 'userAge'];
   const hasTaxContext = taxKeys.some(key => value[key] !== undefined);
@@ -76,6 +82,12 @@ export const taxCalculationContextSchema = Joi.object({
   }
   if (value.regime === 'old' && !Number.isInteger(value.userAge)) {
     return helpers.message({ custom: 'USER_AGE_REQUIRED_FOR_OLD_REGIME' });
+  }
+  if ((value.acquisitionDate === undefined) !== (value.redemptionDate === undefined)) {
+    return helpers.message({ custom: 'acquisitionDate and redemptionDate must be supplied together' });
+  }
+  if (value.acquisitionDate && value.redemptionDate && value.redemptionDate < value.acquisitionDate) {
+    return helpers.message({ custom: 'redemptionDate cannot precede acquisitionDate' });
   }
   return value;
 }).unknown(false);
