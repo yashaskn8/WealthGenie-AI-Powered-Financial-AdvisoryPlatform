@@ -117,15 +117,13 @@ test('Kind HPA verification owns a separate port-forward and uses a valid tax co
   assert.match(hpaStep, /currentMetrics\[0\]\.resource\.current\.averageUtilization/);
 });
 
-test('ML Docker build invokes trainers as modules and fails on missing artifacts', () => {
+test('ML Docker build verifies pre-generated artifacts and never trains', () => {
   const rootDir = fs.existsSync(path.join(process.cwd(), 'docker-compose.yml'))
     ? process.cwd()
     : path.resolve(process.cwd(), '..');
   const dockerfile = fs.readFileSync(path.join(rootDir, 'ml-service', 'Dockerfile'), 'utf8');
 
-  assert.match(dockerfile, /RUN python -m model\.training\.train\b/);
-  assert.match(dockerfile, /RUN python -m model\.training\.train_pytorch\b/);
-  assert.doesNotMatch(dockerfile, /train\.py\s*\|\|\s*true/);
-  assert.doesNotMatch(dockerfile, /train_pytorch[^\n]*\|\|\s*true/);
-  assert.match(dockerfile, /test -s "\$artifact"/);
+  assert.match(dockerfile, /RUN python scripts\/verify_serving_artifacts\.py/);
+  assert.doesNotMatch(dockerfile, /RUN python -m model\.training\./);
+  assert.doesNotMatch(dockerfile, /train(?:_pytorch)?[^\n]*\|\|\s*true/);
 });

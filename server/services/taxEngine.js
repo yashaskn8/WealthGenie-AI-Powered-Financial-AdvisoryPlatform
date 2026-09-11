@@ -234,7 +234,23 @@ export const TAX_SLABS_BY_FY = Object.freeze({
         }),
     }),
 });
-export const REGULATORY_RULE_VERSION = TAX_SLABS_BY_FY[CURRENT_FY]?.policyVersion ?? null;
+
+/**
+ * Resolve the verified statutory policy for the current India fiscal year at
+ * call time. Do not replace this with a module-level snapshot in audit paths:
+ * a long-lived process can cross the April 1 IST boundary without restarting.
+ */
+export function getCurrentRegulatoryRuleVersion(now = new Date()) {
+    const fiscalYear = getCurrentFiscalYear(now);
+    const policy = TAX_SLABS_BY_FY[fiscalYear];
+    return policy?.verified === true ? policy.policyVersion ?? null : null;
+}
+
+/**
+ * @deprecated Compatibility snapshot for older callers. New audit writes must
+ * use getCurrentRegulatoryRuleVersion() so fiscal-year rollover is respected.
+ */
+export const REGULATORY_RULE_VERSION = getCurrentRegulatoryRuleVersion();
 
 export function getTaxPolicyMetadata(fiscalYear) {
     const policy = getTaxSlabsForFY(fiscalYear);

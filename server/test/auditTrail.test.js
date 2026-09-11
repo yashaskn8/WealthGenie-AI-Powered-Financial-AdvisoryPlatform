@@ -11,7 +11,7 @@ import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import recommendRoutes from '../routes/recommend.js';
 import { RECOMMENDATION_POLICY_VERSION } from '../services/recommendationProfile.js';
-import { REGULATORY_RULE_VERSION } from '../services/taxEngine.js';
+import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import { correlationIdMiddleware } from '../middleware/correlation.js';
 import { withServer, jsonRequest } from '../test-utils/httpTestUtils.js';
@@ -75,7 +75,9 @@ describe('AuditRecord - Complete Advisory Audit Trail Verification', () => {
       assert.ok(body.audit_id, 'Expected audit_id in response');
       assert.ok(body.audit_hash, 'Expected audit_hash in response');
       assert.equal(body.recommendation_policy_version, RECOMMENDATION_POLICY_VERSION);
-      assert.notEqual(RECOMMENDATION_POLICY_VERSION, REGULATORY_RULE_VERSION);
+      const regulatoryRuleVersion = getCurrentRegulatoryRuleVersion();
+      assert.ok(regulatoryRuleVersion);
+      assert.notEqual(RECOMMENDATION_POLICY_VERSION, regulatoryRuleVersion);
 
       // Verify AuditRecord in MongoDB
       const auditDoc = await AuditRecord.findById(body.audit_id);
@@ -89,8 +91,8 @@ describe('AuditRecord - Complete Advisory Audit Trail Verification', () => {
       assert.equal(auditDoc.hash_algorithm, 'sha256');
       assert.equal(auditDoc.schema_version, '1.0');
       assert.ok(auditDoc.version_id, 'Must have model/engine version_id');
-      assert.equal(auditDoc.regulatory_rule_version, REGULATORY_RULE_VERSION);
-      assert.equal(auditDoc.inputs.regulatory_rule_version, REGULATORY_RULE_VERSION);
+      assert.equal(auditDoc.regulatory_rule_version, regulatoryRuleVersion);
+      assert.equal(auditDoc.inputs.regulatory_rule_version, regulatoryRuleVersion);
       assert.equal(auditDoc.inputs.recommendation_policy_version, RECOMMENDATION_POLICY_VERSION);
       assert.ok(auditDoc.inputs, 'Must store sanitized inputs');
       assert.equal(auditDoc.inputs.age, 32);

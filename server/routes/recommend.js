@@ -45,7 +45,7 @@ import {
 } from '../services/instrumentConstants.js';
 import { verifyAuditChain } from '../services/auditChain.js';
 import { generatePortfolioProjection } from '../services/projectionEngine.js';
-import { REGULATORY_RULE_VERSION } from '../services/taxEngine.js';
+import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
 
 const router = Router();
 
@@ -56,12 +56,12 @@ export function buildRecommendationCacheKey(userId, profileId, profile, modelVer
   return `recommendation:${userId}:${profileId}:${buildRecommendationProfileHash(profile, { modelVersion })}`;
 }
 
-function canonicalAuditInputs(profile, suitability, modelVersion) {
+export function canonicalAuditInputs(profile, suitability, modelVersion, regulatoryRuleVersion) {
   const metrics = deriveRecommendationMetrics(profile);
   return {
     financial_profile_schema_version: FINANCIAL_PROFILE_SCHEMA_VERSION,
     recommendation_policy_version: RECOMMENDATION_POLICY_VERSION,
-    regulatory_rule_version: REGULATORY_RULE_VERSION,
+    regulatory_rule_version: regulatoryRuleVersion,
     risk_capacity_policy_version: RISK_CAPACITY_POLICY.version,
     model_version: modelVersion,
     monthly_take_home: profile.monthlyTakeHome,
@@ -168,6 +168,15 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
 
   const profile = buildRecommendationProfile(stored);
   const suitability = assessSuitabilityRisk(profile);
+  const regulatoryRuleVersion = getCurrentRegulatoryRuleVersion();
+  if (!regulatoryRuleVersion) {
+    throw createError(
+      503,
+      'No verified regulatory policy is available for the current fiscal year.',
+      'Regulatory policy metadata is temporarily unavailable.',
+      { code: 'REGULATORY_POLICY_UNAVAILABLE' },
+    );
+  }
   const tIdempotencyStart = performance.now();
   const idempotencyClaim = await claimAdvisoryIdempotency({
     key: req.headers['idempotency-key'],
@@ -248,7 +257,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
 
     const recommendationId = new mongoose.Types.ObjectId();
     const auditId = new mongoose.Types.ObjectId();
-    const inputs = canonicalAuditInputs(profile, suitability, modelVersion);
+    const inputs = canonicalAuditInputs(profile, suitability, modelVersion, regulatoryRuleVersion);
     const inputHash = buildRecommendationProfileHash(profile, { modelVersion });
     const correlationId = req.correlationId || req.traceId || crypto.randomUUID();
     const timestamp = new Date();
@@ -274,7 +283,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       correlationId,
       traceId: req.traceId || req.correlationId || '',
       version_id: modelVersion,
-      regulatory_rule_version: REGULATORY_RULE_VERSION,
+      regulatory_rule_version: regulatoryRuleVersion,
       input_hash: inputHash,
       inputs,
       recommendations: {

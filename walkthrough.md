@@ -2,8 +2,9 @@
 
 > Historical note: the phase excerpts below document earlier work. The current
 > runtime uses fiscal-year tax identifiers such as `tax-policy-FY2026-27-v2`
-> for statutory metadata and `suitability-freeze-1.1.0` for recommendation
-> policy metadata; these fields are intentionally separate.
+> for statutory metadata and resolves them at audit-write time with
+> `getCurrentRegulatoryRuleVersion()`; `suitability-freeze-1.1.0` remains
+> recommendation policy metadata. These fields are intentionally separate.
 
 This document records the engineering accomplishments, statutory defect discovery & remediation, adversarial suitability hardening, live audit verification, and documentation updates executed under the **FinTech Correctness & Compliance Hardening** protocol.
 

@@ -53,8 +53,9 @@ def _seed_and_resolve_active_models(version_registry) -> None:
     Seeds baseline models into the persistent version registry if empty or paths invalid,
     ensuring tamper-evident lineage is maintained across restarts and replicas.
 
-    MUST be called AFTER model artifacts exist on disk (i.e. after training/loading),
-    not before, or it will correctly skip seeding and log the reason.
+    MUST be called AFTER serving artifacts have been loaded, not before, or it
+    will correctly skip seeding and log the reason. This function never trains
+    or creates serving artifacts.
     """
     logger.info("[Registry Seeding] Starting _seed_and_resolve_active_models...")
 
@@ -248,14 +249,13 @@ async def lifespan(app: FastAPI):
     app.state.version_registry = version_registry
     logger.info(f"Version registry initialized: {type(version_registry).__name__}")
 
-    # 1. Load / Train model artifacts FIRST (so they exist on disk for seeding)
+    # 1. Load only pre-generated, qualified serving artifacts. Missing
+    # artifacts remain unavailable and are surfaced through readiness; serving
+    # must never manufacture a new model during application startup.
     rf_pred = RandomForestPredictor()
     rf_pred.load_artifacts()
     if not rf_pred.is_loaded:
-        logger.info("Auto-training baseline RandomForest model...")
-        from model.training.train_rf import train_random_forest_model
-        train_random_forest_model()
-        rf_pred.load_artifacts()
+        logger.error("Qualified RandomForest serving artifacts are unavailable; prediction readiness will remain false.")
     model = rf_pred.model
     label_encoder = rf_pred.label_encoder
     registry.register("random_forest", rf_pred)
@@ -264,23 +264,17 @@ async def lifespan(app: FastAPI):
     mlp_pred = MLPPredictor()
     mlp_pred.load_artifacts()
     if not mlp_pred.is_loaded:
-        logger.info("Auto-training baseline PyTorch MLP model...")
-        from model.training.train_pytorch import train_pytorch_model
-        train_pytorch_model()
-        mlp_pred.load_artifacts()
+        logger.error("Qualified PyTorch MLP serving artifacts are unavailable; the MLP endpoint will remain unavailable.")
     registry.register("mlp", mlp_pred)
     registry.register("pytorch", mlp_pred)
 
     ft_pred = FTTransformerPredictor()
     ft_pred.load_artifacts()
     if not ft_pred.is_loaded:
-        logger.info("Auto-training baseline FT-Transformer model...")
-        from model.training.train_pytorch import train_ft_transformer_model
-        train_ft_transformer_model()
-        ft_pred.load_artifacts()
+        logger.error("Qualified FT-Transformer serving artifacts are unavailable; the FT endpoint will remain unavailable.")
     registry.register("ft_transformer", ft_pred)
 
-    # 2. NOW seed the version registry (artifacts guaranteed to exist on disk)
+    # 2. Seed the version registry only from artifacts that loaded successfully
     _seed_and_resolve_active_models(version_registry)
 
     # 3. Resolve active versions from registry and reload predictors from registry-tracked paths

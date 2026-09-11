@@ -15,25 +15,10 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 
 COPY . .
 
-# Build the deterministic baseline artifacts into the image. Module execution
-# preserves the model package import contract and any training failure must
-# fail the image build instead of producing a falsely healthy image.
-RUN python -m model.training.train
-RUN python -m model.training.train_pytorch
-
-# Refuse to ship an image that cannot load every baseline serving artifact.
-RUN set -eux; \
-    for artifact in \
-      /app/model/model.pkl \
-      /app/model/label_encoder.pkl \
-      /app/model/metadata.json \
-      /app/model/saved_models/mlp_model.pt \
-      /app/model/saved_models/scaler.pkl \
-      /app/model/saved_models/pytorch_metadata.json \
-      /app/model/saved_models/ft_transformer.pt \
-      /app/model/saved_models/ft_transformer_metadata.json; do \
-      test -s "$artifact"; \
-    done
+# Production images consume pre-generated, qualified serving artifacts. The
+# verifier is read-only and fails the image build if the supplied artifacts
+# cannot satisfy the serving feature/model contracts.
+RUN python scripts/verify_serving_artifacts.py
 
 EXPOSE 8000
 
