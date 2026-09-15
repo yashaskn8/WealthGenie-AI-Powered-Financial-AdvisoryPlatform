@@ -156,34 +156,36 @@ def test_legitimate_financial_queries_batch_30_zero_false_positives():
         assert max_sim < 0.35, f"Financial query similarity suspiciously high ({max_sim:.4f}): '{query}'"
 
 
-def test_model_load_failure_surfaced_in_health_check():
+def test_model_load_failure_uses_lexical_fallback_in_health_check():
     """
-    Simulates a model loading failure (e.g. offline container or network error)
-    and verifies that readiness status is set to False and layer2_error is recorded.
+    Simulates an offline semantic model and verifies that the configured
+    lexical provider keeps Layer 2 operational while exposing degradation.
     """
     with patch("rag.embeddings.dense_embedding.SentenceTransformerEmbeddingProvider", side_effect=RuntimeError("Model download failed: HuggingFace hub unreachable")):
         guard = SemanticInjectionGuard()
         success = guard.initialize()
 
-        assert success is False
-        assert guard.is_ready is False
-        assert guard.initialization_error is not None
-        assert "HuggingFace hub unreachable" in guard.initialization_error
+        assert success is True
+        assert guard.is_ready is True
+        assert guard.initialization_error is None
+        assert guard.provider_name == "DenseVectorEmbeddingProvider"
+        assert guard.is_degraded is True
 
         sanitizer = PromptSanitizer(block_on_injection=False)
         health = sanitizer.health_check()
 
-        assert health["healthy"] is False
-        assert health["layer2_ready"] is False
-        assert "HuggingFace hub unreachable" in health["layer2_error"]
+        assert health["healthy"] is True
+        assert health["layer2_ready"] is True
+        assert health["layer2_degraded"] is True
+        assert health["layer2_provider"] == "DenseVectorEmbeddingProvider"
 
 
 def test_fail_closed_mode_raises_error_on_model_load_failure():
     """
     Verifies that when fail_closed_on_model_error=True, calling sanitize_user_input()
-    raises SemanticGuardInitializationError when the embedding model is offline/failed.
+    raises SemanticGuardInitializationError when no embedding provider is available.
     """
-    with patch("rag.embeddings.dense_embedding.SentenceTransformerEmbeddingProvider", side_effect=ImportError("sentence_transformers not installed")):
+    with patch("rag.embeddings.dense_embedding.get_embedding_provider", side_effect=ImportError("sentence_transformers not installed")):
         sanitizer = PromptSanitizer(fail_closed_on_model_error=True)
 
         with pytest.raises(SemanticGuardInitializationError) as exc_info:

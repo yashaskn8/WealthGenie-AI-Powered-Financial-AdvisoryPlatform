@@ -5,12 +5,12 @@ Sanitizes user input and retrieved document context against prompt injection, ro
 
 Architecture:
 - Layer 1 (Direct Pattern Matching): Fast regex inspection against known attack patterns and role leakage phrases (loaded from config/security_patterns.json).
-- Layer 2 (Semantic Embedding Guard): Dense vector embedding of user query using sentence-transformers (all-MiniLM-L6-v2) compared via cosine similarity against canonical prompt injection intent reference vectors across 5 diverse attack categories.
+- Layer 2 (Semantic Embedding Guard): Dense vector embedding of user query using sentence-transformers (all-MiniLM-L6-v2), with a deterministic lexical hashing fallback when the semantic model is unavailable, compared via cosine similarity against canonical prompt injection intent reference vectors across 5 diverse attack categories.
 - Layer 2B (Obfuscated / Base64 Payload Extraction): Decodes base64 strings embedded in prompt text and passes decoded payloads through both Layer 1 regex and Layer 2 semantic embedding checks.
 
 Resilience:
-- Explicit readiness signal (is_ready / health_check()) surfaces model loading failures to monitoring rather than silently failing open.
-- Supports fail_closed_on_model_error=True to block requests if Layer 2 model fails to load.
+- Explicit readiness signal (is_ready / health_check()) surfaces provider degradation to monitoring rather than silently failing open.
+- Supports fail_closed_on_model_error=True to block requests if no Layer 2 provider can initialize.
 """
 
 import base64
@@ -90,31 +90,41 @@ class SecurityViolationError(ValueError):
 
 
 class SemanticGuardInitializationError(RuntimeError):
-    """Raised when the semantic embedding guard fails to load required models in fail-closed mode."""
+    """Raised when no usable embedding provider is available in fail-closed mode."""
     pass
 
 
 class SemanticInjectionGuard:
     """
     Genuine Semantic Vector Security Guard (Layer 2).
-    Uses SentenceTransformerEmbeddingProvider (all-MiniLM-L6-v2) to calculate
-    cosine similarity between input text and canonical injection intent reference vectors.
+    Uses the configured embedding provider to calculate cosine similarity between
+    input text and canonical injection intent reference vectors. The provider
+    factory supplies a deterministic lexical fallback for offline CI.
     
     Tracks model readiness (is_ready) and records initialization errors explicitly to prevent silent fail-open.
     """
 
-    def __init__(self, similarity_threshold: float = 0.40):
+    def __init__(
+        self,
+        similarity_threshold: float = 0.40,
+        embedding_provider: Optional[Any] = None,
+    ):
         self.similarity_threshold = similarity_threshold
-        self._provider = None
+        self._provider = embedding_provider
         self._reference_vectors: Optional[np.ndarray] = None
         self.is_ready: bool = False
         self.initialization_error: Optional[str] = None
+        self.provider_name: Optional[str] = (
+            type(embedding_provider).__name__ if embedding_provider is not None else None
+        )
+        self.is_degraded: bool = False
+        self.degradation_reason: Optional[str] = None
         self._retry_after: float = 0.0
         self._retry_delay_seconds: float = 60.0
 
     def initialize(self) -> bool:
         """
-        Explicitly initializes the embedding model and reference vectors.
+        Explicitly initializes the embedding provider and reference vectors.
         Returns True if successful, False if initialization failed.
         """
         if self.is_ready and self._reference_vectors is not None:
@@ -123,8 +133,21 @@ class SemanticInjectionGuard:
             return False
 
         try:
-            from rag.embeddings.dense_embedding import SentenceTransformerEmbeddingProvider
-            self._provider = SentenceTransformerEmbeddingProvider()
+            if self._provider is None:
+                # The factory attempts the qualified sentence-transformer
+                # provider and explicitly falls back to deterministic lexical
+                # hashing when offline or when the model is not installed.
+                from rag.embeddings.dense_embedding import get_embedding_provider
+
+                self._provider = get_embedding_provider()
+
+            self.provider_name = type(self._provider).__name__
+            self.is_degraded = self.provider_name == "DenseVectorEmbeddingProvider"
+            self.degradation_reason = (
+                "sentence-transformer unavailable; lexical hashing fallback is active"
+                if self.is_degraded
+                else None
+            )
             raw_vecs = np.array([self._provider.embed_text(s) for s in CANONICAL_INJECTION_INTENTS], dtype=np.float32)
             # L2 normalize reference vectors
             norms = np.linalg.norm(raw_vecs, axis=1, keepdims=True)
@@ -132,15 +155,32 @@ class SemanticInjectionGuard:
             self.is_ready = True
             self.initialization_error = None
             self._retry_after = 0.0
-            logger.info(f"SemanticInjectionGuard initialized successfully with {len(CANONICAL_INJECTION_INTENTS)} reference vectors.")
+            if self.is_degraded:
+                logger.warning(
+                    "SemanticInjectionGuard initialized in degraded mode with %s; %s.",
+                    self.provider_name,
+                    self.degradation_reason,
+                )
+            else:
+                logger.info(
+                    "SemanticInjectionGuard initialized successfully with %s reference vectors using %s.",
+                    len(CANONICAL_INJECTION_INTENTS),
+                    self.provider_name,
+                )
             return True
         except Exception as e:
             self.is_ready = False
             self.initialization_error = f"Model load failure: {type(e).__name__}: {str(e)}"
             self._provider = None
             self._reference_vectors = None
+            self.provider_name = None
+            self.is_degraded = False
+            self.degradation_reason = None
             self._retry_after = time.monotonic() + self._retry_delay_seconds
-            logger.error(f"SemanticInjectionGuard CRITICAL: Model initialization failed: {self.initialization_error}")
+            logger.warning(
+                "SemanticInjectionGuard initialization failed; Layer 2 is unavailable: %s",
+                self.initialization_error,
+            )
             return False
 
     def check_semantic_similarity(self, text: str) -> Tuple[bool, float, str]:
@@ -173,10 +213,10 @@ class PromptSanitizer:
     """
     Multi-Layer Prompt Security Guard.
     - Layer 1: Fast regex pattern matching against known injection phrases and role leakage terms.
-    - Layer 2: Genuine semantic embedding vector similarity check against canonical injection intents.
+    - Layer 2: Semantic embedding vector similarity check, with a lexical fallback, against canonical injection intents.
     - Layer 2B: Base64 obfuscated payload decoding and multi-layer validation.
     
-    Includes health_check() to expose Layer 2 model status and optional fail_closed_on_model_error mode.
+    Includes health_check() to expose Layer 2 provider status and optional fail_closed_on_model_error mode.
     """
 
     def __init__(
@@ -199,6 +239,9 @@ class PromptSanitizer:
             "healthy": self.semantic_guard.is_ready,
             "layer1_regex_patterns": len(PROMPT_INJECTION_PATTERNS) + len(ROLE_LEAKAGE_PATTERNS),
             "layer2_ready": self.semantic_guard.is_ready,
+            "layer2_provider": self.semantic_guard.provider_name,
+            "layer2_degraded": self.semantic_guard.is_degraded,
+            "layer2_degradation_reason": self.semantic_guard.degradation_reason,
             "layer2_error": self.semantic_guard.initialization_error,
             "similarity_threshold": self.semantic_guard.similarity_threshold,
             "canonical_anchors_count": len(CANONICAL_INJECTION_INTENTS),

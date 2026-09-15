@@ -1,0 +1,37 @@
+{
+  "version": "4.0.0",
+  "feature_schema_version": "recommendation-features-4.0.0",
+  "feature_names": [
+    "age",
+    "monthly_take_home",
+    "monthly_savings",
+    "investment_horizon_years",
+    "liquid_savings",
+    "emi_burden_pct",
+    "financial_dependents",
+    "emergency_fund_months",
+    "deployable_lump_sum",
+    "risk_capacity_score",
+    "risk_tolerance_encoded",
+    "final_suitability_risk_encoded",
+    "savings_rate",
+    "liquidity_months",
+    "goal_retirement",
+    "goal_wealth_growth",
+    "goal_tax_saving",
+    "goal_emergency_fund",
+    "emergency_fund_gap_months"
+  ],
+  "model_config": {
+    "input_dim": 19,
+    "d_token": 32,
+    "n_blocks": 3,
+    "n_heads": 4,
+    "d_ffn_factor": 2.0,
+    "attention_dropout": 0.1,
+    "ffn_dropout": 0.1,
+    "residual_dropout": 0.0,
+    "output_dim": 6,
+    "activation": "gelu"
+  }
+}

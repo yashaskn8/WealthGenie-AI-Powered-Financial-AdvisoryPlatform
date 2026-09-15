@@ -1,0 +1,63 @@
+{
+  "model_type": "PyTorch_FinancialMLP",
+  "version": "4.0.0",
+  "feature_schema_version": "recommendation-features-4.0.0",
+  "feature_names": [
+    "age",
+    "monthly_take_home",
+    "monthly_savings",
+    "investment_horizon_years",
+    "liquid_savings",
+    "emi_burden_pct",
+    "financial_dependents",
+    "emergency_fund_months",
+    "deployable_lump_sum",
+    "risk_capacity_score",
+    "risk_tolerance_encoded",
+    "final_suitability_risk_encoded",
+    "savings_rate",
+    "liquidity_months",
+    "goal_retirement",
+    "goal_wealth_growth",
+    "goal_tax_saving",
+    "goal_emergency_fund",
+    "emergency_fund_gap_months"
+  ],
+  "training_time_seconds": 7.8929,
+  "epochs_completed": 92,
+  "best_val_loss": 0.1206,
+  "best_val_accuracy": 0.9567,
+  "model_config": {
+    "input_dim": 19,
+    "hidden_dims": [
+      64,
+      32
+    ],
+    "output_dim": 6,
+    "dropout_rate": 0.2,
+    "use_batch_norm": true,
+    "activation": "relu"
+  },
+  "training_config": {
+    "batch_size": 64,
+    "epochs": 100,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "patience": 15,
+    "random_seed": 42,
+    "val_split": 0.15,
+    "test_split": 0.15,
+    "lr_scheduler_factor": 0.5,
+    "lr_scheduler_patience": 5,
+    "min_lr": 1e-06
+  },
+  "device_used": "cpu",
+  "target_classes": [
+    "Equity_MF",
+    "ELSS",
+    "ETF",
+    "Debt_MF",
+    "FD",
+    "RBI_Bond"
+  ]
+}

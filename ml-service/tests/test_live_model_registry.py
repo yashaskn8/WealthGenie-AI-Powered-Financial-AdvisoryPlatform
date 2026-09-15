@@ -76,6 +76,17 @@ def test_live_startup_seeds_and_resolves_version_registry(client):
     assert rf_versions[0]["artifact_hash"] is not None
 
 
+def test_readyz_reports_authoritative_model_contract(client):
+    """Readiness is tied to the loaded RandomForest recommendation path."""
+    response = client.get("/readyz")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ready"
+    assert data["required_model"] == "random_forest"
+    assert data["required_model_ready"] is True
+    assert "random_forest" in data["available_models"]
+
+
 def test_get_active_model_endpoint(client):
     """Verifies GET /model/registry/active returns the active model."""
     response = client.get("/model/registry/active?architecture=RandomForest")

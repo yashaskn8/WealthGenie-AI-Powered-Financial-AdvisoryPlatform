@@ -248,6 +248,7 @@ jobs:
           npm ci --prefix server
           npm ci --prefix reactapp
           pip install -r ml-service/requirements.txt
+          python ml-service/scripts/verify_serving_artifacts.py
           cd reactapp
           npx playwright install --with-deps chromium
 
@@ -316,6 +317,10 @@ jobs:
         run: |
           cd ml-service
           pip install -r requirements.txt
+
+      - name: Verify qualified serving artifacts
+        run: python scripts/verify_serving_artifacts.py
+        working-directory: ml-service
 
       - name: Run Pytest Suite
         run: |

@@ -451,12 +451,22 @@ def health():
 
 @app.get("/readiness")
 def readiness():
-    """Readiness probe checking ModelRegistry status."""
+    """Readiness probe for the authoritative RandomForest serving path.
+
+    RAG embeddings and optional predictors are not required for the core
+    recommendation service. The probe therefore becomes ready only when the
+    required RandomForest predictor has loaded a qualified artifact; this
+    prevents a partially initialized process from advertising readiness.
+    """
     loaded_models = registry.get_loaded_predictors()
+    random_forest = registry.get("random_forest")
+    required_model_ready = bool(random_forest and random_forest.is_loaded)
     return {
-        "status": "ready" if loaded_models else "not_ready",
+        "status": "ready" if required_model_ready else "not_ready",
         "loaded_models_count": len(loaded_models),
         "available_models": list(loaded_models.keys()),
+        "required_model": "random_forest",
+        "required_model_ready": required_model_ready,
     }
 
 
