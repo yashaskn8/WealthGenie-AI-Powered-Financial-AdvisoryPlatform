@@ -1,6 +1,4 @@
 import { sipFV, lumpSumFV } from './projectionEngine.js';
-import { reverseSIP } from './monteCarloEngine.js';
-import { computeTax } from './taxEngine.js';
 
 /**
  * Independent Arithmetic Verification Engine

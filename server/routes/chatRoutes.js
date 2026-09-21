@@ -3,7 +3,7 @@
  */
 import { Router } from 'express';
 import crypto from 'crypto';
-import { verifyJWT, isValidObjectId } from '../middleware/authMiddleware.js';
+import { verifyJWT } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
 import { validate, chatMessageSchema } from '../validation/schemas.js';
 import { processChat, buildClientResponseDTO } from '../services/geminiChatService.js';
@@ -73,7 +73,7 @@ router.delete('/session/:sessionId', verifyJWT, asyncHandler(async (req, res) =>
     throw createError(400, 'Invalid sessionId', 'Invalid session ID.');
   }
 
-  const result = await ConversationHistory.findOneAndUpdate(
+  await ConversationHistory.findOneAndUpdate(
     { userId: req.user.userId, session_id: sessionId, is_active: true },
     { is_active: false },
     { new: true }
