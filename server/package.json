@@ -39,7 +39,7 @@
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.21.0",
+    "express": "^4.22.3",
     "express-mongo-sanitize": "^2.2.0",
     "express-rate-limit": "^8.5.0",
     "fast-check": "^4.8.0",
@@ -49,7 +49,7 @@
     "joi-to-json-schema": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.8.0",
-    "morgan": "^1.10.0",
+    "morgan": "^1.12.0",
     "rate-limit-redis": "^5.0.0",
     "redis": "^4.7.0",
     "winston": "^3.19.0"
