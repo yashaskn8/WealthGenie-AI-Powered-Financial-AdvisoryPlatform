@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { optionalUniqueIndex } from '../config/mongoCompatibility.js';
 
 const auditRecordSchema = new mongoose.Schema({
   userId: {
@@ -94,13 +95,10 @@ const auditRecordSchema = new mongoose.Schema({
 
 // Regulatory composite audit indexes
 auditRecordSchema.index({ userId: 1, timestamp: -1 });
+const chainSequenceIndex = optionalUniqueIndex('chain_sequence', 'unique_user_audit_chain_sequence');
 auditRecordSchema.index(
-  { userId: 1, chain_sequence: 1 },
-  {
-    name: 'unique_user_audit_chain_sequence',
-    unique: true,
-    partialFilterExpression: { chain_sequence: { $type: 'number' } },
-  },
+  { userId: 1, ...chainSequenceIndex.key },
+  chainSequenceIndex.options,
 );
 
 export default mongoose.model('AuditRecord', auditRecordSchema);

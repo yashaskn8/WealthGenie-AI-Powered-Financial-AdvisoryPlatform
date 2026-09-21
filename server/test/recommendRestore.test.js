@@ -15,6 +15,7 @@ import {
   toProfilePersistence,
 } from '../services/recommendationProfile.js';
 import { assessSuitabilityRisk } from '../services/riskProfiler.js';
+import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
 import { runPipeline } from '../services/RecommendationPipeline.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
@@ -33,7 +34,7 @@ function signToken(userId) {
   return jwt.sign({ userId: String(userId), jti: crypto.randomUUID() }, JWT_SECRET, { expiresIn: '1h' });
 }
 
-async function createFixture({ userId = userA, stale = false } = {}) {
+async function createFixture({ userId = userA, stale = false, regulatoryRuleVersion = getCurrentRegulatoryRuleVersion() } = {}) {
   const profile = buildRecommendationProfile(canonicalProfilePayload());
   const suitability = assessSuitabilityRisk(profile);
   const storedProfile = await FinancialProfile.create({
@@ -70,10 +71,65 @@ async function createFixture({ userId = userA, stale = false } = {}) {
     confidenceScores: {},
     mlFallback: true,
     modelVersion,
+    regulatoryRuleVersion,
     profileInputHash: stale ? 'b'.repeat(64) : profileInputHash,
     responseSnapshot,
   });
   return storedProfile;
+}
+
+async function createAdvisoryLifecycleFixture() {
+  const profile = buildRecommendationProfile(canonicalProfilePayload());
+  const suitability = assessSuitabilityRisk(profile);
+  const storedProfile = await FinancialProfile.create({
+    userId: userA,
+    ...toProfilePersistence(profile, suitability),
+    version: 1,
+  });
+  const modelVersion = 'restore-advisory-test-model-1';
+  const pipeline = runPipeline(profile, { model_version: modelVersion, confidence_scores: {} });
+  const recommendationId = new mongoose.Types.ObjectId();
+  const auditId = new mongoose.Types.ObjectId();
+  const profileInputHash = buildRecommendationProfileHash(storedProfile.toObject(), { modelVersion });
+  const responseSnapshot = {
+    profileId: String(storedProfile._id),
+    recommendationId: String(recommendationId),
+    audit_id: String(auditId),
+    audit_hash: 'b'.repeat(64),
+    instruments: pipeline.instruments,
+    model_version: modelVersion,
+    advisory_text: 'snapshot explanation',
+    advisory_explanation: {
+      status: 'PENDING',
+      provider: 'snapshot-provider',
+    },
+  };
+  await Recommendation.create({
+    _id: recommendationId,
+    userId: userA,
+    profileId: storedProfile._id,
+    instruments: pipeline.instruments,
+    advisoryText: 'generated explanation',
+    advisoryMetadata: {
+      status: 'READY',
+      provider: 'current-provider',
+      model: 'current-model',
+      prompt_version: 'prompt-2',
+      grounding_version: 'grounding-2',
+      evidence_ids_used: ['E_CURRENT'],
+      unavailable_facts: ['CURRENT_FACT_UNAVAILABLE'],
+      citations: [{ id: 'E_CURRENT', title: 'Current evidence' }],
+      validation_status: 'VALID',
+      generated_at: '2026-09-21T00:00:00.000Z',
+    },
+    confidenceScores: {},
+    mlFallback: true,
+    modelVersion,
+    regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
+    profileInputHash,
+    responseSnapshot,
+  });
+  return { storedProfile, recommendationId, responseSnapshot };
 }
 
 async function request(profileId, userId = userA) {
@@ -127,6 +183,68 @@ test('returns the latest matching recommendation without creating records', asyn
     Recommendation.countDocuments({ userId: userA }),
     AuditRecord.countDocuments({ userId: userA }),
   ]), countsBefore);
+});
+
+test('restores current advisory metadata and text over the original snapshot', async () => {
+  const { storedProfile, responseSnapshot } = await createAdvisoryLifecycleFixture();
+  const countsBefore = await Promise.all([
+    Recommendation.countDocuments({ userId: userA }),
+    AuditRecord.countDocuments({ userId: userA }),
+  ]);
+
+  const response = await request(storedProfile._id);
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(body.instruments, responseSnapshot.instruments);
+  assert.equal(body.advisory_text, 'generated explanation');
+  assert.equal(body.advisory_explanation.status, 'READY');
+  assert.equal(body.advisory_explanation.provider, 'current-provider');
+  assert.equal(body.advisory_explanation.model, 'current-model');
+  assert.equal(body.advisory_explanation.prompt_version, 'prompt-2');
+  assert.equal(body.advisory_explanation.grounding_version, 'grounding-2');
+  assert.deepEqual(body.advisory_explanation.evidence_ids_used, ['E_CURRENT']);
+  assert.deepEqual(body.advisory_explanation.unavailable_facts, ['CURRENT_FACT_UNAVAILABLE']);
+  assert.deepEqual(body.advisory_explanation.citations, [{ id: 'E_CURRENT', title: 'Current evidence' }]);
+  assert.equal(body.advisory_explanation.validation_status, 'VALID');
+  assert.equal(body.advisory_explanation.generated_at, '2026-09-21T00:00:00.000Z');
+  assert.deepEqual(await Promise.all([
+    Recommendation.countDocuments({ userId: userA }),
+    AuditRecord.countDocuments({ userId: userA }),
+  ]), countsBefore);
+});
+
+test('rejects a recommendation generated under an older regulatory policy without mutation', async () => {
+  const profile = await createFixture({ regulatoryRuleVersion: 'tax-policy-FY2025-26-v1' });
+  const countsBefore = await Promise.all([
+    Recommendation.countDocuments({ userId: userA }),
+    AuditRecord.countDocuments({ userId: userA }),
+  ]);
+
+  const response = await request(profile._id);
+  const body = await response.json();
+
+  assert.equal(response.status, 409);
+  assert.equal(body.code, 'STALE_RECOMMENDATION');
+  assert.deepEqual(await Promise.all([
+    Recommendation.countDocuments({ userId: userA }),
+    AuditRecord.countDocuments({ userId: userA }),
+  ]), countsBefore);
+});
+
+test('falls back to snapshot advisory state when current metadata is absent', async () => {
+  const profile = await createFixture();
+  await Recommendation.updateOne(
+    { profileId: profile._id, userId: userA },
+    { $set: { advisoryText: null, advisoryMetadata: null } },
+  );
+
+  const response = await request(profile._id);
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.advisory_text, null);
+  assert.deepEqual(body.advisory_explanation, { status: 'PENDING' });
 });
 
 test('returns 404 when no recommendation exists and does not leak ownership', async () => {

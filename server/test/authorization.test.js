@@ -28,6 +28,7 @@ import Recommendation from '../models/Recommendation.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { canonicalProfile, canonicalProfilePayload } from './helpers/canonicalProfile.js';
 import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
+import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
 
 const testSecret = ['test', 'auth', 'jwt', 'key'].join('-');
 process.env.JWT_SECRET = process.env.JWT_SECRET || testSecret;
@@ -91,6 +92,7 @@ test.before(async () => {
     advisoryText: 'User A Advisory',
     mlFallback: true,
     modelVersion: 'test-rule-fallback-4.0.0',
+    regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
     profileInputHash: buildRecommendationProfileHash(profileA.toObject(), { modelVersion: 'test-rule-fallback-4.0.0' }),
   });
 });

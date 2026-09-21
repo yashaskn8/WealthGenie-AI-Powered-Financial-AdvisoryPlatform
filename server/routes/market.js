@@ -1,6 +1,8 @@
 import { Router } from 'express';
-import { verifyJWT } from '../middleware/authMiddleware.js';
+import { verifyJWT, requireRole } from '../middleware/authMiddleware.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
+import { createEndpointRateLimiter, ipKeyGenerator } from '../middleware/rateLimiter.js';
+import { AMFI_REFRESH_LOCK_TTL_SECONDS, withMarketRefreshLease } from '../jobs/marketDataRefresh.js';
 import { validateQuery, marketNavQuerySchema } from '../validation/schemas.js';
 import {
   fetchAmfiProductSnapshot,
@@ -16,6 +18,14 @@ import {
 import { getLiveMarketContext } from '../services/marketContextService.js';
 
 const router = Router();
+
+const marketRefreshLimiter = createEndpointRateLimiter({
+  windowMs: 5 * 60 * 1000,
+  max: 2,
+  message: 'Market refresh is limited to a small number of administrative operations.',
+  prefix: 'rl:market-refresh:',
+  keyGenerator: req => `user:${req.user?.userId || ipKeyGenerator(req.ip)}`,
+});
 
 /** Public source-health and provenance summary. No assumption is labelled live. */
 router.get('/rates', asyncHandler(async (_req, res) => {
@@ -55,18 +65,28 @@ router.get('/params', asyncHandler(async (_req, res) => {
 }));
 
 /** Refreshes the bounded official source snapshots without widening scope. */
-router.post('/refresh', verifyJWT, asyncHandler(async (_req, res) => {
-  Promise.allSettled([
+router.post('/refresh', verifyJWT, requireRole('admin'), marketRefreshLimiter, asyncHandler(async (_req, res) => {
+  const refreshResult = await withMarketRefreshLease('Manual Market Refresh', async () => Promise.allSettled([
     fetchAmfiProductSnapshot({ forceRefresh: true }),
     fetchAmfiHistoricalNavSnapshot({ forceRefresh: true }),
     fetchGovernmentSavingsSnapshot({ forceRefresh: true }),
     fetchSbiTermDepositSnapshot({ forceRefresh: true }),
     getLiveMarketContext({ forceQuoteRefresh: true, forceHistoryRefresh: true }),
-  ]).catch(() => {});
+  ]), { ttlSeconds: AMFI_REFRESH_LOCK_TTL_SECONDS });
+
+  if (refreshResult === null) {
+    return res.status(process.env.NODE_ENV === 'production' ? 503 : 409).json({
+      status: 'REFRESH_UNAVAILABLE',
+      code: 'MARKET_REFRESH_LEASE_UNAVAILABLE',
+      message: 'Another refresh is active or distributed refresh coordination is unavailable.',
+    });
+  }
+
   res.status(202).json({
-    status: 'REFRESH_INITIATED',
+    status: 'REFRESH_COMPLETED',
     sources: ['AMFI_CURRENT_NAV', 'AMFI_HISTORICAL_NAV', 'GOVERNMENT_SMALL_SAVINGS', 'SBI_TERM_DEPOSITS', `${PRIMARY_MARKET_PROVIDER}_MARKET_CONTEXT`],
-    message: 'A bounded refresh was queued. Provider failures remain explicitly unavailable.',
+    results: refreshResult.map(result => result.status),
+    message: 'A bounded administrative refresh completed. Provider failures remain explicitly unavailable.',
   });
 }));
 

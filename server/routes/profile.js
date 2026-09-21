@@ -236,6 +236,7 @@ router.post(
         PrometheusMetrics.inc('profile_complete_candidate_miss_total');
       } else {
         PrometheusMetrics.inc('profile_complete_candidate_hit_total');
+        core.recommendationData.profileCompletionCandidateId = candidateId;
       }
       const candidateValidationMs = performance.now() - candidateValidationStart;
       const profileDocument = profilePersistenceDocument({
@@ -283,6 +284,19 @@ router.post(
       ].join(', '));
       return res.status(200).json(persisted);
     } catch (error) {
+      if (candidateLease && error?.code === 11000
+          && (error.keyPattern?.profileCompletionCandidateId
+            || error.keyValue?.profileCompletionCandidateId)) {
+        await releaseProfileCandidateCommit(candidateLease).catch(() => {});
+        candidateLease = null;
+        await releaseAdvisoryIdempotency(idempotencyClaim).catch(() => {});
+        throw createError(
+          409,
+          'This precomputed candidate has already been committed.',
+          'Please precompute the profile again before completing it.',
+          { code: 'PROFILE_CANDIDATE_ALREADY_COMMITTED' },
+        );
+      }
       if (candidateLease) await releaseProfileCandidateCommit(candidateLease).catch(() => {});
       await releaseAdvisoryIdempotency(idempotencyClaim).catch(() => {});
       throw error;
@@ -341,6 +355,8 @@ router.put(
   verifyJWT,
   validateStrict(financialProfileUpdateSchema),
   asyncHandler(async (req, res) => {
+    // TODO: Follow-up — make profile edits and recommendation refresh atomic;
+    // this endpoint intentionally preserves the existing two-step edit flow.
     const expectedVersion = req.body.version;
     const existing = await FinancialProfile.findOne({
       _id: req.params.profileId,

@@ -246,22 +246,14 @@ router.post('/create', verifyJWT, idempotency(), validateStrict(customGoalSchema
 }));
 
 router.get('/', verifyJWT, asyncHandler(async (req, res) => {
-  const goals = await Goal.find({ userId: req.user.userId }).sort({ target_date: 1 });
-  for (const goal of goals.filter(item => isStaleAdvice(item.gemini_advice))) {
-    try {
-      const stored = await findOwnedProfile(goal.profileId, req.user.userId);
-      if (!stored) continue;
-      const profile = buildRecommendationProfile(stored);
-      const advice = await generateGoalAdvice(goal, profile);
-      if (!isStaleAdvice(advice)) {
-        goal.gemini_advice = advice;
-        await goal.save();
-      }
-    } catch (error) {
-      console.warn('[Goals] Advice regeneration failed:', error.message);
-    }
-  }
-  res.json({ goals: goals.map(goal => ({ ...goal.toObject(), chartData: goal.chart_data })) });
+  // GET is deliberately read-only. Advice regeneration is an explicit
+  // PATCH so a list request never fans out to LLM providers or writes goals.
+  const goals = await Goal.find({ userId: req.user.userId }).sort({ target_date: 1 }).lean();
+  res.json({ goals: goals.map(goal => ({
+    ...goal,
+    chartData: goal.chart_data,
+    advice_stale: isStaleAdvice(goal.gemini_advice),
+  })) });
 }));
 
 router.post('/:goalId/simulate', verifyJWT, validateStrict(goalSimulationSchema), asyncHandler(async (req, res) => {

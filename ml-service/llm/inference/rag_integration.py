@@ -3,11 +3,13 @@ WealthGenie Open-Weight LLM Platform - RAG Compatibility Adapter
 Compatibility wrapper for the trust-gated extractive RAG pipeline.
 """
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from llm.registry import LLMModelRegistry, llm_registry
 from rag.retrieval.pipeline import RAGPipeline
 from rag.schema import RAGQueryRequest, RAGQueryResponse
+
+if TYPE_CHECKING:
+    from llm.registry import LLMModelRegistry
 
 class RAGLLMPipeline:
     """Retains the existing interface while RAG synthesis is safety-deferred."""
@@ -15,10 +17,14 @@ class RAGLLMPipeline:
     def __init__(
         self,
         rag_pipeline: Optional[RAGPipeline] = None,
-        model_registry: Optional[LLMModelRegistry] = None,
+        model_registry: Optional["LLMModelRegistry"] = None,
     ):
         self.rag_pipeline = rag_pipeline or RAGPipeline()
-        self.model_registry = model_registry or llm_registry
+        if model_registry is None:
+            from llm.registry import llm_registry
+
+            model_registry = llm_registry
+        self.model_registry = model_registry
 
     def query(self, request: RAGQueryRequest) -> RAGQueryResponse:
         """

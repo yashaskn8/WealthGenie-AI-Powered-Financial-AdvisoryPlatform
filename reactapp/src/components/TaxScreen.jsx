@@ -802,7 +802,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
             >
               <h2>Old vs New Regime - Which Costs Less?</h2>
               <div className="tax-bar-chart-container tax-bar-chart-glow">
-                <ResponsiveContainer>
+                <ResponsiveContainer initialDimension={{ width: 1, height: 1 }}>
                   <BarChart data={regimeChartData} margin={{ top: 20, right: 30, left: 20, bottom: 10 }}>
                     <defs>
                       <linearGradient id="colorOld" x1="0" y1="0" x2="0" y2="1">
@@ -833,7 +833,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
               <h2>Before vs After Tax-Saving Investments</h2>
               {totalTax > 0 && regime === 'old' && potentialSaving > 0 ? (
                 <div className="tax-bar-chart-container tax-bar-chart-glow">
-                  <ResponsiveContainer>
+                  <ResponsiveContainer initialDimension={{ width: 1, height: 1 }}>
                     <BarChart data={optimizationChartData} margin={{ top: 20, right: 30, left: 20, bottom: 10 }}>
                       <defs>
                         <linearGradient id="colorCurrent" x1="0" y1="0" x2="0" y2="1">

@@ -44,6 +44,7 @@ async function createAdvisory(index) {
       confidenceScores: { Equity_MF: 0.8 },
       mlFallback: false,
       modelVersion: `model-${index}`,
+      regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
       profileInputHash: 'b'.repeat(64),
     },
     auditRecord: {

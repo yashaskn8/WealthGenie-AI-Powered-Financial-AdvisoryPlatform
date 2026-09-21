@@ -48,6 +48,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
   const precomputePromiseRef = useRef(null);
   const precomputeFingerprintRef = useRef(null);
   const precomputeGenerationRef = useRef(0);
+  const precomputeControllerRef = useRef(null);
   const completionIdempotencyKeyRef = useRef(null);
   const completionPayloadFingerprintRef = useRef(null);
   const [age, setAge] = useState(savedProfile?.age ?? '');
@@ -97,6 +98,45 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
     monthlyTakeHome, soldPropertyAmount, hasLumpSum, lumpSumAmount,
   ]);
 
+  const startPrecomputeForProfile = useCallback(({ profile, fingerprint, generation, controller }) => {
+    if (!controller || controller.signal.aborted || precomputeGenerationRef.current !== generation) return null;
+
+    if (precomputePromiseRef.current && precomputeFingerprintRef.current === fingerprint) {
+      return precomputePromiseRef.current;
+    }
+
+    let requestPromise;
+    let rawPromise;
+    try {
+      rawPromise = api.precomputeProfile(profile, { signal: controller.signal });
+    } catch {
+      rawPromise = Promise.reject(new Error('Precompute request failed to start.'));
+    }
+
+    requestPromise = Promise.resolve(rawPromise)
+      .then(candidate => {
+        if (controller.signal.aborted
+            || precomputeGenerationRef.current !== generation
+            || precomputeFingerprintRef.current !== fingerprint) {
+          return null;
+        }
+        candidateIdRef.current = candidate?.candidateId || null;
+        candidateFingerprintRef.current = candidate?.candidateId ? fingerprint : null;
+        return candidate || null;
+      })
+      .catch(() => null)
+      .finally(() => {
+        if (precomputePromiseRef.current === requestPromise) {
+          precomputePromiseRef.current = null;
+          precomputeFingerprintRef.current = null;
+        }
+      });
+
+    precomputePromiseRef.current = requestPromise;
+    precomputeFingerprintRef.current = fingerprint;
+    return requestPromise;
+  }, []);
+
   const handleSaveProfile = async (e) => {
     e.preventDefault();
     if (isSubmitting) return;
@@ -113,10 +153,19 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
         ? candidateIdRef.current
         : null;
 
-      const inFlightPrecompute = precomputePromiseRef.current;
+      let inFlightPrecompute = precomputeFingerprintRef.current === payloadFingerprint
+        ? precomputePromiseRef.current
+        : null;
+      if (!candidateId && !inFlightPrecompute) {
+        inFlightPrecompute = startPrecomputeForProfile({
+          profile: validation.profile,
+          fingerprint: payloadFingerprint,
+          generation: precomputeGenerationRef.current,
+          controller: precomputeControllerRef.current,
+        });
+      }
       if (!candidateId
-          && inFlightPrecompute
-          && precomputeFingerprintRef.current === payloadFingerprint) {
+          && inFlightPrecompute) {
         const candidate = await waitForBoundedPromise(inFlightPrecompute, PRECOMPUTE_SAVE_WAIT_MS);
         if (candidateFingerprintRef.current === payloadFingerprint) {
           candidateId = candidate?.candidateId || candidateIdRef.current || null;
@@ -185,38 +234,32 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
     candidateFingerprintRef.current = null;
     precomputePromiseRef.current = null;
     precomputeFingerprintRef.current = null;
+    precomputeControllerRef.current = null;
     if (!validation.valid) return undefined;
 
     const controller = new AbortController();
+    precomputeControllerRef.current = controller;
     const fingerprint = financialProfileKey(validation.profile);
     const timer = setTimeout(() => {
-      let requestPromise;
-      requestPromise = api.precomputeProfile(validation.profile, { signal: controller.signal })
-        .then(candidate => {
-          if (controller.signal.aborted || precomputeGenerationRef.current !== generation) return null;
-          candidateIdRef.current = candidate?.candidateId || null;
-          candidateFingerprintRef.current = candidate?.candidateId ? fingerprint : null;
-          return candidate || null;
-        })
-        .catch(() => null)
-        .finally(() => {
-          if (precomputePromiseRef.current === requestPromise) {
-            precomputePromiseRef.current = null;
-            precomputeFingerprintRef.current = null;
-          }
-        });
-      precomputePromiseRef.current = requestPromise;
-      precomputeFingerprintRef.current = fingerprint;
+      startPrecomputeForProfile({
+        profile: validation.profile,
+        fingerprint,
+        generation,
+        controller,
+      });
     }, PRECOMPUTE_DEBOUNCE_MS);
     return () => {
       clearTimeout(timer);
       controller.abort();
+      if (precomputeControllerRef.current === controller) {
+        precomputeControllerRef.current = null;
+      }
       if (precomputeFingerprintRef.current === fingerprint) {
         precomputePromiseRef.current = null;
         precomputeFingerprintRef.current = null;
       }
     };
-  }, [isRestoringProfile, isComplete, userProfilePayload]);
+  }, [isRestoringProfile, isComplete, startPrecomputeForProfile, userProfilePayload]);
 
   useEffect(() => {
     const controller = new AbortController();

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertMongoTransactionCapability } from '../config/db.js';
+import mongoose from 'mongoose';
+import connectDB, { assertMongoTransactionCapability } from '../config/db.js';
 
 function connectionReturning(hello) {
   return {
@@ -24,3 +25,20 @@ test('production transaction capability rejects standalone MongoDB', async () =>
   );
 });
 
+test('database connection rejects standalone MongoDB by default in every environment', async () => {
+  const originalConnect = mongoose.connect;
+  mongoose.connect = async () => connectionReturning({ isWritablePrimary: true });
+
+  try {
+    await assert.rejects(
+      connectDB({
+        uri: 'mongodb://127.0.0.1:27017/wealthgenie',
+        retries: 1,
+        env: { MONGODB_FLAVOR: 'mongodb' },
+      }),
+      error => error.code === 'MONGODB_TRANSACTIONS_REQUIRED',
+    );
+  } finally {
+    mongoose.connect = originalConnect;
+  }
+});

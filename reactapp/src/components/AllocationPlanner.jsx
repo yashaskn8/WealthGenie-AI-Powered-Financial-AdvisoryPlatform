@@ -171,7 +171,7 @@ const AllocationPlanner = ({ profile, recommendations = [], recommendationMeta }
             {/* Background Ambient Radial Ring Glow */}
             <div className="donut-glow-ring" />
 
-            <ResponsiveContainer width="100%" height={380}>
+            <ResponsiveContainer width="100%" height={380} initialDimension={{ width: 1, height: 1 }}>
               <PieChart>
                 <defs>
                   {/* SVG Gradients for Slices */}

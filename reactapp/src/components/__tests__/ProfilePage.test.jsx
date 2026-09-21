@@ -105,7 +105,7 @@ describe('ProfilePage backend version contract', () => {
     expect(sessionStorage.length).toBe(0);
   });
 
-  it('waits briefly for a matching in-flight precompute before completing', async () => {
+  it('does not start a duplicate when Save finds a matching in-flight precompute', async () => {
     vi.useFakeTimers();
     vi.spyOn(api, 'getCurrentProfile').mockRejectedValue({ status: 404 });
     let resolvePrecompute;
@@ -134,6 +134,94 @@ describe('ProfilePage backend version contract', () => {
       expect.objectContaining({ monthly_savings: 25000 }),
       '4f4f4f4f-1111-4111-8111-111111111111',
       expect.objectContaining({ headers: { 'Idempotency-Key': expect.any(String) } }),
+    );
+  });
+
+  it('starts precompute immediately when Save is clicked before the debounce fires', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(api, 'getCurrentProfile').mockRejectedValue({ status: 404 });
+    let resolvePrecompute;
+    const precompute = vi.spyOn(api, 'precomputeProfile').mockReturnValue(new Promise(resolve => {
+      resolvePrecompute = resolve;
+    }));
+    const complete = vi.spyOn(api, 'completeFinancialProfile').mockResolvedValue({
+      profile: VALID_PROFILE,
+      recommendation: { profileId: VALID_PROFILE.profileId, recommendationId: '64b000000000000000000004', instruments: [] },
+    });
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+
+    render(<ProfilePage><ProfileProbe /></ProfilePage>);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await fillValidForm();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('profile-save'));
+      await Promise.resolve();
+    });
+    expect(precompute).toHaveBeenCalledTimes(1);
+    expect(complete).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolvePrecompute({ candidateId: '4f4f4f4f-1111-4111-8111-111111111111' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(complete).toHaveBeenCalledWith(
+      expect.objectContaining({ monthly_savings: 25000 }),
+      '4f4f4f4f-1111-4111-8111-111111111111',
+      expect.objectContaining({ headers: { 'Idempotency-Key': expect.any(String) } }),
+    );
+  });
+
+  it('does not use a candidate returned for a stale profile fingerprint', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(api, 'getCurrentProfile').mockRejectedValue({ status: 404 });
+    let resolveOldPrecompute;
+    let resolveCurrentPrecompute;
+    const precompute = vi.spyOn(api, 'precomputeProfile')
+      .mockReturnValueOnce(new Promise(resolve => { resolveOldPrecompute = resolve; }))
+      .mockReturnValueOnce(new Promise(resolve => { resolveCurrentPrecompute = resolve; }));
+    const complete = vi.spyOn(api, 'completeFinancialProfile').mockResolvedValue({
+      profile: { ...VALID_PROFILE, monthly_savings: 26000 },
+      recommendation: { profileId: VALID_PROFILE.profileId, recommendationId: '64b000000000000000000007', instruments: [] },
+    });
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+
+    render(<ProfilePage><ProfileProbe /></ProfilePage>);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await fillValidForm();
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(precompute).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(screen.getByTestId('profile-input-monthly_savings'), { target: { value: '26000' } });
+    await act(async () => {
+      resolveOldPrecompute({ candidateId: '4f4f4f4f-1111-4111-8111-111111111111' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('profile-save'));
+      await Promise.resolve();
+    });
+    expect(precompute).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      resolveCurrentPrecompute({ candidateId: '4f4f4f4f-2222-4222-8222-222222222222' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(complete).toHaveBeenCalledWith(
+      expect.objectContaining({ monthly_savings: 26000 }),
+      '4f4f4f4f-2222-4222-8222-222222222222',
+      expect.objectContaining({ headers: { 'Idempotency-Key': expect.any(String) } }),
+    );
+    expect(complete).not.toHaveBeenCalledWith(
+      expect.anything(),
+      '4f4f4f4f-1111-4111-8111-111111111111',
+      expect.anything(),
     );
   });
 

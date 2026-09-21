@@ -240,7 +240,7 @@ const OverviewTab = ({ inv, comparisonData, onSelectInvestment }) => {
 
       <div className="ddm-section-header">Model Assumption Comparison</div>
       <div className="ddm-chart-container">
-        <ResponsiveContainer width="100%" height={360}>
+        <ResponsiveContainer width="100%" height={360} initialDimension={{ width: 1, height: 1 }}>
           <BarChart data={comparisonData} margin={{ top: 20, right: 20, left: -10, bottom: 30 }}>
             <defs>
               <linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1">

@@ -86,7 +86,7 @@ const ProjectionBand = ({ chartData, targetAmount, goalProbability, instrumentNa
 
       {/* Chart Container */}
       <div style={{ width: '100%', height: 290 }}>
-        <ResponsiveContainer>
+        <ResponsiveContainer initialDimension={{ width: 1, height: 1 }}>
           <ComposedChart data={chartData} margin={{ top: 10, right: 20, left: 10, bottom: 5 }}>
             <defs>
               <linearGradient id="cyanBand" x1="0" y1="0" x2="0" y2="1">

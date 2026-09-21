@@ -3,7 +3,7 @@
  */
 /* global global */
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import DataFreshnessBar from '../DataFreshnessBar';
 
@@ -17,7 +17,7 @@ describe('DataFreshnessBar Component', () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it('handles refresh button click safely', async () => {
+  it('shows source freshness without exposing a customer-triggered provider refresh', async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -39,8 +39,7 @@ describe('DataFreshnessBar Component', () => {
     render(<DataFreshnessBar instruments={['Equity_MF']} />);
     expect(await screen.findByText('AMFI: PARTIAL')).toBeTruthy();
     expect(await screen.findByText('NSE: AVAILABLE')).toBeTruthy();
-    const refresh = screen.getByRole('button', { name: 'Refresh Sources' });
-    fireEvent.click(refresh);
-    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('button', { name: 'Refresh Sources' })).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
   });
 });

@@ -80,7 +80,7 @@ describe('MCP SSE & HTTP Endpoint Integration Tests', () => {
 
   // ── Session Validation Tests ──
 
-  it('POST /api/mcp/messages with valid JWT but missing sessionId returns 400', async () => {
+  it('POST /api/mcp/messages with valid JWT but missing sessionId returns safe 404', async () => {
     await withServer(buildMcpApp(), async (baseUrl) => {
       const res = await rawRequest(`${baseUrl}/api/mcp/messages`, {
         method: 'POST',
@@ -90,12 +90,12 @@ describe('MCP SSE & HTTP Endpoint Integration Tests', () => {
         },
         body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id: 1 }),
       });
-      // Without a valid SSE session, the handler returns 400 for missing session
-      assert.ok([400, 500].includes(res.status), `Expected 400 or 500 for missing session, got ${res.status}`);
+      // Unknown sessions use a safe not-found response without exposing ownership.
+      assert.equal(res.status, 404);
     });
   });
 
-  it('POST /api/mcp/messages with non-existent sessionId returns 400 error', async () => {
+  it('POST /api/mcp/messages with non-existent sessionId returns safe 404 error', async () => {
     await withServer(buildMcpApp(), async (baseUrl) => {
       const res = await rawRequest(`${baseUrl}/api/mcp/messages?sessionId=non-existent-session-xyz`, {
         method: 'POST',
@@ -105,7 +105,7 @@ describe('MCP SSE & HTTP Endpoint Integration Tests', () => {
         },
         body: JSON.stringify({ jsonrpc: '2.0', method: 'tools/list', id: 1 }),
       });
-      assert.ok([400, 500].includes(res.status), `Expected 400 for invalid session, got ${res.status}`);
+      assert.equal(res.status, 404);
       const data = await res.json();
       assert.ok(data.error, 'Response must contain error field for invalid session');
     });

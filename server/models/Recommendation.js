@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { optionalUniqueIndex } from '../config/mongoCompatibility.js';
 
 const scoreFactorSchema = new mongoose.Schema({
   expectedReturn: { type: Number, min: 0, max: 100, required: true },
@@ -81,8 +82,12 @@ const recommendationSchema = new mongoose.Schema({
   },
   mlFallback: { type: Boolean, required: true },
   modelVersion: { type: String, required: true },
+  regulatoryRuleVersion: { type: String, required: true },
   profileInputHash: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
-  idempotencyOperationId: { type: String, default: null },
+  // Optional unique fields are omitted when absent so the indexes remain
+  // compatible with MongoDB and Amazon DocumentDB.
+  profileCompletionCandidateId: { type: String },
+  idempotencyOperationId: { type: String },
   idempotencyRequestHash: { type: String, default: null },
   responseSnapshot: { type: mongoose.Schema.Types.Mixed, default: null },
   marketAdjustment: { type: marketAdjustmentSchema, default: null },
@@ -97,14 +102,10 @@ const recommendationSchema = new mongoose.Schema({
 
 recommendationSchema.index({ userId: 1, generatedAt: -1 });
 recommendationSchema.index({ profileId: 1 });
-recommendationSchema.index(
-  { idempotencyOperationId: 1 },
-  {
-    name: 'unique_advisory_idempotency_operation',
-    unique: true,
-    partialFilterExpression: { idempotencyOperationId: { $type: 'string' } },
-  },
-);
+const candidateIndex = optionalUniqueIndex('profileCompletionCandidateId', 'unique_profile_completion_candidate');
+recommendationSchema.index(candidateIndex.key, candidateIndex.options);
+const idempotencyIndex = optionalUniqueIndex('idempotencyOperationId', 'unique_advisory_idempotency_operation');
+recommendationSchema.index(idempotencyIndex.key, idempotencyIndex.options);
 
 recommendationSchema.pre('validate', function validateAuthoritativeRecommendation(next) {
   if (!Array.isArray(this.instruments) || this.instruments.length === 0) {

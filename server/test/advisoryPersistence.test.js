@@ -44,6 +44,7 @@ function makeOperation(claim, suffix = '') {
       confidenceScores: {},
       mlFallback: true,
       modelVersion: 'rule_fallback',
+      regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
       profileInputHash: 'a'.repeat(64),
     },
     auditRecord: {

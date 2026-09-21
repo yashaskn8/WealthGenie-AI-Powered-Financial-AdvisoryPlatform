@@ -23,7 +23,7 @@ const HistoryTab = ({ inv, historicalData, benchmarkRate, inflationRate, project
       </div>
 
       <div style={{ height: 340, background: 'rgba(15, 23, 42, 0.4)', borderRadius: 18, padding: '24px 20px 16px', border: '1px solid var(--ddm-border)' }}>
-        <ResponsiveContainer>
+        <ResponsiveContainer initialDimension={{ width: 1, height: 1 }}>
           <AreaChart data={historicalData}>
             <defs>
               <linearGradient id="colorInv" x1="0" y1="0" x2="0" y2="1">

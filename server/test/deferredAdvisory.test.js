@@ -27,8 +27,10 @@ import recommendRoutes from '../routes/recommend.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import AuditRecord from '../models/AuditRecord.js';
+import { ProviderManager } from '../services/providerAbstraction.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
+import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
 
 const JWT_SECRET = 'deferred-advisory-test-secret-key-32ch';
 process.env.JWT_SECRET = JWT_SECRET;
@@ -186,15 +188,65 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
 
   let advisoryData = null;
   await t.test('8. Deferred advisory endpoint successfully generates advisory for owner', async () => {
-    const res = await fetch(`${baseUrl}/api/recommend/${recData.recommendationId}/advisory`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${tokenA}`,
+    const knownExplanation = {
+      top_reason: 'Nested completion explanation reaches deferred advisory generation',
+      feature_contributions: [{ feature: 'emergencyFundMonths', contribution: 0.8 }],
+    };
+    const storedRecommendation = await Recommendation.findById(recData.recommendationId).lean();
+    await Recommendation.updateOne(
+      { _id: recData.recommendationId },
+      {
+        $set: {
+          responseSnapshot: {
+            profile: { profileId: String(profile._id) },
+            recommendation: { ...storedRecommendation.responseSnapshot, explanation: knownExplanation },
+            completion: { candidateHit: false, recomputed: true },
+          },
+        },
       },
-    });
+    );
+
+    const originalGenerate = ProviderManager.nvidia.generate;
+    const originalPrimaryProvider = process.env.LLM_PRIMARY_PROVIDER;
+    let receivedExplanation = null;
+    process.env.LLM_PRIMARY_PROVIDER = 'NVIDIA_NIM';
+    ProviderManager.nvidia.generate = async ({ recentHistory }) => {
+      const userPrompt = recentHistory?.[0]?.parts?.[0]?.text;
+      const evidencePacket = JSON.parse(userPrompt).EVIDENCE_PACKET;
+      receivedExplanation = evidencePacket.entries.find(entry => entry.id === 'E_REC_EXPLANATION')?.value || null;
+      return {
+        text: JSON.stringify({
+          text: 'Nested explanation was grounded [E_REC_EXPLANATION]',
+          evidenceIdsUsed: ['E_REC_EXPLANATION'],
+          claims: [{ text: 'Nested explanation was grounded [E_REC_EXPLANATION]', evidenceIds: ['E_REC_EXPLANATION'] }],
+          unavailableFacts: [],
+        }),
+        provider: 'nvidia_nim',
+        model: 'test-nested-snapshot-model',
+        tokensUsed: 0,
+      };
+    };
+
+    let res;
+    try {
+      res = await fetch(`${baseUrl}/api/recommend/${recData.recommendationId}/advisory`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${tokenA}`,
+        },
+      });
+    } finally {
+      ProviderManager.nvidia.generate = originalGenerate;
+      if (originalPrimaryProvider === undefined) delete process.env.LLM_PRIMARY_PROVIDER;
+      else process.env.LLM_PRIMARY_PROVIDER = originalPrimaryProvider;
+    }
 
     assert.equal(res.status, 200);
+    assert.deepEqual(receivedExplanation, {
+      topReason: knownExplanation.top_reason,
+      featureContributions: knownExplanation.feature_contributions,
+    });
     advisoryData = await res.json();
     assert.equal(advisoryData.recommendationId, recData.recommendationId);
     assert.ok(typeof advisoryData.advisory_text === 'string' && advisoryData.advisory_text.length > 0, 'Must return advisory text');
@@ -257,6 +309,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
       confidenceScores: {},
       mlFallback: false,
       modelVersion: 'ml_v1',
+      regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
       profileInputHash: 'b'.repeat(64),
     });
 
@@ -285,6 +338,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
       confidenceScores: {},
       mlFallback: false,
       modelVersion: 'ml_v1',
+      regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
       profileInputHash: 'c'.repeat(64),
     });
 

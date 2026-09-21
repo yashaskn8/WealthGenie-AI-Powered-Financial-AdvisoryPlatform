@@ -11,7 +11,7 @@ import { FinancialToolRegistry } from '../services/financialToolRegistry.js';
  * Single source of truth for all tools derived dynamically from Joi schemas.
  */
 export class WealthGenieMcpServer {
-  constructor() {
+  constructor({ maxGlobalSessions = process.env.MAX_GLOBAL_SESSIONS, maxSessionsPerUser = process.env.MAX_SESSIONS_PER_USER } = {}) {
     this.server = new Server(
       {
         name: 'WealthGenie Financial Tools Server',
@@ -24,7 +24,33 @@ export class WealthGenieMcpServer {
       }
     );
     this.sseTransports = new Map();
+    this.maxGlobalSessions = WealthGenieMcpServer.positiveLimit(maxGlobalSessions, 100);
+    this.maxSessionsPerUser = WealthGenieMcpServer.positiveLimit(maxSessionsPerUser, 5);
     this.setupHandlers();
+  }
+
+  static positiveLimit(value, fallback) {
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+  }
+
+  #sessionCountForUser(userId) {
+    const normalizedUserId = String(userId);
+    let count = 0;
+    for (const session of this.sseTransports.values()) {
+      if (session.userId === normalizedUserId) count += 1;
+    }
+    return count;
+  }
+
+  checkSseCapacity(userId) {
+    if (this.sseTransports.size >= this.maxGlobalSessions) {
+      return { allowed: false, status: 429, code: 'MCP_GLOBAL_SESSION_LIMIT' };
+    }
+    if (this.#sessionCountForUser(userId) >= this.maxSessionsPerUser) {
+      return { allowed: false, status: 429, code: 'MCP_USER_SESSION_LIMIT' };
+    }
+    return { allowed: true };
   }
 
   /**
@@ -117,24 +143,30 @@ export class WealthGenieMcpServer {
    * Enforces max concurrent sessions and reaps disconnected clients on close.
    */
   async handleSseConnection(req, res) {
-    const MAX_SESSIONS = 100;
-    if (this.sseTransports.size >= MAX_SESSIONS) {
-      const oldestSessionId = this.sseTransports.keys().next().value;
-      const oldestTransport = this.sseTransports.get(oldestSessionId);
-      if (oldestTransport) {
-        try {
-          if (oldestTransport.close) oldestTransport.close();
-        } catch { /* ignore */ }
-        this.sseTransports.delete(oldestSessionId);
-      }
+    const userId = req.user?.userId;
+    if (!userId) {
+      return res.status(401).json({ error: 'Authenticated MCP session required.' });
+    }
+    const capacity = this.checkSseCapacity(userId);
+    if (!capacity.allowed) {
+      return res.status(capacity.status).json({
+        error: 'MCP session capacity reached.',
+        code: capacity.code,
+      });
     }
 
     const transport = new SSEServerTransport('/api/mcp/messages', res);
     const sessionId = transport.sessionId;
-    this.sseTransports.set(sessionId, transport);
+    this.sseTransports.set(sessionId, {
+      transport,
+      userId: String(userId),
+      createdAt: new Date(),
+    });
 
     const cleanup = () => {
-      this.sseTransports.delete(sessionId);
+      if (this.sseTransports.get(sessionId)?.transport === transport) {
+        this.sseTransports.delete(sessionId);
+      }
     };
 
     transport.onclose = cleanup;
@@ -154,11 +186,12 @@ export class WealthGenieMcpServer {
    */
   async handleSseMessage(req, res) {
     const sessionId = req.query.sessionId;
-    const transport = this.sseTransports.get(sessionId);
-    if (!transport) {
-      return res.status(400).json({ error: `Active SSE session '${sessionId}' not found.` });
+    const session = this.sseTransports.get(sessionId);
+    if (!session || session.userId !== String(req.user?.userId || '')) {
+      // Do not reveal whether a different user's session ID exists.
+      return res.status(404).json({ error: 'MCP session not found.' });
     }
-    await transport.handlePostMessage(req, res);
+    await session.transport.handlePostMessage(req, res);
   }
 }
 

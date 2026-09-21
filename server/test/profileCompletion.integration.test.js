@@ -12,6 +12,7 @@ import AuditRecord from '../models/AuditRecord.js';
 import { connectRedis, redisClient } from '../config/redis.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
+import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
 
 const JWT_SECRET = 'profile-completion-integration-secret';
 const enabled = process.env.RUN_PROFILE_COMPLETION_INTEGRATION === 'true';
@@ -24,7 +25,7 @@ function signToken(userId) {
 
 test('precompute -> complete persists one profile, recommendation, and audit and replays safely', {
   skip: !enabled,
-}, async t => {
+}, async () => {
   let server;
   let baseUrl;
   const userId = new mongoose.Types.ObjectId();
@@ -38,10 +39,11 @@ test('precompute -> complete persists one profile, recommendation, and audit and
 
   try {
     await setupTestDatabase({ requireReplicaSet: true });
-    if (!await connectRedis({ url: process.env.REDIS_URL || 'redis://127.0.0.1:6379' })) {
-      t.skip('Redis-compatible test infrastructure is unavailable.');
-      return;
-    }
+    assert.equal(
+      await connectRedis({ url: process.env.REDIS_URL || 'redis://127.0.0.1:6379' }),
+      true,
+      'Redis-compatible test infrastructure is required when RUN_PROFILE_COMPLETION_INTEGRATION=true.',
+    );
 
     const app = express();
     app.use(express.json());
@@ -80,12 +82,19 @@ test('precompute -> complete persists one profile, recommendation, and audit and
     const completed = await completeResponse.json();
     assert.equal(completed.completion.candidateHit, true);
     assert.equal(completed.completion.recomputed, false);
+    const candidateHitTiming = completeResponse.headers.get('server-timing');
+    assert.match(candidateHitTiming || '', /ml;dur=0\.00/);
+    assert.match(candidateHitTiming || '', /pipeline;dur=0\.00/);
+    assert.match(candidateHitTiming || '', /projection;dur=0\.00/);
 
     assert.deepEqual(await Promise.all([
       FinancialProfile.countDocuments({ userId }),
       Recommendation.countDocuments({ userId }),
       AuditRecord.countDocuments({ userId }),
     ]), [1, 1, 1]);
+    const persistedRecommendation = await Recommendation.findOne({ userId }).lean();
+    assert.equal(persistedRecommendation.regulatoryRuleVersion, getCurrentRegulatoryRuleVersion());
+    assert.equal(persistedRecommendation.profileCompletionCandidateId, candidate.candidateId);
 
     const replayResponse = await fetch(`${baseUrl}/api/profile/complete`, {
       method: 'POST',

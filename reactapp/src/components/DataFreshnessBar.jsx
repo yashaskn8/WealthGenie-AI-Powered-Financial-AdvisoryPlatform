@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { RefreshCw, CheckCircle, AlertTriangle, Clock } from 'lucide-react';
-import { getMarketRates, refreshMarketRates } from '../services/api';
+import React, { useState, useEffect } from 'react';
+import { CheckCircle, AlertTriangle, Clock } from 'lucide-react';
+import { getMarketRates } from '../services/api';
 
 /**
  * DataFreshnessBar — displays the status of official external data sources.
@@ -8,38 +8,18 @@ import { getMarketRates, refreshMarketRates } from '../services/api';
  */
 const DataFreshnessBar = () => {
   const [dataSources, setDataSources] = useState(null);
-  const [refreshCooldown, setRefreshCooldown] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
-
-  const fetchSources = useCallback(async () => {
-    try {
-      const data = await getMarketRates();
-      setDataSources(data);
-    } catch {
-      // Graceful degradation — hide bar if market API is unavailable
-    }
-  }, []);
 
   useEffect(() => {
-    fetchSources();
-  }, [fetchSources]);
-
-  const handleRefresh = async () => {
-    if (refreshCooldown) return;
-    setRefreshing(true);
-    try {
-      await refreshMarketRates();
-      // Start cooldown (60s)
-      setRefreshCooldown(true);
-      setTimeout(() => setRefreshCooldown(false), 60000);
-      // Refetch after a brief delay
-      setTimeout(() => fetchSources(), 3500);
-    } catch {
-      // Ignore — refresh is best-effort
-    } finally {
-      setRefreshing(false);
-    }
-  };
+    let active = true;
+    getMarketRates()
+      .then(data => {
+        if (active) setDataSources(data);
+      })
+      .catch(() => {
+        // Graceful degradation — hide bar if market API is unavailable
+      });
+    return () => { active = false; };
+  }, []);
 
   if (!dataSources?.sources) return null;
 
@@ -90,24 +70,6 @@ const DataFreshnessBar = () => {
         );
       })}
 
-      <button
-        onClick={handleRefresh}
-        disabled={refreshCooldown || refreshing}
-        title={refreshCooldown ? 'Cooldown: wait 60s between refreshes' : 'Refresh official backend market-data sources'}
-        style={{
-          marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4,
-          padding: '3px 10px', borderRadius: 6,
-          background: refreshCooldown ? 'rgba(255,255,255,0.03)' : 'rgba(6,182,212,0.1)',
-          border: `1px solid ${refreshCooldown ? 'rgba(255,255,255,0.06)' : 'rgba(6,182,212,0.2)'}`,
-          color: refreshCooldown ? '#475569' : '#06b6d4',
-          cursor: refreshCooldown ? 'not-allowed' : 'pointer',
-          fontSize: 11, fontWeight: 500,
-          transition: 'all 0.2s ease',
-        }}
-      >
-        <RefreshCw size={11} style={{ animation: refreshing ? 'spin 1s linear infinite' : 'none' }} />
-        {refreshCooldown ? 'Cooling down…' : 'Refresh Sources'}
-      </button>
     </div>
   );
 };

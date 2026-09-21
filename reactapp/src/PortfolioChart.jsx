@@ -39,7 +39,7 @@ const PortfolioChart = ({ projectionData = [], horizon }) => {
       </div>
 
       <div style={{ width: '100%', height: 400 }}>
-        <ResponsiveContainer>
+        <ResponsiveContainer initialDimension={{ width: 1, height: 1 }}>
           <LineChart data={data} margin={{ top: 10, right: 30, left: 20, bottom: 10 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
             <XAxis dataKey="year" stroke="#64748b" tick={{fill: '#64748b', fontSize: 12}} dy={10} axisLine={false} tickLine={false} minTickGap={30} />

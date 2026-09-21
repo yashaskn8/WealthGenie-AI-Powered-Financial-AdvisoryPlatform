@@ -233,6 +233,7 @@ function buildCorePersistencePayload({
       confidenceScores,
       mlFallback: Boolean(mlResult.fallback),
       modelVersion,
+      regulatoryRuleVersion,
       profileInputHash: inputHash,
       marketAdjustment,
       currentAllocationSource: marketAdjustment.currentAllocationSource,

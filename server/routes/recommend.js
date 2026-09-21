@@ -22,6 +22,7 @@ import {
   RECOMMENDATION_POLICY_VERSION,
 } from '../services/recommendationProfile.js';
 import { assessSuitabilityRisk } from '../services/riskProfiler.js';
+import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
 import { claimAdvisoryIdempotency, releaseAdvisoryIdempotency } from '../middleware/idempotency.js';
 import { persistAdvisoryAtomically } from '../services/advisoryPersistence.js';
 import { setCache, delCache } from '../config/redis.js';
@@ -46,6 +47,27 @@ const router = Router();
 function plainMarketAdjustment(value) {
   if (!value) return null;
   return typeof value.toObject === 'function' ? value.toObject({ flattenMaps: true }) : value;
+}
+
+export function recommendationPayloadFromSnapshot(snapshot) {
+  if (snapshot?.recommendation && snapshot?.completion) return snapshot.recommendation;
+  return snapshot;
+}
+
+function advisoryExplanationFromMetadata(metadata) {
+  if (!metadata || typeof metadata !== 'object' || Object.keys(metadata).length === 0) return null;
+  return {
+    status: metadata.status,
+    provider: metadata.provider,
+    model: metadata.model,
+    prompt_version: metadata.promptVersion ?? metadata.prompt_version,
+    grounding_version: metadata.groundingVersion ?? metadata.grounding_version,
+    evidence_ids_used: metadata.evidenceIdsUsed ?? metadata.evidence_ids_used ?? [],
+    unavailable_facts: metadata.unavailableFacts ?? metadata.unavailable_facts ?? [],
+    citations: metadata.citations ?? [],
+    validation_status: metadata.validation?.status ?? metadata.validation_status,
+    generated_at: metadata.generatedAt ?? metadata.generated_at,
+  };
 }
 
 router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHandler(async (req, res) => {
@@ -150,9 +172,7 @@ router.get('/current', verifyJWT, asyncHandler(async (req, res) => {
   }
 
   const snapshot = recommendation.responseSnapshot;
-  const response = snapshot?.recommendation && snapshot?.completion
-    ? snapshot.recommendation
-    : snapshot;
+  const response = recommendationPayloadFromSnapshot(snapshot);
   if (!response || typeof response !== 'object' || !Array.isArray(response.instruments)) {
     throw createError(
       503,
@@ -162,6 +182,38 @@ router.get('/current', verifyJWT, asyncHandler(async (req, res) => {
     );
   }
 
+  const currentRegulatoryRuleVersion = getCurrentRegulatoryRuleVersion();
+  if (!currentRegulatoryRuleVersion) {
+    throw createError(
+      503,
+      'No verified regulatory policy is available for the current fiscal year.',
+      'Regulatory policy metadata is temporarily unavailable.',
+      { code: 'REGULATORY_POLICY_UNAVAILABLE' },
+    );
+  }
+  let recommendationRegulatoryRuleVersion = recommendation.regulatoryRuleVersion;
+  if (!recommendationRegulatoryRuleVersion) {
+    // Legacy documents may lack the denormalized field. Read the immutable
+    // audit source when available; if neither record has it, retain a
+    // compatibility read-only path rather than inventing policy metadata.
+    const audit = await AuditRecord.findOne({
+      recommendationId: recommendation._id,
+      userId: req.user.userId,
+    }).select('regulatory_rule_version').lean();
+    recommendationRegulatoryRuleVersion = audit?.regulatory_rule_version || null;
+  }
+  if (recommendationRegulatoryRuleVersion
+      && recommendationRegulatoryRuleVersion !== currentRegulatoryRuleVersion) {
+    throw createError(
+      409,
+      'Recommendation was generated under an older regulatory policy version.',
+      'Regenerate recommendations before opening the dashboard.',
+      { code: 'STALE_RECOMMENDATION' },
+    );
+  }
+
+  const currentAdvisoryExplanation = advisoryExplanationFromMetadata(recommendation.advisoryMetadata);
+
   return res.json({
     ...response,
     profileId: String(profile._id),
@@ -169,9 +221,7 @@ router.get('/current', verifyJWT, asyncHandler(async (req, res) => {
     audit_id: response.audit_id ? String(response.audit_id) : response.audit_id,
     audit_hash: response.audit_hash || snapshot.audit_hash || null,
     advisory_text: recommendation.advisoryText ?? response.advisory_text ?? null,
-    advisory_explanation: response.advisory_explanation || {
-      status: recommendation.advisoryMetadata?.status || 'PENDING',
-    },
+    advisory_explanation: currentAdvisoryExplanation || response.advisory_explanation || { status: 'PENDING' },
   });
 }));
 
@@ -277,7 +327,8 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
 
     const profile = buildRecommendationProfile(storedProfile);
     const suitability = assessSuitabilityRisk(profile);
-    const shapExplanation = recommendation.responseSnapshot?.explanation || null;
+    const recommendationSnapshot = recommendationPayloadFromSnapshot(recommendation.responseSnapshot);
+    const shapExplanation = recommendationSnapshot?.explanation || null;
 
     const advisory = await generateAdvisory({
       profile: buildLlmFinancialContext(profile, suitability),

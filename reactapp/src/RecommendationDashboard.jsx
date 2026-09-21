@@ -862,7 +862,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                  <div className="skeleton-box" style={{ width: '160px', height: '160px', borderRadius: '50%', margin: '20px auto' }} />
               ) : (
                 <>
-                  <ResponsiveContainer width="100%" height="100%">
+                  <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 1, height: 1 }}>
                     <PieChart>
                       <Pie 
                         data={allocationDataOuter} 
@@ -997,7 +997,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                         : 'Emergency-fund projection is waiting for the recommendation service.'}
                     </div>
                     <div style={{ height: 200, fontSize: '0.7rem' }}>
-                      <ResponsiveContainer width="100%" height="100%">
+                      <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 1, height: 1 }}>
                         <AreaChart data={chartData} margin={{top: 10, right: 30, left: -20, bottom: 0}}>
                           <defs>
                             <linearGradient id="colorEF" x1="0" y1="0" x2="0" y2="1">
@@ -1068,7 +1068,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                           <div className="skeleton-box" style={{ width: '25%', height: '100%' }} />
                        </div>
                     ) : (
-                      <ResponsiveContainer width="100%" height="100%">
+                      <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 1, height: 1 }}>
                         <AreaChart data={performanceData} margin={{top: 10, right: 20, left: -10, bottom: 0}}>
                           <defs>
                             <linearGradient id="colorAvg" x1="0" y1="0" x2="0" y2="1">

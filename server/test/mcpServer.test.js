@@ -167,3 +167,54 @@ describe('MCP Endpoint Auth & Router Integration Tests', () => {
     });
   });
 });
+
+describe('MCP SSE ownership and capacity controls', () => {
+  function responseRecorder() {
+    return {
+      statusCode: 200,
+      body: null,
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; return this; },
+    };
+  }
+
+  it('allows the owning user and safely denies another user', async () => {
+    const server = new WealthGenieMcpServer({ maxGlobalSessions: 10, maxSessionsPerUser: 2 });
+    let messages = 0;
+    server.sseTransports.set('session-a', {
+      userId: 'user-a',
+      createdAt: new Date(),
+      transport: { handlePostMessage: async () => { messages += 1; } },
+    });
+
+    const ownerResponse = responseRecorder();
+    await server.handleSseMessage({ query: { sessionId: 'session-a' }, user: { userId: 'user-a' } }, ownerResponse);
+    assert.equal(messages, 1);
+
+    const foreignResponse = responseRecorder();
+    await server.handleSseMessage({ query: { sessionId: 'session-a' }, user: { userId: 'user-b' } }, foreignResponse);
+    assert.equal(foreignResponse.statusCode, 404);
+    assert.deepEqual(foreignResponse.body, { error: 'MCP session not found.' });
+
+    const unknownResponse = responseRecorder();
+    await server.handleSseMessage({ query: { sessionId: 'missing' }, user: { userId: 'user-a' } }, unknownResponse);
+    assert.equal(unknownResponse.statusCode, 404);
+  });
+
+  it('returns 429 at per-user and global caps without evicting another user', () => {
+    const perUser = new WealthGenieMcpServer({ maxGlobalSessions: 10, maxSessionsPerUser: 1 });
+    perUser.sseTransports.set('a-1', { userId: 'user-a', transport: {}, createdAt: new Date() });
+    assert.deepEqual(perUser.checkSseCapacity('user-a'), {
+      allowed: false, status: 429, code: 'MCP_USER_SESSION_LIMIT',
+    });
+
+    const global = new WealthGenieMcpServer({ maxGlobalSessions: 2, maxSessionsPerUser: 5 });
+    global.sseTransports.set('a-1', { userId: 'user-a', transport: {}, createdAt: new Date() });
+    global.sseTransports.set('b-1', { userId: 'user-b', transport: {}, createdAt: new Date() });
+    assert.deepEqual(global.checkSseCapacity('user-c'), {
+      allowed: false, status: 429, code: 'MCP_GLOBAL_SESSION_LIMIT',
+    });
+    assert.equal(global.sseTransports.has('a-1'), true);
+    assert.equal(global.sseTransports.has('b-1'), true);
+  });
+});

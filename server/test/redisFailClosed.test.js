@@ -128,6 +128,46 @@ test('Redis fail-closed: Token blacklist check DENIES access when Redis is unava
   assert.equal(result, true, 'MUST return true (deny access) when Redis is unavailable');
 });
 
+test('Redis optional in development: token blacklist check allows access when Redis is unavailable', async () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousRequireRedis = process.env.REQUIRE_REDIS;
+  try {
+    process.env.NODE_ENV = 'development';
+    delete process.env.REQUIRE_REDIS;
+    setForceFailClosedInTest(false);
+    setRedisAvailable(false);
+    setRedisClient(null);
+
+    const result = await isTokenBlacklisted('development-jti-without-redis');
+
+    assert.equal(result, false, 'Optional development Redis outage must not invalidate active sessions');
+  } finally {
+    process.env.NODE_ENV = previousNodeEnv;
+    if (previousRequireRedis === undefined) delete process.env.REQUIRE_REDIS;
+    else process.env.REQUIRE_REDIS = previousRequireRedis;
+  }
+});
+
+test('Redis required in development: token blacklist check still fails closed', async () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousRequireRedis = process.env.REQUIRE_REDIS;
+  try {
+    process.env.NODE_ENV = 'development';
+    process.env.REQUIRE_REDIS = 'true';
+    setForceFailClosedInTest(false);
+    setRedisAvailable(false);
+    setRedisClient(null);
+
+    const result = await isTokenBlacklisted('required-development-jti-without-redis');
+
+    assert.equal(result, true, 'REQUIRE_REDIS=true must preserve fail-closed revocation behavior');
+  } finally {
+    process.env.NODE_ENV = previousNodeEnv;
+    if (previousRequireRedis === undefined) delete process.env.REQUIRE_REDIS;
+    else process.env.REQUIRE_REDIS = previousRequireRedis;
+  }
+});
+
 // ══════════════════════════════════════════════════════════════════════
 // 2. Token Blacklist — MUST fail CLOSED on Redis query error
 // ══════════════════════════════════════════════════════════════════════

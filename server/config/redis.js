@@ -5,6 +5,12 @@ let redisClient = null;
 let redisAvailable = false;
 let forceFailClosedInTest = false;
 
+function revocationCheckMustFailClosed() {
+  return forceFailClosedInTest
+    || process.env.NODE_ENV === 'production'
+    || process.env.REQUIRE_REDIS === 'true';
+}
+
 /**
  * Initialize Redis connection.
  * Falls back gracefully if Redis is not available (dev environments).
@@ -156,14 +162,20 @@ const blacklistToken = async (jti, ttlSeconds) => {
 /**
  * Check if token JTI is blacklisted.
  *
- * SECURITY: When Redis is unavailable or disconnected, this check FAILS CLOSED (returns true),
- * denying access by default to prevent revoked tokens from being silently accepted during an outage.
+ * SECURITY: Production and REQUIRE_REDIS=true fail closed when Redis is unavailable so revoked
+ * tokens cannot be silently accepted during an outage. Local development explicitly permits
+ * Redis to be optional, so the revocation lookup fails open there and authentication remains
+ * usable without a local Redis instance.
  */
 const isTokenBlacklisted = async (jti) => {
   if (process.env.NODE_ENV === 'test' && !forceFailClosedInTest) {
     return testBlacklist.has(jti);
   }
   if (!redisAvailable || !redisClient) {
+    if (!revocationCheckMustFailClosed()) {
+      logger.warn('Redis unavailable during token blacklist check — skipping optional development revocation lookup', { jti });
+      return false;
+    }
     logger.warn('Redis unavailable during token blacklist check — failing closed (denying access)', { jti });
     return true; // FAIL CLOSED: Deny access if revocation status cannot be verified
   }
@@ -171,6 +183,13 @@ const isTokenBlacklisted = async (jti) => {
     const res = await redisClient.get(`bl:${jti}`);
     return res === 'revoked';
   } catch (err) {
+    if (!revocationCheckMustFailClosed()) {
+      logger.warn('Redis error during token blacklist check — skipping optional development revocation lookup', {
+        message: err.message,
+        jti,
+      });
+      return false;
+    }
     logger.error('Redis error during token blacklist check — failing closed', { message: err.message, jti });
     return true; // FAIL CLOSED: on Redis query error
   }

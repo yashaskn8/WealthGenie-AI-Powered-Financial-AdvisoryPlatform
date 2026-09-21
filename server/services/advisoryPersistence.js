@@ -5,6 +5,7 @@ import AuditRecord from '../models/AuditRecord.js';
 import IdempotencyKey from '../models/IdempotencyKey.js';
 import AuditChainHead from '../models/AuditChainHead.js';
 import { prepareAuditChainEntry, advanceAuditChainHead } from './auditChain.js';
+import { omitUnsetOptionalUniqueFields, optionalUniqueIndex } from '../config/mongoCompatibility.js';
 
 let advisoryPersistenceReady = null;
 
@@ -12,6 +13,7 @@ async function ensureAdvisoryPersistenceReady() {
   if (!advisoryPersistenceReady) {
     advisoryPersistenceReady = (async () => {
       await Promise.all([
+        FinancialProfile.init(),
         Recommendation.init(),
         AuditRecord.init(),
         AuditChainHead.init(),
@@ -19,22 +21,16 @@ async function ensureAdvisoryPersistenceReady() {
       ]);
       // Production disables general auto-index creation. This one uniqueness
       // constraint is part of the advisory correctness boundary, not tuning.
-      await Recommendation.collection.createIndex(
-        { idempotencyOperationId: 1 },
-        {
-          name: 'unique_advisory_idempotency_operation',
-          unique: true,
-          partialFilterExpression: { idempotencyOperationId: { $type: 'string' } },
-        },
-      );
-      await AuditRecord.collection.createIndex(
-        { userId: 1, chain_sequence: 1 },
-        {
-          name: 'unique_user_audit_chain_sequence',
-          unique: true,
-          partialFilterExpression: { chain_sequence: { $type: 'number' } },
-        },
-      );
+      for (const [collection, index] of [
+        [Recommendation.collection, optionalUniqueIndex('idempotencyOperationId', 'unique_advisory_idempotency_operation')],
+        [Recommendation.collection, optionalUniqueIndex('profileCompletionCandidateId', 'unique_profile_completion_candidate')],
+        [AuditRecord.collection, optionalUniqueIndex('chain_sequence', 'unique_user_audit_chain_sequence')],
+      ]) {
+        const key = collection === AuditRecord.collection
+          ? { userId: 1, ...index.key }
+          : index.key;
+        await collection.createIndex(key, index.options);
+      }
     })().catch(error => {
       advisoryPersistenceReady = null;
       throw error;
@@ -97,12 +93,12 @@ export async function persistAdvisoryAtomically({
         await FinancialProfile.create([profile], { session });
       }
 
-      await Recommendation.create([{
+      await Recommendation.create([omitUnsetOptionalUniqueFields({
         ...recommendation,
         idempotencyOperationId: idempotencyClaim.operationId,
         idempotencyRequestHash: idempotencyClaim.requestHash,
         responseSnapshot: committedResponse,
-      }], { session });
+      })], { session });
 
       await testHooks.afterRecommendationCreate?.(session);
 
