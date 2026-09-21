@@ -42,12 +42,17 @@ services:
       - MONGODB_URI=mongodb://mongodb:27017/wealthgenie?replicaSet=rs0
       - REDIS_URL=redis://redis:6379
       - ML_SERVICE_URL=http://ml-service:8000
-      - NODE_ENV=production
-      - JWT_SECRET=${JWT_SECRET:-}
+      # Docker Compose is the local HTTP integration stack. Production must
+      # terminate HTTPS and provide independently managed secrets.
+      - NODE_ENV=development
+      - JWT_SECRET=${JWT_SECRET:-local-compose-jwt-secret-at-least-32-characters}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - ML_SERVICE_API_KEY=${ML_SERVICE_API_KEY:-}
       - METRICS_TOKEN=${METRICS_TOKEN:-}
-      - CORS_ORIGINS=${CORS_ORIGINS:-https://localhost}
+      - AUTH_COOKIE_SECURE=${AUTH_COOKIE_SECURE:-false}
+      - AUTH_COOKIE_SAME_SITE=${AUTH_COOKIE_SAME_SITE:-strict}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://127.0.0.1}
+      - MONGODB_FLAVOR=${MONGODB_FLAVOR:-mongodb}
     depends_on:
       mongodb:
         condition: service_healthy

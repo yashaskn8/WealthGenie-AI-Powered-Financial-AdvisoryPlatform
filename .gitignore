@@ -61,6 +61,8 @@ venv
 .pytest_cache
 .ruff_cache
 ml-service/.live-runtime/
+ml-service/.venv-finetune-cuda/
+ml-service/.venv-finetune-cuda-system/
 *.db
 *.db-wal
 *.db-shm
@@ -68,14 +70,23 @@ ml-service/.live-runtime/
 # ML Model artifacts
 *.pkl
 *.pt
-ml-service/model/model.pkl
-ml-service/model/label_encoder.pkl
 ml-service/model/decision_tree.pkl
-ml-service/model/saved_models/
 ml-service/reports/
 !ml-service/reports/rag_eval_report.json
 !ml-service/reports/multi_model_benchmark.json
 !ml-service/model/checkpoints/*.pt
+# These are qualified, read-only serving inputs consumed by the production
+# image and verified by scripts/verify_serving_artifacts.py. Keep development
+# checkpoints and runtime-generated candidates ignored.
+!ml-service/model/model.pkl
+!ml-service/model/label_encoder.pkl
+!ml-service/model/saved_models/
+ml-service/model/saved_models/*
+!ml-service/model/saved_models/mlp_model.pt
+!ml-service/model/saved_models/scaler.pkl
+!ml-service/model/saved_models/pytorch_metadata.json
+!ml-service/model/saved_models/ft_transformer.pt
+!ml-service/model/saved_models/ft_transformer_metadata.json
 ml-service/data/investment_profiles.csv
 
 # Development artifacts

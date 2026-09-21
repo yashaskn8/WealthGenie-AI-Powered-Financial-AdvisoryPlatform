@@ -37,7 +37,11 @@ module "database" {
   db_cluster_size    = var.db_cluster_size
   master_username    = var.db_master_username
   kms_key_arn        = module.vpc.kms_key_arn
-  app_security_group = module.alb.alb_security_group_id
+  app_security_group_id = var.app_security_group_id
+  documentdb_engine_version = var.documentdb_engine_version
+  documentdb_deletion_protection = var.documentdb_deletion_protection
+  documentdb_skip_final_snapshot = var.documentdb_skip_final_snapshot
+  documentdb_final_snapshot_identifier = var.documentdb_final_snapshot_identifier
 }
 
 # Application Load Balancer & Ingress Security

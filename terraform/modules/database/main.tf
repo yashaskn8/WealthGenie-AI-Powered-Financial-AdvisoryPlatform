@@ -3,6 +3,16 @@ resource "random_password" "master_password" {
   special = false
 }
 
+resource "random_id" "final_snapshot_suffix" {
+  byte_length = 4
+}
+
+locals {
+  final_snapshot_identifier = var.documentdb_final_snapshot_identifier != null
+    ? var.documentdb_final_snapshot_identifier
+    : "wealthgenie-${var.environment}-final-${random_id.final_snapshot_suffix.hex}"
+}
+
 resource "aws_docdb_subnet_group" "main" {
   name       = "wealthgenie-${var.environment}-docdb-subnet-group"
   subnet_ids = var.subnet_ids
@@ -18,12 +28,15 @@ resource "aws_security_group" "docdb" {
   description = "Control traffic to managed DocumentDB / MongoDB cluster"
   vpc_id      = var.vpc_id
 
-  ingress {
-    description     = "MongoDB Protocol from K8s App Pods"
-    from_port       = 27017
-    to_port         = 27017
-    protocol        = "tcp"
-    security_groups = [var.app_security_group]
+  dynamic "ingress" {
+    for_each = var.app_security_group_id == null ? [] : [var.app_security_group_id]
+    content {
+      description     = "MongoDB protocol from the explicitly supplied application workload"
+      from_port       = 27017
+      to_port         = 27017
+      protocol        = "tcp"
+      security_groups = [ingress.value]
+    }
   }
 
   egress {
@@ -42,11 +55,14 @@ resource "aws_security_group" "docdb" {
 resource "aws_docdb_cluster" "docdb" {
   cluster_identifier      = "wealthgenie-${var.environment}-docdb"
   engine                  = "docdb"
+  engine_version          = var.documentdb_engine_version
   master_username         = var.master_username
   master_password         = random_password.master_password.result
   backup_retention_period = 14
   preferred_backup_window = "02:00-03:00"
-  skip_final_snapshot     = true
+  deletion_protection     = var.documentdb_deletion_protection
+  skip_final_snapshot     = var.documentdb_skip_final_snapshot
+  final_snapshot_identifier = local.final_snapshot_identifier
   db_subnet_group_name    = aws_docdb_subnet_group.main.name
   vpc_security_group_ids  = [aws_security_group.docdb.id]
   storage_encrypted       = true

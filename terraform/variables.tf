@@ -25,7 +25,6 @@ variable "availability_zones" {
 variable "domain_name" {
   type        = string
   description = "Primary domain for the financial advisory platform"
-  default     = "wealthgenie.internal"
 }
 
 variable "db_instance_class" {
@@ -44,4 +43,35 @@ variable "db_master_username" {
   type        = string
   description = "Master administrator username for DocumentDB"
   default     = "wealthgenie_admin"
+}
+
+variable "documentdb_engine_version" {
+  type        = string
+  description = "Explicit Amazon DocumentDB engine version; provide a version supported by the target region."
+}
+
+variable "documentdb_deletion_protection" {
+  type        = bool
+  description = "Protect the DocumentDB cluster from accidental deletion. Keep enabled for production."
+  default     = true
+}
+
+variable "documentdb_skip_final_snapshot" {
+  type        = bool
+  description = "Skip the final DocumentDB snapshot only for explicitly disposable environments."
+  default     = false
+}
+
+variable "documentdb_final_snapshot_identifier" {
+  type        = string
+  description = "Optional final snapshot identifier. A unique deterministic-per-state identifier is generated when omitted."
+  default     = null
+  nullable    = true
+}
+
+variable "app_security_group_id" {
+  type        = string
+  description = "Security group for the actual application workload that connects to DocumentDB. This stack does not provision compute."
+  default     = null
+  nullable    = true
 }

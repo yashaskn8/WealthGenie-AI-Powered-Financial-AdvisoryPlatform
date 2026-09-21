@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wealthgenie-config
+data:
+  # Replace the placeholder before rendering/applying this overlay.
+  CORS_ORIGINS: "https://${WEALTHGENIE_PRODUCTION_HOST}"
+  MONGODB_FLAVOR: "documentdb"
+  AUTH_COOKIE_SECURE: "true"
+  AUTH_COOKIE_SAME_SITE: "strict"

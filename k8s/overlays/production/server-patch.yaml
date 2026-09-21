@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wealthgenie-server
+spec:
+  template:
+    spec:
+      containers:
+        - name: server
+          env:
+            - name: MONGODB_TLS_CA_FILE
+              value: /etc/wealthgenie/documentdb/ca.pem
+          volumeMounts:
+            - name: documentdb-ca
+              mountPath: /etc/wealthgenie/documentdb
+              readOnly: true
+      volumes:
+        - name: documentdb-ca
+          secret:
+            secretName: ${WEALTHGENIE_DOCUMENTDB_CA_SECRET}
+            items:
+              - key: ca.pem
+                path: ca.pem

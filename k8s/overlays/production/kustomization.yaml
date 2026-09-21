@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: wealthgenie
+
+resources:
+  - ../../
+
+patches:
+  - path: ingress-patch.yaml
+    target:
+      group: networking.k8s.io
+      version: v1
+      kind: Ingress
+      name: wealthgenie-ingress
+  - path: config-patch.yaml
+    target:
+      version: v1
+      kind: ConfigMap
+      name: wealthgenie-config
+  - path: server-patch.yaml
+    target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: wealthgenie-server

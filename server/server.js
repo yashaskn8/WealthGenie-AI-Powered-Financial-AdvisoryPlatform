@@ -59,6 +59,7 @@ export async function startServer({ env = process.env } = {}) {
   try {
     await connectDB({
       uri: env.MONGODB_URI,
+      env,
       options: {
         autoIndex: config.mongo.autoIndex,
         maxPoolSize: config.mongo.maxPoolSize,
@@ -67,7 +68,11 @@ export async function startServer({ env = process.env } = {}) {
         socketTimeoutMS: config.mongo.socketTimeoutMs,
         maxIdleTimeMS: config.mongo.maxIdleTimeMs,
       },
-      requireTransactions: config.isProduction,
+      // Profile completion persists the profile, recommendation, audit record,
+      // and idempotency result atomically. Fail startup early if the local or
+      // deployed MongoDB is not transaction-capable instead of returning a
+      // 503 only after a user submits the profile.
+      requireTransactions: true,
     });
     await warmAdvisoryPersistence();
     await connectRedis({ url: env.REDIS_URL });

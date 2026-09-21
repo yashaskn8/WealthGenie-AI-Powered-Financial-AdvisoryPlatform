@@ -1,3 +1,5 @@
+import { getMongoFlavor } from './mongoCompatibility.js';
+
 const LOCAL_DEVELOPMENT_ORIGINS = ['http://localhost:5173', 'http://localhost:3000'];
 
 function positiveInteger(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
@@ -40,6 +42,8 @@ export function getRuntimeConfig(env = process.env) {
     requireRedis: booleanValue(env.REQUIRE_REDIS, isProduction),
     deepHealthTimeoutMs: positiveInteger(env.DEEP_HEALTH_TIMEOUT_MS, 3000, { min: 100, max: 30000 }),
     mongo: Object.freeze({
+      flavor: getMongoFlavor(env),
+      tlsCAFile: env.MONGODB_TLS_CA_FILE?.trim() || null,
       autoIndex: booleanValue(env.MONGODB_AUTO_INDEX, !isProduction),
       maxPoolSize: positiveInteger(env.MONGODB_MAX_POOL_SIZE, 50, { min: 5, max: 500 }),
       minPoolSize: positiveInteger(env.MONGODB_MIN_POOL_SIZE, isProduction ? 2 : 0, { min: 0, max: 100 }),

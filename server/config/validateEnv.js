@@ -5,9 +5,12 @@
  * development, test, and production environments.
  */
 
+import { validateMongoCompatibilityConfig } from './mongoCompatibility.js';
+
 export function validateEnvironmentConfig(env = process.env) {
   const isProduction = env.NODE_ENV === 'production';
   const errors = [];
+  errors.push(...validateMongoCompatibilityConfig(env).errors);
 
   if (!env.JWT_SECRET || !env.JWT_SECRET.trim()) {
     errors.push('JWT_SECRET is required');

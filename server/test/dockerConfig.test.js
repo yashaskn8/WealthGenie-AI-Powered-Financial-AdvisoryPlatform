@@ -41,9 +41,28 @@ test('Docker full-stack wiring proxies frontend API calls and supplies ML operat
   assert.match(composeConfig, /aliases:[\s\S]*- wealthgenie-server/);
   assert.match(composeConfig, /ML_OPERATOR_KEY=\$\{ML_OPERATOR_KEY:-\}/);
   assert.match(composeConfig, /METRICS_TOKEN=\$\{METRICS_TOKEN:-\}/);
-  assert.match(composeConfig, /CORS_ORIGINS=\$\{CORS_ORIGINS:-https:\/\/localhost\}/);
+  assert.match(composeConfig, /NODE_ENV=development/);
+  assert.match(composeConfig, /AUTH_COOKIE_SECURE=\$\{AUTH_COOKIE_SECURE:-false\}/);
+  assert.match(composeConfig, /CORS_ORIGINS=\$\{CORS_ORIGINS:-http:\/\/localhost,http:\/\/127\.0\.0\.1\}/);
   assert.match(composeConfig, /MONGODB_URI=mongodb:\/\/mongodb:27017\/wealthgenie\?replicaSet=rs0/);
   assert.match(mongoService, /publishNotReadyAddresses:\s*true/);
+});
+
+test('production edge timeout hierarchy is explicit and above the 90-second client deadline', () => {
+  const rootDir = fs.existsSync(path.join(process.cwd(), 'docker-compose.yml'))
+    ? process.cwd()
+    : path.resolve(process.cwd(), '..');
+  const nginxConfig = fs.readFileSync(path.join(rootDir, 'reactapp', 'nginx.conf'), 'utf8');
+  const ingress = fs.readFileSync(path.join(rootDir, 'k8s', 'ingress.yaml'), 'utf8');
+  const runtime = fs.readFileSync(path.join(rootDir, 'server', 'config', 'runtime.js'), 'utf8');
+  assert.match(nginxConfig, /proxy_connect_timeout\s+10s/);
+  assert.match(nginxConfig, /proxy_send_timeout\s+125s/);
+  assert.match(nginxConfig, /proxy_read_timeout\s+125s/);
+  assert.doesNotMatch(nginxConfig, /proxy_read_timeout\s+60s/);
+  assert.match(ingress, /proxy-connect-timeout:\s*"10"/);
+  assert.match(ingress, /proxy-send-timeout:\s*"130"/);
+  assert.match(ingress, /proxy-read-timeout:\s*"130"/);
+  assert.match(runtime, /requestTimeoutMs: positiveInteger\(env\.HTTP_REQUEST_TIMEOUT_MS, 120000/);
 });
 
 test('Docker build contexts exclude local secrets, caches, and host dependencies', () => {

@@ -1,0 +1,12 @@
+- op: replace
+  path: /metadata/annotations/nginx.ingress.kubernetes.io~1ssl-redirect
+  value: "true"
+- op: add
+  path: /spec/tls
+  value:
+    - hosts:
+        - ${WEALTHGENIE_PRODUCTION_HOST}
+      secretName: ${WEALTHGENIE_PRODUCTION_TLS_SECRET}
+- op: add
+  path: /spec/rules/0/host
+  value: ${WEALTHGENIE_PRODUCTION_HOST}

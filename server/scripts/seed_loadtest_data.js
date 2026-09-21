@@ -12,6 +12,7 @@ import {
   buildRecommendationProfileHash,
   FINANCIAL_PROFILE_SCHEMA_VERSION,
 } from '../services/recommendationProfile.js';
+import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
 
 const LOADTEST_USER_ID = '60d5ecb8b3b3a72d9c8e4a11';
 
@@ -98,6 +99,7 @@ async function seedLoadTestData() {
     confidenceScores: {},
     mlFallback: true,
     modelVersion: 'loadtest-rule-fallback-4.0.0',
+    regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
     profileInputHash: buildRecommendationProfileHash(profile.toObject(), { modelVersion: 'loadtest-rule-fallback-4.0.0' }),
     generatedAt: new Date(),
   });

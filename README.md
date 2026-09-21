@@ -311,8 +311,25 @@ To spin up the full multi-container application stack (MongoDB, Redis, Express b
 ```bash
 cp .env.example .env
 # Replace the CHANGE_ME values for JWT_SECRET, ML_SERVICE_API_KEY, and ML_OPERATOR_KEY.
-docker-compose up --build -d
+docker compose up --build -d
 ```
+
+This Compose file is a local/integration HTTP topology: it intentionally uses
+`NODE_ENV=development`, non-secure cookies, and same-origin HTTP through the
+frontend Nginx container. It is not a production TLS termination setup. To run
+the production-edge browser check against this stack, use the Nginx port rather
+than the Vite dev server:
+
+```bash
+PLAYWRIGHT_BASE_URL=http://127.0.0.1:80 npm run test:e2e --prefix reactapp -- production-edge.spec.ts
+```
+
+Production requires HTTPS termination, an HTTPS `CORS_ORIGINS` value, and
+secure cookies. The Terraform directory provisions network, DocumentDB, ALB,
+and DNS scaffolding only; application compute/runtime attachment is a separate
+deployment step. Provide `documentdb_engine_version`, an application workload
+security group, and production snapshot/deletion settings explicitly before any
+plan or apply. This repository does not run `terraform apply`.
 
 Docker Compose reads the root `.env` file for secret substitution. The frontend
 serves `/api/*` through its Nginx reverse proxy to the Express container.

@@ -279,6 +279,12 @@ jobs:
             sleep 2
           done
 
+      - name: Run profile completion integration
+        env:
+          RUN_PROFILE_COMPLETION_INTEGRATION: 'true'
+        working-directory: server
+        run: node --test --test-concurrency=1 test/profileCompletion.integration.test.js
+
       - name: Run real-dependency Playwright lifecycle
         run: npm run test:e2e --prefix reactapp
 
@@ -293,6 +299,62 @@ jobs:
             ml-service-e2e.log
             server-e2e.log
             frontend-e2e.log
+
+  production-edge-e2e:
+    name: Production edge E2E (Docker Compose + Nginx)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      JWT_SECRET: edge-e2e-jwt-secret-with-more-than-32-characters
+      ML_SERVICE_API_KEY: edge-e2e-ml-service-api-key
+      ML_OPERATOR_KEY: edge-e2e-ml-operator-key
+      CORS_ORIGINS: http://127.0.0.1
+      AUTH_COOKIE_SECURE: 'false'
+      MONGODB_FLAVOR: mongodb
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: reactapp/package-lock.json
+
+      - name: Install Playwright runner
+        run: |
+          npm ci --prefix reactapp
+          npx --prefix reactapp playwright install --with-deps chromium
+
+      - name: Start the real Nginx edge stack
+        run: docker compose up --build -d
+
+      - name: Wait for backend and published Nginx frontend
+        run: |
+          for attempt in $(seq 1 120); do
+            if curl --fail --silent http://127.0.0.1:5000/health/ready > /dev/null \
+              && curl --fail --silent http://127.0.0.1/ > /dev/null; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 120 ]; then
+              docker compose ps
+              docker compose logs --no-color server reactapp ml-service
+              exit 1
+            fi
+            sleep 3
+          done
+
+      - name: Run production-edge Playwright test through Nginx
+        env:
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1
+        run: npm run test:e2e --prefix reactapp -- production-edge.spec.ts
+
+      - name: Tear down edge stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans
 
   ml-microservice-quality:
     name: ML Service (Python ${{ matrix.python-version }}, ${{ matrix.os }})
