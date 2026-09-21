@@ -117,6 +117,64 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
   }
 }));
 
+router.get('/current', verifyJWT, asyncHandler(async (req, res) => {
+  const { profileId } = req.query;
+  if (!isValidObjectId(profileId)) {
+    throw createError(400, 'Invalid profile ID format', 'Invalid profile ID.');
+  }
+
+  const profile = await FinancialProfile.findOne({
+    _id: profileId,
+    userId: req.user.userId,
+  }).lean();
+  if (!profile) {
+    throw createError(404, 'Profile not found or access denied', 'Recommendation not found.');
+  }
+
+  const recommendation = await Recommendation.findOne({
+    profileId,
+    userId: req.user.userId,
+  }).sort({ generatedAt: -1 }).lean();
+  if (!recommendation) {
+    throw createError(404, 'No recommendation found for this profile', 'Recommendation not found.');
+  }
+
+  const expectedHash = buildRecommendationProfileHash(profile, { modelVersion: recommendation.modelVersion });
+  if (recommendation.profileInputHash !== expectedHash) {
+    throw createError(
+      409,
+      'Recommendation was generated from an older profile state.',
+      'Regenerate recommendations before opening the dashboard.',
+      { code: 'STALE_RECOMMENDATION' },
+    );
+  }
+
+  const snapshot = recommendation.responseSnapshot;
+  const response = snapshot?.recommendation && snapshot?.completion
+    ? snapshot.recommendation
+    : snapshot;
+  if (!response || typeof response !== 'object' || !Array.isArray(response.instruments)) {
+    throw createError(
+      503,
+      'The persisted recommendation response is unavailable.',
+      'Recommendation restore is temporarily unavailable.',
+      { code: 'RECOMMENDATION_SNAPSHOT_UNAVAILABLE' },
+    );
+  }
+
+  return res.json({
+    ...response,
+    profileId: String(profile._id),
+    recommendationId: String(recommendation._id),
+    audit_id: response.audit_id ? String(response.audit_id) : response.audit_id,
+    audit_hash: response.audit_hash || snapshot.audit_hash || null,
+    advisory_text: recommendation.advisoryText ?? response.advisory_text ?? null,
+    advisory_explanation: response.advisory_explanation || {
+      status: recommendation.advisoryMetadata?.status || 'PENDING',
+    },
+  });
+}));
+
 router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, res) => {
   const { recommendationId } = req.params;
   if (!isValidObjectId(recommendationId)) {

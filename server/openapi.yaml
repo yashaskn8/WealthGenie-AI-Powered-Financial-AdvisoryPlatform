@@ -101,6 +101,13 @@ paths:
       parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody: { $ref: '#/components/requestBodies/Recommendation' }
       responses: { '200': { $ref: '#/components/responses/Recommendation' }, '201': { $ref: '#/components/responses/Recommendation' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '409': { $ref: '#/components/responses/Conflict' } }
+  /api/recommend/current:
+    get:
+      operationId: getCurrentRecommendation
+      tags: [Advisory]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      parameters: [{ name: profileId, in: query, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{24}$' } }]
+      responses: { '200': { $ref: '#/components/responses/Recommendation' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' }, '503': { $ref: '#/components/responses/Unavailable' } }
   /api/recommend/audit:
     get:
       operationId: listRecommendationAudits

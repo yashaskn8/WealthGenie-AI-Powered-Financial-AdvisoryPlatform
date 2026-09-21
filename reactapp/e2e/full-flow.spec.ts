@@ -1,4 +1,4 @@
-import { test, expect, type Page, type Response } from '@playwright/test';
+import { test, expect, type Page, type Request, type Response } from '@playwright/test';
 
 declare const process: { env: { VITE_API_URL?: string } };
 
@@ -88,14 +88,37 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     await page.locator('label.goal-checkbox', { hasText: 'Wealth Growth' }).click();
     await expect(page.getByLabel('Wealth Growth', { exact: true })).toBeChecked();
 
-    const profileCreatePromise = page.waitForResponse(apiResponse('POST', '/api/profile/build'));
-    const recommendationPromise = page.waitForResponse(apiResponse('POST', '/api/recommend'), { timeout: 90_000 });
+    const precomputeResponses: Response[] = [];
+    const initialRecommendationPosts: string[] = [];
+    const lifecycleResponseListener = (response: Response) => {
+      const url = new URL(response.url());
+      if (response.request().method() === 'POST' && url.pathname === '/api/profile/precompute') {
+        precomputeResponses.push(response);
+      }
+    };
+    const lifecycleRequestListener = (request: Request) => {
+      const url = new URL(request.url());
+      if (request.method() === 'POST' && url.pathname === '/api/recommend') {
+        initialRecommendationPosts.push(request.url());
+      }
+    };
+    page.on('response', lifecycleResponseListener);
+    page.on('request', lifecycleRequestListener);
+    const completionPromise = page.waitForResponse(apiResponse('POST', '/api/profile/complete'), { timeout: 120_000 });
     await page.getByTestId('profile-save').click();
 
-    const profileCreate = await profileCreatePromise;
-    expect(profileCreate.status()).toBe(201);
-    const profile = await profileCreate.json();
-    expect(profile.profileId).toMatch(/^[0-9a-f]{24}$/i);
+    const completionResponse = await completionPromise;
+    expect(completionResponse.status()).toBe(200);
+    const completionBody = await completionResponse.json();
+    expect(completionBody).toMatchObject({
+      profile: expect.any(Object),
+      recommendation: expect.any(Object),
+      completion: expect.any(Object),
+    });
+    expect(completionBody.profile.profileId).toMatch(/^[0-9a-f]{24}$/i);
+    expect(completionBody.completion.candidateHit).toEqual(expect.any(Boolean));
+    expect(completionBody.completion.recomputed).toEqual(expect.any(Boolean));
+    const profile = completionBody.profile;
     expect(profile).toMatchObject({
       sold_property_proceeds: null,
       has_lump_sum: null,
@@ -107,9 +130,14 @@ test.describe('real WealthGenie dependency lifecycle', () => {
       final_suitability_risk: 'Conservative',
     });
 
-    const recommendation = await recommendationPromise;
-    expect(recommendation.status()).toBe(200);
-    const advisory = await recommendation.json();
+    const precomputeResponse = precomputeResponses[0];
+    if (precomputeResponse) {
+      expect(precomputeResponse.status()).toBe(200);
+      const candidate = await precomputeResponse.json();
+      expect(candidate.candidateId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    }
+
+    const advisory = completionBody.recommendation;
     expect(String(advisory.recommendationId)).toMatch(/^[0-9a-f]{24}$/i);
     expect(String(advisory.audit_id)).toMatch(/^[0-9a-f]{24}$/i);
     expect(advisory.instruments.length).toBeGreaterThan(0);
@@ -124,7 +152,10 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     expect(advisory.ml_input_fields_unknown).toEqual([
       'hasLumpSum', 'liquidSavings', 'emiBurdenPct', 'financialDependents', 'emergencyFundMonths',
     ]);
+    expect(initialRecommendationPosts).toEqual([]);
     await expect(page.locator('aside.sidebar')).toBeVisible();
+    page.off('response', lifecycleResponseListener);
+    page.off('request', lifecycleRequestListener);
 
     await page.getByTestId('nav-profile').click();
     await page.getByTestId('profile-edit').click();
@@ -292,11 +323,21 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     expect(cookies.find(cookie => cookie.name === 'wg_session')).toMatchObject({ httpOnly: true });
     await assertNoSensitiveBrowserStorage(page);
 
+    const restoreRecommendationPosts: string[] = [];
+    const restoreRequestListener = (request: Request) => {
+      const url = new URL(request.url());
+      if (request.method() === 'POST' && url.pathname === '/api/recommend') restoreRecommendationPosts.push(request.url());
+    };
+    page.on('request', restoreRequestListener);
     const sessionRestorePromise = page.waitForResponse(apiResponse('GET', '/api/auth/session'));
+    const recommendationRestorePromise = page.waitForResponse(apiResponse('GET', '/api/recommend/current'), { timeout: 45_000 });
     await page.reload();
     const restored = await sessionRestorePromise;
     expect(restored.status()).toBe(200);
+    expect((await recommendationRestorePromise).status()).toBe(200);
     await expect(page.locator('aside.sidebar')).toBeVisible({ timeout: 45_000 });
+    expect(restoreRecommendationPosts).toEqual([]);
+    page.off('request', restoreRequestListener);
     await assertNoSensitiveBrowserStorage(page);
 
     const firstLogoutPromise = page.waitForResponse(apiResponse('POST', '/api/auth/logout'));
@@ -307,9 +348,19 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     await page.locator('#login-email').fill(user.email);
     await page.locator('#login-password').fill(user.password);
     const loginPromise = page.waitForResponse(apiResponse('POST', '/api/auth/login'));
+    const loginRecommendationPosts: string[] = [];
+    const loginRequestListener = (request: Request) => {
+      const url = new URL(request.url());
+      if (request.method() === 'POST' && url.pathname === '/api/recommend') loginRecommendationPosts.push(request.url());
+    };
+    page.on('request', loginRequestListener);
+    const loginRecommendationRestorePromise = page.waitForResponse(apiResponse('GET', '/api/recommend/current'), { timeout: 45_000 });
     await page.locator('#login-form button[type="submit"]').click();
     expect((await loginPromise).status()).toBe(200);
+    expect((await loginRecommendationRestorePromise).status()).toBe(200);
     await expect(page.locator('aside.sidebar')).toBeVisible({ timeout: 45_000 });
+    expect(loginRecommendationPosts).toEqual([]);
+    page.off('request', loginRequestListener);
 
     const finalLogoutPromise = page.waitForResponse(apiResponse('POST', '/api/auth/logout'));
     await page.getByTestId('nav-sign-out').click();

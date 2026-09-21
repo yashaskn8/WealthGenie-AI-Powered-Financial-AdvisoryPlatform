@@ -1,13 +1,25 @@
 import React from 'react';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ProfilePage from '../ProfilePage.jsx';
 import * as api from '../../services/api.js';
 
-function ProfileProbe({ userProfile, onProfileUpdate }) {
+const VALID_PROFILE = {
+  profileId: '64b000000000000000000001',
+  version: 1,
+  age: 34,
+  monthly_take_home: 90000,
+  monthly_savings: 25000,
+  risk_tolerance: 'Moderate',
+  investment_goals: ['Wealth Growth'],
+  investment_horizon_years: 12,
+};
+
+function ProfileProbe({ userProfile, onProfileUpdate, initialRecommendation }) {
   return (
     <div>
       <span data-testid="profile-version">{userProfile.version}</span>
+      <span data-testid="restored-recommendation-id">{initialRecommendation?.recommendationId || ''}</span>
       <button
         type="button"
         onClick={() => onProfileUpdate({ ...userProfile, version: userProfile.version + 1 })}
@@ -18,13 +30,26 @@ function ProfileProbe({ userProfile, onProfileUpdate }) {
   );
 }
 
+async function fillValidForm() {
+  fireEvent.change(screen.getByTestId('profile-input-monthly_take_home'), { target: { value: '90000' } });
+  fireEvent.change(screen.getByTestId('profile-input-monthly_savings'), { target: { value: '25000' } });
+  fireEvent.change(screen.getByTestId('profile-input-age'), { target: { value: '34' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Moderate', exact: true }));
+  fireEvent.click(screen.getByLabelText('Wealth Growth', { exact: true }));
+  fireEvent.change(screen.getByTestId('profile-input-investment_horizon_years'), { target: { value: '12' } });
+  await act(async () => {});
+}
+
 describe('ProfilePage backend version contract', () => {
   beforeEach(() => {
+    vi.useRealTimers();
     localStorage.clear();
     api.setUserInfo({ id: 'user-1' });
+    vi.spyOn(api, 'getCurrentRecommendation').mockRejectedValue({ status: 404 });
   });
 
   afterEach(() => {
+    cleanup();
     vi.restoreAllMocks();
   });
 
@@ -78,5 +103,106 @@ describe('ProfilePage backend version contract', () => {
     expect(screen.getByTestId('profile-version').textContent).toBe('3');
     expect(localStorage.length).toBe(0);
     expect(sessionStorage.length).toBe(0);
+  });
+
+  it('waits briefly for a matching in-flight precompute before completing', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(api, 'getCurrentProfile').mockRejectedValue({ status: 404 });
+    let resolvePrecompute;
+    const precomputePromise = new Promise(resolve => { resolvePrecompute = resolve; });
+    const precompute = vi.spyOn(api, 'precomputeProfile').mockReturnValue(precomputePromise);
+    const complete = vi.spyOn(api, 'completeFinancialProfile').mockResolvedValue({
+      profile: VALID_PROFILE,
+      recommendation: { profileId: VALID_PROFILE.profileId, recommendationId: '64b000000000000000000002', instruments: [] },
+    });
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+
+    render(<ProfilePage><ProfileProbe /></ProfilePage>);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    screen.getByTestId('profile-save');
+    await fillValidForm();
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(precompute).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTestId('profile-save'));
+    await act(async () => {
+      resolvePrecompute({ candidateId: '4f4f4f4f-1111-4111-8111-111111111111' });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(complete).toHaveBeenCalledWith(
+      expect.objectContaining({ monthly_savings: 25000 }),
+      '4f4f4f4f-1111-4111-8111-111111111111',
+      expect.objectContaining({ headers: { 'Idempotency-Key': expect.any(String) } }),
+    );
+  });
+
+  it('bounds the precompute wait and completes without a stale candidate', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(api, 'getCurrentProfile').mockRejectedValue({ status: 404 });
+    const precompute = vi.spyOn(api, 'precomputeProfile').mockReturnValue(new Promise(() => {}));
+    const complete = vi.spyOn(api, 'completeFinancialProfile').mockResolvedValue({
+      profile: VALID_PROFILE,
+      recommendation: { profileId: VALID_PROFILE.profileId, recommendationId: '64b000000000000000000003', instruments: [] },
+    });
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+
+    render(<ProfilePage><ProfileProbe /></ProfilePage>);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    screen.getByTestId('profile-save');
+    await fillValidForm();
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    expect(precompute).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId('profile-save'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+
+    expect(complete).toHaveBeenCalledWith(
+      expect.any(Object),
+      null,
+      expect.objectContaining({ headers: { 'Idempotency-Key': expect.any(String) } }),
+    );
+  });
+
+  it('reuses the completion key for retries and rotates it after a payload change', async () => {
+    vi.spyOn(api, 'getCurrentProfile').mockRejectedValue({ status: 404 });
+    const complete = vi.spyOn(api, 'completeFinancialProfile')
+      .mockRejectedValueOnce(new Error('network failure'))
+      .mockRejectedValueOnce(new Error('network failure'))
+      .mockResolvedValueOnce({ profile: { ...VALID_PROFILE, monthly_savings: 26000 }, recommendation: { profileId: VALID_PROFILE.profileId, recommendationId: '64b000000000000000000005', instruments: [] } });
+    vi.spyOn(api, 'precomputeProfile').mockRejectedValue(new Error('precompute unavailable'));
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+
+    render(<ProfilePage><ProfileProbe /></ProfilePage>);
+    await screen.findByTestId('profile-save');
+    await fillValidForm();
+    fireEvent.click(screen.getByTestId('profile-save'));
+    await act(async () => {});
+    fireEvent.click(screen.getByTestId('profile-save'));
+    await act(async () => {});
+
+    const firstKey = complete.mock.calls[0][2].headers['Idempotency-Key'];
+    const retryKey = complete.mock.calls[1][2].headers['Idempotency-Key'];
+    expect(retryKey).toBe(firstKey);
+
+    fireEvent.change(screen.getByTestId('profile-input-monthly_savings'), { target: { value: '26000' } });
+    fireEvent.click(screen.getByTestId('profile-save'));
+    await act(async () => {});
+    expect(complete.mock.calls[2][2].headers['Idempotency-Key']).not.toBe(retryKey);
+  });
+
+  it('restores an existing authoritative recommendation before entering the dashboard', async () => {
+    vi.spyOn(api, 'getCurrentProfile').mockResolvedValue(VALID_PROFILE);
+    vi.spyOn(api, 'getCurrentRecommendation').mockResolvedValue({
+      profileId: VALID_PROFILE.profileId,
+      recommendationId: '64b000000000000000000006',
+      instruments: [],
+    });
+    vi.spyOn(api, 'completeFinancialProfile');
+
+    render(<ProfilePage><ProfileProbe /></ProfilePage>);
+
+    await waitFor(() => expect(screen.getByTestId('restored-recommendation-id')).toHaveTextContent('64b000000000000000000006'));
+    expect(api.getCurrentRecommendation).toHaveBeenCalledWith(VALID_PROFILE.profileId, expect.any(Object));
+    expect(api.completeFinancialProfile).not.toHaveBeenCalled();
   });
 });

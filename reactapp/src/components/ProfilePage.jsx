@@ -1,8 +1,39 @@
 import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import profileImg from '../assets/gen_4k_nobull.png';
 import * as api from '../services/api';
-import { normalizeFinancialProfile, validateFinancialProfile } from '../utils/financialProfile';
+import { financialProfileKey, normalizeFinancialProfile, validateFinancialProfile } from '../utils/financialProfile';
 import '../App.css';
+
+const PRECOMPUTE_DEBOUNCE_MS = 500;
+const PRECOMPUTE_SAVE_WAIT_MS = 1500;
+
+function createCompletionIdempotencyKey() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `completion-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function waitForBoundedPromise(promise, timeoutMs) {
+  return new Promise(resolve => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(null);
+      }
+    }, timeoutMs);
+    promise.then(value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    }, () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(null);
+    });
+  });
+}
 
 const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
   // Sensitive profile data is restored from the authenticated backend and held in memory only.
@@ -13,7 +44,12 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [initialRecommendation, setInitialRecommendation] = useState(null);
   const candidateIdRef = useRef(null);
+  const candidateFingerprintRef = useRef(null);
+  const precomputePromiseRef = useRef(null);
+  const precomputeFingerprintRef = useRef(null);
   const precomputeGenerationRef = useRef(0);
+  const completionIdempotencyKeyRef = useRef(null);
+  const completionPayloadFingerprintRef = useRef(null);
   const [age, setAge] = useState(savedProfile?.age ?? '');
   const [monthlySavings, setMonthlySavings] = useState(savedProfile?.monthly_savings ?? '');
   const [investmentGoals, setInvestmentGoals] = useState(savedProfile?.investment_goals || []);
@@ -72,7 +108,31 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
 
     try {
       setIsSubmitting(true);
-      const response = await api.completeFinancialProfile(validation.profile, candidateIdRef.current);
+      const payloadFingerprint = financialProfileKey(validation.profile);
+      let candidateId = candidateFingerprintRef.current === payloadFingerprint
+        ? candidateIdRef.current
+        : null;
+
+      const inFlightPrecompute = precomputePromiseRef.current;
+      if (!candidateId
+          && inFlightPrecompute
+          && precomputeFingerprintRef.current === payloadFingerprint) {
+        const candidate = await waitForBoundedPromise(inFlightPrecompute, PRECOMPUTE_SAVE_WAIT_MS);
+        if (candidateFingerprintRef.current === payloadFingerprint) {
+          candidateId = candidate?.candidateId || candidateIdRef.current || null;
+        }
+      }
+
+      if (completionPayloadFingerprintRef.current !== payloadFingerprint
+          || !completionIdempotencyKeyRef.current) {
+        completionPayloadFingerprintRef.current = payloadFingerprint;
+        completionIdempotencyKeyRef.current = createCompletionIdempotencyKey();
+      }
+      const response = await api.completeFinancialProfile(
+        validation.profile,
+        candidateId,
+        { headers: { 'Idempotency-Key': completionIdempotencyKeyRef.current } },
+      );
       const nextProfileId = response.profileId || null;
       const committedProfile = response.profile || response;
       const committedRecommendation = response.recommendation || null;
@@ -84,6 +144,9 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
       handleProfileUpdate(profileWithUser, { preserveRecommendation: true });
       setInitialRecommendation(committedRecommendation);
       candidateIdRef.current = null;
+      candidateFingerprintRef.current = null;
+      completionIdempotencyKeyRef.current = null;
+      completionPayloadFingerprintRef.current = null;
       setIsComplete(true);
     } catch (err) {
       alert("Error saving profile: " + err.message);
@@ -119,31 +182,59 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
     const generation = precomputeGenerationRef.current + 1;
     precomputeGenerationRef.current = generation;
     candidateIdRef.current = null;
+    candidateFingerprintRef.current = null;
+    precomputePromiseRef.current = null;
+    precomputeFingerprintRef.current = null;
     if (!validation.valid) return undefined;
 
     const controller = new AbortController();
-    const timer = setTimeout(async () => {
-      try {
-        const candidate = await api.precomputeProfile(validation.profile, { signal: controller.signal });
-        if (controller.signal.aborted || precomputeGenerationRef.current !== generation) return;
-        candidateIdRef.current = candidate?.candidateId || null;
-      } catch {
-        if (!controller.signal.aborted && precomputeGenerationRef.current === generation) {
-          candidateIdRef.current = null;
-        }
-      }
-    }, 500);
+    const fingerprint = financialProfileKey(validation.profile);
+    const timer = setTimeout(() => {
+      let requestPromise;
+      requestPromise = api.precomputeProfile(validation.profile, { signal: controller.signal })
+        .then(candidate => {
+          if (controller.signal.aborted || precomputeGenerationRef.current !== generation) return null;
+          candidateIdRef.current = candidate?.candidateId || null;
+          candidateFingerprintRef.current = candidate?.candidateId ? fingerprint : null;
+          return candidate || null;
+        })
+        .catch(() => null)
+        .finally(() => {
+          if (precomputePromiseRef.current === requestPromise) {
+            precomputePromiseRef.current = null;
+            precomputeFingerprintRef.current = null;
+          }
+        });
+      precomputePromiseRef.current = requestPromise;
+      precomputeFingerprintRef.current = fingerprint;
+    }, PRECOMPUTE_DEBOUNCE_MS);
     return () => {
       clearTimeout(timer);
       controller.abort();
+      if (precomputeFingerprintRef.current === fingerprint) {
+        precomputePromiseRef.current = null;
+        precomputeFingerprintRef.current = null;
+      }
     };
   }, [isRestoringProfile, isComplete, userProfilePayload]);
 
   useEffect(() => {
     const controller = new AbortController();
     api.getCurrentProfile({ signal: controller.signal })
-      .then(restoredProfile => {
+      .then(async restoredProfile => {
         handleProfileUpdate(restoredProfile);
+        let restoredRecommendation = null;
+        try {
+          restoredRecommendation = await api.getCurrentRecommendation(restoredProfile.profileId, {
+            signal: controller.signal,
+          });
+        } catch (error) {
+          if (error?.status !== 404 && error?.status !== 409 && error?.code !== 'REQUEST_ABORTED') {
+            console.warn('[Profile] Authoritative recommendation restore failed:', error.message);
+          }
+        }
+        if (controller.signal.aborted) return;
+        setInitialRecommendation(restoredRecommendation);
         setIsComplete(true);
       })
       .catch(error => {

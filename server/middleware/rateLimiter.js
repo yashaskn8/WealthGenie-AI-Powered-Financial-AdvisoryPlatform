@@ -1,4 +1,4 @@
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import RedisStore from 'rate-limit-redis';
 import { redisClient, redisAvailable } from '../config/redis.js';
 import { sendError } from './errorHandler.js';
@@ -119,7 +119,13 @@ export const apiLimiter = rateLimit({
 
 // Factory function for dedicated endpoint rate limiters (Chat, Monte Carlo, Portfolio Optimisation)
 export function createEndpointRateLimiter(options = {}) {
-  const { windowMs = 60 * 1000, max = 10, message = 'Endpoint rate limit exceeded.' } = options;
+  const {
+    windowMs = 60 * 1000,
+    max = 10,
+    message = 'Endpoint rate limit exceeded.',
+    prefix = 'rl:ep:',
+    keyGenerator,
+  } = options;
   return rateLimit({
     windowMs,
     max,
@@ -127,10 +133,11 @@ export function createEndpointRateLimiter(options = {}) {
     handler: rateLimitHandler(message, 'ENDPOINT_RATE_LIMIT_EXCEEDED'),
     standardHeaders: true,
     legacyHeaders: false,
-    store: new HybridStore({ prefix: 'rl:ep:', windowMs }),
+    ...(keyGenerator ? { keyGenerator } : {}),
+    store: new HybridStore({ prefix, windowMs }),
     passOnStoreError: true,
     skip: () => process.env.DISABLE_RATE_LIMIT === 'true',
   });
 }
 
-export { HybridStore };
+export { HybridStore, ipKeyGenerator };

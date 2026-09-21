@@ -38,9 +38,17 @@ import {
   rebindCandidateForProfile,
 } from '../services/profileCompletion.js';
 import { claimAdvisoryIdempotency, releaseAdvisoryIdempotency } from '../middleware/idempotency.js';
+import { createEndpointRateLimiter, ipKeyGenerator } from '../middleware/rateLimiter.js';
 
 const router = Router();
 const PROFILE_RATE_LIMIT = 10;
+const profilePrecomputeLimiter = createEndpointRateLimiter({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: 'Profile precomputation rate limit exceeded. Continue editing and try again shortly.',
+  prefix: 'rl:profile-precompute:',
+  keyGenerator: req => `user:${req.user?.userId || ipKeyGenerator(req.ip)}`,
+});
 
 function profilePersistenceDocument({ userId, profileId, canonical, suitability }) {
   return {
@@ -93,6 +101,7 @@ export function formatProfileResponse(profile) {
 router.post(
   '/precompute',
   verifyJWT,
+  profilePrecomputeLimiter,
   validateStrict(financialProfileSchema),
   asyncHandler(async (req, res) => {
     PrometheusMetrics.inc('profile_precompute_requested_total');

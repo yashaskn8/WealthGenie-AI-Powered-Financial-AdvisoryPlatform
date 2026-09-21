@@ -313,6 +313,22 @@ describe('frontend API contracts', () => {
     expect(fetchMock.mock.calls[1][1].headers['Idempotency-Key']).toBe('stable-completion-key');
   });
 
+  it('restores a persisted recommendation through the read-only endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      profileId: '64b000000000000000000001',
+      recommendationId: '64b000000000000000000002',
+      instruments: [],
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.getCurrentRecommendation('64b000000000000000000001');
+
+    expect(fetchMock.mock.calls[0][0]).toMatch(
+      /\/api\/recommend\/current\?profileId=64b000000000000000000001$/,
+    );
+    expect(fetchMock.mock.calls[0][1].headers['Idempotency-Key']).toBeUndefined();
+  });
+
   it('never persists financial lifecycle payloads in browser storage', async () => {
     const responses = [
       { csrfToken: 'csrf', user: { id: 'privacy-user', email: 'privacy@example.com' } },
