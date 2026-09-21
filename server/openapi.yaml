@@ -147,6 +147,23 @@ paths:
       parameters: [{ name: recommendationId, in: path, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{24}$' } }]
       responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' } }
 
+  /api/agent/plan-review:
+    post:
+      operationId: runPlanReview
+      tags: [Agent]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      x-csrf-protection: cookie-session
+      description: Bounded, read-only evidence review. It never changes profiles, recommendations, goals, allocations, or weights. The feature is controlled by AGENTIC_PLAN_REVIEW_ENABLED.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PlanReviewRequest' } } } }
+      responses: { '200': { $ref: '#/components/responses/PlanReview' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '429': { $ref: '#/components/responses/Error' }, '503': { $ref: '#/components/responses/Unavailable' } }
+  /api/agent/plan-review/{runId}:
+    get:
+      operationId: getPlanReviewRun
+      tags: [Agent]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      parameters: [{ name: runId, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses: { '200': { $ref: '#/components/responses/PlanReview' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+
   /api/goals/create:
     post:
       operationId: createGoal
@@ -467,6 +484,7 @@ components:
     ProfileCandidate: { description: Short-lived non-authoritative precomputation handle, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileCandidate' } } } }
     ProfileCompletion: { description: Atomically committed profile and recommendation, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileCompletion' } } } }
     Recommendation: { description: Recommendation and audit identifiers, content: { application/json: { schema: { $ref: '#/components/schemas/RecommendationResponse' } } } }
+    PlanReview: { description: Bounded read-only plan review, content: { application/json: { schema: { $ref: '#/components/schemas/PlanReviewResponse' } } } }
     Goal: { description: Goal state, content: { application/json: { schema: { $ref: '#/components/schemas/Goal' } } } }
     TaxCalculation: { description: Authoritative tax calculation, content: { application/json: { schema: { $ref: '#/components/schemas/TaxCalculation' } } } }
     TaxComparison: { description: Authoritative regime comparison, content: { application/json: { schema: { $ref: '#/components/schemas/TaxComparison' } } } }
@@ -574,6 +592,22 @@ components:
             suitability_reason_codes: { type: array, items: { type: string } }
       unevaluatedProperties: false
     RecommendationRequest: { type: object, additionalProperties: false, required: [profileId], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' } } }
+    PlanReviewRequest: { type: object, additionalProperties: false, required: [profileId], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' } } }
+    PlanReviewResponse:
+      type: object
+      required: [version, runId, status, recommendedAction, summary, findings, freshness, goals, evidence, provider]
+      properties:
+        version: { type: string, const: plan-review-1.0.0 }
+        runId: { type: string, format: uuid }
+        status: { type: string, enum: [COMPLETED, FAILED, FEATURE_UNAVAILABLE] }
+        recommendedAction: { type: string, enum: [NONE, REVIEW_PROFILE, RECOMPUTE_PLAN, REVIEW_GOALS, INSUFFICIENT_EVIDENCE] }
+        summary: { type: string }
+        findings: { type: array, items: { type: object, additionalProperties: true } }
+        freshness: { type: object, additionalProperties: true }
+        goals: { type: object, additionalProperties: true }
+        evidence: { type: object, additionalProperties: true }
+        provider: { type: object, additionalProperties: true }
+      additionalProperties: false
     RecommendationResponse:
       type: object
       required: [recommendationId, audit_id, audit_hash, instruments, model_version, recommendation_policy_version, financial_profile_schema_version, return_basis, final_risk_tier]

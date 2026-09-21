@@ -140,4 +140,12 @@ export function createEndpointRateLimiter(options = {}) {
   });
 }
 
+export const planReviewLimiter = createEndpointRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 12,
+  message: 'Plan review limit reached. Try again later.',
+  prefix: 'rl:ep:plan-review:',
+  keyGenerator: req => `user:${req.user?.userId || ipKeyGenerator(req.ip)}`,
+});
+
 export { HybridStore, ipKeyGenerator };

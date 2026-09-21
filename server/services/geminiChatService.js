@@ -12,9 +12,10 @@ import { ImmutableSecurityPipeline } from './immutableSecurityPipeline.js';
 import { PrometheusMetrics } from './metricsCollector.js';
 import {
   buildRecommendationProfile,
-  buildRecommendationProfileHash,
   buildLlmFinancialContext,
 } from './recommendationProfile.js';
+import { getCurrentRegulatoryRuleVersion } from './taxEngine.js';
+import { assessRecommendationFreshness } from './recommendationFreshness.js';
 import { assessSuitabilityRisk } from './riskProfiler.js';
 import {
   buildChatEvidencePacket,
@@ -84,12 +85,12 @@ export function buildClientResponseDTO({
 }
 
 function recommendationForCurrentProfile(storedRecommendation, profile) {
-  if (!storedRecommendation
-      || typeof storedRecommendation.modelVersion !== 'string'
-      || !storedRecommendation.modelVersion.trim()
-      || typeof storedRecommendation.profileInputHash !== 'string') return null;
-  const expectedHash = buildRecommendationProfileHash(profile, { modelVersion: storedRecommendation.modelVersion });
-  return storedRecommendation.profileInputHash === expectedHash ? storedRecommendation : null;
+  const freshness = assessRecommendationFreshness({
+    profile,
+    recommendation: storedRecommendation,
+    currentRegulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
+  });
+  return freshness.fresh ? storedRecommendation : null;
 }
 
 function noProfileResponse(sessionId, rateCheck) {

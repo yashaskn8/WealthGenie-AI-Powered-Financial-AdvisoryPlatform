@@ -23,6 +23,7 @@ import {
 } from '../services/recommendationProfile.js';
 import { assessSuitabilityRisk } from '../services/riskProfiler.js';
 import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
+import { assessRecommendationFreshness } from '../services/recommendationFreshness.js';
 import { claimAdvisoryIdempotency, releaseAdvisoryIdempotency } from '../middleware/idempotency.js';
 import { persistAdvisoryAtomically } from '../services/advisoryPersistence.js';
 import { setCache, delCache } from '../config/redis.js';
@@ -161,16 +162,6 @@ router.get('/current', verifyJWT, asyncHandler(async (req, res) => {
     throw createError(404, 'No recommendation found for this profile', 'Recommendation not found.');
   }
 
-  const expectedHash = buildRecommendationProfileHash(profile, { modelVersion: recommendation.modelVersion });
-  if (recommendation.profileInputHash !== expectedHash) {
-    throw createError(
-      409,
-      'Recommendation was generated from an older profile state.',
-      'Regenerate recommendations before opening the dashboard.',
-      { code: 'STALE_RECOMMENDATION' },
-    );
-  }
-
   const snapshot = recommendation.responseSnapshot;
   const response = recommendationPayloadFromSnapshot(snapshot);
   if (!response || typeof response !== 'object' || !Array.isArray(response.instruments)) {
@@ -202,11 +193,27 @@ router.get('/current', verifyJWT, asyncHandler(async (req, res) => {
     }).select('regulatory_rule_version').lean();
     recommendationRegulatoryRuleVersion = audit?.regulatory_rule_version || null;
   }
-  if (recommendationRegulatoryRuleVersion
-      && recommendationRegulatoryRuleVersion !== currentRegulatoryRuleVersion) {
+  const freshness = assessRecommendationFreshness({
+    profile,
+    recommendation,
+    currentRegulatoryRuleVersion,
+    recommendationRegulatoryRuleVersion,
+  });
+  if (!freshness.fresh) {
+    const regulatoryUnavailable = freshness.reasonCodes.includes('REGULATORY_VERSION_UNAVAILABLE');
+    if (regulatoryUnavailable) {
+      throw createError(
+        503,
+        'No verified regulatory policy is available for the current fiscal year.',
+        'Regulatory policy metadata is temporarily unavailable.',
+        { code: 'REGULATORY_POLICY_UNAVAILABLE' },
+      );
+    }
     throw createError(
       409,
-      'Recommendation was generated under an older regulatory policy version.',
+      freshness.reasonCodes.includes('REGULATORY_POLICY_CHANGED')
+        ? 'Recommendation was generated under an older regulatory policy version.'
+        : 'Recommendation was generated from an older profile state.',
       'Regenerate recommendations before opening the dashboard.',
       { code: 'STALE_RECOMMENDATION' },
     );

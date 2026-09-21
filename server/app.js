@@ -25,6 +25,7 @@ import portfolioRoutes from './routes/portfolio.js';
 import regimeRoutes from './routes/regime.js';
 import metricsRoutes from './routes/metricsRoutes.js';
 import mcpRoutes from './routes/mcpRouter.js';
+import agentRoutes from './routes/agentRoutes.js';
 import { createHealthRouter } from './routes/health.js';
 import { createRuntimeState } from './services/runtimeState.js';
 
@@ -144,6 +145,7 @@ export function createApp({ env = process.env, runtimeState = null } = {}) {
   app.use('/api/regime', regimeRoutes);
   app.use('/api/metrics', metricsRoutes);
   app.use('/api/mcp', mcpRoutes);
+  app.use('/api/agent', agentRoutes);
   app.get('/api/health', detailedHealth);
 
   app.use((req, res) => sendError(req, res, 404, 'Route not found.', 'ROUTE_NOT_FOUND'));

@@ -33,6 +33,11 @@ class MetricsCollector {
       profile_complete_candidate_profile_mismatch_total: 0,
       profile_complete_candidate_version_mismatch_total: 0,
       profile_complete_recomputed_total: 0,
+      agent_runs_completed_total: 0,
+      agent_runs_failed_total: 0,
+      agent_tool_calls_total: 0,
+      agent_tool_calls_failed_total: 0,
+      agent_policy_rejections_total: 0,
     };
 
     this.toolUsage = {}; // tool_name -> count
@@ -70,6 +75,20 @@ class MetricsCollector {
       this.latencies.shift();
     }
     this.latencies.push({ provider, latencyMs, timestamp: Date.now() });
+  }
+
+  recordAgentRun(status) {
+    if (status === 'completed') this.inc('agent_runs_completed_total');
+    else this.inc('agent_runs_failed_total');
+  }
+
+  recordAgentToolCall(_toolName, success) {
+    this.inc('agent_tool_calls_total');
+    if (!success) this.inc('agent_tool_calls_failed_total');
+  }
+
+  recordAgentPolicyRejection() {
+    this.inc('agent_policy_rejections_total');
   }
 
   httpRequestStarted(inFlight) {
@@ -159,6 +178,16 @@ class MetricsCollector {
     lines.push('# HELP wealthgenie_http_overload_total Requests rejected by admission control');
     lines.push('# TYPE wealthgenie_http_overload_total counter');
     lines.push(`wealthgenie_http_overload_total ${this.counters.http_overload_total}`);
+
+    lines.push('\n# HELP wealthgenie_plan_review_agent_total Plan Review Agent outcomes');
+    lines.push('# TYPE wealthgenie_plan_review_agent_total counter');
+    lines.push(`wealthgenie_plan_review_agent_total{status="completed"} ${this.counters.agent_runs_completed_total}`);
+    lines.push(`wealthgenie_plan_review_agent_total{status="failed"} ${this.counters.agent_runs_failed_total}`);
+    lines.push(`wealthgenie_plan_review_agent_total{status="policy_rejected"} ${this.counters.agent_policy_rejections_total}`);
+    lines.push('# HELP wealthgenie_plan_review_agent_tool_calls_total Plan Review Agent safe tool calls');
+    lines.push('# TYPE wealthgenie_plan_review_agent_tool_calls_total counter');
+    lines.push(`wealthgenie_plan_review_agent_tool_calls_total{status="total"} ${this.counters.agent_tool_calls_total}`);
+    lines.push(`wealthgenie_plan_review_agent_tool_calls_total{status="failed"} ${this.counters.agent_tool_calls_failed_total}`);
 
     lines.push('# HELP wealthgenie_profile_completion_total Profile precompute and completion outcomes');
     lines.push('# TYPE wealthgenie_profile_completion_total counter');

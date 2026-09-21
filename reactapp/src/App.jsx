@@ -360,6 +360,37 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
     }
   };
 
+  const handleAuthoritativeRecompute = async () => {
+    if (!profileId) return;
+    setIsRecommendationLoading(true);
+    setBackendFallback(null);
+    try {
+      const recResponse = await api.getRecommendations(profileId, { retries: 0 });
+      setBackendRecs({ ...recResponse, profileId });
+      setIsRecommendationLoading(false);
+      if (recResponse?.recommendationId && (recResponse.advisory_explanation?.status === 'PENDING' || !recResponse.advisory_text)) {
+        setIsAdvisoryLoading(true);
+        try {
+          const advisory = await fetchDeferredAdvisoryWithBoundedRetry(api.fetchAdvisory, recResponse.recommendationId, {
+            onConflict: () => undefined,
+          });
+          if (advisory) {
+            setBackendRecs(prev => prev && prev.recommendationId === recResponse.recommendationId
+              ? { ...prev, advisory_text: advisory.advisory_text ?? prev.advisory_text ?? null, advisory_explanation: advisory.advisory_explanation || { status: 'GENERATING' } }
+              : prev);
+          }
+        } finally {
+          setIsAdvisoryLoading(false);
+        }
+      }
+    } catch (err) {
+      setBackendRecs(null);
+      setBackendFallback({ message: 'Authoritative recommendations are temporarily unavailable', detail: err?.message || null });
+      setIsRecommendationLoading(false);
+      setIsAdvisoryLoading(false);
+    }
+  };
+
   const renderPage = () => {
     switch (activePage) {
       case NAV_PAGES.HOME:
@@ -389,6 +420,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
               profile={userProfile}
               recommendations={recommendations}
               recommendationMeta={backendRecs}
+              onRecomputePlan={handleAuthoritativeRecompute}
             />
           </ErrorBoundary>
         );

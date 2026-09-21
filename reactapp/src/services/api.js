@@ -378,6 +378,16 @@ export async function getRecommendations(profileId, options = {}) {
   return request('POST', '/recommend', { profileId }, { timeoutMs: 90000, ...options });
 }
 
+export async function runPlanReview(profileId, options = {}) {
+  if (!profileId) throw new TypeError('A profile ID is required to review a plan.');
+  return request('POST', '/agent/plan-review', { profileId }, { timeoutMs: 45000, retries: 0, ...options });
+}
+
+export async function getPlanReviewRun(runId, options = {}) {
+  if (!runId) throw new TypeError('A plan review run ID is required.');
+  return request('GET', `/agent/plan-review/${encodeURIComponent(runId)}`, null, { retries: 0, ...options });
+}
+
 export async function fetchAdvisory(recommendationId, options = {}) {
   return request('POST', `/recommend/${recommendationId}/advisory`, {}, { timeoutMs: 90000, ...options });
 }
@@ -631,7 +641,7 @@ const api = {
   setAuthToken, getAuthToken, clearAuthToken, clearUserSession,
   subscribeAuth, getAuthSnapshot,
   setUserInfo, getUserInfo,
-  buildProfile, precomputeProfile, completeFinancialProfile, getCurrentProfile, getCurrentRecommendation, getFinancialHealthScore, updateProfile, getRecommendations, getInstruments, rankInvestmentCandidates, getProjections, calculateStepUpProjection, calculateAllocationSplit, compareInvestmentProjection, getCustomPortfolioProjection, runInstrumentStressTest,
+  buildProfile, precomputeProfile, completeFinancialProfile, getCurrentProfile, getCurrentRecommendation, getFinancialHealthScore, updateProfile, getRecommendations, runPlanReview, getPlanReviewRun, getInstruments, rankInvestmentCandidates, getProjections, calculateStepUpProjection, calculateAllocationSplit, compareInvestmentProjection, getCustomPortfolioProjection, runInstrumentStressTest,
   runMonteCarlo, runPortfolioMonteCarlo, createGoal, getGoals, updateGoal, simulateGoal, deleteGoal, healthCheck,
   getMarketRates, getBenchmarkMarketFacts, getMutualFundNavFacts, refreshMarketRates,
   sendChatMessage, getChatHistory, clearChatSession, rebalancePortfolio,

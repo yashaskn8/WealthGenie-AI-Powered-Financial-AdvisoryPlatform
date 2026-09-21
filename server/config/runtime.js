@@ -40,6 +40,15 @@ export function getRuntimeConfig(env = process.env) {
     slowRequestMs: positiveInteger(env.SLOW_REQUEST_MS, 3000, { min: 100 }),
     maxInFlightRequests: positiveInteger(env.MAX_IN_FLIGHT_REQUESTS, 250, { min: 1, max: 10000 }),
     requireRedis: booleanValue(env.REQUIRE_REDIS, isProduction),
+    // Plan Review is read-only and opt-in in production. Local development can
+    // exercise the feature without requiring an extra .env entry.
+    agenticPlanReviewEnabled: booleanValue(env.AGENTIC_PLAN_REVIEW_ENABLED, !isProduction),
+    agentPlanReview: Object.freeze({
+      maxSteps: positiveInteger(env.AGENT_MAX_STEPS, 6, { min: 1, max: 6 }),
+      maxToolCalls: positiveInteger(env.AGENT_MAX_TOOL_CALLS, 8, { min: 1, max: 8 }),
+      maxToolCallsPerTool: positiveInteger(env.AGENT_MAX_TOOL_CALLS_PER_TOOL, 2, { min: 1, max: 2 }),
+      timeoutMs: positiveInteger(env.AGENT_TIMEOUT_MS, 30000, { min: 1000, max: 60000 }),
+    }),
     deepHealthTimeoutMs: positiveInteger(env.DEEP_HEALTH_TIMEOUT_MS, 3000, { min: 100, max: 30000 }),
     mongo: Object.freeze({
       flavor: getMongoFlavor(env),

@@ -16,6 +16,7 @@ const publicMounts = [
   ['auth.js', '/api/auth'],
   ['profile.js', '/api/profile'],
   ['recommend.js', '/api/recommend'],
+  ['agentRoutes.js', '/api/agent'],
   ['instruments.js', '/api/instruments'],
   ['projection.js', '/api/projection'],
   ['montecarlo.js', '/api/montecarlo'],
