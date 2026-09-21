@@ -12,6 +12,7 @@ import { validateEnvironmentConfig } from './config/validateEnv.js';
 import { startMarketDataRefreshJobs, stopMarketDataRefreshJobs } from './jobs/marketDataRefresh.js';
 import logger from './utils/logger.js';
 import { createRuntimeState } from './services/runtimeState.js';
+import { warmAdvisoryPersistence } from './services/advisoryPersistence.js';
 
 let server = null;
 let shuttingDown = false;
@@ -68,6 +69,7 @@ export async function startServer({ env = process.env } = {}) {
       },
       requireTransactions: config.isProduction,
     });
+    await warmAdvisoryPersistence();
     await connectRedis({ url: env.REDIS_URL });
     if (config.requireRedis && !redisAvailable) {
       throw new Error('Redis is required in this environment but is unavailable');

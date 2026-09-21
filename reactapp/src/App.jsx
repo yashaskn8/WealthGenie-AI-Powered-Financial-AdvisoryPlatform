@@ -91,7 +91,7 @@ export async function fetchDeferredAdvisoryWithBoundedRetry(
 }
 
 /* ===== DASHBOARD SHELL - Sidebar + Pages + Chatbot ===== */
-const DashboardShell = ({ userProfile, onProfileUpdate }) => {
+const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = null }) => {
   const navigate = useNavigate();
   const { logout } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -139,7 +139,9 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
         if (!activeProfileId) {
           throw new Error('Backend profile creation did not return a profileId.');
         }
-        const recResponse = await api.getRecommendations(activeProfileId, { signal: controller.signal });
+        const recResponse = initialRecommendation?.profileId === activeProfileId
+          ? initialRecommendation
+          : await api.getRecommendations(activeProfileId, { signal: controller.signal });
         if (cancelled) return;
         setBackendRecs({
           ...recResponse,
@@ -233,7 +235,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate }) => {
       cancelled = true;
       controller.abort();
     };
-  }, [profileId, profileKey]);
+  }, [profileId, profileKey, initialRecommendation]);
 
   const handleLogout = async () => {
     try {

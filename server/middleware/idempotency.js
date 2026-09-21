@@ -70,7 +70,7 @@ function advisoryRequestHash({ userId, profileId, payload }) {
   return canonicalSha256({
     operation: ADVISORY_OPERATION,
     userId: String(userId),
-    profileId: String(profileId),
+    profileId: profileId === null || profileId === undefined ? null : String(profileId),
     payload,
   });
 }
@@ -152,7 +152,7 @@ export async function claimAdvisoryIdempotency({
       status: 'LOCK',
       operation: ADVISORY_OPERATION,
       userId,
-      profileId,
+      profileId: profileId || null,
       requestHash,
       response: null,
     });

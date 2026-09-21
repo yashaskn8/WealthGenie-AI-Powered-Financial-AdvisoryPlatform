@@ -53,6 +53,8 @@ test('protected route files enforce JWT before service/database work', async () 
   await withServer(buildApp(), async (baseUrl) => {
     const checks = [
       ['profile', 'POST', '/api/profile/build', canonicalProfilePayload()],
+      ['profile precompute', 'POST', '/api/profile/precompute', canonicalProfilePayload()],
+      ['profile complete', 'POST', '/api/profile/complete', canonicalProfilePayload()],
       ['recommend', 'POST', '/api/recommend', { profileId: '65b000000000000000000001' }],
       ['projection', 'POST', '/api/projection', { profileId: '65b000000000000000000001', monthly_investment: 10000 }],
       ['stress test', 'POST', '/api/projection/stress-test', { profileId: '65b000000000000000000001', instrumentId: 'ETF', principal: 100000 }],

@@ -57,6 +57,10 @@ export const financialProfileUpdateSchema = financialProfileSchema.keys({
   version: Joi.number().integer().min(1).required(),
 });
 
+export const financialProfileCompletionSchema = financialProfileSchema.keys({
+  candidateId: Joi.string().guid({ version: ['uuidv4'] }).optional(),
+});
+
 export const rankWtiProfileSchema = Joi.object({
   profileId: objectId.required(),
   parentInstrumentId: Joi.string().trim().max(50).required(),

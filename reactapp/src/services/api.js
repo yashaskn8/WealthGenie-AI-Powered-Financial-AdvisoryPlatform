@@ -328,6 +328,23 @@ export async function buildProfile(profile, requestOptions = {}) {
   return request('POST', '/profile/build', toFinancialProfilePayload(profile), requestOptions);
 }
 
+export async function precomputeProfile(profile, requestOptions = {}) {
+  return request('POST', '/profile/precompute', toFinancialProfilePayload(profile), {
+    timeoutMs: 90000,
+    ...requestOptions,
+  });
+}
+
+export async function completeFinancialProfile(profile, candidateId = null, requestOptions = {}) {
+  return request('POST', '/profile/complete', {
+    ...toFinancialProfilePayload(profile),
+    ...(candidateId ? { candidateId } : {}),
+  }, {
+    timeoutMs: 90000,
+    ...requestOptions,
+  });
+}
+
 export async function getCurrentProfile(options = {}) {
   return request('GET', '/profile/current', null, { retries: 0, ...options });
 }
@@ -606,7 +623,7 @@ const api = {
   setAuthToken, getAuthToken, clearAuthToken, clearUserSession,
   subscribeAuth, getAuthSnapshot,
   setUserInfo, getUserInfo,
-  buildProfile, getCurrentProfile, getFinancialHealthScore, updateProfile, getRecommendations, getInstruments, rankInvestmentCandidates, getProjections, calculateStepUpProjection, calculateAllocationSplit, compareInvestmentProjection, getCustomPortfolioProjection, runInstrumentStressTest,
+  buildProfile, precomputeProfile, completeFinancialProfile, getCurrentProfile, getFinancialHealthScore, updateProfile, getRecommendations, getInstruments, rankInvestmentCandidates, getProjections, calculateStepUpProjection, calculateAllocationSplit, compareInvestmentProjection, getCustomPortfolioProjection, runInstrumentStressTest,
   runMonteCarlo, runPortfolioMonteCarlo, createGoal, getGoals, updateGoal, simulateGoal, deleteGoal, healthCheck,
   getMarketRates, getBenchmarkMarketFacts, getMutualFundNavFacts, refreshMarketRates,
   sendChatMessage, getChatHistory, clearChatSession, rebalancePortfolio,

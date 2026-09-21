@@ -24,6 +24,15 @@ class MetricsCollector {
       prompt_injection_attempts_total: 0,
       csrf_rejections_total: 0,
       http_overload_total: 0,
+      profile_precompute_requested_total: 0,
+      profile_precompute_ready_total: 0,
+      profile_precompute_failed_total: 0,
+      profile_complete_candidate_hit_total: 0,
+      profile_complete_candidate_miss_total: 0,
+      profile_complete_candidate_expired_total: 0,
+      profile_complete_candidate_profile_mismatch_total: 0,
+      profile_complete_candidate_version_mismatch_total: 0,
+      profile_complete_recomputed_total: 0,
     };
 
     this.toolUsage = {}; // tool_name -> count
@@ -150,6 +159,12 @@ class MetricsCollector {
     lines.push('# HELP wealthgenie_http_overload_total Requests rejected by admission control');
     lines.push('# TYPE wealthgenie_http_overload_total counter');
     lines.push(`wealthgenie_http_overload_total ${this.counters.http_overload_total}`);
+
+    lines.push('# HELP wealthgenie_profile_completion_total Profile precompute and completion outcomes');
+    lines.push('# TYPE wealthgenie_profile_completion_total counter');
+    for (const [name, value] of Object.entries(this.counters).filter(([name]) => name.startsWith('profile_'))) {
+      lines.push(`wealthgenie_profile_completion_total{event="${name}"} ${value}`);
+    }
 
     return lines.join('\n');
   }

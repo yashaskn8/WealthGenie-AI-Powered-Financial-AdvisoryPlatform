@@ -291,6 +291,28 @@ describe('frontend API contracts', () => {
     expect(localStorage.getItem('wg_token')).toBeNull();
   });
 
+  it('uses the server-side precompute and single authoritative completion contracts', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ candidateId: '4f4f4f4f-1111-4111-8111-111111111111' }))
+      .mockResolvedValueOnce(jsonResponse({ profile: CANONICAL_PROFILE, recommendation: { instruments: [] } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.precomputeProfile(CANONICAL_PROFILE);
+    await api.completeFinancialProfile(
+      CANONICAL_PROFILE,
+      '4f4f4f4f-1111-4111-8111-111111111111',
+      { headers: { 'Idempotency-Key': 'stable-completion-key' } },
+    );
+
+    expect(fetchMock.mock.calls[0][0]).toMatch(/\/api\/profile\/precompute$/);
+    expect(fetchMock.mock.calls[1][0]).toMatch(/\/api\/profile\/complete$/);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({
+      monthly_savings: 20000,
+      candidateId: '4f4f4f4f-1111-4111-8111-111111111111',
+    });
+    expect(fetchMock.mock.calls[1][1].headers['Idempotency-Key']).toBe('stable-completion-key');
+  });
+
   it('never persists financial lifecycle payloads in browser storage', async () => {
     const responses = [
       { csrfToken: 'csrf', user: { id: 'privacy-user', email: 'privacy@example.com' } },

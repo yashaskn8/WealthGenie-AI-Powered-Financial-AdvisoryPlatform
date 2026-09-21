@@ -1,5 +1,3 @@
-import crypto from 'crypto';
-import mongoose from 'mongoose';
 import { Router } from 'express';
 import { verifyJWT, isValidObjectId } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
@@ -12,146 +10,38 @@ import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import AuditRecord from '../models/AuditRecord.js';
 import logger from '../utils/logger.js';
-import { getIncompleteProfileFallback, getMLPrediction } from '../services/mlClient.js';
 import { generateAdvisory } from '../services/geminiService.js';
 import {
-  runPipeline,
   assertPortfolioSuitable,
   resolveConcentrationCap,
 } from '../services/RecommendationPipeline.js';
-import { applyProfileSafeMarketContextAdjustment } from '../services/regimeRotationEngine.js';
-import { getLatestQualifiedMarketContextForRecommendation } from '../services/marketContextService.js';
 import {
   buildRecommendationProfile,
   buildRecommendationProfileHash,
-  buildMlProfileInput,
-  getMissingMlProfileFields,
-  getUnknownOptionalProfileFields,
   buildLlmFinancialContext,
-  deriveRecommendationMetrics,
   RECOMMENDATION_POLICY_VERSION,
-  FINANCIAL_PROFILE_SCHEMA_VERSION,
 } from '../services/recommendationProfile.js';
-import { assessSuitabilityRisk, RISK_CAPACITY_POLICY } from '../services/riskProfiler.js';
+import { assessSuitabilityRisk } from '../services/riskProfiler.js';
 import { claimAdvisoryIdempotency, releaseAdvisoryIdempotency } from '../middleware/idempotency.js';
 import { persistAdvisoryAtomically } from '../services/advisoryPersistence.js';
 import { setCache, delCache } from '../config/redis.js';
 import {
-  RISK_FREE_RATE,
-  DISCLAIMER,
   PROJECTION_ASSUMPTION_DATA_CLASS,
   PROJECTION_ASSUMPTION_SOURCE,
   PROJECTION_ASSUMPTION_VERSION,
 } from '../services/instrumentConstants.js';
 import { verifyAuditChain } from '../services/auditChain.js';
-import { generatePortfolioProjection } from '../services/projectionEngine.js';
-import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
+import {
+  computeCoreRecommendation,
+  buildRecommendationCacheKey,
+  buildPortfolioReturnAssumption,
+  buildAssetClassAllocation,
+  buildDashboardProjection,
+} from '../services/coreRecommendation.js';
+
+export { buildRecommendationCacheKey, canonicalAuditInputs } from '../services/coreRecommendation.js';
 
 const router = Router();
-
-export function buildRecommendationCacheKey(userId, profileId, profile, modelVersion) {
-  if (typeof modelVersion !== 'string' || !modelVersion.trim()) {
-    throw new TypeError('A model version is required for recommendation cache keys');
-  }
-  return `recommendation:${userId}:${profileId}:${buildRecommendationProfileHash(profile, { modelVersion })}`;
-}
-
-export function canonicalAuditInputs(profile, suitability, modelVersion, regulatoryRuleVersion) {
-  const metrics = deriveRecommendationMetrics(profile);
-  return {
-    financial_profile_schema_version: FINANCIAL_PROFILE_SCHEMA_VERSION,
-    recommendation_policy_version: RECOMMENDATION_POLICY_VERSION,
-    regulatory_rule_version: regulatoryRuleVersion,
-    risk_capacity_policy_version: RISK_CAPACITY_POLICY.version,
-    model_version: modelVersion,
-    monthly_take_home: profile.monthlyTakeHome,
-    monthly_savings: profile.monthlySavings,
-    age: profile.age,
-    risk_tolerance: profile.riskTolerance,
-    sold_property_proceeds: profile.soldPropertyProceeds,
-    has_lump_sum: profile.hasLumpSum,
-    lump_sum_amount: profile.lumpSumAmount,
-    liquid_savings: profile.liquidSavings,
-    emi_burden_pct: profile.emiBurdenPct,
-    financial_dependents: profile.financialDependents,
-    emergency_fund_months: profile.emergencyFundMonths,
-    investment_goals: [...profile.investmentGoals],
-    investment_horizon_years: profile.investmentHorizonYears,
-    deployable_lump_sum: metrics.deployableLumpSum,
-    risk_capacity_score: suitability.capacityScore,
-    final_suitability_risk: suitability.finalRisk,
-    suitability_reason_codes: [...suitability.reasonCodes],
-  };
-}
-
-function buildPortfolioReturnAssumption(instruments) {
-  return Number(instruments.reduce(
-    (sum, instrument) => sum + Number(instrument.nominalReturn) * Number(instrument.allocationWeight),
-    0,
-  ).toFixed(2));
-}
-
-function buildAssetClassAllocation(instruments) {
-  return Object.fromEntries(Object.entries(instruments.reduce((totals, instrument) => {
-    const assetClass = instrument.assetClass || 'Other';
-    totals[assetClass] = (totals[assetClass] || 0) + (Number(instrument.allocationWeight) * 100);
-    return totals;
-  }, {})).map(([assetClass, percentage]) => [assetClass, Number(percentage.toFixed(2))]));
-}
-
-function buildDashboardProjection(profile, instruments) {
-  const metrics = deriveRecommendationMetrics(profile);
-  return generatePortfolioProjection({
-    monthlyContribution: profile.monthlySavings,
-    initialLumpSum: metrics.deployableLumpSum ?? 0,
-    horizonYears: profile.investmentHorizonYears,
-    instruments,
-  });
-}
-
-function unavailableMarketAdjustment(reasonCode, marketContext = null) {
-  return {
-    status: 'UNAVAILABLE',
-    contextStatus: marketContext?.status ?? 'MARKET_CONTEXT_UNAVAILABLE',
-    context: marketContext?.context ?? null,
-    policyVersion: marketContext?.policyVersion ?? null,
-    observedAt: marketContext?.marketSnapshot?.observedAt ?? marketContext?.observedAt ?? null,
-    evaluatedAt: marketContext?.evaluatedAt ?? null,
-    reasonCodes: [reasonCode, ...(marketContext?.reasonCodes || [])],
-    adjustmentVersion: 'market-context-adjustment-1.0.0',
-    applied: false,
-    maxTotalTiltPct: 0,
-    actualTotalTiltPct: 0,
-    suitabilityValidation: 'NOT_RUN',
-    concentrationValidation: 'NOT_RUN',
-  };
-}
-
-function buildMarketAdjustmentMetadata(adjustment, marketContext) {
-  return {
-    status: adjustment.applied ? 'APPLIED' : 'NOT_APPLIED',
-    contextStatus: adjustment.contextStatus,
-    context: adjustment.context,
-    policyVersion: marketContext?.policyVersion ?? null,
-    observedAt: marketContext?.marketSnapshot?.observedAt ?? marketContext?.observedAt ?? null,
-    evaluatedAt: marketContext?.evaluatedAt ?? null,
-    reasonCodes: adjustment.reasonCodes || [],
-    adjustmentVersion: adjustment.adjustmentVersion,
-    applied: adjustment.applied,
-    maxTotalTiltPct: adjustment.maxTotalTiltPct,
-    actualTotalTiltPct: adjustment.actualTotalTiltPct,
-    baseWeights: adjustment.baseWeights,
-    adjustedWeights: adjustment.adjustedWeights,
-    changedInstruments: adjustment.explanations || [],
-    suitabilityValidation: adjustment.suitabilityRevalidated ? 'PASSED' : 'NOT_RUN',
-    concentrationValidation: adjustment.concentrationCapsRevalidated ? 'PASSED' : 'NOT_RUN',
-    recommendationUsability: marketContext?.recommendationUsability ?? null,
-  };
-}
-
-function currentAllocationSourceFor(marketAdjustment) {
-  return marketAdjustment?.applied ? 'MARKET_CONTEXT_ADJUSTED' : 'ORIGINAL_RECOMMENDATION';
-}
 
 function plainMarketAdjustment(value) {
   if (!value) return null;
@@ -167,16 +57,6 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
   if (!stored) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
 
   const profile = buildRecommendationProfile(stored);
-  const suitability = assessSuitabilityRisk(profile);
-  const regulatoryRuleVersion = getCurrentRegulatoryRuleVersion();
-  if (!regulatoryRuleVersion) {
-    throw createError(
-      503,
-      'No verified regulatory policy is available for the current fiscal year.',
-      'Regulatory policy metadata is temporarily unavailable.',
-      { code: 'REGULATORY_POLICY_UNAVAILABLE' },
-    );
-  }
   const tIdempotencyStart = performance.now();
   const idempotencyClaim = await claimAdvisoryIdempotency({
     key: req.headers['idempotency-key'],
@@ -191,178 +71,38 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
   }
 
   try {
-    const missingMlProfileFields = getMissingMlProfileFields(profile);
-    const unknownOptionalProfileFields = getUnknownOptionalProfileFields(profile);
-    const tMlStart = performance.now();
-    const mlResult = missingMlProfileFields.length > 0
-      ? getIncompleteProfileFallback(profile, suitability)
-      : await getMLPrediction(
-        buildMlProfileInput(profile, suitability),
-        req.correlationId,
-        req.user.userId,
-        req.user.role,
-      );
-    const tMl = performance.now() - tMlStart;
-    const modelVersion = mlResult.model_version;
-    if (typeof modelVersion !== 'string' || !modelVersion.trim()) {
-      throw createError(502, 'ML result did not include a model version', 'Recommendation model metadata is unavailable.');
-    }
-    const tPipelineStart = performance.now();
-    const pipelineResult = runPipeline(profile, mlResult);
-    const baseInstruments = pipelineResult.instruments;
-    if (!baseInstruments.length) {
-      throw createError(422, 'No instruments passed the suitability boundary', 'No suitable instruments were found for this profile.');
-    }
-    const tMarketContextStart = performance.now();
-    let marketContext;
-    try {
-      marketContext = await getLatestQualifiedMarketContextForRecommendation();
-    } catch (error) {
-      logger.warn('Recommendation market context read failed closed', { error: error.message });
-      marketContext = {
-        status: 'MARKET_CONTEXT_UNAVAILABLE',
-        context: null,
-        reasonCodes: ['MARKET_CONTEXT_READ_FAILED_CLOSED'],
-        recommendationUsability: { status: 'NOT_USABLE', reasonCodes: ['MARKET_CONTEXT_READ_FAILED_CLOSED'] },
-      };
-    }
-    let marketAdjustment;
-    let adjustedInstruments = baseInstruments;
-    try {
-      const adjustment = applyProfileSafeMarketContextAdjustment({
-        profile,
-        instruments: baseInstruments,
-        marketContext,
-      });
-      adjustedInstruments = adjustment.adjustedInstruments;
-      marketAdjustment = buildMarketAdjustmentMetadata(adjustment, marketContext);
-    } catch (error) {
-      logger.warn('Recommendation market adjustment failed closed', { error: error.message, code: error.code });
-      marketAdjustment = unavailableMarketAdjustment('MARKET_CONTEXT_ADJUSTMENT_FAILED_CLOSED', marketContext);
-    }
-    const instruments = adjustedInstruments;
-    // The adjustment engine revalidates this boundary; the explicit final
-    // assertion protects the persistence path if the adjustment DTO evolves.
-    assertPortfolioSuitable(profile, instruments.map(instrument => instrument.id));
-    const { confidenceScores, riskReconciliation, computedWeights } = pipelineResult;
-    marketAdjustment.currentAllocationSource = currentAllocationSourceFor(marketAdjustment);
-    const tMarketContext = performance.now() - tMarketContextStart;
-
-    const portfolioReturnAssumption = buildPortfolioReturnAssumption(instruments);
-    const assetClassAllocation = buildAssetClassAllocation(instruments);
-    const tPipeline = performance.now() - tPipelineStart;
-    const tProjectionStart = performance.now();
-    const dashboardProjection = buildDashboardProjection(profile, instruments);
-    const tProjection = performance.now() - tProjectionStart;
-
-    const recommendationId = new mongoose.Types.ObjectId();
-    const auditId = new mongoose.Types.ObjectId();
-    const inputs = canonicalAuditInputs(profile, suitability, modelVersion, regulatoryRuleVersion);
-    const inputHash = buildRecommendationProfileHash(profile, { modelVersion });
-    const correlationId = req.correlationId || req.traceId || crypto.randomUUID();
-    const timestamp = new Date();
-    const recommendationData = {
-      _id: recommendationId,
+    const core = await computeCoreRecommendation({
+      canonicalProfile: profile,
       userId: req.user.userId,
       profileId: stored._id,
-      instruments,
-      advisoryText: null,
-      advisoryMetadata: { status: 'PENDING' },
-      confidenceScores,
-      mlFallback: Boolean(mlResult.fallback),
-      modelVersion,
-      profileInputHash: inputHash,
-      marketAdjustment,
-      currentAllocationSource: marketAdjustment.currentAllocationSource,
-    };
-    const auditRecordData = {
-      _id: auditId,
-      userId: req.user.userId,
-      profileId: stored._id,
-      recommendationId,
-      correlationId,
-      traceId: req.traceId || req.correlationId || '',
-      version_id: modelVersion,
-      regulatory_rule_version: regulatoryRuleVersion,
-      input_hash: inputHash,
-      inputs,
-      recommendations: {
-        instruments,
-        confidenceScores,
-        portfolioReturnAssumption,
-        returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
-        modelVersion,
-        recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
-        marketAdjustment,
-        advisorySummary: '',
-      },
-      cited_rag_chunk_ids: mlResult.cited_chunk_ids || [],
-      engine: mlResult.fallback ? 'rule_fallback' : 'ml_service',
-      timestamp,
-    };
-    const response = {
-      recommendationId,
-      audit_id: auditId,
-      audit_hash: inputHash,
-      instruments,
-      ranked: true,
-      advisory_text: null,
-      advisory_explanation: { status: 'PENDING' },
-      confidence_scores: confidenceScores,
-      decision_path: mlResult.decision_path,
-      explanation: mlResult.explanation || null,
-      ml_fallback: Boolean(mlResult.fallback),
-      model_version: modelVersion,
-      recommendation_policy_version: RECOMMENDATION_POLICY_VERSION,
-      financial_profile_schema_version: FINANCIAL_PROFILE_SCHEMA_VERSION,
-      portfolio_return_assumption: portfolioReturnAssumption,
-      return_data_class: PROJECTION_ASSUMPTION_DATA_CLASS,
-      return_assumption_version: PROJECTION_ASSUMPTION_VERSION,
-      return_assumption_source: PROJECTION_ASSUMPTION_SOURCE,
-      observed_market_fact: false,
-      provider_forecast: false,
-      asset_class_allocation: assetClassAllocation,
-      dashboard_projection: dashboardProjection,
-      return_basis: 'PRE_TAX_NOMINAL',
-      risk_free_rate: Number((RISK_FREE_RATE * 100).toFixed(2)),
-      disclaimer: DISCLAIMER,
-      final_risk_tier: riskReconciliation.final_risk_tier,
-      capacity_score: riskReconciliation.capacity_score,
-      preference_score: riskReconciliation.preference_score,
-      reconciliation_note: riskReconciliation.reconciliation_note,
-      advisory_note: riskReconciliation.advisory_note,
-      suitability_reason_codes: riskReconciliation.reason_codes,
-      optional_profile_fields_unknown: unknownOptionalProfileFields,
-      ml_input_fields_unknown: missingMlProfileFields,
-      excluded_due_to_eligibility: riskReconciliation.excluded_due_to_eligibility,
-      computed_weights: computedWeights,
-      market_adjustment: marketAdjustment,
-      current_allocation_source: marketAdjustment.currentAllocationSource,
-    };
-
+      correlationId: req.correlationId,
+      traceId: req.traceId || req.correlationId,
+      userRole: req.user.role,
+    });
     const tPersistStart = performance.now();
     const persisted = await persistAdvisoryAtomically({
-      recommendation: recommendationData,
-      auditRecord: auditRecordData,
-      response,
+      recommendation: core.recommendationData,
+      auditRecord: core.auditRecordData,
+      response: core.response,
       idempotencyClaim,
     });
     const tPersist = performance.now() - tPersistStart;
     const tCacheStart = performance.now();
-    const cacheKey = buildRecommendationCacheKey(req.user.userId, stored._id, profile, modelVersion);
+    const cacheKey = buildRecommendationCacheKey(req.user.userId, stored._id, profile, core.modelVersion);
     await setCache(cacheKey, persisted, 86400).catch(error => {
       logger.warn('Recommendation cache write failed after committed advisory', { error: error.message });
     });
     const tCache = performance.now() - tCacheStart;
     const tTotal = performance.now() - tTotalStart;
+    const timings = core.timings || {};
 
     res.setHeader('Server-Timing', [
       `profile;dur=${tProfile.toFixed(2)}`,
       `idempotency;dur=${tIdempotency.toFixed(2)}`,
-      `ml;dur=${tMl.toFixed(2)}`,
-      `pipeline;dur=${tPipeline.toFixed(2)}`,
-      `market-context;dur=${tMarketContext.toFixed(2)}`,
-      `projection;dur=${tProjection.toFixed(2)}`,
+      `ml;dur=${Number(timings.ml || 0).toFixed(2)}`,
+      `pipeline;dur=${Number(timings.pipeline || 0).toFixed(2)}`,
+      `market-context;dur=${Number(timings.marketContext || 0).toFixed(2)}`,
+      `projection;dur=${Number(timings.projection || 0).toFixed(2)}`,
       `persistence;dur=${tPersist.toFixed(2)}`,
       `cache;dur=${tCache.toFixed(2)}`,
       `total;dur=${tTotal.toFixed(2)}`,

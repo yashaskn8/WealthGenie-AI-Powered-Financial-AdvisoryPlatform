@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import AuditRecord from '../models/AuditRecord.js';
 import IdempotencyKey from '../models/IdempotencyKey.js';
@@ -42,6 +43,12 @@ async function ensureAdvisoryPersistenceReady() {
   return advisoryPersistenceReady;
 }
 
+// Called during application startup after MongoDB is connected so the first
+// authoritative request does not pay schema/index initialization latency.
+export async function warmAdvisoryPersistence() {
+  await ensureAdvisoryPersistenceReady();
+}
+
 function transactionRequirementError(error) {
   const message = error?.message || '';
   if (/Transaction numbers are only allowed|replica set|does not support retryable writes/i.test(message)) {
@@ -62,6 +69,7 @@ function transactionRequirementError(error) {
  * successful idempotency response. No compensation/fallback path is allowed.
  */
 export async function persistAdvisoryAtomically({
+  profile = null,
   recommendation,
   auditRecord,
   response,
@@ -74,7 +82,20 @@ export async function persistAdvisoryAtomically({
   try {
     await session.withTransaction(async () => {
       const chainEntry = await prepareAuditChainEntry(auditRecord, session);
-      committedResponse = { ...response, audit_hash: chainEntry.record.record_hash };
+      committedResponse = response?.recommendation
+        ? {
+          ...response,
+          audit_hash: chainEntry.record.record_hash,
+          recommendation: {
+            ...response.recommendation,
+            audit_hash: chainEntry.record.record_hash,
+          },
+        }
+        : { ...response, audit_hash: chainEntry.record.record_hash };
+
+      if (profile) {
+        await FinancialProfile.create([profile], { session });
+      }
 
       await Recommendation.create([{
         ...recommendation,

@@ -47,6 +47,27 @@ paths:
       x-idempotency-key: optional
       requestBody: { $ref: '#/components/requestBodies/ProfileCreate' }
       responses: { '201': { $ref: '#/components/responses/Profile' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '409': { $ref: '#/components/responses/Conflict' } }
+  /api/profile/precompute:
+    post:
+      operationId: precomputeProfileRecommendation
+      tags: [Profiles]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      x-csrf-protection: cookie-session
+      x-idempotency-key: optional
+      description: Server-side, short-lived non-authoritative recommendation precomputation. It does not persist profile, recommendation, or audit records.
+      requestBody: { $ref: '#/components/requestBodies/ProfileCreate' }
+      responses: { '200': { $ref: '#/components/responses/ProfileCandidate' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '503': { $ref: '#/components/responses/Unavailable' } }
+  /api/profile/complete:
+    post:
+      operationId: completeFinancialProfile
+      tags: [Profiles]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      x-csrf-protection: cookie-session
+      x-idempotency-key: required
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      description: Authoritative profile completion boundary. Commits the profile, recommendation, audit record, and idempotency result atomically. Advisory prose remains deferred.
+      requestBody: { $ref: '#/components/requestBodies/ProfileCompletion' }
+      responses: { '200': { $ref: '#/components/responses/ProfileCompletion' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '409': { $ref: '#/components/responses/Conflict' }, '503': { $ref: '#/components/responses/Unavailable' } }
   /api/profile/current:
     get:
       operationId: getCurrentProfile
@@ -408,6 +429,7 @@ components:
     Register: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RegisterRequest' } } } }
     Login: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/LoginRequest' } } } }
     ProfileCreate: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/FinancialProfileInput' } } } }
+    ProfileCompletion: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/FinancialProfileCompletion' } } } }
     ProfileUpdate: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/FinancialProfileUpdate' } } } }
     Recommendation: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RecommendationRequest' } } } }
     RecommendationWeights: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/RecommendationWeightsRequest' } } } }
@@ -435,6 +457,8 @@ components:
     Message: { description: Successful operation, content: { application/json: { schema: { type: object, required: [message], properties: { message: { type: string } } } } } }
     AuthSession: { description: Authenticated session, content: { application/json: { schema: { $ref: '#/components/schemas/AuthSession' } } } }
     Profile: { description: Authoritative financial profile, content: { application/json: { schema: { $ref: '#/components/schemas/FinancialProfile' } } } }
+    ProfileCandidate: { description: Short-lived non-authoritative precomputation handle, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileCandidate' } } } }
+    ProfileCompletion: { description: Atomically committed profile and recommendation, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileCompletion' } } } }
     Recommendation: { description: Recommendation and audit identifiers, content: { application/json: { schema: { $ref: '#/components/schemas/RecommendationResponse' } } } }
     Goal: { description: Goal state, content: { application/json: { schema: { $ref: '#/components/schemas/Goal' } } } }
     TaxCalculation: { description: Authoritative tax calculation, content: { application/json: { schema: { $ref: '#/components/schemas/TaxCalculation' } } } }
@@ -496,6 +520,33 @@ components:
         emergency_fund_months: { type: number, nullable: true, minimum: 0, maximum: 120, description: Optional; null means unknown and is never treated as zero. }
         investment_goals: { type: array, minItems: 1, maxItems: 4, uniqueItems: true, items: { type: string, enum: [Retirement, Wealth Growth, Tax Saving, Emergency Fund] } }
         investment_horizon_years: { type: integer, minimum: 1, maximum: 30 }
+    FinancialProfileCompletion:
+      allOf:
+        - { $ref: '#/components/schemas/FinancialProfileInput' }
+        - type: object
+          unevaluatedProperties: false
+          properties:
+            candidateId: { type: string, format: uuid }
+    ProfileCandidate:
+      type: object
+      required: [candidateId, status, expiresInMs, profileFingerprint, modelVersion, recommendationPolicyVersion, financialProfileSchemaVersion, regulatoryRuleVersion]
+      properties:
+        candidateId: { type: string, format: uuid }
+        status: { type: string, enum: [READY] }
+        expiresInMs: { type: integer, minimum: 0 }
+        profileFingerprint: { type: string, pattern: '^[a-f0-9]{64}$' }
+        modelVersion: { type: string }
+        recommendationPolicyVersion: { type: string }
+        financialProfileSchemaVersion: { type: string }
+        regulatoryRuleVersion: { type: string }
+        marketContext: { type: object, additionalProperties: true }
+    ProfileCompletion:
+      type: object
+      required: [profile, recommendation, completion]
+      properties:
+        profile: { $ref: '#/components/schemas/FinancialProfile' }
+        recommendation: { $ref: '#/components/schemas/RecommendationResponse' }
+        completion: { type: object, additionalProperties: true }
     FinancialProfileUpdate:
       allOf: [{ $ref: '#/components/schemas/FinancialProfileInput' }, { type: object, required: [version], properties: { version: { type: integer, minimum: 1 } } }]
       unevaluatedProperties: false

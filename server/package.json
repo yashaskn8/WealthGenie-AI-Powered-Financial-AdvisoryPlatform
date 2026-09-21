@@ -15,6 +15,7 @@
     "lint:fix": "eslint . --fix",
     "typecheck": "node --check server.js",
     "loadtest": "node scripts/loadtest.js",
+    "measure:profile-completion": "node scripts/measure_profile_completion_latency.js",
     "seed": "node config/seedInstruments.js",
     "catalog:sync": "node scripts/syncFrontendCatalog.js",
     "qualify:nse": "node scripts/qualifyNseProvider.js",

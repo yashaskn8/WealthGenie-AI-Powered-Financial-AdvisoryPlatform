@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback, useEffect } from 'react';
+import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import profileImg from '../assets/gen_4k_nobull.png';
 import * as api from '../services/api';
 import { normalizeFinancialProfile, validateFinancialProfile } from '../utils/financialProfile';
@@ -10,6 +10,10 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
 
   const [isComplete, setIsComplete] = useState(false);
   const [isRestoringProfile, setIsRestoringProfile] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [initialRecommendation, setInitialRecommendation] = useState(null);
+  const candidateIdRef = useRef(null);
+  const precomputeGenerationRef = useRef(0);
   const [age, setAge] = useState(savedProfile?.age ?? '');
   const [monthlySavings, setMonthlySavings] = useState(savedProfile?.monthly_savings ?? '');
   const [investmentGoals, setInvestmentGoals] = useState(savedProfile?.investment_goals || []);
@@ -59,6 +63,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
 
   const handleSaveProfile = async (e) => {
     e.preventDefault();
+    if (isSubmitting) return;
     const validation = validateFinancialProfile(userProfilePayload);
     if (!validation.valid) {
       alert(validation.errors.join('\n'));
@@ -66,22 +71,31 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
     }
 
     try {
-      const response = await api.buildProfile(validation.profile);
+      setIsSubmitting(true);
+      const response = await api.completeFinancialProfile(validation.profile, candidateIdRef.current);
       const nextProfileId = response.profileId || null;
-      setProfileId(nextProfileId);
-      const nextVersion = response.version || null;
+      const committedProfile = response.profile || response;
+      const committedRecommendation = response.recommendation || null;
+      const committedProfileId = committedProfile.profileId || nextProfileId;
+      setProfileId(committedProfileId);
+      const nextVersion = committedProfile.version || null;
       setVersion(nextVersion);
-      const profileWithUser = normalizeFinancialProfile({ ...response, profileId: nextProfileId, version: nextVersion });
-      handleProfileUpdate(profileWithUser);
+      const profileWithUser = normalizeFinancialProfile({ ...committedProfile, profileId: committedProfileId, version: nextVersion });
+      handleProfileUpdate(profileWithUser, { preserveRecommendation: true });
+      setInitialRecommendation(committedRecommendation);
+      candidateIdRef.current = null;
       setIsComplete(true);
     } catch (err) {
       alert("Error saving profile: " + err.message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   // Called from DashboardShell when profile is updated inline
-  const handleProfileUpdate = useCallback((updatedProfile) => {
+  const handleProfileUpdate = useCallback((updatedProfile, { preserveRecommendation = false } = {}) => {
     const profile = normalizeFinancialProfile(updatedProfile);
+    if (!preserveRecommendation) setInitialRecommendation(null);
     setAge(profile.age);
     setMonthlyTakeHome(profile.monthly_take_home);
     setMonthlySavings(profile.monthly_savings);
@@ -98,6 +112,32 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
     setVersion(profile.version);
     if (profile.profileId) setProfileId(profile.profileId);
   }, []);
+
+  useEffect(() => {
+    if (isRestoringProfile || isComplete) return undefined;
+    const validation = validateFinancialProfile(userProfilePayload);
+    const generation = precomputeGenerationRef.current + 1;
+    precomputeGenerationRef.current = generation;
+    candidateIdRef.current = null;
+    if (!validation.valid) return undefined;
+
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      try {
+        const candidate = await api.precomputeProfile(validation.profile, { signal: controller.signal });
+        if (controller.signal.aborted || precomputeGenerationRef.current !== generation) return;
+        candidateIdRef.current = candidate?.candidateId || null;
+      } catch {
+        if (!controller.signal.aborted && precomputeGenerationRef.current === generation) {
+          candidateIdRef.current = null;
+        }
+      }
+    }, 500);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [isRestoringProfile, isComplete, userProfilePayload]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -124,7 +164,8 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
   if (isComplete) {
     return React.cloneElement(children, {
       userProfile: userProfilePayload,
-      onProfileUpdate: handleProfileUpdate
+      onProfileUpdate: handleProfileUpdate,
+      initialRecommendation,
     });
   }
 
@@ -448,6 +489,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
                 data-testid="profile-save"
                 type="submit"
                 className="btn-save-continue"
+                disabled={isSubmitting}
                 style={{
                   padding: '14px',
                   fontSize: '0.98rem',
@@ -458,7 +500,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
                   margin: 0,
                 }}
               >
-                Save and Continue
+                {isSubmitting ? 'Preparing your dashboard…' : 'Save and Continue'}
               </button>
             </div>
           </form>
