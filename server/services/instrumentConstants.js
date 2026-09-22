@@ -23,6 +23,8 @@
  *      resembles a jagged mountain range. This is modeled stochastically in our Monte Carlo simulator.
  */
 
+import { canonicalSha256 } from '../utils/canonicalJson.js';
+
 export const CESS_RATE = 0.04;
 export const PROJECTION_ASSUMPTION_VERSION = 'wealthgenie-projection-assumptions-1.0.0';
 export const PROJECTION_ASSUMPTION_SOURCE = 'WEALTHGENIE_MODEL_POLICY';
@@ -43,7 +45,7 @@ const rawModelAssumptions = {
   PPF:          { nominalRate: 7.1,   volatility: 0.003,  expenseRatio: 0.0,    riskLevel: 'Very Low',   lockIn: 15, name: 'Public Provident Fund',    tags: ['EEE', 'Tax Free', '80C'] },
   NPS:          { nominalRate: 10.1,  volatility: 0.12,   expenseRatio: 0.0001, riskLevel: 'Medium',     lockIn: 60, name: 'National Pension System',  tags: ['Retirement', '80CCD'] },
   Gold:         { nominalRate: 11.3,  volatility: 0.15,   expenseRatio: 0.005,  riskLevel: 'Medium',     lockIn: 0,  name: 'Gold (Commodity)',          assetClass: 'Commodity', tags: ['Hedge', 'Inflation'] },
-  SGB:          { nominalRate: 13.0,  volatility: 0.14,   expenseRatio: 0.0,    riskLevel: 'Low-Medium', lockIn: 8,  name: 'Sovereign Gold Bond',      tags: ['Gold', 'Tax Exempt'] },
+  SGB:          { nominalRate: 13.0,  volatility: 0.14,   expenseRatio: 0.0,    riskLevel: 'Low-Medium', lockIn: 8,  name: 'Sovereign Gold Bond',      tags: ['Gold', 'Conditional Maturity Tax Treatment'] },
   Liquid_MF:    { nominalRate: 6.8,   volatility: 0.005,  expenseRatio: 0.0025, riskLevel: 'Low',        lockIn: 0,  name: 'Liquid Mutual Fund',       tags: ['Emergency Fund', 'T+1'] },
   Arbitrage_MF: { nominalRate: 7.5,   volatility: 0.02,   expenseRatio: 0.0035, riskLevel: 'Low',        lockIn: 0,  name: 'Arbitrage Mutual Fund',    tags: ['Low Volatility', 'Equity Taxed'] },
   Hybrid_MF:    { nominalRate: 11.8,  volatility: 0.10,   expenseRatio: 0.012,  riskLevel: 'Medium',     lockIn: 0,  name: 'Balanced Advantage Fund',  tags: ['Hybrid', 'Dynamic'] },
@@ -54,11 +56,22 @@ const rawModelAssumptions = {
   SSY:          { nominalRate: 8.2,   volatility: 0.002,  expenseRatio: 0.0,    riskLevel: 'Very Low',   lockIn: 21, name: 'Sukanya Samriddhi',        tags: ['EEE', 'Girl Child'] },
 };
 
+// This hash is deliberately derived from the committed policy inputs. A
+// change to any model value changes the hash and therefore requires an
+// explicit review/version decision instead of silently retaining the same
+// assumption identity.
+export const PROJECTION_ASSUMPTION_POLICY_HASH = canonicalSha256({
+  version: PROJECTION_ASSUMPTION_VERSION,
+  source: PROJECTION_ASSUMPTION_SOURCE,
+  inputs: rawModelAssumptions,
+});
+
 export const INSTRUMENT_PARAMS = Object.freeze(Object.fromEntries(
   Object.entries(rawModelAssumptions).map(([key, value]) => [key, Object.freeze({
     ...value,
     dataClass: PROJECTION_ASSUMPTION_DATA_CLASS,
     assumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+    assumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
     source: PROJECTION_ASSUMPTION_SOURCE,
     observedMarketFact: false,
     providerForecast: false,

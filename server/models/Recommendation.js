@@ -22,6 +22,7 @@ const instrumentDetailSchema = new mongoose.Schema({
   returnBasis: { type: String, enum: ['PRE_TAX_NOMINAL'], required: true },
   returnDataClass: { type: String, enum: ['MODEL_ASSUMPTION'], default: 'MODEL_ASSUMPTION', required: true },
   returnAssumptionVersion: { type: String, default: 'wealthgenie-projection-assumptions-1.0.0', required: true },
+  returnAssumptionHash: { type: String, match: /^[a-f0-9]{64}$/, default: null },
   returnSource: { type: String, enum: ['WEALTHGENIE_MODEL_POLICY'], default: 'WEALTHGENIE_MODEL_POLICY', required: true },
   observedMarketFact: { type: Boolean, enum: [false], default: false, required: true },
   providerForecast: { type: Boolean, enum: [false], default: false, required: true },
@@ -84,6 +85,8 @@ const recommendationSchema = new mongoose.Schema({
   modelVersion: { type: String, required: true },
   regulatoryRuleVersion: { type: String, required: true },
   profileInputHash: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
+  recommendationPolicyVersion: { type: String, default: 'suitability-freeze-1.1.0', required: true },
+  recommendationGeneration: { type: Number, min: 1, default: 1, required: true },
   // Optional unique fields are omitted when absent so the indexes remain
   // compatible with MongoDB and Amazon DocumentDB.
   profileCompletionCandidateId: { type: String },

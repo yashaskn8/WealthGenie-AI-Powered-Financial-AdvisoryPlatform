@@ -416,6 +416,7 @@ function presentationInstrument(row) {
     returnBasis: 'PRE_TAX_NOMINAL',
     returnDataClass: PROJECTION_ASSUMPTION_DATA_CLASS,
     returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+    returnAssumptionHash: INSTRUMENT_PARAMS[backendType]?.assumptionHash || null,
     returnSource: PROJECTION_ASSUMPTION_SOURCE,
     observedMarketFact: false,
     providerForecast: false,

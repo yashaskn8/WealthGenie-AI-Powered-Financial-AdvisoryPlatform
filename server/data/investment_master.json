@@ -765,11 +765,11 @@
         "sourceConfidence": "High"
       },
       "staticData": {
-        "description": "Best gold instrument. Capital gains at 8-year maturity are completely tax-free. Earns 2.5% p.a. interest in addition to gold price appreciation.",
+        "description": "Sovereign gold exposure with 2.5% coupon. Maturity tax treatment requires proof of original-issue subscription and continuous holding; secondary-market and premature-redemption treatment is not inferred.",
         "pros": [
           "Offers strong historical return potential ranging between 8% and 18% p.a. for long-term wealth growth.",
           "Maintains low return volatility, securing your core capital against sudden market swings.",
-          "Capital gains at maturity are completely exempt from tax for sovereign gold bond holders.",
+          "A maturity exemption is conditional on original-issue subscription and continuous holding; it is not a universal SGB exemption.",
           "Extremely cost-effective option featuring an ultra-low expense ratio of 0.00%."
         ],
         "cons": [
@@ -783,7 +783,7 @@
           },
           {
             "question": "How are returns from Sovereign Gold Bond (SGB) taxed?",
-            "answer": "Under Sovereign Gold Bond (SGB), taxation is classified under 2.5% Interest Taxable · Gains Tax-Free. Specifically: 2.5% annual interest is taxed at your slab rate. All capital gains at 8-year maturity are fully tax-free under Section 47(viic). Most tax-efficient gold option."
+            "answer": "Under Sovereign Gold Bond (SGB), the 2.5% annual interest is taxable at the applicable slab rate. A maturity exemption is conditional on original-issue subscription and continuous holding until maturity; secondary-market and premature-redemption treatment is not inferred."
           },
           {
             "question": "Can I close my Sovereign Gold Bond (SGB) account before 8 years?",
@@ -795,9 +795,9 @@
           "section": null,
           "taxFreeInterest": false,
           "stcg": "Interest taxable at your income slab",
-          "ltcg": "100% tax-free if held to full 8-year maturity",
+          "ltcg": "Conditional maturity treatment; acquisition channel and continuous holding must be established",
           "indexation": null,
-          "details": "2.5% annual interest is taxed at your slab rate. All capital gains at 8-year maturity are fully tax-free under Section 47(viic). Most tax-efficient gold option."
+          "details": "2.5% annual interest is taxed at your slab rate. Maturity exemption requires an original-issue subscription and continuous holding until maturity; secondary-market and premature-redemption treatment is not inferred."
         },
         "whereToInvest": {
           "howToStart": "Open a demat + trading account on Zerodha, Groww, or Angel One. Search for 'SGB' or 'SGBAUG29' on the exchange.",
@@ -813,9 +813,9 @@
         },
         "trustBadge": {
           "type": "rbi",
-          "label": "RBI Issued · Tax-Free at Maturity",
+          "label": "RBI Issued · Conditional Maturity Tax Treatment",
           "body": "Reserve Bank of India",
-          "desc": "Sovereign Gold Bonds are issued by RBI on behalf of the Government of India. Capital gains at 8-year maturity are completely tax-free under Section 47(viic)."
+          "desc": "Sovereign Gold Bonds are issued by RBI on behalf of the Government of India. Maturity exemption is conditional on original-issue subscription and continuous holding; the exact acquisition facts must be verified."
         },
         "alternatives": [
           "sgb_secondary",
@@ -823,7 +823,7 @@
           "gold_mf"
         ],
         "explainer": {
-          "what": "A government bond whose value follows the price of gold. You also earn 2.5% interest per year, and pay zero capital gains tax if you hold it for 8 years.",
+          "what": "A government bond whose value follows the price of gold. You also earn a tranche-specific coupon; maturity tax treatment depends on the acquisition channel and continuous holding facts.",
           "riskPlain": "Low-medium — your returns depend on gold price movement.",
           "lockInPlain": "8-year maturity. You can sell on the stock exchange from year 5 onwards.",
           "whoFor": "Investors who want gold exposure without buying physical gold, and want to save on tax.",
@@ -14423,7 +14423,7 @@
           },
           {
             "question": "How are returns from Sovereign Gold Bond (Secondary Market) taxed?",
-            "answer": "Under Sovereign Gold Bond (Secondary Market), taxation is classified under 2.5% Interest Taxable · Gains Tax-Free. Specifically: 2.5% annual interest is taxed at your slab rate. All capital gains at 8-year maturity are fully tax-free under Section 47(viic). Most tax-efficient gold option."
+            "answer": "For Sovereign Gold Bond (Secondary Market), the coupon is taxable at the applicable slab rate and capital-gains treatment depends on the documented acquisition and disposal facts. The original-issue maturity exemption is not inferred for a secondary-market purchase."
           },
           {
             "question": "What is the redemption timeline for Sovereign Gold Bond (Secondary Market)?",
@@ -14437,7 +14437,7 @@
           "stcg": "Interest taxable at your income slab",
           "ltcg": "100% tax-free if held to full 8-year maturity",
           "indexation": null,
-          "details": "2.5% annual interest is taxed at your slab rate. All capital gains at 8-year maturity are fully tax-free under Section 47(viic). Most tax-efficient gold option."
+          "details": "2.5% annual interest is taxed at your slab rate. Secondary-market capital-gains treatment must be established from acquisition and disposal facts; the original-issue maturity exemption is not inferred."
         },
         "whereToInvest": {
           "howToStart": "Submit a direct mutual fund application on the AMC portal, or transact seamlessly on any popular mutual fund platform.",
@@ -22265,7 +22265,7 @@
         },
         "suitability": {
           "idealFor": "Beginners wanting micro-investments in gold without storage hassles.",
-          "whoShouldAvoid": "Large investors who prefer Sovereign Gold Bonds (SGB) for tax-free maturity returns."
+          "whoShouldAvoid": "Large investors who require a universal tax-free maturity outcome without documenting the SGB acquisition channel and holding history."
         },
         "trustBadge": {
           "type": "none",

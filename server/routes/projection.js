@@ -3,7 +3,6 @@ import { verifyJWT } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
 import { allocationSplitSchema, customPortfolioProjectionSchema, historicalXirrSchema, personalizedProjectionSchema, projectionComparisonSchema, stepUpProjectionSchema, stressScenarioSchema, validateStrict } from '../validation/financialSchemas.js';
 import FinancialProfile from '../models/FinancialProfile.js';
-import Recommendation from '../models/Recommendation.js';
 import { generateAllocationSplit, generatePortfolioProjection, generateProjectionComparison, generateProjections, sipFV, stepUpSipFV } from '../services/projectionEngine.js';
 import { computeXIRR, computeSIPXIRR } from '../services/xirrCalculator.js';
 import {
@@ -13,7 +12,7 @@ import {
   PROJECTION_ASSUMPTION_SOURCE,
   PROJECTION_ASSUMPTION_VERSION,
 } from '../services/instrumentConstants.js';
-import { buildRecommendationProfile, buildProfileGroundedSimulation, buildRecommendationProfileHash } from '../services/recommendationProfile.js';
+import { buildRecommendationProfile, buildProfileGroundedSimulation } from '../services/recommendationProfile.js';
 import {
   assertPortfolioSuitable,
   resolveConcentrationCap,
@@ -21,6 +20,7 @@ import {
 } from '../services/RecommendationPipeline.js';
 import { resolveAssetKey } from '../services/portfolioEngine.js';
 import { buildStressScenarioReport } from '../services/stressScenarioEngine.js';
+import { requireFreshRecommendationState, resolveCurrentRecommendationState } from '../services/recommendationState.js';
 
 const router = Router();
 
@@ -58,30 +58,17 @@ router.post('/stress-test', verifyJWT, validateStrict(stressScenarioSchema), asy
   const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
   if (!stored) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
 
-  const recommendation = await Recommendation.findOne({ profileId, userId: req.user.userId })
-    .sort({ generatedAt: -1 })
-    .lean();
-  if (!recommendation?.instruments?.length) {
-    throw createError(
-      409,
-      'Stress test requires an authoritative recommendation.',
-      'Generate your recommendation before running a stress test.',
-      { code: 'RECOMMENDATION_REQUIRED' },
-    );
-  }
-
   const profile = buildRecommendationProfile(stored);
-  const expectedProfileHash = buildRecommendationProfileHash(profile, { modelVersion: recommendation.modelVersion });
-  if (recommendation.profileInputHash !== expectedProfileHash) {
-    throw createError(
-      409,
-      'Authoritative recommendation is stale for the current profile.',
-      'Refresh your recommendation before running a stress test.',
-      { code: 'RECOMMENDATION_STALE' },
-    );
+  let state;
+  try {
+    state = await requireFreshRecommendationState({ userId: req.user.userId, profileId, profile });
+  } catch (error) {
+    throw createError(error.status || 409, error.message, 'Refresh your recommendation before running a stress test.', {
+      code: error.code || 'RECOMMENDATION_STALE', reasonCodes: error.reasonCodes, freshness: error.freshness,
+    });
   }
 
-  const instrument = recommendation.instruments.find(entry => entry.id === instrumentId);
+  const instrument = state.currentAllocation.instruments.find(entry => entry.id === instrumentId);
   if (!instrument) {
     throw createError(
       400,
@@ -94,7 +81,9 @@ router.post('/stress-test', verifyJWT, validateStrict(stressScenarioSchema), asy
   res.json({
     ...buildStressScenarioReport({ instrument, principal }),
     profile_id: profileId,
-    recommendation_generated_at: recommendation.generatedAt,
+    recommendation_generated_at: state.recommendation.generatedAt,
+    allocation_revision: state.allocationRevision.revision,
+    portfolio_fingerprint: state.portfolioFingerprint,
   });
 }));
 
@@ -144,11 +133,11 @@ router.post('/custom-portfolio', verifyJWT, validateStrict(customPortfolioProjec
     } else assetClassAllocation.debt += instrument.allocationWeight * 100;
   }
 
-  const recommendation = await Recommendation.findOne({ profileId, userId: req.user.userId }).sort({ generatedAt: -1 }).lean();
+  const recommendationState = await resolveCurrentRecommendationState({ userId: req.user.userId, profileId, profile });
   let recommendationMatchPct = null;
-  if (recommendation?.instruments?.length) {
+  if (recommendationState?.freshness?.fresh && recommendationState.currentAllocation?.instruments?.length) {
     const reference = {};
-    for (const instrument of recommendation.instruments) {
+    for (const instrument of recommendationState.currentAllocation.instruments) {
       const key = resolveAssetKey(instrument.id);
       reference[key] = (reference[key] || 0) + Number(instrument.allocationWeight);
     }

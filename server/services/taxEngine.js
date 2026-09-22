@@ -143,18 +143,48 @@ const TAX_SOURCES = Object.freeze({
     ]),
     'FY2026-27': Object.freeze([
         Object.freeze({
+            authority: 'Income Tax Department — Government of India',
+            title: 'Income-tax Act, 2025 as amended by Finance Act, 2026',
+            url: 'https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf',
+            role: 'TAX_POLICY',
+        }),
+        Object.freeze({
+            authority: 'Income Tax Department — Government of India',
+            title: 'Budget 2026 tax FAQs and slab/rebate explanation',
+            url: 'https://www.incometaxindia.gov.in/documents/d/guest/FAQs-Budget-2026.pdf',
+            role: 'TAX_POLICY',
+        }),
+        Object.freeze({
+            authority: 'Income Tax Department — Government of India',
+            title: 'Objective and scope of the new Income-tax Act, 2025',
+            url: 'https://www.incometax.gov.in/iec/foportal/help/all-topics/e-filing-services/objective-and-scope-new-act',
+            role: 'STATUTE_EFFECTIVE_DATE',
+        }),
+        Object.freeze({
             authority: 'Government of India — Union Budget',
             title: 'Finance Bill 2026 Memorandum',
             url: 'https://www.indiabudget.gov.in/doc/memo.pdf',
             role: 'TAX_POLICY',
         }),
-        Object.freeze({
-            authority: 'Income Tax Department',
-            title: 'Individual return applicability and tax regime guidance',
-            url: 'https://www.incometax.gov.in/iec/foportal/help/individual/return-applicable-1?fromCampaign=true',
-            role: 'TAX_POLICY',
-        }),
     ]),
+});
+
+const TAX_STATUTE_METADATA = Object.freeze({
+    'FY2025-26': Object.freeze({
+        statute: 'INCOME_TAX_ACT_1961',
+        effectiveFrom: '1961-04-01',
+        fiscalYear: 'FY2025-26',
+        taxYear: 'TY2025-26',
+        policyStatus: 'HISTORICAL_PRIOR_LAW',
+    }),
+    'FY2026-27': Object.freeze({
+        statute: 'INCOME_TAX_ACT_2025',
+        effectiveFrom: '2026-04-01',
+        fiscalYear: 'FY2026-27',
+        taxYear: 'TY2026-27',
+        policyStatus: 'CURRENT_STATUTE_VERSIONED',
+        legacyReferencePolicy: 'Legacy section labels may be retained only as aliases; they are not current statutory authority.',
+    }),
 });
 
 const TAX_POLICY_RULES = Object.freeze({
@@ -213,6 +243,8 @@ export const TAX_SLABS_BY_FY = Object.freeze({
         verified: true,
         policyVersion: 'tax-policy-FY2025-26-v2',
         sourceReferences: TAX_SOURCES['FY2025-26'],
+        statuteMetadata: TAX_STATUTE_METADATA['FY2025-26'],
+        verifiedRuleIds: Object.freeze(['FY2025-26_NEW_SLABS', 'FY2025-26_OLD_SLABS', 'FY2025-26_CESS', 'FY2025-26_CAPITAL_GAINS']),
         new: FY2025_26_NEW_SLABS,
         old: FY2025_26_OLD_NON_SENIOR_SLABS,
         oldByAge: Object.freeze({
@@ -225,6 +257,8 @@ export const TAX_SLABS_BY_FY = Object.freeze({
         verified: true,
         policyVersion: 'tax-policy-FY2026-27-v2',
         sourceReferences: TAX_SOURCES['FY2026-27'],
+        statuteMetadata: TAX_STATUTE_METADATA['FY2026-27'],
+        verifiedRuleIds: Object.freeze(['FY2026-27_NEW_SLABS', 'FY2026-27_OLD_SLABS', 'FY2026-27_STANDARD_DEDUCTION', 'FY2026-27_REBATE', 'FY2026-27_CESS', 'FY2026-27_CAPITAL_GAINS', 'FY2026-27_SGB_MATURITY_QUALIFICATION']),
         new: FY2026_27_NEW_SLABS,
         old: FY2026_27_OLD_NON_SENIOR_SLABS,
         oldByAge: Object.freeze({
@@ -259,6 +293,8 @@ export function getTaxPolicyMetadata(fiscalYear) {
         policyVersion: policy.policyVersion,
         fiscalYear,
         verified: true,
+        statuteMetadata: policy.statuteMetadata,
+        verifiedRuleIds: policy.verifiedRuleIds,
         sourceReferences: policy.sourceReferences.map(source => ({ ...source })),
         rules: {
             ...rules,
@@ -583,6 +619,7 @@ export function computeTax(annualIncome, regime, deductions = {}, incomeSource, 
         userAge,
         fiscalYear,
         policyVersion: policy.policyVersion,
+        statuteMetadata: policy.statuteMetadata,
         sourceReferences: policy.sourceReferences,
         inputsUsed: {
             annualIncome,
@@ -667,6 +704,7 @@ export function computeCapitalGainsTaxBuckets({
             surcharge: null,
             marginalRelief: null,
             policyVersion: policy.policyVersion,
+            statuteMetadata: policy.statuteMetadata,
             fiscalYear,
             userAge: ordinary.userAge,
             sourceReferences: policy.sourceReferences,
@@ -715,6 +753,7 @@ export function computeCapitalGainsTaxBuckets({
         holdingPeriodBasis: 'EXPLICIT_TAX_BUCKETS',
         fiscalYear,
         policyVersion: policy.policyVersion,
+        statuteMetadata: policy.statuteMetadata,
         userAge: ordinary.userAge,
         sourceReferences: policy.sourceReferences,
         rulesApplied,

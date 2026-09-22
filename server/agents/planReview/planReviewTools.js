@@ -5,6 +5,7 @@ import AuditRecord from '../../models/AuditRecord.js';
 import { buildRecommendationProfile } from '../../services/recommendationProfile.js';
 import { getCurrentRegulatoryRuleVersion } from '../../services/taxEngine.js';
 import { assessRecommendationFreshness } from '../../services/recommendationFreshness.js';
+import { resolveCurrentRecommendationState } from '../../services/recommendationState.js';
 import { buildGroundedEvidencePacket, makeEvidenceEntry } from '../../services/groundedEvidence.js';
 import { SAFE_PLAN_REVIEW_TOOLS } from './planReviewSchemas.js';
 
@@ -196,7 +197,17 @@ export async function loadPlanReviewContext({ userId, profileId, dependencies = 
   }
 
   const profile = buildRecommendationProfile(storedProfile);
-  const recommendation = await latestOwnedRecommendationQuery(profileId, userId, recommendationModel);
+  let recommendation;
+  let freshness;
+  if (!dependencies.profileModel && !dependencies.recommendationModel && !dependencies.auditModel) {
+    const state = await resolveCurrentRecommendationState({ userId, profileId, profile });
+    recommendation = state.currentRecommendationView;
+    freshness = state.freshness;
+  } else {
+    // Test/adapter callers may provide isolated model doubles. Their path is
+    // still read-only; production uses the canonical resolver above.
+    recommendation = await latestOwnedRecommendationQuery(profileId, userId, recommendationModel);
+  }
   let recommendationRegulatoryRuleVersion = recommendation?.regulatoryRuleVersion ?? null;
   if (recommendation && !recommendationRegulatoryRuleVersion && auditModel) {
     const audit = await auditModel.findOne({ recommendationId: recommendation._id, userId })
@@ -205,16 +216,17 @@ export async function loadPlanReviewContext({ userId, profileId, dependencies = 
     recommendationRegulatoryRuleVersion = audit?.regulatory_rule_version || null;
   }
   const currentRegulatoryRuleVersion = (dependencies.getCurrentRegulatoryRuleVersion || getCurrentRegulatoryRuleVersion)();
+  freshness ||= assessRecommendationFreshness({
+    profile,
+    recommendation,
+    currentRegulatoryRuleVersion,
+    recommendationRegulatoryRuleVersion,
+  });
   return {
     profile,
     profileContext: buildProfileContext(storedProfile, profile),
     recommendation,
     recommendationSummary: buildRecommendationSummary(recommendation),
-    freshness: assessRecommendationFreshness({
-      profile,
-      recommendation,
-      currentRegulatoryRuleVersion,
-      recommendationRegulatoryRuleVersion,
-    }),
+    freshness,
   };
 }

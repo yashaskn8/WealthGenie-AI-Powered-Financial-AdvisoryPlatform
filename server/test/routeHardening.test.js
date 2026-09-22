@@ -8,6 +8,8 @@ import { regimeAdjustSchema } from '../validation/schemas.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
+import RecommendationState from '../models/RecommendationState.js';
+import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 
 function buildApp() {
   const app = express();
@@ -71,6 +73,8 @@ test('market-context adjustment rejects a recommendation from an older profile s
   };
   const oldProfileFind = FinancialProfile.findOne;
   const oldRecommendationFind = Recommendation.findOne;
+  const oldStateFind = RecommendationState.findOne;
+  const oldRevisionFind = RecommendationAllocationRevision.findOne;
   const oldSecret = process.env.JWT_SECRET;
   FinancialProfile.findOne = () => ({ lean: async () => profile });
   Recommendation.findOne = () => ({
@@ -82,6 +86,11 @@ test('market-context adjustment rejects a recommendation from an older profile s
         instruments: [{ id: 'ppf', riskScore: 1, allocationWeight: 1 }],
       }),
     }),
+  });
+  RecommendationState.findOne = () => ({ lean: async () => null });
+  RecommendationAllocationRevision.findOne = () => ({
+    sort: () => ({ lean: async () => null }),
+    lean: async () => null,
   });
   process.env.JWT_SECRET = 'test_jwt_secret_that_is_at_least_32_chars';
   try {
@@ -98,6 +107,8 @@ test('market-context adjustment rejects a recommendation from an older profile s
   } finally {
     FinancialProfile.findOne = oldProfileFind;
     Recommendation.findOne = oldRecommendationFind;
+    RecommendationState.findOne = oldStateFind;
+    RecommendationAllocationRevision.findOne = oldRevisionFind;
     if (oldSecret === undefined) delete process.env.JWT_SECRET;
     else process.env.JWT_SECRET = oldSecret;
   }

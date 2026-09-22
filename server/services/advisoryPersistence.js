@@ -4,8 +4,17 @@ import Recommendation from '../models/Recommendation.js';
 import AuditRecord from '../models/AuditRecord.js';
 import IdempotencyKey from '../models/IdempotencyKey.js';
 import AuditChainHead from '../models/AuditChainHead.js';
+import RecommendationState from '../models/RecommendationState.js';
+import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import { prepareAuditChainEntry, advanceAuditChainHead } from './auditChain.js';
 import { omitUnsetOptionalUniqueFields, optionalUniqueIndex } from '../config/mongoCompatibility.js';
+import { buildPortfolioFingerprint } from './recommendationFingerprint.js';
+import {
+  PROJECTION_ASSUMPTION_POLICY_HASH,
+  PROJECTION_ASSUMPTION_SOURCE,
+  PROJECTION_ASSUMPTION_VERSION,
+} from './instrumentConstants.js';
+import { RECOMMENDATION_POLICY_VERSION } from './recommendationProfile.js';
 
 let advisoryPersistenceReady = null;
 
@@ -18,6 +27,8 @@ async function ensureAdvisoryPersistenceReady() {
         AuditRecord.init(),
         AuditChainHead.init(),
         IdempotencyKey.init(),
+        RecommendationState.init(),
+        RecommendationAllocationRevision.init(),
       ]);
       // Production disables general auto-index creation. This one uniqueness
       // constraint is part of the advisory correctness boundary, not tuning.
@@ -77,6 +88,28 @@ export async function persistAdvisoryAtomically({
   let committedResponse = null;
   try {
     await session.withTransaction(async () => {
+      const existingState = await RecommendationState.findOne({
+        userId: recommendation.userId,
+        profileId: recommendation.profileId,
+      }).session(session).lean();
+      const generationRevision = Number(existingState?.generationRevision || 0) + 1;
+      const instruments = recommendation.instruments || [];
+      const portfolioFingerprint = buildPortfolioFingerprint(instruments);
+      const persistedRecommendation = {
+        ...recommendation,
+        recommendationGeneration: generationRevision,
+        recommendationPolicyVersion: recommendation.recommendationPolicyVersion || RECOMMENDATION_POLICY_VERSION,
+      };
+      const initialRevisionId = new mongoose.Types.ObjectId();
+      if (auditRecord.recommendations && typeof auditRecord.recommendations === 'object') {
+        auditRecord.recommendations = {
+          ...auditRecord.recommendations,
+          recommendationGeneration: generationRevision,
+          allocationRevision: 1,
+          allocationSource: persistedRecommendation.currentAllocationSource || 'ORIGINAL_RECOMMENDATION',
+          portfolioFingerprint,
+        };
+      }
       const chainEntry = await prepareAuditChainEntry(auditRecord, session);
       committedResponse = response?.recommendation
         ? {
@@ -88,17 +121,56 @@ export async function persistAdvisoryAtomically({
           },
         }
         : { ...response, audit_hash: chainEntry.record.record_hash };
+      committedResponse = {
+        ...committedResponse,
+        generation_instruments: instruments,
+        allocation_revision: 1,
+        current_allocation_source: persistedRecommendation.currentAllocationSource || 'ORIGINAL_RECOMMENDATION',
+        portfolio_fingerprint: portfolioFingerprint,
+      };
 
       if (profile) {
         await FinancialProfile.create([profile], { session });
       }
 
       await Recommendation.create([omitUnsetOptionalUniqueFields({
-        ...recommendation,
+        ...persistedRecommendation,
         idempotencyOperationId: idempotencyClaim.operationId,
         idempotencyRequestHash: idempotencyClaim.requestHash,
         responseSnapshot: committedResponse,
       })], { session });
+
+      await RecommendationAllocationRevision.create([{
+        _id: initialRevisionId,
+        recommendationId: persistedRecommendation._id,
+        profileId: persistedRecommendation.profileId,
+        userId: persistedRecommendation.userId,
+        revision: 1,
+        previousRevision: null,
+        source: persistedRecommendation.currentAllocationSource || 'ORIGINAL_RECOMMENDATION',
+        instruments,
+        profileInputHash: persistedRecommendation.profileInputHash,
+        modelVersion: persistedRecommendation.modelVersion,
+        recommendationPolicyVersion: persistedRecommendation.recommendationPolicyVersion,
+        regulatoryRuleVersion: persistedRecommendation.regulatoryRuleVersion,
+        returnAssumptionVersion: instruments.find(item => item.returnAssumptionVersion)?.returnAssumptionVersion || PROJECTION_ASSUMPTION_VERSION,
+        returnAssumptionHash: instruments.find(item => item.returnAssumptionHash)?.returnAssumptionHash || PROJECTION_ASSUMPTION_POLICY_HASH,
+        returnAssumptionSource: instruments.find(item => item.returnSource)?.returnSource || PROJECTION_ASSUMPTION_SOURCE,
+        portfolioFingerprint,
+      }], { session });
+      await RecommendationState.findOneAndUpdate({
+        userId: persistedRecommendation.userId,
+        profileId: persistedRecommendation.profileId,
+      }, {
+        $set: {
+          currentRecommendationId: persistedRecommendation._id,
+          currentAllocationRevision: 1,
+          currentAllocationRevisionId: initialRevisionId,
+          generationRevision,
+          profileInputHash: persistedRecommendation.profileInputHash,
+          portfolioFingerprint,
+        },
+      }, { session, upsert: true, new: true, setDefaultsOnInsert: true });
 
       await testHooks.afterRecommendationCreate?.(session);
 

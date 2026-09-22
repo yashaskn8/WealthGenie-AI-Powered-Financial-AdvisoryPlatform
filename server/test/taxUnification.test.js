@@ -150,10 +150,16 @@ test('SGB requires an explicit redemption channel and separates coupon from capi
   const maturity = calculatePostTaxReturn('SGB', 0.13, 1_500_000, 8, 'new', 10_000, 35, 'salary', undefined, FY, {
     redemptionChannel: 'MATURITY_REDEMPTION', couponRate: 0.025,
   });
-  assert.equal(maturity.status, 'CALCULATED');
-  assert.equal(maturity.redemptionChannel, 'MATURITY_REDEMPTION');
-  assert.ok(maturity.grossGain > maturity.incrementalTax);
-  assert.match(maturity.notes, /not assumed by default/);
+  assert.equal(maturity.status, 'REQUIRES_TAX_INPUTS');
+  assert.ok(maturity.unavailableReasons.includes('SGB_MATURITY_EXEMPTION_NOT_ESTABLISHED'));
+  const qualifiedMaturity = calculatePostTaxReturn('SGB', 0.13, 1_500_000, 8, 'new', 10_000, 35, 'salary', undefined, FY, {
+    redemptionChannel: 'MATURITY_REDEMPTION', couponRate: 0.025,
+    acquiredAtOriginalIssue: true, heldContinuously: true,
+  });
+  assert.equal(qualifiedMaturity.status, 'CALCULATED');
+  assert.equal(qualifiedMaturity.redemptionChannel, 'MATURITY_REDEMPTION');
+  assert.ok(qualifiedMaturity.grossGain > qualifiedMaturity.incrementalTax);
+  assert.match(qualifiedMaturity.notes, /original-issue|conditional/i);
 });
 
 test('gold long-term taxRate is derived from the same tax amount that includes cess', () => {

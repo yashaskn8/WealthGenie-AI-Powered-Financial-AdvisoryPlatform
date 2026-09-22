@@ -48,6 +48,20 @@ const GoalSchema = new mongoose.Schema({
   observed_market_fact: { type: Boolean, enum: [false] },
   provider_forecast: { type: Boolean, enum: [false] },
   inflation_assumption: { type: Number, min: 0, max: 1 },
+  sourceRecommendationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Recommendation', default: null },
+  sourceAllocationRevision: { type: Number, min: 1, default: null },
+  sourceProfileInputHash: { type: String, match: /^[a-f0-9]{64}$/, default: null },
+  sourceModelVersion: { type: String, default: null },
+  sourceRecommendationPolicyVersion: { type: String, default: null },
+  sourceRegulatoryRuleVersion: { type: String, default: null },
+  sourceReturnAssumptionVersion: { type: String, default: null },
+  sourceReturnAssumptionSource: { type: String, default: null },
+  sourcePortfolioFingerprint: { type: String, match: /^[a-f0-9]{64}$/, default: null },
+  calculationFreshness: {
+    fresh: { type: Boolean, default: false },
+    reasonCodes: { type: [String], default: [] },
+    checkedAt: { type: Date, default: null },
+  },
   gemini_advice: { type: String, maxlength: 2000 },
 }, { timestamps: true });
 

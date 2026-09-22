@@ -31,6 +31,7 @@ import { ProviderManager } from '../services/providerAbstraction.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
 import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
+import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
 
 const JWT_SECRET = 'deferred-advisory-test-secret-key-32ch';
 process.env.JWT_SECRET = JWT_SECRET;
@@ -81,6 +82,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     ...canonicalProfile({ monthlyTakeHome: 120000, monthlySavings: 35000, age: 32 }),
     recommendationProfileVersion: 'financial-profile-1.0.0',
   });
+  const validMlV1ProfileHash = buildRecommendationProfileHash(profile.toObject(), { modelVersion: 'ml_v1' });
 
   let recData = null;
   let serverTimingHeader = null;
@@ -310,7 +312,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
       mlFallback: false,
       modelVersion: 'ml_v1',
       regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
-      profileInputHash: 'b'.repeat(64),
+      profileInputHash: validMlV1ProfileHash,
     });
 
     const res = await fetch(`${baseUrl}/api/recommend/${newRecId}/advisory`, {
@@ -339,7 +341,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
       mlFallback: false,
       modelVersion: 'ml_v1',
       regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
-      profileInputHash: 'c'.repeat(64),
+      profileInputHash: validMlV1ProfileHash,
     });
 
     const res = await fetch(`${baseUrl}/api/recommend/${failedRecId}/advisory`, {

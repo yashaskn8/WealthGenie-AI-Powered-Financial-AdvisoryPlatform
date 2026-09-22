@@ -2,13 +2,12 @@ import express from 'express';
 import { verifyJWT } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
 import FinancialProfile from '../models/FinancialProfile.js';
-import Recommendation from '../models/Recommendation.js';
 import {
   buildRecommendationProfile,
-  buildRecommendationProfileHash,
 } from '../services/recommendationProfile.js';
 import { getLiveMarketContext } from '../services/marketContextService.js';
 import { applyProfileSafeMarketContextAdjustment } from '../services/regimeRotationEngine.js';
+import { requireFreshRecommendationState } from '../services/recommendationState.js';
 import {
   validate, validateQuery, regimeAdjustSchema, marketContextQuerySchema,
 } from '../validation/schemas.js';
@@ -33,36 +32,31 @@ router.post('/adjust', verifyJWT, validate(regimeAdjustSchema), asyncHandler(asy
   if (!profileDocument) {
     throw createError(404, 'Profile not found or access denied', 'Financial profile not found.');
   }
-  const recommendation = await Recommendation.findOne({
-    profileId,
-    userId: req.user.userId,
-  }).sort({ generatedAt: -1 }).lean();
-  if (!recommendation?.instruments?.length) {
-    throw createError(404, 'No authoritative recommendation found', 'Generate a recommendation before previewing a market-context adjustment.');
-  }
   const profile = buildRecommendationProfile(profileDocument);
-  const expectedProfileHash = buildRecommendationProfileHash(profile, {
-    modelVersion: recommendation.modelVersion,
-  });
-  if (recommendation.profileInputHash !== expectedProfileHash) {
-    throw createError(
-      409,
-      'Recommendation was generated from an older profile state.',
-      'Regenerate recommendations before previewing a market-context adjustment.',
-      { code: 'STALE_RECOMMENDATION_PROFILE' },
-    );
+  let state;
+  try {
+    state = await requireFreshRecommendationState({ userId: req.user.userId, profileId, profile });
+  } catch (error) {
+    const publicCode = error.reasonCodes?.includes('PROFILE_CHANGED')
+      ? 'STALE_RECOMMENDATION_PROFILE'
+      : (error.code || 'RECOMMENDATION_STALE');
+    throw createError(error.status || 409, error.message, 'Regenerate recommendations before previewing a market-context adjustment.', {
+      code: publicCode, reasonCodes: error.reasonCodes, freshness: error.freshness,
+    });
   }
   const marketContext = await getLiveMarketContext();
   const result = applyProfileSafeMarketContextAdjustment({
     profile,
-    instruments: recommendation.instruments,
+    instruments: state.currentAllocation.instruments,
     marketContext,
   });
   res.json({
     ...result,
     marketContext,
-    recommendationId: String(recommendation._id),
+    recommendationId: String(state.recommendation._id),
     profileId: String(profileDocument._id),
+    allocation_revision: state.allocationRevision.revision,
+    portfolio_fingerprint: state.portfolioFingerprint,
     persisted: false,
   });
 }));

@@ -15,6 +15,7 @@ export const PRODUCT_TAX_CLASSES = Object.freeze({
   EQUITY_MF_112A: 'EQUITY_MF_SECTION_112A',
   EQUITY_MF_ELSS: 'EQUITY_MF_ELSS_SECTION_112A',
   DEBT_MF_50AA: 'DEBT_MF_SECTION_50AA',
+  SGB: 'SGB_CONDITIONAL_MATURITY_TREATMENT',
 });
 
 export const PRODUCT_TAX_STATUSES = Object.freeze({
@@ -57,6 +58,12 @@ const FD_SOURCE = Object.freeze({
   url: 'https://sbi.co.in/web/interest-rates/deposit-rates/retail-domestic-term-deposits',
   role: 'PRODUCT_RULE',
 });
+const SGB_SOURCE = Object.freeze({
+  authority: 'Income Tax Department — Government of India',
+  title: 'Budget 2026 FAQ — Sovereign Gold Bond maturity exemption conditions',
+  url: 'https://www.incometaxindia.gov.in/documents/d/guest/FAQs-Budget-2026.pdf',
+  role: 'PRODUCT_RULE',
+});
 
 const EXACT_PARENT_TAX_METADATA = Object.freeze({
   ppf: Object.freeze({
@@ -91,6 +98,13 @@ const EXACT_PARENT_TAX_METADATA = Object.freeze({
       'FRSB_INTEREST_TAXABLE',
       'FRSB_COUPON_RESETS_SEMIANNUALLY',
     ]),
+  }),
+  sgb: Object.freeze({
+    taxClass: PRODUCT_TAX_CLASSES.SGB,
+    displayName: 'Sovereign Gold Bond',
+    sourceReferences: Object.freeze([SGB_SOURCE]),
+    rulesApplied: Object.freeze(['SGB_COUPON_TAXABLE', 'SGB_MATURITY_EXEMPTION_REQUIRES_ORIGINAL_ISSUE_AND_CONTINUOUS_HOLDING']),
+    factsRequired: Object.freeze(['redemptionChannel', 'acquiredAtOriginalIssue', 'heldContinuously']),
   }),
 });
 
@@ -157,6 +171,9 @@ export function getRequiredTaxInputs(taxClass) {
     PRODUCT_TAX_CLASSES.RBI_FRSB_INTEREST,
   ].includes(taxClass)) {
     return ['annualGrossIncome', 'incomeSource', 'regime', 'fiscalYear', 'userAge'];
+  }
+  if (taxClass === PRODUCT_TAX_CLASSES.SGB) {
+    return ['annualGrossIncome', 'incomeSource', 'regime', 'fiscalYear', 'userAge', 'redemptionChannel', 'acquiredAtOriginalIssue', 'heldContinuously'];
   }
   if (taxClass === PRODUCT_TAX_CLASSES.DEBT_MF_50AA) {
     return ['annualGrossIncome', 'incomeSource', 'regime', 'fiscalYear', 'userAge', 'holdingPeriodMonths'];

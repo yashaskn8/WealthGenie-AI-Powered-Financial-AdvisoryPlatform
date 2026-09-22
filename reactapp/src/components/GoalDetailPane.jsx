@@ -150,6 +150,7 @@ export const GoalDetailPane = ({
   simulationLoading,
   simulationError,
   simulationResult,
+  calculationFreshness,
 }) => {
   const [isEditingSettings, setIsEditingSettings] = useState(false);
   const [editTarget, setEditTarget] = useState('');
@@ -188,10 +189,11 @@ export const GoalDetailPane = ({
   };
 
   const goalId = selectedGoal?._id || selectedGoal?.goalId;
+  const isCalculationFresh = calculationFreshness?.fresh !== false;
   const currentSipCandidate = Number(simulatedSips[goalId] ?? selectedGoal?.simulated_monthly_contribution);
   const currentSip = Number.isFinite(currentSipCandidate) && currentSipCandidate >= 0 ? currentSipCandidate : null;
   const liveProbability = getLiveProbability(selectedGoal);
-  const recommendedSipCandidate = Number(selectedGoal.recommended_sip);
+  const recommendedSipCandidate = isCalculationFresh ? Number(selectedGoal.recommended_sip) : NaN;
   const recommendedSip = Number.isFinite(recommendedSipCandidate) && recommendedSipCandidate >= 0 ? recommendedSipCandidate : null;
   const capacityCandidate = Number(monthlySavingsCapacity);
   const sliderMax = Number.isFinite(capacityCandidate) && capacityCandidate > 0 ? capacityCandidate : 0;
@@ -572,7 +574,7 @@ export const GoalDetailPane = ({
         </motion.div>
 
         {/* ─── Neural AI Insight Card ──────────────────────────────────── */}
-        {selectedGoal.gemini_advice && (
+        {selectedGoal.gemini_advice && isCalculationFresh && (
           <motion.div 
             initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.25 }}
             style={{
@@ -606,7 +608,7 @@ export const GoalDetailPane = ({
         )}
 
         {/* ─── Monte Carlo Engine Toggle Button ─────────────────────────── */}
-        {selectedGoal.chartData && (
+        {selectedGoal.chartData && isCalculationFresh && (
           <motion.div initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }}>
             <motion.button
               whileHover={{ scale: 1.015, boxShadow: '0 10px 30px rgba(6, 182, 212, 0.25)' }}

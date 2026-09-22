@@ -10,13 +10,12 @@ import {
 } from '../validation/financialSchemas.js';
 import {
   buildRecommendationProfile,
-  buildRecommendationProfileHash,
   toProfileApiResponse,
   toProfilePersistence,
 } from '../services/recommendationProfile.js';
 import { assessSuitabilityRisk } from '../services/riskProfiler.js';
 import FinancialProfile from '../models/FinancialProfile.js';
-import Recommendation from '../models/Recommendation.js';
+import { requireFreshRecommendationState } from '../services/recommendationState.js';
 import { calculateFinancialHealthScore } from '../services/financialHealthEngine.js';
 import { redisClient, redisAvailable } from '../config/redis.js';
 import { idempotency } from '../middleware/idempotency.js';
@@ -319,16 +318,18 @@ router.get('/current', verifyJWT, asyncHandler(async (req, res) => {
 router.get('/:profileId/health-score', verifyJWT, asyncHandler(async (req, res) => {
   const profile = await FinancialProfile.findOne({ _id: req.params.profileId, userId: req.user.userId }).lean();
   if (!profile) throw createError(404, 'Profile not found or access denied', 'Financial profile not found.');
-  const recommendation = await Recommendation.findOne({ profileId: profile._id, userId: req.user.userId })
-    .sort({ generatedAt: -1 })
-    .lean();
-  if (recommendation) {
-    const expectedHash = buildRecommendationProfileHash(profile, { modelVersion: recommendation.modelVersion });
-    if (recommendation.profileInputHash !== expectedHash) {
-      throw createError(409, 'Recommendation was generated from an older profile state.', 'Regenerate recommendations before calculating financial health.');
+  let instruments = [];
+  try {
+    const state = await requireFreshRecommendationState({ userId: req.user.userId, profileId: profile._id, profile });
+    instruments = state.currentAllocation?.instruments || [];
+  } catch (error) {
+    if (error.code !== 'RECOMMENDATION_REQUIRED') {
+      throw createError(error.status || 409, error.message, 'Regenerate recommendations before calculating financial health.', {
+        code: error.code || 'RECOMMENDATION_STALE', reasonCodes: error.reasonCodes, freshness: error.freshness,
+      });
     }
   }
-  res.json(calculateFinancialHealthScore(profile, recommendation?.instruments || []));
+  res.json(calculateFinancialHealthScore(profile, instruments));
 }));
 
 router.post(

@@ -171,7 +171,7 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
     instrumentType, nominalRate, annualIncome, holdingYears, regime, monthlySIP, userAge, incomeSource,
   } = req.body;
   const {
-    fiscalYear, deductions = {}, acquisitionDate, redemptionDate, redemptionChannel,
+    fiscalYear, deductions = {}, acquisitionDate, redemptionDate, redemptionChannel, acquiredAtOriginalIssue, heldContinuously,
     couponRate, annuityFraction, retirementTiming, section112AExemptionUsed,
   } = req.body;
   if (!isFYVerified(fiscalYear)) {
@@ -194,6 +194,8 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
       acquisitionDate,
       redemptionDate,
       redemptionChannel,
+      acquiredAtOriginalIssue,
+      heldContinuously,
       couponRate,
       annuityFraction,
       retirementTiming,
@@ -219,6 +221,7 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
     inputsUsed: {
       annualIncome, incomeSource, regime, fiscalYear, holdingYears, monthlySIP, userAge,
       nominalRate, deductions, acquisitionDate, redemptionDate, redemptionChannel,
+      acquiredAtOriginalIssue, heldContinuously,
     },
     rulesApplied: [result.taxType],
     assumptions: [
@@ -251,6 +254,8 @@ router.post('/post-tax-return/batch', validate(postTaxReturnBatchSchema), asyncH
       acquisitionDate: inv.acquisitionDate,
       redemptionDate: inv.redemptionDate,
       redemptionChannel: inv.redemptionChannel,
+      acquiredAtOriginalIssue: inv.acquiredAtOriginalIssue,
+      heldContinuously: inv.heldContinuously,
       couponRate: inv.couponRate,
       annuityFraction: inv.annuityFraction,
       retirementTiming: inv.retirementTiming,

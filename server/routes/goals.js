@@ -4,7 +4,6 @@ import { asyncHandler, createError } from '../middleware/errorHandler.js';
 import { customGoalSchema, customGoalUpdateSchema, goalSimulationSchema, validateStrict } from '../validation/financialSchemas.js';
 import Goal from '../models/Goal.js';
 import FinancialProfile from '../models/FinancialProfile.js';
-import Recommendation from '../models/Recommendation.js';
 import { reverseSIP, runMonteCarloWithGoal } from '../services/monteCarloEngine.js';
 import { buildCovarianceMatrix, portfolioReturn, portfolioVol } from '../services/portfolioEngine.js';
 import { getGoalAdvisory } from '../services/geminiService.js';
@@ -21,6 +20,7 @@ import {
   PROJECTION_ASSUMPTION_VERSION,
 } from '../services/instrumentConstants.js';
 import { triggerPlanHealthCheck } from '../services/planHealthMonitor.js';
+import { assessGoalCalculationFreshness, requireFreshRecommendationState } from '../services/recommendationState.js';
 
 const router = Router();
 const GOAL_INFLATION_ASSUMPTION = 0.05;
@@ -66,7 +66,8 @@ function toDecimalRate(value) {
 
 /** Uses only the persisted authoritative recommendation for this exact profile. */
 export async function _getBlendedPortfolioMetrics(userId, profileId, profile = undefined, overrideRec = null) {
-  const recommendation = overrideRec || await Recommendation.findOne({ userId, profileId }).sort({ generatedAt: -1 }).lean();
+  let state = null;
+  const recommendation = overrideRec || (state = await requireFreshRecommendationState({ userId, profileId, profile })).currentRecommendationView;
   const instruments = recommendation?.instruments;
   if (!instruments?.length) {
     const error = new Error('Generate an authoritative recommendation before creating or recalculating goals.');
@@ -105,6 +106,8 @@ export async function _getBlendedPortfolioMetrics(userId, profileId, profile = u
     returnDataClass: PROJECTION_ASSUMPTION_DATA_CLASS,
     returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
     returnAssumptionSource: PROJECTION_ASSUMPTION_SOURCE,
+    returnAssumptionHash: state?.allocationRevision?.returnAssumptionHash || null,
+    state,
   };
 }
 
@@ -231,6 +234,16 @@ router.post('/create', verifyJWT, idempotency(), validateStrict(customGoalSchema
     return_data_class: plan.metrics.returnDataClass,
     return_assumption_version: plan.metrics.returnAssumptionVersion,
     return_assumption_source: plan.metrics.returnAssumptionSource,
+    sourceRecommendationId: plan.metrics.state?.recommendation?._id || null,
+    sourceAllocationRevision: plan.metrics.state?.allocationRevision?.revision || null,
+    sourceProfileInputHash: plan.metrics.state?.recommendation?.profileInputHash || null,
+    sourceModelVersion: plan.metrics.state?.recommendation?.modelVersion || null,
+    sourceRecommendationPolicyVersion: plan.metrics.state?.recommendation?.recommendationPolicyVersion || null,
+    sourceRegulatoryRuleVersion: plan.metrics.state?.recommendation?.regulatoryRuleVersion || null,
+    sourceReturnAssumptionVersion: plan.metrics.state?.allocationRevision?.returnAssumptionVersion || plan.metrics.returnAssumptionVersion,
+    sourceReturnAssumptionSource: plan.metrics.state?.allocationRevision?.returnAssumptionSource || plan.metrics.returnAssumptionSource,
+    sourcePortfolioFingerprint: plan.metrics.state?.portfolioFingerprint || null,
+    calculationFreshness: { fresh: true, reasonCodes: [], checkedAt: new Date() },
     observed_market_fact: false,
     provider_forecast: false,
     inflation_assumption: GOAL_INFLATION_ASSUMPTION,
@@ -251,11 +264,26 @@ router.get('/', verifyJWT, asyncHandler(async (req, res) => {
   // GET is deliberately read-only. Advice regeneration is an explicit
   // PATCH so a list request never fans out to LLM providers or writes goals.
   const goals = await Goal.find({ userId: req.user.userId }).sort({ target_date: 1 }).lean();
-  res.json({ goals: goals.map(goal => ({
+  const stateByProfile = new Map();
+  await Promise.all([...new Set(goals.map(goal => String(goal.profileId)))].map(async profileId => {
+    try {
+      const state = await requireFreshRecommendationState({ userId: req.user.userId, profileId });
+      stateByProfile.set(profileId, state);
+    } catch (error) {
+      stateByProfile.set(profileId, { error });
+    }
+  }));
+  res.json({ goals: goals.map(goal => {
+    const state = stateByProfile.get(String(goal.profileId));
+    const freshness = state?.recommendation
+      ? assessGoalCalculationFreshness(goal, state)
+      : { fresh: false, reasonCodes: state?.error?.reasonCodes || ['SOURCE_MISSING'] };
+    return ({
     ...goal,
     chartData: goal.chart_data,
     advice_stale: isStaleAdvice(goal.gemini_advice),
-  })) });
+    calculation_freshness: freshness,
+  }); }) });
 }));
 
 router.post('/:goalId/simulate', verifyJWT, validateStrict(goalSimulationSchema), asyncHandler(async (req, res) => {
@@ -312,6 +340,13 @@ router.patch('/:goalId/refresh-advice', verifyJWT, asyncHandler(async (req, res)
   const stored = await findOwnedProfile(goal.profileId, req.user.userId);
   if (!stored) throw createError(409, 'The goal profile is unavailable.', 'Financial profile unavailable.');
   const profile = buildRecommendationProfile(stored);
+  const state = await requireFreshRecommendationState({ userId: req.user.userId, profileId: goal.profileId, profile });
+  const existingFreshness = assessGoalCalculationFreshness(goal, state);
+  if (!existingFreshness.fresh) {
+    throw createError(409, 'Goal calculation is stale for the current financial state.', 'Recalculate the goal before refreshing its advisory.', {
+      code: 'GOAL_CALCULATION_STALE', calculationFreshness: existingFreshness,
+    });
+  }
   goal.gemini_advice = await generateGoalAdvice(goal, profile);
   await goal.save();
   res.json({ goalId: goal._id, gemini_advice: goal.gemini_advice });
@@ -354,6 +389,16 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
     goal.return_data_class = plan.metrics.returnDataClass;
     goal.return_assumption_version = plan.metrics.returnAssumptionVersion;
     goal.return_assumption_source = plan.metrics.returnAssumptionSource;
+    goal.sourceRecommendationId = plan.metrics.state?.recommendation?._id || null;
+    goal.sourceAllocationRevision = plan.metrics.state?.allocationRevision?.revision || null;
+    goal.sourceProfileInputHash = plan.metrics.state?.recommendation?.profileInputHash || null;
+    goal.sourceModelVersion = plan.metrics.state?.recommendation?.modelVersion || null;
+    goal.sourceRecommendationPolicyVersion = plan.metrics.state?.recommendation?.recommendationPolicyVersion || null;
+    goal.sourceRegulatoryRuleVersion = plan.metrics.state?.recommendation?.regulatoryRuleVersion || null;
+    goal.sourceReturnAssumptionVersion = plan.metrics.state?.allocationRevision?.returnAssumptionVersion || plan.metrics.returnAssumptionVersion;
+    goal.sourceReturnAssumptionSource = plan.metrics.state?.allocationRevision?.returnAssumptionSource || plan.metrics.returnAssumptionSource;
+    goal.sourcePortfolioFingerprint = plan.metrics.state?.portfolioFingerprint || null;
+    goal.calculationFreshness = { fresh: true, reasonCodes: [], checkedAt: new Date() };
     goal.observed_market_fact = false;
     goal.provider_forecast = false;
     goal.inflation_assumption = GOAL_INFLATION_ASSUMPTION;

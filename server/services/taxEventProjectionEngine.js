@@ -357,6 +357,25 @@ export function calculateCanonicalPostTaxOutcome({ instrumentType, nominalRate, 
     if (!Number.isFinite(couponRate) || couponRate < 0 || couponRate > 1) {
       return unavailableResult({ instrumentType, modelTaxClass, status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS, reasons: ['couponRate'], fiscalYear });
     }
+    if (fiscalYear === 'FY2026-27' && channel === 'MATURITY_REDEMPTION'
+        && (options.acquiredAtOriginalIssue !== true || options.heldContinuously !== true)) {
+      return unavailableResult({
+        instrumentType,
+        modelTaxClass,
+        status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS,
+        reasons: ['SGB_MATURITY_EXEMPTION_NOT_ESTABLISHED', 'acquiredAtOriginalIssue', 'heldContinuously'],
+        fiscalYear,
+      });
+    }
+    if (fiscalYear === 'FY2026-27' && channel === 'RBI_REDEMPTION') {
+      return unavailableResult({
+        instrumentType,
+        modelTaxClass,
+        status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS,
+        reasons: ['SGB_PREMATURE_REDEMPTION_TAX_CLASSIFICATION_REQUIRES_FACTS'],
+        fiscalYear,
+      });
+    }
     const annualPrincipal = monthlySIP * 12;
     const couponGain = annualPrincipal * couponRate;
     const capitalGain = annualPrincipal * Math.max(0, nominalRate - couponRate);
@@ -381,7 +400,9 @@ export function calculateCanonicalPostTaxOutcome({ instrumentType, nominalRate, 
       holdingPeriodBasis: holdingBasis,
       assumptions: ['SGB_COUPON_AND_CAPITAL_GAIN_PATHS_SEPARATE', `SGB_REDEMPTION_CHANNEL_${channel}`],
       details: { redemptionChannel: channel, couponRate, fiscalYear: policy.fiscalYear, policyVersion: policy.policyVersion },
-      notes: 'The redemption channel is explicit. An RBI redemption exemption is not assumed by default; coupon and capital-gain treatment are modeled separately.',
+      notes: channel === 'MATURITY_REDEMPTION'
+        ? 'Maturity exemption is modeled only for an original-issue subscription held continuously until maturity. Secondary-market and premature-redemption exemptions are not inferred.'
+        : 'The redemption channel is explicit. Secondary-market capital gains are modeled separately; premature-redemption exemption is not inferred.',
     });
   }
 

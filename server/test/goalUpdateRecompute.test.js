@@ -20,6 +20,7 @@ import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
 import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
+import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
 
 const testSecret = ['wg037', 'test', 'jwt', 'secret', 'key'].join('-');
 process.env.JWT_SECRET = process.env.JWT_SECRET || testSecret;
@@ -71,6 +72,7 @@ async function ensureDb() {
       }],
       advisoryText: 'Fixture recommendation', mlFallback: true,
       modelVersion: 'test-rule-fallback-4.0.0', generatedAt: new Date(),
+      regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
       profileInputHash: buildRecommendationProfileHash(profile.toObject(), { modelVersion: 'test-rule-fallback-4.0.0' }),
     },
     { upsert: true, new: true },

@@ -77,6 +77,8 @@ export function calculatePostTaxReturn(
     holdingPeriodMonths: options.holdingPeriodMonths ?? (holdingYears * 12),
     section112AExemptionUsed: options.section112AExemptionUsed ?? 0,
     redemptionChannel: options.redemptionChannel ?? explicitLegacyChannel,
+    acquiredAtOriginalIssue: options.acquiredAtOriginalIssue,
+    heldContinuously: options.heldContinuously,
   };
   const result = calculateCanonicalPostTaxOutcome({
     instrumentType,

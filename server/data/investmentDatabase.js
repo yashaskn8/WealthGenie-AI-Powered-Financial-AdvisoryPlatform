@@ -40,8 +40,8 @@ export const TAX_INFO = {
     desc: "Additional ₹50,000 deduction under 80CCD(1B) beyond the ₹1.5L 80C limit. 60% lump sum at retirement is tax-free."
   },
   sgb: {
-    label: "2.5% Interest Taxable · Gains Tax-Free",
-    desc: "2.5% annual interest is taxed at your slab rate. All capital gains at 8-year maturity are fully tax-free under Section 47(viic). Most tax-efficient gold option."
+    label: "2.5% Interest Taxable · Maturity Tax Depends on Acquisition Facts",
+    desc: "2.5% annual interest is taxed at your slab rate. A maturity exemption requires an original-issue subscription and continuous holding until maturity; secondary-market and premature-redemption treatment must be established separately."
   }
 };
 

@@ -25,6 +25,7 @@ import {
   DISCLAIMER,
   PROJECTION_ASSUMPTION_DATA_CLASS,
   PROJECTION_ASSUMPTION_SOURCE,
+  PROJECTION_ASSUMPTION_POLICY_HASH,
   PROJECTION_ASSUMPTION_VERSION,
 } from './instrumentConstants.js';
 import { generatePortfolioProjection } from './projectionEngine.js';
@@ -255,7 +256,8 @@ function buildCorePersistencePayload({
         portfolioReturnAssumption,
         returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
         modelVersion,
-        recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
+      recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
+      returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
         marketAdjustment,
         advisorySummary: '',
       },
@@ -380,6 +382,7 @@ export async function computeCoreRecommendation({
     return_data_class: PROJECTION_ASSUMPTION_DATA_CLASS,
     return_assumption_version: PROJECTION_ASSUMPTION_VERSION,
     return_assumption_source: PROJECTION_ASSUMPTION_SOURCE,
+    return_assumption_hash: PROJECTION_ASSUMPTION_POLICY_HASH,
     observed_market_fact: false,
     provider_forecast: false,
     asset_class_allocation: assetClassAllocation,

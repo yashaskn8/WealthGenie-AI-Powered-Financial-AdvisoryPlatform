@@ -235,7 +235,7 @@ const WHERE_TO_INVEST = {
   "sgb": {
     "title": "Best Platforms & Products for Sovereign Gold Bond (SGB)",
     "riskLevel": 2,
-    "note": "Best gold instrument. Capital gains at 8-year maturity are completely tax-free. Earns 2.5% p.a. interest in addition to gold price appreciation.",
+    "note": "Sovereign gold exposure with 2.5% coupon. Maturity tax treatment requires proof of original-issue subscription and continuous holding; secondary-market and premature-redemption treatment is not inferred.",
     "howToStart": "Open a demat + trading account on Zerodha, Groww, or Angel One. Search for 'SGB' or 'SGBAUG29' on the exchange.",
     "products": [
       {

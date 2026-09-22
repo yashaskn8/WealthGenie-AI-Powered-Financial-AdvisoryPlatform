@@ -17,13 +17,10 @@ import {
 } from '../services/RecommendationPipeline.js';
 import {
   buildRecommendationProfile,
-  buildRecommendationProfileHash,
   buildLlmFinancialContext,
   RECOMMENDATION_POLICY_VERSION,
 } from '../services/recommendationProfile.js';
 import { assessSuitabilityRisk } from '../services/riskProfiler.js';
-import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
-import { assessRecommendationFreshness } from '../services/recommendationFreshness.js';
 import { claimAdvisoryIdempotency, releaseAdvisoryIdempotency } from '../middleware/idempotency.js';
 import { persistAdvisoryAtomically } from '../services/advisoryPersistence.js';
 import { setCache, delCache } from '../config/redis.js';
@@ -34,6 +31,7 @@ import {
 } from '../services/instrumentConstants.js';
 import { verifyAuditChain } from '../services/auditChain.js';
 import { triggerPlanHealthCheck } from '../services/planHealthMonitor.js';
+import { requireFreshRecommendationState, createManualAllocationRevision } from '../services/recommendationState.js';
 import {
   computeCoreRecommendation,
   buildRecommendationCacheKey,
@@ -156,14 +154,22 @@ router.get('/current', verifyJWT, asyncHandler(async (req, res) => {
     throw createError(404, 'Profile not found or access denied', 'Recommendation not found.');
   }
 
-  const recommendation = await Recommendation.findOne({
-    profileId,
-    userId: req.user.userId,
-  }).sort({ generatedAt: -1 }).lean();
-  if (!recommendation) {
-    throw createError(404, 'No recommendation found for this profile', 'Recommendation not found.');
+  let state;
+  try {
+    state = await requireFreshRecommendationState({ userId: req.user.userId, profileId, profile });
+  } catch (error) {
+    if (error.code === 'RECOMMENDATION_REQUIRED') throw createError(404, error.message, 'Recommendation not found.');
+    if (error.code === 'RECOMMENDATION_STALE') {
+      throw createError(error.status || 409, error.message, 'Regenerate recommendations before opening the dashboard.', {
+        code: error.reasonCodes?.includes('REGULATORY_VERSION_UNAVAILABLE') ? 'REGULATORY_POLICY_UNAVAILABLE' : 'STALE_RECOMMENDATION',
+        reasonCodes: error.reasonCodes,
+        freshness: error.freshness,
+        provenance: error.provenance,
+      });
+    }
+    throw error;
   }
-
+  const { recommendation, allocationRevision, freshness, provenance, portfolioFingerprint } = state;
   const snapshot = recommendation.responseSnapshot;
   const response = recommendationPayloadFromSnapshot(snapshot);
   if (!response || typeof response !== 'object' || !Array.isArray(response.instruments)) {
@@ -175,62 +181,25 @@ router.get('/current', verifyJWT, asyncHandler(async (req, res) => {
     );
   }
 
-  const currentRegulatoryRuleVersion = getCurrentRegulatoryRuleVersion();
-  if (!currentRegulatoryRuleVersion) {
-    throw createError(
-      503,
-      'No verified regulatory policy is available for the current fiscal year.',
-      'Regulatory policy metadata is temporarily unavailable.',
-      { code: 'REGULATORY_POLICY_UNAVAILABLE' },
-    );
-  }
-  let recommendationRegulatoryRuleVersion = recommendation.regulatoryRuleVersion;
-  if (!recommendationRegulatoryRuleVersion) {
-    // Legacy documents may lack the denormalized field. Read the immutable
-    // audit source when available; if neither record has it, retain a
-    // compatibility read-only path rather than inventing policy metadata.
-    const audit = await AuditRecord.findOne({
-      recommendationId: recommendation._id,
-      userId: req.user.userId,
-    }).select('regulatory_rule_version').lean();
-    recommendationRegulatoryRuleVersion = audit?.regulatory_rule_version || null;
-  }
-  const freshness = assessRecommendationFreshness({
-    profile,
-    recommendation,
-    currentRegulatoryRuleVersion,
-    recommendationRegulatoryRuleVersion,
-  });
-  if (!freshness.fresh) {
-    const regulatoryUnavailable = freshness.reasonCodes.includes('REGULATORY_VERSION_UNAVAILABLE');
-    if (regulatoryUnavailable) {
-      throw createError(
-        503,
-        'No verified regulatory policy is available for the current fiscal year.',
-        'Regulatory policy metadata is temporarily unavailable.',
-        { code: 'REGULATORY_POLICY_UNAVAILABLE' },
-      );
-    }
-    throw createError(
-      409,
-      freshness.reasonCodes.includes('REGULATORY_POLICY_CHANGED')
-        ? 'Recommendation was generated under an older regulatory policy version.'
-        : 'Recommendation was generated from an older profile state.',
-      'Regenerate recommendations before opening the dashboard.',
-      { code: 'STALE_RECOMMENDATION' },
-    );
-  }
-
   const currentAdvisoryExplanation = advisoryExplanationFromMetadata(recommendation.advisoryMetadata);
+  const currentInstruments = allocationRevision?.instruments || recommendation.instruments;
+  const currentResponse = { ...response, instruments: currentInstruments };
 
   return res.json({
-    ...response,
+    ...currentResponse,
+    generation_instruments: state.generationSnapshot.instruments,
     profileId: String(profile._id),
     recommendationId: String(recommendation._id),
     audit_id: response.audit_id ? String(response.audit_id) : response.audit_id,
     audit_hash: response.audit_hash || snapshot.audit_hash || null,
     advisory_text: recommendation.advisoryText ?? response.advisory_text ?? null,
     advisory_explanation: currentAdvisoryExplanation || response.advisory_explanation || { status: 'PENDING' },
+    allocation_revision: allocationRevision?.revision || 1,
+    allocation_revision_id: allocationRevision?._id ? String(allocationRevision._id) : null,
+    current_allocation_source: allocationRevision?.source || recommendation.currentAllocationSource,
+    portfolio_fingerprint: portfolioFingerprint,
+    calculation_freshness: freshness,
+    state_provenance: provenance,
   });
 }));
 
@@ -248,12 +217,41 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
     throw createError(403, 'Access denied to recommendation', 'Access denied.');
   }
 
+  let recommendationState;
+  try {
+    recommendationState = await requireFreshRecommendationState({
+      userId: req.user.userId,
+      profileId: recommendation.profileId,
+      recommendationId,
+    });
+  } catch (error) {
+    throw createError(error.status || 409, error.message, 'Regenerate recommendations before generating advisory text.', {
+      code: error.code || 'RECOMMENDATION_STALE',
+      reasonCodes: error.reasonCodes,
+      freshness: error.freshness,
+    });
+  }
+  const currentAllocationRevision = recommendationState.allocationRevision?.revision || 1;
+  const currentPortfolioFingerprint = recommendationState.portfolioFingerprint;
+  const advisoryBoundRevision = Number(recommendation.advisoryMetadata?.allocationRevision);
+  const advisoryBoundFingerprint = recommendation.advisoryMetadata?.portfolioFingerprint;
+  const advisoryIsStale = (Number.isInteger(advisoryBoundRevision)
+    && advisoryBoundRevision !== currentAllocationRevision)
+    || (advisoryBoundFingerprint && advisoryBoundFingerprint !== currentPortfolioFingerprint);
+
   const isReady = recommendation.advisoryMetadata?.status === 'READY'
     || recommendation.advisoryMetadata?.status === 'GROUNDED_EXPLANATION_AVAILABLE'
     || recommendation.advisoryMetadata?.status === 'GROUNDED_EXPLANATION_FALLBACK'
     || (Boolean(recommendation.advisoryText) && !['PENDING', 'GENERATING', 'FAILED'].includes(recommendation.advisoryMetadata?.status));
 
   if (isReady) {
+    if (advisoryIsStale) {
+      throw createError(409, 'Advisory text describes an older allocation revision.', 'Refresh the advisory after reviewing the current portfolio.', {
+        code: 'ADVISORY_STALE',
+        allocation_revision: currentAllocationRevision,
+        portfolio_fingerprint: currentPortfolioFingerprint,
+      });
+    }
     return res.json({
       recommendationId: recommendation._id,
       advisory_text: recommendation.advisoryText,
@@ -268,6 +266,8 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
         citations: recommendation.advisoryMetadata?.citations || [],
         validation_status: recommendation.advisoryMetadata?.validation?.status || recommendation.advisoryMetadata?.validation_status,
         generated_at: recommendation.advisoryMetadata?.generatedAt || recommendation.advisoryMetadata?.generated_at,
+        allocation_revision: currentAllocationRevision,
+        portfolio_fingerprint: currentPortfolioFingerprint,
       },
     });
   }
@@ -301,6 +301,18 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
       || (Boolean(current?.advisoryText) && !['PENDING', 'GENERATING', 'FAILED'].includes(current?.advisoryMetadata?.status));
 
     if (currentIsReady) {
+      const currentAdvisoryRevision = Number(current.advisoryMetadata?.allocationRevision);
+      const currentAdvisoryFingerprint = current.advisoryMetadata?.portfolioFingerprint;
+      const currentAdvisoryIsStale = (Number.isInteger(currentAdvisoryRevision)
+        && currentAdvisoryRevision !== currentAllocationRevision)
+        || (currentAdvisoryFingerprint && currentAdvisoryFingerprint !== currentPortfolioFingerprint);
+      if (currentAdvisoryIsStale) {
+        throw createError(409, 'Advisory text describes an older allocation revision.', 'Refresh the advisory after reviewing the current portfolio.', {
+          code: 'ADVISORY_STALE',
+          allocation_revision: currentAllocationRevision,
+          portfolio_fingerprint: currentPortfolioFingerprint,
+        });
+      }
       return res.json({
         recommendationId: current._id,
         advisory_text: current.advisoryText,
@@ -335,13 +347,19 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
     }
 
     const profile = buildRecommendationProfile(storedProfile);
+    const currentState = await requireFreshRecommendationState({
+      userId: req.user.userId,
+      profileId: recommendation.profileId,
+      recommendationId,
+      profile: storedProfile,
+    });
     const suitability = assessSuitabilityRisk(profile);
     const recommendationSnapshot = recommendationPayloadFromSnapshot(recommendation.responseSnapshot);
     const shapExplanation = recommendationSnapshot?.explanation || null;
 
     const advisory = await generateAdvisory({
       profile: buildLlmFinancialContext(profile, suitability),
-      instruments: recommendation.instruments.map(instrument => ({
+      instruments: currentState.currentAllocation.instruments.map(instrument => ({
         id: instrument.id,
         name: instrument.name,
         type: instrument.type,
@@ -364,6 +382,12 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
       citations: advisory.citations,
       validation: advisory.validation,
       generatedAt: advisory.generatedAt,
+      recommendationId: String(recommendation._id),
+      profileId: String(recommendation.profileId),
+      allocationRevision: currentState.allocationRevision.revision,
+      portfolioFingerprint: currentState.portfolioFingerprint,
+      profileInputHash: recommendation.profileInputHash,
+      recommendationPolicyVersion: recommendation.recommendationPolicyVersion || RECOMMENDATION_POLICY_VERSION,
     };
 
     // Update ONLY advisoryText and advisoryMetadata fields on the Recommendation document
@@ -437,18 +461,23 @@ router.get('/audit/:id', verifyJWT, asyncHandler(async (req, res) => {
 }));
 
 router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), asyncHandler(async (req, res) => {
-  const { profileId, weights } = req.body;
+  const { profileId, weights, expectedAllocationRevision } = req.body;
   const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
   if (!stored) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
   const profile = buildRecommendationProfile(stored);
-  const recommendation = await Recommendation.findOne({ profileId, userId: req.user.userId }).sort({ generatedAt: -1 });
-  if (!recommendation) throw createError(404, 'No recommendation found to update', 'No recommendation found.');
-  const expectedProfileHash = buildRecommendationProfileHash(profile, { modelVersion: recommendation.modelVersion });
-  if (recommendation.profileInputHash !== expectedProfileHash) {
-    throw createError(409, 'Recommendation was generated from an older profile state.', 'Regenerate recommendations before changing weights.');
+  let state;
+  try {
+    state = await requireFreshRecommendationState({ userId: req.user.userId, profileId, profile });
+  } catch (error) {
+    throw createError(error.status || 409, error.message, 'Regenerate recommendations before changing weights.', {
+      code: error.code || 'RECOMMENDATION_STALE',
+      reasonCodes: error.reasonCodes,
+      freshness: error.freshness,
+    });
   }
-
-  const instrumentIds = recommendation.instruments.map(instrument => String(instrument.id));
+  const recommendation = state.recommendation;
+  const currentInstruments = state.currentAllocation?.instruments || [];
+  const instrumentIds = currentInstruments.map(instrument => String(instrument.id));
   const suppliedIds = Object.keys(weights);
   if (instrumentIds.length !== suppliedIds.length || instrumentIds.some(id => !suppliedIds.includes(id))) {
     throw createError(400, 'Weights must identify every recommended instrument by id and may not add instruments.', 'Invalid instrument weights.');
@@ -456,43 +485,66 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
   assertPortfolioSuitable(profile, instrumentIds);
 
   const groupTotals = new Map();
-  recommendation.instruments.forEach(instrument => {
+  currentInstruments.forEach(instrument => {
     const cap = resolveConcentrationCap(instrument.toObject ? instrument.toObject() : instrument);
     if (cap) groupTotals.set(cap.key, (groupTotals.get(cap.key) || 0) + weights[instrument.id] * 100);
   });
   for (const [key, total] of groupTotals.entries()) {
-    const cap = resolveConcentrationCap(recommendation.instruments.find(instrument => resolveConcentrationCap(instrument)?.key === key));
+    const cap = resolveConcentrationCap(currentInstruments.find(instrument => resolveConcentrationCap(instrument)?.key === key));
     if (cap && total > cap.maxPct + 0.0001) {
       throw createError(400, `Allocation exceeds ${key} concentration cap of ${cap.maxPct}%`, 'Allocation exceeds suitability limits.');
     }
   }
 
-  recommendation.instruments.forEach(instrument => {
-    instrument.allocationWeight = Number(weights[instrument.id].toFixed(4));
-    instrument.allocation_pct = Number((weights[instrument.id] * 100).toFixed(2));
-  });
+  const updatedInstruments = currentInstruments.map(instrument => ({
+    ...instrument,
+    allocationWeight: Number(weights[instrument.id].toFixed(4)),
+    allocation_pct: Number((weights[instrument.id] * 100).toFixed(2)),
+  }));
+  if (Math.abs(updatedInstruments.reduce((sum, item) => sum + item.allocationWeight, 0) - 1) > 0.001) {
+    throw createError(400, 'Allocation weights must total 100%.', 'Invalid allocation weights.');
+  }
   const supersededAt = new Date();
   const generationMarketAdjustment = plainMarketAdjustment(recommendation.marketAdjustment);
-  recommendation.currentAllocationSource = 'USER_REBALANCED';
-  recommendation.marketAdjustmentSupersededAt = supersededAt;
-  await recommendation.save();
+  let revisionResult;
+  try {
+    revisionResult = await createManualAllocationRevision({
+      userId: req.user.userId,
+      profileId,
+      recommendationId: recommendation._id,
+      expectedRevision: expectedAllocationRevision || state.allocationRevision.revision,
+      instruments: updatedInstruments,
+      correlationId: req.correlationId,
+      traceId: req.traceId,
+    });
+  } catch (error) {
+    if (error.code === 'ALLOCATION_REVISION_CONFLICT') {
+      throw createError(409, error.message, 'This portfolio changed before the rebalance completed. Refresh and retry.', { code: error.code });
+    }
+    if (error.code === 'RECOMMENDATION_STALE') {
+      throw createError(409, error.message, 'Regenerate recommendations before changing weights.', { code: error.code });
+    }
+    throw error;
+  }
   await delCache(buildRecommendationCacheKey(req.user.userId, stored._id, profile, recommendation.modelVersion));
-  const updatedInstruments = recommendation.instruments.map(instrument => (
-    instrument.toObject ? instrument.toObject() : instrument
-  ));
+  const committedInstruments = revisionResult.revision.instruments;
   res.json({
     status: 'success',
     message: 'Recommendation weights updated.',
-    instruments: updatedInstruments,
-    portfolio_return_assumption: buildPortfolioReturnAssumption(updatedInstruments),
+    instruments: committedInstruments,
+    portfolio_return_assumption: buildPortfolioReturnAssumption(committedInstruments),
     return_data_class: PROJECTION_ASSUMPTION_DATA_CLASS,
     return_assumption_version: PROJECTION_ASSUMPTION_VERSION,
     return_assumption_source: PROJECTION_ASSUMPTION_SOURCE,
     observed_market_fact: false,
     provider_forecast: false,
-    asset_class_allocation: buildAssetClassAllocation(updatedInstruments),
-    dashboard_projection: buildDashboardProjection(profile, updatedInstruments),
+    asset_class_allocation: buildAssetClassAllocation(committedInstruments),
+    dashboard_projection: buildDashboardProjection(profile, committedInstruments),
     current_allocation_source: 'USER_REBALANCED',
+    allocation_revision: revisionResult.revision.revision,
+    allocation_revision_id: String(revisionResult.revision._id),
+    portfolio_fingerprint: revisionResult.revision.portfolioFingerprint,
+    recommendation_id: String(recommendation._id),
     generation_market_adjustment: generationMarketAdjustment,
     market_adjustment: generationMarketAdjustment
       ? {

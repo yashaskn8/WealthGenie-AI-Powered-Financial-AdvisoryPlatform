@@ -66,8 +66,8 @@ const GoalPlanner = ({ profile }) => {
       const pa = PRIORITY_ORDER[a.priority] ?? Number.MAX_SAFE_INTEGER;
       const pb = PRIORITY_ORDER[b.priority] ?? Number.MAX_SAFE_INTEGER;
       if (pa !== pb) return pa - pb;
-      const probabilityA = Number(a.probability_of_success);
-      const probabilityB = Number(b.probability_of_success);
+      const probabilityA = a.calculation_freshness?.fresh === false ? NaN : Number(a.probability_of_success);
+      const probabilityB = b.calculation_freshness?.fresh === false ? NaN : Number(b.probability_of_success);
       if (!Number.isFinite(probabilityA)) return Number.isFinite(probabilityB) ? 1 : 0;
       if (!Number.isFinite(probabilityB)) return -1;
       return probabilityA - probabilityB;
@@ -75,12 +75,14 @@ const GoalPlanner = ({ profile }) => {
   }, [goals]);
 
   const getLiveProbability = (goal) => {
+    if (goal?.calculation_freshness?.fresh === false) return null;
     const id = goal._id || goal.goalId;
     const value = Number(goalSimulations[id]?.probability_of_success ?? goal.probability_of_success);
     return Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
   };
 
   const getSimulatedChartData = (goal) => {
+    if (goal?.calculation_freshness?.fresh === false) return [];
     const id = goal._id || goal.goalId;
     return goalSimulations[id]?.chartData ?? goal.chartData ?? [];
   };
@@ -209,7 +211,7 @@ const GoalPlanner = ({ profile }) => {
   // Summary statistics
   const targetValues = goals.map(goal => Number(goal.target_amount));
   const sipValues = goals.map(goal => Number(goal.recommended_sip));
-  const probabilityValues = goals.map(goal => Number(goal.probability_of_success));
+  const probabilityValues = goals.map(goal => goal.calculation_freshness?.fresh === false ? NaN : Number(goal.probability_of_success));
   const totalTarget = targetValues.every(value => Number.isFinite(value) && value >= 0)
     ? targetValues.reduce((sum, value) => sum + value, 0)
     : null;
@@ -491,7 +493,8 @@ const GoalPlanner = ({ profile }) => {
 
           <AnimatePresence>
             {sortedGoals.map((goal, index) => {
-              const cfg = STATUS_CONFIG[goal.status] || UNKNOWN_STATUS_CONFIG;
+              const calculationFresh = goal.calculation_freshness?.fresh !== false;
+              const cfg = calculationFresh ? (STATUS_CONFIG[goal.status] || UNKNOWN_STATUS_CONFIG) : UNKNOWN_STATUS_CONFIG;
               const StatusIcon = cfg.icon;
               const isSelected = selectedGoal?._id === goal._id || selectedGoal?.goalId === goal.goalId;
               const prob = getLiveProbability(goal);
@@ -567,7 +570,7 @@ const GoalPlanner = ({ profile }) => {
                         </span>
                         <span style={{ opacity: 0.3 }}>|</span>
                         <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                          <TrendingUp size={12} color="#10b981" /> {formatINR(goal.recommended_sip)}/mo
+                          <TrendingUp size={12} color="#10b981" /> {calculationFresh ? `${formatINR(goal.recommended_sip)}/mo` : 'Calculation unavailable'}
                         </span>
                       </div>
                     </div>
@@ -582,6 +585,9 @@ const GoalPlanner = ({ profile }) => {
                       }}>
                         <StatusIcon size={12} /> {cfg.label}
                       </span>
+                      {!calculationFresh && (
+                        <span style={{ color: '#f59e0b', fontSize: '0.65rem', fontWeight: 800 }}>RECALCULATE</span>
+                      )}
                       <motion.button 
                         whileHover={{ scale: 1.2, color: '#f43f5e' }}
                         onClick={(e) => { e.stopPropagation(); handleDelete(goal._id || goal.goalId); }}
@@ -657,6 +663,7 @@ const GoalPlanner = ({ profile }) => {
             onSaveGoalUpdates={handleSaveGoalUpdates}
             getLiveProbability={getLiveProbability}
             getSimulatedChartData={getSimulatedChartData}
+            calculationFreshness={selectedGoal.calculation_freshness}
             monthlySavingsCapacity={Number(profile?.monthly_savings)}
             simulationLoading={simulationLoading}
             simulationError={simulationError}

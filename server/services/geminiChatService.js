@@ -7,21 +7,19 @@ import { redisClient, redisAvailable } from '../config/redis.js';
 import { createError } from '../middleware/errorHandler.js';
 import ConversationHistory from '../models/ConversationHistory.js';
 import FinancialProfile from '../models/FinancialProfile.js';
-import Recommendation from '../models/Recommendation.js';
 import { ImmutableSecurityPipeline } from './immutableSecurityPipeline.js';
 import { PrometheusMetrics } from './metricsCollector.js';
 import {
   buildRecommendationProfile,
   buildLlmFinancialContext,
 } from './recommendationProfile.js';
-import { getCurrentRegulatoryRuleVersion } from './taxEngine.js';
-import { assessRecommendationFreshness } from './recommendationFreshness.js';
 import { assessSuitabilityRisk } from './riskProfiler.js';
 import {
   buildChatEvidencePacket,
   generateGroundedExplanation,
   isGroundingBoundaryAttack,
 } from './groundedExplanationService.js';
+import { resolveCurrentRecommendationState } from './recommendationState.js';
 
 const CHAT_RATE_LIMIT = 30;
 const SESSION_CUMULATIVE_TOKEN_CAP = 50000;
@@ -84,15 +82,6 @@ export function buildClientResponseDTO({
   };
 }
 
-function recommendationForCurrentProfile(storedRecommendation, profile) {
-  const freshness = assessRecommendationFreshness({
-    profile,
-    recommendation: storedRecommendation,
-    currentRegulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
-  });
-  return freshness.fresh ? storedRecommendation : null;
-}
-
 function noProfileResponse(sessionId, rateCheck) {
   return buildClientResponseDTO({
     response: "I don't have your Financial Profile yet. Complete the profile flow before requesting a personalized explanation.",
@@ -120,11 +109,15 @@ export async function processChat({ userId, user: _user, message, sessionId }) {
     || isGroundingBoundaryAttack(securityContext.sanitizedMessage);
   if (promptInjectionDetected) PrometheusMetrics.inc('prompt_injection_attempts_total');
 
-  const storedRecommendation = await Recommendation.findOne({
-    userId,
-    profileId: storedProfile._id,
-  }).sort({ generatedAt: -1 }).lean();
-  const recommendation = recommendationForCurrentProfile(storedRecommendation, profile);
+  let recommendation = null;
+  try {
+    const recommendationState = await resolveCurrentRecommendationState({ userId, profileId: storedProfile._id, profile });
+    recommendation = recommendationState.freshness.fresh ? recommendationState.currentRecommendationView : null;
+  } catch {
+    // Chat remains available as a non-personalized grounded explanation when
+    // the authoritative recommendation is stale or unavailable.
+    recommendation = null;
+  }
 
   let conversation = await ConversationHistory.findOne({ userId, session_id: sessionId, is_active: true });
   if (!conversation) {
