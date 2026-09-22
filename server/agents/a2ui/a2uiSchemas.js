@@ -1,4 +1,4 @@
-export const A2UI_VERSION = 'a2ui-1.0.0';
+export const A2UI_VERSION = 'a2ui-inspired-internal-1.0.0';
 const COMPONENT_TYPES = new Set(['status', 'finding', 'evidence', 'action_descriptor', 'verifiable_action_approval']);
 const INTENTS = new Set(['plan_review_status', 'plan_review_finding', 'plan_review_evidence', 'plan_review_action', 'verifiable_action_approval']);
 

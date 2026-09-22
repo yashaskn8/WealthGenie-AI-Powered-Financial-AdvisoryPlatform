@@ -21,8 +21,13 @@ const SYNTHETIC_EVIDENCE = Object.freeze({
   unavailableFacts: [],
 });
 
-export async function runLivePlanReviewEvaluations({ dataset, provider, maxCases = LIVE_EVAL_MAX_CASES } = {}) {
+export async function runLivePlanReviewEvaluations({ dataset, provider, maxCases = LIVE_EVAL_MAX_CASES, runner = null } = {}) {
   if (!provider || typeof provider.generate !== 'function') throw new Error('A configured live evaluation provider is required.');
+  if (typeof runner !== 'function') {
+    const error = new Error('A real closed-loop live evaluator is required; expected actions cannot be echoed as results.');
+    error.code = 'LIVE_EVAL_RUNNER_REQUIRED';
+    throw error;
+  }
   const cases = (dataset || []).slice(0, Math.min(LIVE_EVAL_MAX_CASES, Math.max(1, Number(maxCases) || LIVE_EVAL_MAX_CASES)));
   const results = [];
   for (const caseDefinition of cases) {
@@ -43,14 +48,17 @@ export async function runLivePlanReviewEvaluations({ dataset, provider, maxCases
     const latencyMs = Math.round(performance.now() - startedAt);
     const tokens = Number(explanation.tokensUsed || 0);
     if (tokens > LIVE_EVAL_MAX_TOKENS) throw new Error(`Live evaluation token budget exceeded for ${caseDefinition.id}`);
+    const actual = await runner({ caseDefinition, provider });
+    const actualTrajectory = actual?.trajectory || [];
+    const actualAction = actual?.result?.review?.recommendedAction || actual?.result?.recommendedAction || null;
     results.push({
       caseId: caseDefinition.id,
       toolChoices: planner?.checks || [],
-      forbiddenToolRequests: (planner?.checks || []).filter(tool => caseDefinition.forbiddenTools.includes(tool)),
-      finalAction: caseDefinition.expectedAction,
-      grounding: explanation.validation?.status === 'PASS',
-      unsupportedNumericalClaims: explanation.validation?.status !== 'PASS',
-      policyRejected: false,
+      forbiddenToolRequests: actualTrajectory.filter(event => event?.type === 'TOOL_SUCCEEDED' && caseDefinition.forbiddenTools.includes(event.tool)).map(event => event.tool),
+      finalAction: actualAction,
+      grounding: actual?.result?.validation?.valid === true || explanation.validation?.status === 'PASS',
+      unsupportedNumericalClaims: actual?.result?.validation?.valid === false,
+      policyRejected: actual?.result?.policy?.allowed === false,
       fallback: Boolean(explanation.fallback || planner?.fallback),
       latencyMs,
       tokens,

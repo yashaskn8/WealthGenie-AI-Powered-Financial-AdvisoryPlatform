@@ -168,7 +168,7 @@ paths:
       operationId: listAgentCards
       tags: [Agent]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
-      description: Allowlisted A2A capability cards for the Plan Review and Evidence Verifier agents.
+      description: Allowlisted A2A-inspired internal capability cards for the Plan Review and Evidence Verifier agents; official A2A conformance is not claimed.
       responses: { '200': { $ref: '#/components/responses/Object' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
   /api/agent/cards/{agentType}:
     get:
@@ -192,7 +192,7 @@ paths:
       parameters:
         - { name: runId, in: path, required: true, schema: { type: string, format: uuid } }
         - { name: Last-Event-ID, in: header, required: false, schema: { type: integer, minimum: 0 } }
-      responses: { '200': { description: Owned AG-UI-compatible event stream, content: { text/event-stream: { schema: { type: string } } } }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+      responses: { '200': { description: Owned AG-UI-inspired internal SSE event stream (not the official AG-UI protocol), content: { text/event-stream: { schema: { type: string } } } }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
   /api/agent/plan-review/{runId}/ui:
     get:
       operationId: getPlanReviewA2UI
@@ -290,6 +290,13 @@ paths:
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       parameters: [{ name: receiptId, in: path, required: true, schema: { type: string, format: uuid } }]
       responses: { '200': { $ref: '#/components/responses/ExecutionReceipt' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+  /api/agent/receipts/{receiptId}/verify:
+    get:
+      operationId: verifyExecutionReceipt
+      tags: [AgentAuthorization]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      parameters: [{ name: receiptId, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses: { '200': { description: Cryptographic receipt verification result, content: { application/json: { schema: { type: object } } } }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
   /api/agent/plan-health:
     get:
       operationId: inspectPlanHealth

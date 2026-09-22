@@ -6,6 +6,7 @@ import { PrometheusMetrics } from '../../services/metricsCollector.js';
 import { runPlanReview } from './planReviewService.js';
 import { MongoPlanReviewCheckpointer } from './mongoPlanReviewCheckpointer.js';
 import { PLAN_REVIEW_BUDGETS } from './planReviewRuntime.js';
+import { allocateAgentRunEventSequence } from '../../services/agentEventSequence.js';
 
 const NODE_LABELS = Object.freeze({
   load_context: 'Loading your saved plan',
@@ -286,11 +287,18 @@ class PlanReviewWorker {
   async appendEvent(run, sequence, event, node = null) {
     if (!this.eventModel?.create || !event?.type) return;
     try {
+      const eventSequence = await allocateAgentRunEventSequence({
+        runModel: this.model,
+        eventModel: this.eventModel,
+        runId: run.runId,
+        userId: run.userId,
+        executionGeneration: run.executionGeneration,
+      }) || sequence;
       await this.eventModel.create({
         runId: run.runId,
         userId: run.userId,
         executionGeneration: run.executionGeneration,
-        sequence,
+        sequence: eventSequence,
         eventType: event.type,
         node: node || null,
         data: {

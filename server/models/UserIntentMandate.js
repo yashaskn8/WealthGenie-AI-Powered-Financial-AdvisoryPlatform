@@ -4,8 +4,12 @@ import { AUTHORIZATION_VERSION, ALLOWED_ACTIONS, MANDATE_STATUSES } from '../age
 const identitySchema = new mongoose.Schema({
   agentType: { type: String, enum: ['PLAN_REVIEW', 'EVIDENCE_VERIFIER', 'SCAFFOLD_EVOLUTION'], required: true },
   provider: { type: String, enum: ['development', 'oidc', 'spiffe'], required: true },
-  subject: { type: String, required: true, maxlength: 120 },
+  subject: { type: String, required: true, maxlength: 240 },
+  issuer: { type: String, default: null, maxlength: 240 },
+  audience: { type: String, default: null, maxlength: 240 },
+  capabilities: { type: [String], default: [] },
   authenticated: { type: Boolean, required: true },
+  verifiedAt: { type: Date, required: true },
 }, { _id: false, strict: 'throw' });
 
 const constraintsSchema = new mongoose.Schema({
@@ -31,7 +35,7 @@ const signatureSchema = new mongoose.Schema({
 }, { _id: false, strict: 'throw' });
 
 const schema = new mongoose.Schema({
-  mandateId: { type: String, required: true, unique: true, immutable: true, index: true, match: /^[0-9a-f-]{36}$/i },
+  mandateId: { type: String, required: true, unique: true, immutable: true, match: /^[0-9a-f-]{36}$/i },
   version: { type: String, enum: [AUTHORIZATION_VERSION], required: true, immutable: true },
   issuer: { type: String, required: true, immutable: true, maxlength: 120 },
   subject: { type: String, required: true, immutable: true, maxlength: 120 },

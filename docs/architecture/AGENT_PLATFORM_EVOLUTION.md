@@ -20,7 +20,7 @@ evaluation and scaffold promotion requires `financialAuthorityDelta === 0`.
 - The existing polling endpoints remain the compatibility fallback.
 - `EvidenceVerifierAgent` validates evidence references and prompt-injection
   boundaries before the policy guard.
-- A2A cards describe only Plan Review and Evidence Verifier capabilities.
+- A2A-inspired internal cards describe only Plan Review and Evidence Verifier capabilities; this is not a claim of official A2A conformance.
 - A2UI messages are strict, allowlisted descriptors; they cannot contain
   arbitrary components or mutation claims.
 

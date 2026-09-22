@@ -6,6 +6,7 @@ export function AuthorizedActionsPanel() {
   const [error, setError] = useState(null);
   const [receipt, setReceipt] = useState(null);
   const [receiptError, setReceiptError] = useState(null);
+  const [verification, setVerification] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -20,7 +21,9 @@ export function AuthorizedActionsPanel() {
   async function verifyReceipt(receiptId) {
     setReceiptError(null);
     try {
-      setReceipt(await api.getExecutionReceipt(receiptId));
+      const result = await api.verifyExecutionReceipt(receiptId);
+      setVerification(result);
+      setReceipt(result);
     } catch {
       setReceiptError('Receipt verification is temporarily unavailable.');
     }
@@ -45,7 +48,7 @@ export function AuthorizedActionsPanel() {
         ))}
       </div>
       {receiptError ? <p role="alert">{receiptError}</p> : null}
-      {receipt ? <p role="status">Receipt {receipt.receiptId} is available for server-side verification.</p> : null}
+      {receipt ? <p role="status">Receipt {receipt.receiptId} {verification?.verified ? 'verified by the server.' : 'could not be verified.'}</p> : null}
     </section>
   );
 }

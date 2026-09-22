@@ -59,6 +59,15 @@ export function getRuntimeConfig(env = process.env) {
     agentWorkerEnabled: booleanValue(env.AGENT_WORKER_ENABLED, true),
     agentWorkerMode,
     agentIdentityProvider,
+    agentIdentity: Object.freeze({
+      provider: agentIdentityProvider,
+      issuer: env.AGENT_OIDC_ISSUER?.trim() || null,
+      audience: env.AGENT_OIDC_AUDIENCE?.trim() || null,
+      publicKey: env.AGENT_OIDC_PUBLIC_KEY || null,
+      jwksUrl: env.AGENT_OIDC_JWKS_URL?.trim() || null,
+      subjectMap: env.AGENT_OIDC_SUBJECT_MAP || null,
+      trustDomain: env.SPIFFE_TRUST_DOMAIN?.trim() || null,
+    }),
     agentWorkflowBackend,
     agentStreamEnabled: booleanValue(env.AGENT_STREAM_ENABLED, !isProduction),
     agentEvolutionEnabled: booleanValue(env.AGENT_EVOLUTION_ENABLED, false),
@@ -142,6 +151,18 @@ export function assertValidRuntimeConfig(config) {
     }
     if (!config.authorization.webauthnOrigin || !config.authorization.webauthnRpId) {
       throw new Error('Production WebAuthn approval requires WEBAUTHN_ORIGIN and WEBAUTHN_RP_ID');
+    }
+    if (config.agentIdentityProvider === 'development') {
+      throw new Error('Production verifiable actions require a cryptographically verified OIDC or SPIFFE agent identity.');
+    }
+    if (config.agentIdentityProvider === 'oidc'
+      && (!config.agentIdentity.issuer || !config.agentIdentity.audience
+        || (!config.agentIdentity.publicKey && !config.agentIdentity.jwksUrl)
+        || !config.agentIdentity.subjectMap)) {
+      throw new Error('Production OIDC agent identity requires issuer, audience, key source, and subject mapping.');
+    }
+    if (config.agentIdentityProvider === 'spiffe' && !config.agentIdentity.trustDomain) {
+      throw new Error('Production SPIFFE agent identity requires SPIFFE_TRUST_DOMAIN and a runtime SVID verifier.');
     }
   }
   if (config.agentWorkerMode === 'embedded' && config.agentWorkerEnabled === false) {

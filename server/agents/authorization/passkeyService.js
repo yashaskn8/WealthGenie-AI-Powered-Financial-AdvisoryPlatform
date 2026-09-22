@@ -3,6 +3,7 @@ import PasskeyCredential from '../../models/PasskeyCredential.js';
 import PasskeyRegistrationChallenge from '../../models/PasskeyRegistrationChallenge.js';
 import { createTrustedApprovalProvider } from './approvalProviders.js';
 import { mandateError } from './authorizationConstants.js';
+import { normalizeWebAuthnCredential } from './webAuthnBytes.js';
 
 export async function createPasskeyRegistrationOptions({ userId, runtimeConfig = {}, dependencies = {} }) {
   const models = { userModel: User, credentialModel: PasskeyCredential, challengeModel: PasskeyRegistrationChallenge, ...dependencies };
@@ -24,12 +25,18 @@ export async function verifyPasskeyRegistration({ userId, response, runtimeConfi
   const provider = dependencies.approvalProvider || createTrustedApprovalProvider({ env: runtimeConfig.env || process.env, verifier: dependencies.webauthnVerifier });
   if (provider.name !== 'WEBAUTHN' || typeof provider.verifyRegistration !== 'function') throw mandateError('WEBAUTHN_PROVIDER_UNAVAILABLE', 'Passkey enrollment is not configured.', 503);
   const info = await provider.verifyRegistration({ response, expectedChallenge: challenge.challenge });
-  const credentialId = info.credential?.id || info.credentialID;
-  const publicKey = info.credential?.publicKey || info.credentialPublicKey;
-  const counter = info.credential?.counter ?? info.counter ?? 0;
-  if (!credentialId || !publicKey) throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey registration returned incomplete credential metadata.');
-  const credential = await models.credentialModel.create({ userId, credentialId, publicKey: Buffer.from(publicKey), counter, transports: response?.response?.transports || [] });
-  await models.challengeModel.updateOne({ _id: challenge._id, consumedAt: null }, { $set: { consumedAt: new Date() } });
-  return { credentialId: credential.credentialId, createdAt: credential.createdAt };
+  const credential = normalizeWebAuthnCredential({
+    credentialId: info.credential?.id || info.credentialID,
+    publicKey: info.credential?.publicKey || info.credentialPublicKey,
+    counter: info.credential?.counter ?? info.counter ?? 0,
+    transports: response?.response?.transports || [],
+  });
+  const consumed = await models.challengeModel.findOneAndUpdate(
+    { _id: challenge._id, consumedAt: null },
+    { $set: { consumedAt: new Date() } },
+    { new: true },
+  );
+  if (!consumed) throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey enrollment challenge was already consumed.');
+  const saved = await models.credentialModel.create({ userId, ...credential });
+  return { credentialId: saved.credentialId, createdAt: saved.createdAt };
 }
-

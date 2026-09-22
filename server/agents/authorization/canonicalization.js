@@ -59,7 +59,7 @@ export function canonicalizeMandate(mandate) {
   assertKeys(mandate, REQUIRED_MANDATE_KEYS, 'Mandate');
   const identity = mandate.agentIdentity;
   assertPlainObject(identity, 'Agent identity');
-  assertKeys(identity, ['agentType', 'provider', 'subject', 'authenticated'], 'Agent identity');
+  assertKeys(identity, ['agentType', 'provider', 'subject', 'issuer', 'audience', 'capabilities', 'authenticated', 'verifiedAt'], 'Agent identity');
   const constraints = mandate.constraints;
   assertPlainObject(constraints, 'Mandate constraints');
   assertKeys(constraints, ['maxAgeSeconds', 'allowedAgentType', 'resourceVersion', 'noFinancialMutationByAgent'], 'Mandate constraints');
@@ -82,7 +82,16 @@ export function canonicalizeMandate(mandate) {
     subject: mandate.subject,
     audience: mandate.audience,
     userId: String(mandate.userId),
-    agentIdentity: { agentType: identity.agentType, provider: identity.provider, subject: identity.subject, authenticated: identity.authenticated === true },
+    agentIdentity: {
+      agentType: identity.agentType,
+      provider: identity.provider,
+      subject: identity.subject,
+      issuer: identity.issuer || null,
+      audience: identity.audience || null,
+      capabilities: [...new Set(Array.isArray(identity.capabilities) ? identity.capabilities.map(String) : [])].sort(),
+      authenticated: identity.authenticated === true,
+      verifiedAt: identity.verifiedAt ? normalizeDate(identity.verifiedAt, 'agentIdentity.verifiedAt') : null,
+    },
     agentType: mandate.agentType,
     agentVersion: mandate.agentVersion,
     runId: mandate.runId,

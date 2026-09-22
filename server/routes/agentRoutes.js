@@ -10,7 +10,7 @@ import { buildApprovalAction } from '../agents/planReview/planReviewRuntime.js';
 import { acknowledgePlanHealthEvent, inspectPlanHealth, listPlanHealthEvents } from '../services/planHealthMonitor.js';
 import AgentRunEvent from '../models/AgentRunEvent.js';
 import { buildPlanReviewA2UI } from '../agents/a2ui/a2uiSchemas.js';
-import { getAgentCard, listAgentCards } from '../agents/a2a/agentCards.js';
+import { A2A_PROTOCOL_VERSION, getAgentCard, listAgentCards } from '../agents/a2a/agentCards.js';
 import { validateStrict } from '../validation/financialSchemas.js';
 import { mandateApprovalAssertionSchema, mandateRevokeSchema, passkeyRegistrationResponseSchema } from '../agents/authorization/authorizationSchemas.js';
 import {
@@ -26,6 +26,7 @@ import { createPasskeyRegistrationOptions, verifyPasskeyRegistration } from '../
 import ExecutionReceipt from '../models/ExecutionReceipt.js';
 import { appendAuthorizationEvent } from '../agents/authorization/authorizationEvents.js';
 import { PrometheusMetrics } from '../services/metricsCollector.js';
+import { verifyExecutionReceiptForUser } from '../agents/authorization/receiptVerification.js';
 
 const router = Router();
 
@@ -79,7 +80,7 @@ router.get('/plan-review/current', verifyJWT, asyncHandler(async (req, res) => {
 
 router.get('/cards', verifyJWT, asyncHandler(async (req, res) => {
   if (!isEnabled(req)) return featureUnavailable();
-  return res.json({ protocolVersion: 'a2a-1.0.0', agents: listAgentCards() });
+  return res.json({ protocolVersion: A2A_PROTOCOL_VERSION, agents: listAgentCards() });
 }));
 
 router.get('/cards/:agentType', verifyJWT, asyncHandler(async (req, res) => {
@@ -265,6 +266,17 @@ router.get('/receipts/:receiptId', verifyJWT, asyncHandler(async (req, res) => {
   const receipt = await ExecutionReceipt.findOne({ receiptId: req.params.receiptId, userId: req.user.userId }).lean();
   if (!receipt) throw createError(404, 'Execution receipt not found or access denied.', 'Execution receipt not found.');
   return res.json(receipt);
+}));
+
+router.get('/receipts/:receiptId/verify', verifyJWT, asyncHandler(async (req, res) => {
+  if (!authorizationEnabled(req)) return featureUnavailable();
+  const result = await verifyExecutionReceiptForUser({
+    receiptId: req.params.receiptId,
+    userId: req.user.userId,
+    runtimeConfig: authorizationConfig(req),
+  });
+  if (result.reason === 'RECEIPT_NOT_FOUND') throw createError(404, 'Execution receipt not found or access denied.', 'Execution receipt not found.');
+  return res.json(result);
 }));
 
 router.get('/plan-health', verifyJWT, asyncHandler(async (req, res) => {

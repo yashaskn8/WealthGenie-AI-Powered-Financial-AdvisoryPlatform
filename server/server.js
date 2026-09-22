@@ -16,12 +16,14 @@ import { createRuntimeState } from './services/runtimeState.js';
 import { warmAdvisoryPersistence } from './services/advisoryPersistence.js';
 import AgentRunEvent from './models/AgentRunEvent.js';
 import { warmAuthorizationPersistence } from './services/authorizationPersistence.js';
+import { reconcileAuthorizedExecutions } from './agents/authorization/executionRecovery.js';
 
 let server = null;
 let shuttingDown = false;
 let processHandlersInstalled = false;
 const runtimeState = createRuntimeState();
 let activeConfig = null;
+let authorizedRecoveryTimer = null;
 
 function configureHttpServer(httpServer, config) {
   httpServer.requestTimeout = config.http.requestTimeoutMs;
@@ -41,6 +43,8 @@ function closeHttpServer(httpServer) {
 async function closeInfrastructure({ stopAgentWorker = false } = {}) {
   stopMarketDataRefreshJobs();
   if (stopAgentWorker) await stopPlanReviewWorker();
+  if (authorizedRecoveryTimer) clearInterval(authorizedRecoveryTimer);
+  authorizedRecoveryTimer = null;
   const closers = [];
   if (mongoose.connection.readyState !== 0) closers.push(mongoose.connection.close());
   if (redisClient?.isOpen) closers.push(redisClient.quit());
@@ -104,6 +108,12 @@ export async function startServer({ env = process.env } = {}) {
     startMarketDataRefreshJobs();
     if (config.agentWorkerEnabled && config.agentWorkerMode === 'embedded') {
       startPlanReviewWorker({ runtimeConfig: config, eventModel: AgentRunEvent });
+    }
+    if (config.authorization.verifiableActionsEnabled) {
+      authorizedRecoveryTimer = setInterval(() => {
+        void reconcileAuthorizedExecutions({ runtimeConfig: config }).catch(error => logger.warn('Authorized execution recovery sweep failed', { code: error.code || 'RECOVERY_SWEEP_FAILED' }));
+      }, 30000);
+      authorizedRecoveryTimer.unref?.();
     }
     runtimeState.markReady();
     logger.info('WealthGenie API started', { port: config.port, env: config.nodeEnv });

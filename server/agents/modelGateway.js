@@ -13,14 +13,27 @@ export function createModelGateway({ providers = configuredOrder(), maxOutputTok
     async generate({ role, systemPrompt, recentHistory = [], maxTokens = maxOutputTokens, jsonMode = false } = {}) {
       if (!MODEL_ROLES.includes(role)) throw new Error('Unknown model gateway role.');
       const startedAt = Date.now();
+      const failures = [];
       for (const provider of providers) {
-        const response = await provider.generate({
-          systemPrompt,
-          recentHistory,
-          maxTokens: Math.min(Number(maxTokens) || maxOutputTokens, maxOutputTokens),
-          jsonMode,
-          tools: null,
-        });
+        if (!provider || typeof provider.generate !== 'function') continue;
+        let response = null;
+        try {
+          response = await provider.generate({
+            systemPrompt,
+            recentHistory,
+            maxTokens: Math.min(Number(maxTokens) || maxOutputTokens, maxOutputTokens),
+            jsonMode,
+            tools: null,
+          });
+        } catch (error) {
+          // Providers are an untrusted availability boundary. Continue only
+          // for explicitly retryable/provider failures; programming and
+          // validation errors must surface to the caller.
+          const code = String(error?.code || '');
+          if (!code.startsWith('PROVIDER_') && !error?.retryable) throw error;
+          failures.push(code || 'PROVIDER_REQUEST_FAILED');
+          continue;
+        }
         if (response) {
           return {
             ...response,
@@ -31,11 +44,14 @@ export function createModelGateway({ providers = configuredOrder(), maxOutputTok
               latencyMs: Date.now() - startedAt,
               tokensUsed: Number(response.tokensUsed) || 0,
               fallback: provider !== providers[0],
+              attemptedProviders: [...failures, provider.name].filter(Boolean),
+              fallbackReason: failures[0] || null,
             },
           };
         }
+        failures.push(provider.lastFailureReason || `${provider.name || 'provider'}_unavailable`);
       }
-      return { text: null, routing: { role, provider: null, model: null, latencyMs: Date.now() - startedAt, tokensUsed: 0, fallback: true } };
+      return { text: null, routing: { role, provider: null, model: null, latencyMs: Date.now() - startedAt, tokensUsed: 0, fallback: true, attemptedProviders: failures, fallbackReason: failures[0] || 'NO_PROVIDER_RESPONSE' } };
     },
   };
 }

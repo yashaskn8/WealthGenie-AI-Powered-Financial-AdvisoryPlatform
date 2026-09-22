@@ -80,6 +80,15 @@ export function validateEnvironmentConfig(env = process.env) {
       if (String(env.AGENT_APPROVAL_PROVIDER || 'webauthn').toLowerCase() !== 'webauthn') errors.push('AGENT_APPROVAL_PROVIDER must be webauthn when verifiable actions are enabled in production');
       if (!env.WEBAUTHN_ORIGIN || !env.WEBAUTHN_RP_ID) errors.push('WEBAUTHN_ORIGIN and WEBAUTHN_RP_ID are required for production verifiable actions');
       if (!env.AUTHORIZATION_SIGNING_PRIVATE_KEY || !env.AUTHORIZATION_SIGNING_PUBLIC_KEY) errors.push('Authorization signing keys are required for production verifiable actions');
+      const identityProvider = String(env.AGENT_IDENTITY_PROVIDER || 'development').toLowerCase();
+      if (identityProvider === 'development') errors.push('AGENT_IDENTITY_PROVIDER cannot be development for production verifiable actions');
+      if (!['oidc', 'spiffe'].includes(identityProvider)) errors.push('AGENT_IDENTITY_PROVIDER must be oidc or spiffe for production verifiable actions');
+      if (identityProvider === 'oidc') {
+        if (!env.AGENT_OIDC_ISSUER || !env.AGENT_OIDC_AUDIENCE) errors.push('OIDC issuer and audience are required for production agent identity');
+        if (!env.AGENT_OIDC_PUBLIC_KEY && !env.AGENT_OIDC_JWKS_URL) errors.push('OIDC public key or JWKS URL is required for production agent identity');
+        if (!env.AGENT_OIDC_SUBJECT_MAP) errors.push('AGENT_OIDC_SUBJECT_MAP is required for production agent identity');
+      }
+      if (identityProvider === 'spiffe' && !env.SPIFFE_TRUST_DOMAIN) errors.push('SPIFFE_TRUST_DOMAIN is required for production agent identity');
     }
   }
 

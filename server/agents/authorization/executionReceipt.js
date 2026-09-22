@@ -61,11 +61,18 @@ export function createSignedExecutionReceipt({ mandate, resultMetadata, beforeSn
   };
 }
 
-export function verifyExecutionReceipt(receipt, keyProvider) {
-  if (!receipt || calculateReceiptHash(receipt) !== receipt.receiptHash) return false;
-  return Boolean(receipt.signatureMetadata?.signature && keyProvider?.verify(canonicalJson({
-    ...receipt,
-    signatureMetadata: undefined,
-  }), receipt.signatureMetadata.signature));
+export function verifyExecutionReceiptDetails(receipt, keyProvider) {
+  const receiptHashValid = Boolean(receipt && calculateReceiptHash(receipt) === receipt.receiptHash);
+  const metadata = receipt?.signatureMetadata;
+  if (metadata?.algorithm !== 'Ed25519' || !metadata.keyId || !metadata.signature) return { receiptHashValid, signatureValid: false };
+  const payload = canonicalJson({ ...receipt, signatureMetadata: undefined });
+  const signatureValid = Boolean(typeof keyProvider?.verifyByKeyId === 'function'
+    ? keyProvider.verifyByKeyId(payload, metadata.signature, metadata.keyId)
+    : keyProvider?.verify?.(payload, metadata.signature, metadata.keyId));
+  return { receiptHashValid, signatureValid };
 }
 
+export function verifyExecutionReceipt(receipt, keyProvider) {
+  const details = verifyExecutionReceiptDetails(receipt, keyProvider);
+  return Boolean(details.receiptHashValid && details.signatureValid);
+}

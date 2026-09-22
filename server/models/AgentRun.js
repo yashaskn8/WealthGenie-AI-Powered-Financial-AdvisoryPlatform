@@ -50,6 +50,7 @@ const agentRunSchema = new mongoose.Schema({
   },
   checkpoint: { type: mongoose.Schema.Types.Mixed, default: null },
   checkpointSequence: { type: Number, min: 0, default: 0 },
+  eventSequence: { type: Number, min: 0, default: 0 },
   trajectory: { type: [mongoose.Schema.Types.Mixed], default: [] },
   toolExecutionLedger: { type: [mongoose.Schema.Types.Mixed], default: [] },
   cancellationRequested: { type: Boolean, default: false },

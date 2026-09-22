@@ -1,4 +1,4 @@
-export const A2A_PROTOCOL_VERSION = 'a2a-1.0.0';
+export const A2A_PROTOCOL_VERSION = 'a2a-inspired-internal-1.0.0';
 
 const CARDS = Object.freeze({
   PLAN_REVIEW: Object.freeze({

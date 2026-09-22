@@ -78,18 +78,24 @@ function deterministicChecks(profile) {
   return profile ? [...SAFE_PLAN_REVIEW_TOOLS] : [];
 }
 
-function plannerPrompt(freshness, profileContext) {
+function allowedTools(dependencies = {}) {
+  const requested = dependencies.scaffoldSpec?.tools;
+  if (!Array.isArray(requested)) return SAFE_PLAN_REVIEW_TOOLS;
+  return SAFE_PLAN_REVIEW_TOOLS.filter(tool => requested.includes(tool));
+}
+
+function plannerPrompt(freshness, profileContext, tools = SAFE_PLAN_REVIEW_TOOLS) {
   return [
     'You are a bounded routing planner for a read-only financial plan review.',
     'Return JSON only: {"checks":["allowed_tool_name"]}.',
-    `Allowed tools: ${SAFE_PLAN_REVIEW_TOOLS.join(', ')}.`,
+    `Allowed tools: ${tools.join(', ')}.`,
     'Never return mutation, optimizer, rebalance, HTTP, shell, raw database, or unknown tools.',
     `Freshness reason codes: ${JSON.stringify(freshness?.reasonCodes || [])}.`,
     `Profile available: ${Boolean(profileContext)}.`,
   ].join('\n');
 }
 
-export async function planWithProvider({ freshness, profileContext, provider }) {
+export async function planWithProvider({ freshness, profileContext, provider, tools = SAFE_PLAN_REVIEW_TOOLS }) {
   if (!provider || typeof provider.generate !== 'function') return null;
   const response = await withAgentSpan('gen_ai.chat', {
     'agent.type': 'PLAN_REVIEW',
@@ -97,7 +103,7 @@ export async function planWithProvider({ freshness, profileContext, provider }) 
     'gen_ai.request.model': provider.configuredModel?.() || provider.model || 'configured-provider',
   }, async span => {
     const value = await provider.generate({
-      systemPrompt: plannerPrompt(freshness, profileContext),
+      systemPrompt: plannerPrompt(freshness, profileContext, tools),
       recentHistory: [{ role: 'user', parts: [{ text: 'Select only the minimum safe read-only checks.' }] }],
       maxTokens: 240,
       jsonMode: true,
@@ -126,7 +132,8 @@ async function loadContextNode(state, dependencies) {
       stepCount: incrementStep(state, dependencies),
     };
   }
-  const context = await loadPlanReviewContext({
+  const contextLoader = dependencies.loadPlanReviewContext || loadPlanReviewContext;
+  const context = await contextLoader({
     userId: state.userId,
     profileId: state.profileId,
     dependencies,
@@ -143,11 +150,17 @@ async function loadContextNode(state, dependencies) {
 }
 
 async function determineChecksNode(state, dependencies) {
-  const required = deterministicChecks(state.profile);
+  const tools = allowedTools(dependencies);
+  const required = deterministicChecks(state.profile).filter(tool => tools.includes(tool));
   let planner = { provider: 'DETERMINISTIC', model: null, fallback: true };
   let requestedChecks = required;
   let modelCallCount = Number(state.modelCallCount || 0);
-  if (state.profile && dependencies.plannerProvider) {
+  const plannerProvider = dependencies.plannerProvider || (dependencies.modelGateway && dependencies.modelPlannerEnabled ? {
+    name: 'model-gateway',
+    configuredModel: () => 'model-gateway',
+    generate: args => dependencies.modelGateway.generate({ role: 'PLANNER', ...args }),
+  } : null);
+  if (state.profile && plannerProvider) {
     try {
       if (modelCallCount >= configuredLimit(dependencies.maxModelCalls, 2, 2)) {
         const error = new Error('AGENT_BUDGET_EXCEEDED');
@@ -158,12 +171,13 @@ async function determineChecksNode(state, dependencies) {
       const modelPlan = await planWithProvider({
         freshness: state.freshness,
         profileContext: state.profileContext,
-        provider: dependencies.plannerProvider,
+        provider: plannerProvider,
+        tools,
       });
       if (modelPlan) {
         planner = modelPlan;
         const maxToolCalls = configuredLimit(dependencies.maxToolCalls, MAX_TOOL_CALLS, MAX_TOOL_CALLS);
-        requestedChecks = unique([...modelPlan.checks, ...required]).slice(0, maxToolCalls);
+        requestedChecks = unique([...modelPlan.checks, ...required]).filter(tool => tools.includes(tool)).slice(0, maxToolCalls);
       }
     } catch (error) {
       if (error?.code === 'AGENT_BUDGET_EXCEEDED') throw error;
@@ -199,8 +213,9 @@ async function executeSafeToolsNode(state, dependencies) {
     freshness: state.freshness,
     dependencies,
   };
+  const tools = allowedTools(dependencies);
   for (const toolName of state.requestedChecks || []) {
-    if (!SAFE_PLAN_REVIEW_TOOLS.includes(toolName)) {
+    if (!tools.includes(toolName)) {
       repeatedRequests.push(`UNKNOWN_TOOL:${toolName}`);
       continue;
     }
@@ -299,11 +314,16 @@ async function synthesizeNode(state, dependencies) {
         'agent.type': 'PLAN_REVIEW',
         'gen_ai.operation.name': 'explainer',
       }, async span => {
+        const gatewayProvider = dependencies.modelGateway ? {
+          name: 'model-gateway',
+          configuredModel: () => 'model-gateway',
+          generate: args => dependencies.modelGateway.generate({ role: 'EXPLAINER', ...args }),
+        } : null;
         const value = await generateGroundedExplanation({
           question: 'Review the current saved financial plan for evidence alignment. Do not propose new allocations, weights, products, tax results, or changes. State only what the evidence supports and its limitations.',
           evidencePacket: validated.evidencePacket,
         }, {
-          providers: dependencies.explanationProviders,
+          providers: gatewayProvider ? [gatewayProvider] : dependencies.explanationProviders,
           getCache: async () => null,
           setCache: async () => undefined,
         });

@@ -17,6 +17,7 @@ import { verifyEvidencePacket } from '../agents/a2a/evidenceVerifier.js';
 import { buildPlanReviewA2UI, validateA2UIMessage } from '../agents/a2ui/a2uiSchemas.js';
 import { assertAgentCapability, createAgentIdentity } from '../agents/identity/agentIdentity.js';
 import { createAgentWorkflowBackend } from '../agents/workflows/agentWorkflowBackend.js';
+import { buildPromotionMandate, createPromotionAuthorization } from '../agents/evolution/promotionAuthorization.js';
 
 test('agent telemetry only permits bounded non-sensitive semantic attributes', () => {
   const safe = sanitizeAgentAttributes({
@@ -53,7 +54,7 @@ test('evaluation v2 seals holdout and enforces financial authority delta zero', 
   assert.equal(holdout.passed, true);
 });
 
-test('scaffold registry is immutable, read-only, and human-promotion gated', () => {
+test('scaffold registry is immutable, read-only, and human-promotion gated', async () => {
   const base = createScaffoldSpec({ scaffoldId: 'plan-review', version: '1.0.0' });
   assert.ok(Object.isFrozen(base));
   assert.throws(() => createScaffoldSpec({ code: 'process.exit(1)' }), /executable|field/i);
@@ -63,7 +64,17 @@ test('scaffold registry is immutable, read-only, and human-promotion gated', () 
   const candidate = createScaffoldSpec({ scaffoldId: 'plan-review', version: '1.1.0', parentVersion: '1.0.0' });
   registry.register(candidate, { source: 'offline-evolution' });
   assert.throws(() => registry.promote('plan-review', '1.1.0', { evaluation: { passed: true } }), /approval/i);
-  registry.promote('plan-review', '1.1.0', { approvedBy: 'reviewer', approvalId: 'approval-1', evaluation: { passed: true, hardGates: { financialAuthorityDelta: 0 } } });
+  const evaluation = { passed: true, scoreCards: [{ hardGatePassed: true }] };
+  const promotionMandate = buildPromotionMandate({ candidate, evaluation, reviewerId: 'reviewer' });
+  const authorization = await createPromotionAuthorization({
+    candidate,
+    evaluation,
+    reviewerId: 'reviewer',
+    mandate: { ...promotionMandate, mandateHash: 'mandate-hash-1' },
+    assertion: { credentialId: 'credential-1' },
+    approvalProvider: { verify: async () => ({ verified: true, method: 'WEBAUTHN', approvalId: 'approval-1', credentialId: 'credential-1' }) },
+  });
+  registry.promote('plan-review', '1.1.0', { authorization, evaluation });
   assert.equal(registry.current().spec.version, '1.1.0');
 });
 

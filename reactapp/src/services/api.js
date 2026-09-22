@@ -437,6 +437,11 @@ export async function getExecutionReceipt(receiptId, options = {}) {
   return request('GET', `/agent/receipts/${encodeURIComponent(receiptId)}`, null, { retries: 0, ...options });
 }
 
+export async function verifyExecutionReceipt(receiptId, options = {}) {
+  if (!receiptId) throw new TypeError('A receipt ID is required.');
+  return request('GET', `/agent/receipts/${encodeURIComponent(receiptId)}/verify`, null, { retries: 0, ...options });
+}
+
 export async function getPlanHealth(profileId, options = {}) {
   if (!profileId) throw new TypeError('A profile ID is required.');
   return request('GET', `/agent/plan-health?profileId=${encodeURIComponent(profileId)}`, null, options);
@@ -699,7 +704,7 @@ const api = {
   setAuthToken, getAuthToken, clearAuthToken, clearUserSession,
   subscribeAuth, getAuthSnapshot,
   setUserInfo, getUserInfo,
-  buildProfile, precomputeProfile, completeFinancialProfile, getCurrentProfile, getCurrentRecommendation, getFinancialHealthScore, updateProfile, getRecommendations, runPlanReview, getPlanReviewRun, getCurrentPlanReviewRun, cancelPlanReviewRun, actOnPlanReview, listAuthorizedMandates, getAuthorizedMandate, getMandateApprovalOptions, verifyMandateApproval, revokeAuthorizedMandate, executeAuthorizedMandate, getExecutionReceipt, getPlanHealth, getPlanHealthEvents, getInstruments, rankInvestmentCandidates, getProjections, calculateStepUpProjection, calculateAllocationSplit, compareInvestmentProjection, getCustomPortfolioProjection, runInstrumentStressTest,
+  buildProfile, precomputeProfile, completeFinancialProfile, getCurrentProfile, getCurrentRecommendation, getFinancialHealthScore, updateProfile, getRecommendations, runPlanReview, getPlanReviewRun, getCurrentPlanReviewRun, cancelPlanReviewRun, actOnPlanReview, listAuthorizedMandates, getAuthorizedMandate, getMandateApprovalOptions, verifyMandateApproval, revokeAuthorizedMandate, executeAuthorizedMandate, getExecutionReceipt, verifyExecutionReceipt, getPlanHealth, getPlanHealthEvents, getInstruments, rankInvestmentCandidates, getProjections, calculateStepUpProjection, calculateAllocationSplit, compareInvestmentProjection, getCustomPortfolioProjection, runInstrumentStressTest,
   runMonteCarlo, runPortfolioMonteCarlo, createGoal, getGoals, updateGoal, simulateGoal, deleteGoal, healthCheck,
   getMarketRates, getBenchmarkMarketFacts, getMutualFundNavFacts, refreshMarketRates,
   sendChatMessage, getChatHistory, clearChatSession, rebalancePortfolio,

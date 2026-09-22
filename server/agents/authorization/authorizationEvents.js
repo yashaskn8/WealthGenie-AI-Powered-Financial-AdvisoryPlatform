@@ -1,5 +1,7 @@
 import AgentRun from '../../models/AgentRun.js';
 import AgentRunEvent from '../../models/AgentRunEvent.js';
+import { allocateAgentRunEventSequence } from '../../services/agentEventSequence.js';
+import { PrometheusMetrics } from '../../services/metricsCollector.js';
 
 const AUTHORIZATION_EVENT_TYPES = new Set([
   'ACTION_PROPOSED',
@@ -31,8 +33,11 @@ export async function appendAuthorizationEvent({ runId, userId, eventType, data 
   try {
     const run = await models.runModel.findOne({ runId, userId }).lean();
     if (!run) return null;
-    const latest = await models.eventModel.findOne({ runId, userId }).sort({ sequence: -1 }).lean();
-    const sequence = Number(latest?.sequence || 0) + 1;
+    const sequence = await allocateAgentRunEventSequence({ runModel: models.runModel, eventModel: models.eventModel, runId, userId });
+    if (!sequence) {
+      PrometheusMetrics.inc('agent_event_persistence_failures_total');
+      return null;
+    }
     return await models.eventModel.create({
       runId,
       userId,
@@ -42,11 +47,10 @@ export async function appendAuthorizationEvent({ runId, userId, eventType, data 
       node: 'authorization',
       data: { type: eventType, ...safeData(data), at: new Date().toISOString() },
     });
-  } catch (error) {
+  } catch {
     // Authorization events are audit/progress metadata; a transient event
     // write must not turn a valid authorization into a financial failure.
-    if (error?.code !== 11000) return null;
+    PrometheusMetrics.inc('agent_event_persistence_failures_total');
     return null;
   }
 }
-

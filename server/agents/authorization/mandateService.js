@@ -22,6 +22,8 @@ import {
 } from './authorizationConstants.js';
 import { canonicalizeMandate, hashActionPayload, hashMandatePayload, verifyMandatePayloadHash } from './canonicalization.js';
 import { PrometheusMetrics } from '../../services/metricsCollector.js';
+import { assertVerifiedAgentIdentity, createAgentIdentityVerifier } from '../identity/agentIdentityVerifier.js';
+import { normalizeCredentialId, normalizePublicKey } from './webAuthnBytes.js';
 
 function asId(value) { return value === null || value === undefined ? null : String(value); }
 
@@ -55,6 +57,7 @@ export function buildMandateDraft({ run, profile, recommendation = null, agentId
   if (!run?.runId || run.status !== 'WAITING_FOR_APPROVAL') throw mandateError('MANDATE_SOURCE_NOT_APPROVABLE', 'This plan review is not waiting for approval.');
   if (run.recommendedAction !== 'RECOMPUTE_PLAN') throw mandateError('ACTION_NOT_PROPOSED', 'This plan review did not propose recompute.');
   if (!profile?._id || String(profile._id) !== String(run.profileId)) throw mandateError('RESOURCE_OWNERSHIP_DENIED', 'The plan review resource is unavailable.');
+  assertVerifiedAgentIdentity(agentIdentity, { allowDevelopment: true });
   const boundedTtl = Math.min(MAX_MANDATE_TTL_SECONDS, Math.max(1, Number(ttlSeconds) || DEFAULT_MANDATE_TTL_SECONDS));
   const snapshot = buildSnapshotFingerprint({ profile, recommendation });
   const mandateId = crypto.randomUUID();
@@ -138,7 +141,13 @@ function publicMandate(mandate) {
 
 function verifyMandateRecord(mandate, keyProvider) {
   if (!mandate?.mandateHash || !verifyMandatePayloadHash(mandate, mandate.mandateHash)) throw mandateError('MANDATE_SIGNATURE_INVALID', 'Mandate payload integrity verification failed.');
-  if (!mandate.signatureMetadata || !keyProvider.verify(canonicalizeMandate(mandate), mandate.signatureMetadata.signature)) throw mandateError('MANDATE_SIGNATURE_INVALID', 'Mandate signature verification failed.');
+  const metadata = mandate.signatureMetadata;
+  const verified = metadata?.algorithm === 'Ed25519'
+    && metadata.keyId
+    && (typeof keyProvider?.verifyByKeyId === 'function'
+      ? keyProvider.verifyByKeyId(canonicalizeMandate(mandate), metadata.signature, metadata.keyId)
+      : keyProvider?.verify?.(canonicalizeMandate(mandate), metadata.signature, metadata.keyId));
+  if (!verified) throw mandateError('MANDATE_SIGNATURE_INVALID', 'Mandate signature verification failed.');
   return true;
 }
 
@@ -151,12 +160,15 @@ export async function createMandateForPlanReview({ runId, userId, correlationId 
   const recommendation = run.recommendationId
     ? await models.recommendationModel.findOne({ _id: run.recommendationId, profileId: run.profileId, userId }).lean()
     : await models.recommendationModel.findOne({ profileId: run.profileId, userId }).sort({ generatedAt: -1 }).lean();
-  const agentIdentity = dependencies.agentIdentity || {
-    agentType: 'PLAN_REVIEW',
-    provider: runtimeConfig.agentIdentityProvider || 'development',
-    subject: `plan-review:${run.agentVersion || 'unknown'}`,
-    authenticated: true,
-  };
+  const env = runtimeConfig.env || process.env;
+  const identityVerifier = dependencies.agentIdentityVerifier || createAgentIdentityVerifier({ env, dependencies });
+  const agentIdentity = dependencies.agentIdentity
+    ? assertVerifiedAgentIdentity(dependencies.agentIdentity)
+    : await identityVerifier.verify({
+      agentType: 'PLAN_REVIEW',
+      token: dependencies.agentIdentityToken || env.AGENT_IDENTITY_ASSERTION,
+      svid: dependencies.svid,
+    });
   const provider = dependencies.approvalProvider || createTrustedApprovalProvider({ env: runtimeConfig.env || process.env, verifier: dependencies.webauthnVerifier });
   const draft = buildMandateDraft({ run, profile, recommendation, agentIdentity, approvalMethod: provider.name, ttlSeconds, correlationId });
   const mandate = await models.mandateModel.create({ ...draft, userId });
@@ -221,11 +233,12 @@ export async function verifyMandateApproval({ mandateId, userId, assertion, depe
     const challenge = await models.challengeModel.findOne({ mandateId, userId, consumedAt: null }).lean();
     if (!challenge || new Date(challenge.expiresAt).getTime() <= Date.now()) throw mandateError('TRUSTED_APPROVAL_INVALID', 'The passkey challenge is missing or expired.');
     if (assertion?.mandateHash !== mandate.mandateHash) throw mandateError('TRUSTED_APPROVAL_INVALID', 'The passkey assertion is bound to a different mandate.');
-    const storedCredential = await models.credentialModel.findOne({ userId, credentialId: assertion.credentialId }).lean();
+    const assertedCredentialId = normalizeCredentialId(assertion.credentialId);
+    const storedCredential = await models.credentialModel.findOne({ userId, credentialId: assertedCredentialId }).lean();
     if (!storedCredential) throw mandateError('TRUSTED_APPROVAL_INVALID', 'The passkey credential is not registered to this user.');
     credential = {
-      id: storedCredential.credentialId,
-      publicKey: storedCredential.publicKey,
+      id: assertedCredentialId,
+      publicKey: normalizePublicKey(storedCredential.publicKey),
       counter: storedCredential.counter,
       transports: storedCredential.transports || [],
     };
@@ -253,11 +266,17 @@ export async function verifyMandateApproval({ mandateId, userId, assertion, depe
       throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey authenticator counter is invalid.');
     }
     const counterUpdate = await models.credentialModel.findOneAndUpdate(
-      { userId, credentialId: credential.credentialId, counter: credential.counter },
+      { userId, credentialId: credential.id, counter: credential.counter },
       { $set: { counter: approval.newCounter, lastUsedAt: new Date() } },
       { new: true },
     );
     if (!counterUpdate) throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey authenticator counter changed unexpectedly.');
+    const challengeConsumed = await models.challengeModel.findOneAndUpdate(
+      { mandateId, userId, mandateHash: mandate.mandateHash, consumedAt: null },
+      { $set: { consumedAt: new Date() } },
+      { new: true },
+    );
+    if (!challengeConsumed) throw mandateError('MANDATE_ALREADY_CONSUMED', 'The passkey challenge was already consumed.');
   }
   const keyProvider = dependencies.keyProvider || createAuthorizationKeyProvider({ env: runtimeConfig.env || process.env, required: (runtimeConfig.env || process.env).NODE_ENV === 'production' });
   const signature = keyProvider.sign(canonicalizeMandate(mandate));
@@ -267,7 +286,6 @@ export async function verifyMandateApproval({ mandateId, userId, assertion, depe
     { new: true },
   ).lean();
   if (!update) throw mandateError('MANDATE_ALREADY_CONSUMED', 'This mandate changed while it was being approved.');
-  if (provider.name === 'WEBAUTHN') await models.challengeModel.updateOne({ mandateId, userId, consumedAt: null }, { $set: { consumedAt: new Date() } });
   PrometheusMetrics.inc('mandates_authorized_total');
   return publicMandate(update);
 }

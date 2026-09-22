@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { SAFE_PLAN_REVIEW_TOOLS } from '../planReview/planReviewSchemas.js';
+import { isVerifiedPromotionAuthorization, verifyPromotionAuthorization } from './promotionAuthorization.js';
 
 export const SCAFFOLD_SPEC_VERSION = 'scaffold-spec-1.0.0';
 export const IMMUTABLE_FINANCIAL_SURFACES = Object.freeze([
@@ -124,24 +125,24 @@ export class ScaffoldRegistry {
     return Object.freeze({ candidateVersion: candidate.spec.version, evaluation, appliedToProduction: false });
   }
 
-  promote(scaffoldId, version, { approvedBy, approvalId, evaluation } = {}) {
-    if (!approvedBy || !approvalId) throw new Error('Human approval is required to promote a scaffold.');
-    if (!evaluation?.passed || Number(evaluation?.hardGates?.financialAuthorityDelta || 0) !== 0) {
+  promote(scaffoldId, version, { authorization, evaluation } = {}) {
+    if (!evaluation?.passed || evaluation?.scoreCards?.some(card => card.hardGatePassed !== true)) {
       throw new Error('Only a passed, financially inert evaluation can be promoted.');
     }
     const record = this.get(scaffoldId, version);
     if (!record) throw new Error('Scaffold version is not registered.');
+    verifyPromotionAuthorization({ authorization, candidate: record.spec, evaluation });
     this.champion = record;
-    this.history.push({ action: 'PROMOTE', scaffoldId, version, approvedBy, approvalId, at: new Date().toISOString() });
+    this.history.push({ action: 'PROMOTE', scaffoldId, version, reviewerId: authorization.reviewerId, approvalId: authorization.approvalId, at: new Date().toISOString() });
     return record;
   }
 
-  rollback({ approvedBy, approvalId } = {}) {
-    if (!approvedBy || !approvalId) throw new Error('Human approval is required to rollback a scaffold.');
+  rollback({ authorization } = {}) {
+    if (!isVerifiedPromotionAuthorization(authorization) || !authorization?.verified || authorization.method !== 'WEBAUTHN' || !authorization.approvalId) throw new Error('Cryptographic WebAuthn human approval is required to rollback a scaffold.');
     const previous = [...this.versions.values()].filter(item => item !== this.champion).at(-1);
     if (!previous) throw new Error('No previous scaffold version is available for rollback.');
     this.champion = previous;
-    this.history.push({ action: 'ROLLBACK', version: previous.spec.version, approvedBy, approvalId, at: new Date().toISOString() });
+    this.history.push({ action: 'ROLLBACK', version: previous.spec.version, reviewerId: authorization.reviewerId, approvalId: authorization.approvalId, at: new Date().toISOString() });
     return previous;
   }
 }

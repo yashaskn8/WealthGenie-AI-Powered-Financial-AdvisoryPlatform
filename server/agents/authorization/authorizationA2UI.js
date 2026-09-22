@@ -3,7 +3,7 @@ import { validateA2UIMessage } from '../a2ui/a2uiSchemas.js';
 export function buildVerifiableActionApprovalA2UI(mandate) {
   if (!mandate?.mandateId || mandate.action !== 'APPROVE_RECOMPUTE') throw new TypeError('A valid recompute mandate is required.');
   const message = {
-    version: 'a2ui-1.0.0',
+    version: 'a2ui-inspired-internal-1.0.0',
     surface: 'plan-review',
     components: [{
       id: 'a2ui_verifiable_recompute',
@@ -22,4 +22,3 @@ export function buildVerifiableActionApprovalA2UI(mandate) {
   validateA2UIMessage(message);
   return message;
 }
-

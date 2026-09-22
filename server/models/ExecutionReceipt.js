@@ -16,9 +16,9 @@ const resultSchema = new mongoose.Schema({
 }, { _id: false, strict: 'throw' });
 
 const schema = new mongoose.Schema({
-  receiptId: { type: String, required: true, unique: true, immutable: true, index: true, match: /^[0-9a-f-]{36}$/i },
+  receiptId: { type: String, required: true, unique: true, immutable: true, match: /^[0-9a-f-]{36}$/i },
   version: { type: String, enum: [RECEIPT_VERSION], required: true, immutable: true },
-  mandateId: { type: String, required: true, immutable: true, index: true },
+  mandateId: { type: String, required: true, immutable: true },
   action: { type: String, enum: ['APPROVE_RECOMPUTE'], required: true, immutable: true },
   status: { type: String, enum: ['EXECUTED', 'FAILED'], required: true, immutable: true },
   executedByServiceIdentity: { type: String, required: true, immutable: true, maxlength: 120 },
@@ -40,6 +40,6 @@ const schema = new mongoose.Schema({
 }, { strict: 'throw', timestamps: true });
 
 schema.index({ userId: 1, createdAt: -1 });
+schema.index({ mandateId: 1 }, { unique: true });
 
 export default mongoose.model('ExecutionReceipt', schema);
-

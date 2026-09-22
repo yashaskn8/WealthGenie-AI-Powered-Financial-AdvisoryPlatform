@@ -12,6 +12,7 @@ import {
   hashPlanReviewRequest,
   isActivePlanReviewState,
 } from './planReviewRuntime.js';
+import { createModelGateway } from '../modelGateway.js';
 
 function primaryProvider() {
   const configured = String(process.env.LLM_PRIMARY_PROVIDER || 'NVIDIA_NIM').trim().toUpperCase();
@@ -77,6 +78,8 @@ export async function runPlanReview({ userId, profileId, runId = null, resumeChe
       maxTotalTokens: runtimeConfig.agentPlanReview.maxTotalTokens,
       toolTimeoutMs: Math.min(5000, runtimeConfig.agentPlanReview.timeoutMs),
       plannerProvider: process.env.AGENT_USE_MODEL_PLANNER === 'true' ? primaryProvider() : null,
+      modelPlannerEnabled: process.env.AGENT_USE_MODEL_PLANNER === 'true',
+      modelGateway: createModelGateway({ maxOutputTokens: runtimeConfig.agentPlanReview.maxOutputTokens }),
       persistAgentRun: payload => persistPlanReviewRun(payload),
       ...dependencies,
     },

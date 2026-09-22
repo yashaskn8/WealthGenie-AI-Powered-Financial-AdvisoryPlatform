@@ -3,7 +3,7 @@ import React from 'react';
 const SUPPORTED_TYPES = new Set(['status', 'finding', 'evidence', 'action_descriptor', 'verifiable_action_approval']);
 
 export function A2UIRenderer({ message, onAction }) {
-  if (!message || message.version !== 'a2ui-1.0.0' || message.surface !== 'plan-review') return null;
+  if (!message || message.version !== 'a2ui-inspired-internal-1.0.0' || message.surface !== 'plan-review') return null;
   return (
     <section aria-label="Plan review details" data-a2ui-surface="plan-review">
       {(message.components || []).filter(component => SUPPORTED_TYPES.has(component.type)).map(component => (
