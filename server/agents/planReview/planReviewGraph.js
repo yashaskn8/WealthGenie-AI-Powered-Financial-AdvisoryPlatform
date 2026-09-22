@@ -7,6 +7,10 @@ import { generateGroundedExplanation, isGroundingBoundaryAttack } from '../../se
 import { parseGroundedModelJson, validateGroundedExplanation } from '../../services/groundingValidator.js';
 import { loadPlanReviewContext, executePlanReviewTool, getPlanReviewToolDefinitions } from './planReviewTools.js';
 import { PlanReviewState } from './planReviewState.js';
+import { createResearchBrief } from '../research/researchSchemas.js';
+import { evaluateResearchNeed } from '../research/researchNeedEvaluator.js';
+import { researchArtifactToEvidenceEntries } from '../research/researchArtifact.js';
+import { verifyResearchArtifact } from '../research/researchClaimVerifier.js';
 import {
   MAX_AGENT_STEPS,
   MAX_TOOL_CALLS,
@@ -266,6 +270,13 @@ async function executeSafeToolsNode(state, dependencies) {
 }
 
 async function validateEvidenceNode(state) {
+  if (state.evidencePacket?.entries) {
+    return {
+      evidencePacket: state.evidencePacket,
+      goalSummary: state.goalSummary || state.toolResults?.get_goal_status_summary || { status: state.profile ? 'NONE' : 'UNAVAILABLE', items: [] },
+      errors: [],
+    };
+  }
   const evidence = state.toolResults?.get_plan_evidence_snapshot;
   const goalSummary = state.toolResults?.get_goal_status_summary
     || { status: state.profile ? 'NONE' : 'UNAVAILABLE', items: [] };
@@ -275,8 +286,9 @@ async function validateEvidenceNode(state) {
       evidenceHash: evidence.evidenceHash,
       entries: evidence.entries || [],
       unavailableFacts: evidence.unavailableFacts || [],
+      status: 'AVAILABLE',
     }
-    : { groundingVersion: null, evidenceHash: null, entries: [], unavailableFacts: evidence?.unavailableFacts || ['EVIDENCE_UNAVAILABLE'] };
+    : { groundingVersion: null, evidenceHash: null, entries: [], unavailableFacts: evidence?.unavailableFacts || ['EVIDENCE_UNAVAILABLE'], status: 'UNAVAILABLE' };
   const evidenceIds = unique(evidencePacket.entries.map(item => item?.id));
   const evidenceValid = evidenceIds.length === evidencePacket.entries.length
     && evidenceIds.every(id => /^E_[A-Z0-9_:-]+$/.test(id));
@@ -291,9 +303,66 @@ async function validateEvidenceNode(state) {
   };
 }
 
+function researchBriefForPlan(state, mode) {
+  return createResearchBrief({
+    topic: 'Current public financial and regulatory evidence',
+    question: 'Retrieve current public evidence that can safely explain a read-only financial plan review. Do not use private user information, make recommendations, or perform financial calculations.',
+    jurisdiction: 'IN',
+    requestedFactTypes: ['regulatory_context', 'public_market_context'],
+    instrumentCategories: [],
+    maxResearchDepth: mode === 'DEEP_RESEARCH' ? 3 : 1,
+    correlationId: state.correlationId || null,
+    runId: state.runId || null,
+  });
+}
+
+async function researchMeshNode(state, dependencies) {
+  const evidencePacket = state.evidencePacket || { status: 'UNAVAILABLE', entries: [], unavailableFacts: ['EVIDENCE_UNAVAILABLE'] };
+  const researchNeed = evaluateResearchNeed({
+    enabled: Boolean(dependencies.researchAdaptiveEnabled),
+    evidenceStatus: evidencePacket.status,
+    reasonCodes: evidencePacket.unavailableFacts || [],
+    evidenceEntries: evidencePacket.entries || [],
+  });
+  const base = { researchNeed };
+  if (researchNeed.mode === 'NO_RESEARCH') return base;
+  if (!dependencies.researchMeshClient) return { ...base, researchFailure: 'RESEARCH_AGENT_UNAVAILABLE' };
+  if (researchNeed.mode === 'DEEP_RESEARCH' && !dependencies.researchDeepEnabled) {
+    return { ...base, researchFailure: 'DEEP_RESEARCH_DISABLED' };
+  }
+  const brief = researchBriefForPlan(state, researchNeed.mode);
+  try {
+    await reportProgress(dependencies, { node: 'research_mesh', state: { ...state, researchNeed }, event: trajectoryEvent('RESEARCH_REQUIRED', { mode: researchNeed.mode }) });
+    await reportProgress(dependencies, { node: 'research_mesh', state: { ...state, researchNeed, researchBrief: brief }, event: trajectoryEvent('RESEARCH_TASK_STARTED') });
+    const result = await dependencies.researchMeshClient.sendResearch({ brief });
+    const verification = verifyResearchArtifact(result.artifact, { brief });
+    if (!verification.valid) {
+      return { ...base, researchBrief: brief, researchFailure: 'RESEARCH_ARTIFACT_REJECTED', researchVerification: verification };
+    }
+    const researchEntries = researchArtifactToEvidenceEntries(result.artifact);
+    const existingIds = new Set(evidencePacket.entries.map(entry => entry.id));
+    const mergedEntries = [...evidencePacket.entries, ...researchEntries.filter(entry => !existingIds.has(entry.id))];
+    return {
+      ...base,
+      researchBrief: brief,
+      researchArtifact: result.artifact,
+      researchVerification: verification,
+      evidencePacket: {
+        ...evidencePacket,
+        status: mergedEntries.length > 0 ? 'AVAILABLE' : evidencePacket.status,
+        entries: mergedEntries,
+        unavailableFacts: evidencePacket.unavailableFacts.filter(code => code !== 'EVIDENCE_UNAVAILABLE'),
+      },
+    };
+  } catch (error) {
+    await reportProgress(dependencies, { node: 'research_mesh', state: { ...state, researchNeed, researchBrief: brief }, event: trajectoryEvent('RESEARCH_FAILED', { code: error.code || 'RESEARCH_FAILED' }) });
+    return { ...base, researchBrief: brief, researchFailure: error.code || 'RESEARCH_FAILED' };
+  }
+}
+
 async function synthesizeNode(state, dependencies) {
   const validated = await validateEvidenceNode(state);
-  const evidence = state.toolResults?.get_plan_evidence_snapshot;
+  const evidence = validated.evidencePacket;
   const safeProvider = { provider: 'DETERMINISTIC_FALLBACK', model: null, fallback: true };
   let explanation = null;
   let provider = safeProvider;
@@ -344,7 +413,7 @@ async function synthesizeNode(state, dependencies) {
     profile: state.profile,
     freshness: state.freshness,
     goalSummary: validated.goalSummary,
-    evidence: evidence || { status: 'UNAVAILABLE', entries: [], unavailableFacts: ['EVIDENCE_UNAVAILABLE'] },
+    evidence,
     provider,
     stepCount: state.stepCount,
     toolCallCount: state.toolCallCount,
@@ -401,7 +470,7 @@ async function policyGuardNode(state) {
     profile: state.profile,
     freshness: state.freshness,
     goalSummary: state.goalSummary,
-    evidence: state.toolResults?.get_plan_evidence_snapshot,
+    evidence: state.evidencePacket,
     provider: state.review?.provider,
     reasonCodes: unique([...policy.reasonCodes, ...(state.validation?.errors || [])]),
     stepCount: state.stepCount,
@@ -455,6 +524,11 @@ export function createPlanReviewGraph(dependencies = {}) {
       await reportProgress(dependencies, { node: 'validate_evidence', state: { ...state, ...next }, event: trajectoryEvent('EVIDENCE_VALIDATED') });
       return next;
     })
+    .addNode('research_mesh', async state => {
+      const next = await researchMeshNode(state, dependencies);
+      await reportProgress(dependencies, { node: 'research_mesh', state: { ...state, ...next }, event: next.researchFailure ? trajectoryEvent('RESEARCH_FAILED', { code: next.researchFailure }) : trajectoryEvent('RESEARCH_COMPLETED', { mode: next.researchNeed?.mode }) });
+      return next;
+    })
     .addNode('synthesize_review', async state => {
       const next = await synthesizeNode(state, dependencies);
       await reportProgress(dependencies, { node: 'synthesize_review', state: { ...state, ...next }, event: trajectoryEvent(next.explanation?.fallback ? 'FALLBACK_USED' : 'NODE_ENTERED', { node: 'synthesize_review' }) });
@@ -480,7 +554,8 @@ export function createPlanReviewGraph(dependencies = {}) {
     .addEdge('check_recommendation_freshness', 'determine_required_checks')
     .addEdge('determine_required_checks', 'execute_safe_tools')
     .addEdge('execute_safe_tools', 'validate_evidence')
-    .addEdge('validate_evidence', 'synthesize_review')
+    .addEdge('validate_evidence', 'research_mesh')
+    .addEdge('research_mesh', 'synthesize_review')
     .addEdge('synthesize_review', 'validate_agent_output')
     .addEdge('validate_agent_output', 'policy_guard')
     .addEdge('policy_guard', 'persist_agent_run')

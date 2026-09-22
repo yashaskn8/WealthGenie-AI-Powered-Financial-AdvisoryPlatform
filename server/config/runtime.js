@@ -72,6 +72,30 @@ export function getRuntimeConfig(env = process.env) {
     agentStreamEnabled: booleanValue(env.AGENT_STREAM_ENABLED, !isProduction),
     agentEvolutionEnabled: booleanValue(env.AGENT_EVOLUTION_ENABLED, false),
     agentResearchEnabled: booleanValue(env.AGENT_RESEARCH_ENABLED, false),
+    researchMesh: Object.freeze({
+      a2aV1Enabled: booleanValue(env.AGENT_A2A_V1_ENABLED, false),
+      deepResearchEnabled: booleanValue(env.AGENT_DEEP_RESEARCH_ENABLED, false),
+      adaptiveResearchEnabled: booleanValue(env.AGENT_ADAPTIVE_RESEARCH_ENABLED, false),
+      liveSearchEnabled: booleanValue(env.AGENT_RESEARCH_LIVE_SEARCH_ENABLED, false),
+      researchUrl: env.AGENT_A2A_RESEARCH_URL?.trim() || null,
+      publicUrl: env.AGENT_A2A_PUBLIC_URL?.trim() || null,
+      searchProvider: env.RESEARCH_SEARCH_PROVIDER?.trim().toLowerCase() || null,
+      searchProviderUrl: env.RESEARCH_SEARCH_PROVIDER_URL?.trim() || null,
+      devTokenConfigured: Boolean(env.AGENT_A2A_DEV_TOKEN),
+      cardSigningEnabled: booleanValue(env.AGENT_A2A_CARD_SIGNING_ENABLED, false),
+      cardSigningPrivateKeyConfigured: Boolean(env.AGENT_A2A_CARD_SIGNING_PRIVATE_KEY),
+      budgets: Object.freeze({
+        maxResearchRounds: positiveInteger(env.RESEARCH_MAX_ROUNDS, 3, { min: 0, max: 3 }),
+        maxSearchQueries: positiveInteger(env.RESEARCH_MAX_SEARCH_QUERIES, 6, { min: 0, max: 6 }),
+        maxResultsPerQuery: positiveInteger(env.RESEARCH_MAX_RESULTS_PER_QUERY, 5, { min: 0, max: 5 }),
+        maxUniqueDocuments: positiveInteger(env.RESEARCH_MAX_UNIQUE_DOCUMENTS, 12, { min: 0, max: 12 }),
+        maxConcurrentFetches: positiveInteger(env.RESEARCH_MAX_CONCURRENT_FETCHES, 4, { min: 0, max: 4 }),
+        maxModelCalls: positiveInteger(env.RESEARCH_MAX_MODEL_CALLS, 6, { min: 0, max: 6 }),
+        maxOutputTokens: positiveInteger(env.RESEARCH_MAX_OUTPUT_TOKENS, 2500, { min: 0, max: 2500 }),
+        maxTotalTokens: positiveInteger(env.RESEARCH_MAX_TOTAL_TOKENS, 15000, { min: 0, max: 15000 }),
+        maxDurationMs: positiveInteger(env.RESEARCH_MAX_DURATION_MS, 60000, { min: 0, max: 60000 }),
+      }),
+    }),
     authorization: Object.freeze({
       verifiableActionsEnabled: booleanValue(env.AGENT_VERIFIABLE_ACTIONS_ENABLED, false),
       webauthnApprovalEnabled: booleanValue(env.AGENT_WEBAUTHN_APPROVAL_ENABLED, false),
@@ -164,6 +188,22 @@ export function assertValidRuntimeConfig(config) {
     if (config.agentIdentityProvider === 'spiffe' && !config.agentIdentity.trustDomain) {
       throw new Error('Production SPIFFE agent identity requires SPIFFE_TRUST_DOMAIN and a runtime SVID verifier.');
     }
+  }
+  const research = config.researchMesh;
+  const researchEnabled = research.a2aV1Enabled || research.deepResearchEnabled || research.adaptiveResearchEnabled || research.liveSearchEnabled;
+  if (researchEnabled && !research.a2aV1Enabled) {
+    throw new Error('ResearchMesh feature flags require AGENT_A2A_V1_ENABLED=true');
+  }
+  if (research.a2aV1Enabled) {
+    if (!research.researchUrl) throw new Error('AGENT_A2A_RESEARCH_URL is required when A2A ResearchMesh is enabled');
+    if (config.isProduction && !research.researchUrl.startsWith('https://')) throw new Error('AGENT_A2A_RESEARCH_URL must use HTTPS in production');
+    if (config.isProduction && config.agentIdentityProvider === 'development') throw new Error('Production ResearchMesh requires OIDC or SPIFFE agent identity');
+    if (!config.isProduction && config.agentIdentityProvider === 'development' && !research.devTokenConfigured) throw new Error('AGENT_A2A_DEV_TOKEN is required for development A2A ResearchMesh');
+    if (config.isProduction && !research.cardSigningEnabled) throw new Error('Production ResearchMesh requires signed Agent Cards');
+    if (config.isProduction && research.cardSigningEnabled && !research.cardSigningPrivateKeyConfigured) throw new Error('Production signed Agent Cards require AGENT_A2A_CARD_SIGNING_PRIVATE_KEY');
+  }
+  if (research.liveSearchEnabled && (research.searchProvider !== 'configured' || !research.searchProviderUrl)) {
+    throw new Error('Live ResearchMesh search requires the configured approved search provider and endpoint');
   }
   if (config.agentWorkerMode === 'embedded' && config.agentWorkerEnabled === false) {
     return;

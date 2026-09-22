@@ -27,6 +27,26 @@ export function validateEnvironmentConfig(env = process.env) {
     errors.push('MONGODB_URI is required');
   }
 
+  const researchA2AEnabled = env.AGENT_A2A_V1_ENABLED === 'true';
+  const researchFeatureEnabled = researchA2AEnabled
+    || env.AGENT_DEEP_RESEARCH_ENABLED === 'true'
+    || env.AGENT_ADAPTIVE_RESEARCH_ENABLED === 'true'
+    || env.AGENT_RESEARCH_LIVE_SEARCH_ENABLED === 'true';
+  if (researchFeatureEnabled && !researchA2AEnabled) errors.push('ResearchMesh feature flags require AGENT_A2A_V1_ENABLED=true');
+  if (researchA2AEnabled) {
+    if (!env.AGENT_A2A_RESEARCH_URL) errors.push('AGENT_A2A_RESEARCH_URL is required when A2A ResearchMesh is enabled');
+    if (isProduction && !String(env.AGENT_A2A_RESEARCH_URL || '').startsWith('https://')) errors.push('AGENT_A2A_RESEARCH_URL must use HTTPS in production');
+    const identityProvider = String(env.AGENT_IDENTITY_PROVIDER || 'development').toLowerCase();
+    if (isProduction && identityProvider === 'development') errors.push('Production ResearchMesh requires OIDC or SPIFFE agent identity');
+    if (!isProduction && identityProvider === 'development' && !env.AGENT_A2A_DEV_TOKEN) errors.push('AGENT_A2A_DEV_TOKEN is required for development A2A ResearchMesh');
+    if (isProduction && env.AGENT_A2A_CARD_SIGNING_ENABLED !== 'true') errors.push('Production ResearchMesh requires signed Agent Cards');
+    if (isProduction && env.AGENT_A2A_CARD_SIGNING_ENABLED === 'true' && !env.AGENT_A2A_CARD_SIGNING_PRIVATE_KEY) errors.push('Production signed Agent Cards require AGENT_A2A_CARD_SIGNING_PRIVATE_KEY');
+  }
+  if (env.AGENT_RESEARCH_LIVE_SEARCH_ENABLED === 'true'
+    && (String(env.RESEARCH_SEARCH_PROVIDER || '').toLowerCase() !== 'configured' || !env.RESEARCH_SEARCH_PROVIDER_URL)) {
+    errors.push('Live ResearchMesh search requires the configured approved search provider and endpoint');
+  }
+
   const jwtSecret = (env.JWT_SECRET || '').trim();
   const INSECURE_JWT_PLACEHOLDERS = [
     'CHANGE_ME',

@@ -1,6 +1,7 @@
 const CAPABILITIES = Object.freeze({
-  PLAN_REVIEW: Object.freeze(['read_profile_context', 'read_recommendation_summary', 'read_evidence', 'grounded_review', 'propose:plan_recompute']),
+  PLAN_REVIEW: Object.freeze(['read_profile_context', 'read_recommendation_summary', 'read_evidence', 'grounded_review', 'propose:plan_recompute', 'invoke:financial_research']),
   EVIDENCE_VERIFIER: Object.freeze(['validate_evidence_ids', 'detect_unsupported_claims', 'detect_prompt_injection']),
+  FINANCIAL_RESEARCH: Object.freeze(['search:public_financial_sources', 'retrieve:public_document', 'extract:public_evidence', 'verify:research_claim', 'emit:research_artifact']),
   SCAFFOLD_EVOLUTION: Object.freeze(['read_sanitized_trajectory', 'run_offline_evaluation']),
 });
 

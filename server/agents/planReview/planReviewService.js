@@ -13,6 +13,7 @@ import {
   isActivePlanReviewState,
 } from './planReviewRuntime.js';
 import { createModelGateway } from '../modelGateway.js';
+import { createResearchMeshClient } from '../research/researchMeshClient.js';
 
 function primaryProvider() {
   const configured = String(process.env.LLM_PRIMARY_PROVIDER || 'NVIDIA_NIM').trim().toUpperCase();
@@ -60,6 +61,17 @@ export async function persistPlanReviewRun({ review, userId, profileId, recommen
 }
 
 export async function runPlanReview({ userId, profileId, runId = null, resumeCheckpoint = null, correlationId = null, traceId = null, runtimeConfig = getRuntimeConfig(), dependencies = {} }) {
+  const researchConfig = runtimeConfig.researchMesh || {};
+  const researchEnabled = Boolean(researchConfig.a2aV1Enabled && researchConfig.adaptiveResearchEnabled);
+  let researchMeshClient = dependencies.researchMeshClient || null;
+  let researchClientInitError = null;
+  if (researchEnabled && !researchMeshClient) {
+    try {
+      researchMeshClient = createResearchMeshClient({ env: dependencies.researchEnv || process.env, fetchImpl: dependencies.fetchImpl || globalThis.fetch });
+    } catch (error) {
+      researchClientInitError = error.code || 'RESEARCH_AGENT_CONFIGURATION_INVALID';
+    }
+  }
   const result = await invokePlanReviewGraph({
     userId,
     profileId,
@@ -81,6 +93,11 @@ export async function runPlanReview({ userId, profileId, runId = null, resumeChe
       modelPlannerEnabled: process.env.AGENT_USE_MODEL_PLANNER === 'true',
       modelGateway: createModelGateway({ maxOutputTokens: runtimeConfig.agentPlanReview.maxOutputTokens }),
       persistAgentRun: payload => persistPlanReviewRun(payload),
+      researchAdaptiveEnabled: researchEnabled,
+      researchDeepEnabled: Boolean(researchConfig.deepResearchEnabled),
+      researchMeshClient,
+      researchClientInitError,
+      researchBudget: researchConfig.budgets,
       ...dependencies,
     },
   });

@@ -62,6 +62,16 @@ class MetricsCollector {
       replay_rejections_total: 0,
       snapshot_mismatch_rejections_total: 0,
       capability_denials_total: 0,
+      research_queries_total: 0,
+      research_documents_total: 0,
+      research_model_calls_total: 0,
+      research_tokens_total: 0,
+      research_duration_seconds_total: 0,
+      research_provider_failures_total: 0,
+      research_verification_failures_total: 0,
+      research_budget_exhausted_total: 0,
+      research_a2a_tasks_total: 0,
+      research_a2a_task_failures_total: 0,
     };
 
     this.gauges = {
@@ -228,6 +238,22 @@ class MetricsCollector {
       'snapshot_mismatch_rejections_total', 'capability_denials_total',
     ];
     for (const name of authorizationCounters) {
+      lines.push(`# TYPE wealthgenie_${name} counter`);
+      lines.push(`wealthgenie_${name} ${this.counters[name]}`);
+    }
+    const researchCounters = [
+      'research_queries_total',
+      'research_documents_total',
+      'research_model_calls_total',
+      'research_tokens_total',
+      'research_duration_seconds_total',
+      'research_provider_failures_total',
+      'research_verification_failures_total',
+      'research_budget_exhausted_total',
+      'research_a2a_tasks_total',
+      'research_a2a_task_failures_total',
+    ];
+    for (const name of researchCounters) {
       lines.push(`# TYPE wealthgenie_${name} counter`);
       lines.push(`wealthgenie_${name} ${this.counters[name]}`);
     }

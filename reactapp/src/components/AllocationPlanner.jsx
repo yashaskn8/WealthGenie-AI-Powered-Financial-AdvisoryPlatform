@@ -25,6 +25,7 @@ import * as Tooltip from '@radix-ui/react-tooltip';
 import { toast } from 'sonner';
 import { RISK_COLORS } from '../investmentDatabase';
 import * as api from '../services/api';
+import ResearchStatusCard from './agent/ResearchStatusCard';
 import './AllocationPlanner.css';
 
 const SLICE_GRADIENTS = [
@@ -255,6 +256,7 @@ const PlanReviewPanel = ({ profileId, onRecomputePlan }) => {
                 </div>
               ))}
             </div>
+            <ResearchStatusCard evidenceEntries={evidenceEntries} />
             <div className="ap-review-actions">
               <Dialog.Root open={evidenceOpen} onOpenChange={setEvidenceOpen}>
                 <Dialog.Trigger asChild>

@@ -1,0 +1,81 @@
+name: A2A v1 MUST conformance
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  a2a-tck:
+    name: ResearchAgent A2A HTTP+JSON MUST checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install WealthGenie server dependencies
+        run: npm ci --prefix server
+
+      - name: Start the standalone FinancialResearchAgent
+        env:
+          NODE_ENV: test
+          AGENT_A2A_V1_ENABLED: 'true'
+          AGENT_A2A_PUBLIC_URL: http://127.0.0.1:5088
+          AGENT_A2A_DEV_TOKEN: ci-a2a-plan-review-token
+          AGENT_IDENTITY_PROVIDER: development
+          RESEARCH_SEARCH_PROVIDER: fixture
+        run: |
+          node server/agents/research/researchAgentServer.js > research-agent.log 2>&1 &
+          echo $! > research-agent.pid
+
+      - name: Wait for ResearchAgent liveness
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:5088/health/live > /dev/null; then exit 0; fi
+            if [ "$attempt" -eq 30 ]; then cat research-agent.log; exit 1; fi
+            sleep 1
+          done
+
+      - name: Checkout the official A2A TCK
+        run: git clone --depth 1 https://github.com/a2aproject/a2a-tck.git .a2a-tck
+
+      - name: Install TCK dependencies
+        working-directory: .a2a-tck
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Run official HTTP+JSON MUST checks
+        working-directory: .a2a-tck
+        env:
+          A2A_AUTH_TYPE: bearer
+          A2A_AUTH_TOKEN: ci-a2a-plan-review-token
+        run: |
+          python run_tck.py --sut-host http://127.0.0.1:5088 --transport http_json --level must
+
+      - name: Upload TCK report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a2a-tck-report
+          if-no-files-found: ignore
+          path: |
+            .a2a-tck/reports/
+            research-agent.log
+
+      - name: Stop ResearchAgent
+        if: always()
+        run: if [ -f research-agent.pid ]; then kill "$(cat research-agent.pid)" || true; fi
