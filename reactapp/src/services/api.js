@@ -388,6 +388,30 @@ export async function getPlanReviewRun(runId, options = {}) {
   return request('GET', `/agent/plan-review/${encodeURIComponent(runId)}`, null, { retries: 0, ...options });
 }
 
+export async function getCurrentPlanReviewRun(profileId, options = {}) {
+  if (!profileId) throw new TypeError('A profile ID is required.');
+  return request('GET', `/agent/plan-review/current?profileId=${encodeURIComponent(profileId)}`, null, { retries: 0, ...options });
+}
+
+export async function cancelPlanReviewRun(runId, options = {}) {
+  if (!runId) throw new TypeError('A plan review run ID is required.');
+  return request('POST', `/agent/plan-review/${encodeURIComponent(runId)}/cancel`, {}, { retries: 0, ...options });
+}
+
+export async function actOnPlanReview(runId, action, options = {}) {
+  if (!runId) throw new TypeError('A plan review run ID is required.');
+  return request('POST', `/agent/plan-review/${encodeURIComponent(runId)}/action`, { action }, { retries: 0, ...options });
+}
+
+export async function getPlanHealth(profileId, options = {}) {
+  if (!profileId) throw new TypeError('A profile ID is required.');
+  return request('GET', `/agent/plan-health?profileId=${encodeURIComponent(profileId)}`, null, options);
+}
+
+export async function getPlanHealthEvents(options = {}) {
+  return request('GET', '/agent/plan-health/events', null, options);
+}
+
 export async function fetchAdvisory(recommendationId, options = {}) {
   return request('POST', `/recommend/${recommendationId}/advisory`, {}, { timeoutMs: 90000, ...options });
 }
@@ -641,7 +665,7 @@ const api = {
   setAuthToken, getAuthToken, clearAuthToken, clearUserSession,
   subscribeAuth, getAuthSnapshot,
   setUserInfo, getUserInfo,
-  buildProfile, precomputeProfile, completeFinancialProfile, getCurrentProfile, getCurrentRecommendation, getFinancialHealthScore, updateProfile, getRecommendations, runPlanReview, getPlanReviewRun, getInstruments, rankInvestmentCandidates, getProjections, calculateStepUpProjection, calculateAllocationSplit, compareInvestmentProjection, getCustomPortfolioProjection, runInstrumentStressTest,
+  buildProfile, precomputeProfile, completeFinancialProfile, getCurrentProfile, getCurrentRecommendation, getFinancialHealthScore, updateProfile, getRecommendations, runPlanReview, getPlanReviewRun, getCurrentPlanReviewRun, cancelPlanReviewRun, actOnPlanReview, getPlanHealth, getPlanHealthEvents, getInstruments, rankInvestmentCandidates, getProjections, calculateStepUpProjection, calculateAllocationSplit, compareInvestmentProjection, getCustomPortfolioProjection, runInstrumentStressTest,
   runMonteCarlo, runPortfolioMonteCarlo, createGoal, getGoals, updateGoal, simulateGoal, deleteGoal, healthCheck,
   getMarketRates, getBenchmarkMarketFacts, getMutualFundNavFacts, refreshMarketRates,
   sendChatMessage, getChatHistory, clearChatSession, rebalancePortfolio,
