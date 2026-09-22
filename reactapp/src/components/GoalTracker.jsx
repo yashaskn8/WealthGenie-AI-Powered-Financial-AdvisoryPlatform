@@ -75,6 +75,7 @@ const GoalCard = ({
 }) => {
   // Target facts are editable; every computed value is read from the stored backend goal.
   const isDbGoal = !!goalObj;
+  const isCalculationFresh = goalObj?.calculation_freshness?.fresh !== false;
   const initialTarget = isDbGoal ? goalObj.target_amount : defaults.target;
   const initialSaved = isDbGoal ? goalObj.current_savings : defaults.currentSaved;
 
@@ -90,12 +91,12 @@ const GoalCard = ({
 
   const actualTarget = Number(target) || 0;
   const actualSaved = Number(currentSaved) || 0;
-  const projectedCandidate = Number(goalObj?.monte_carlo_summary?.p50);
+  const projectedCandidate = isCalculationFresh ? Number(goalObj?.monte_carlo_summary?.p50) : NaN;
   const hasProjection = Number.isFinite(projectedCandidate) && projectedCandidate >= 0;
   const projectedValue = hasProjection ? projectedCandidate : null;
 
   // MC projections target the inflation-adjusted amount, so compare against that
-  const comparisonTargetCandidate = Number(goalObj?.inflation_adjusted_target);
+  const comparisonTargetCandidate = isCalculationFresh ? Number(goalObj?.inflation_adjusted_target) : NaN;
   const hasComparisonTarget = Number.isFinite(comparisonTargetCandidate) && comparisonTargetCandidate > 0;
   const comparisonTarget = hasComparisonTarget ? comparisonTargetCandidate : null;
 
@@ -104,8 +105,8 @@ const GoalCard = ({
     ? Math.min((projectedValue / comparisonTarget) * 100, 100)
     : 0;
 
-  const isFullyFunded = goalObj?.status === 'on_track';
-  const gapCandidate = Number(goalObj?.gap_amount);
+  const isFullyFunded = isCalculationFresh && goalObj?.status === 'on_track';
+  const gapCandidate = isCalculationFresh ? Number(goalObj?.gap_amount) : NaN;
   const hasGap = Number.isFinite(gapCandidate) && gapCandidate >= 0;
   const gap = hasGap ? gapCandidate : null;
   const gapPositive = !isFullyFunded && hasGap && gap > 0;
@@ -115,14 +116,16 @@ const GoalCard = ({
     : null;
 
   let status, statusClass, StatusIcon;
-  if (goalObj?.status === 'on_track') {
+  if (isCalculationFresh && goalObj?.status === 'on_track') {
     status = 'On Track (Highly Likely)'; statusClass = 'status--ontrack'; StatusIcon = CheckCircle;
-  } else if (isDbGoal) {
+  } else if (isDbGoal && isCalculationFresh) {
     if (goalObj.status === 'at_risk') {
       status = 'Slightly Behind (Needs Boost)'; statusClass = 'status--almost'; StatusIcon = TrendingUp;
     } else if (goalObj.status === 'off_track') {
       status = 'Off Track (Action Required)'; statusClass = 'status--behind'; StatusIcon = AlertTriangle;
-    } else {
+  } else if (isDbGoal) {
+    status = 'Recalculation Required'; statusClass = 'status--warning'; StatusIcon = AlertTriangle;
+  } else {
       status = 'Projection Unavailable'; statusClass = 'status--behind'; StatusIcon = Clock;
     }
   } else { status = 'Awaiting Backend Plan'; statusClass = 'status--behind'; StatusIcon = AlertTriangle; }
@@ -464,7 +467,7 @@ const GoalTracker = ({ profile, onNavigate }) => {
     const allocs = {};
 
     mappedGoals.forEach(g => {
-      const value = Number(g.obj?.recommended_sip);
+      const value = g.obj?.calculation_freshness?.fresh === false ? NaN : Number(g.obj?.recommended_sip);
       allocs[g.name] = Number.isFinite(value) && value >= 0 ? value : null;
     });
     return allocs;
@@ -486,14 +489,16 @@ const GoalTracker = ({ profile, onNavigate }) => {
   }, [dbGoals]);
 
   const totalProjected = useMemo(() => {
-    const values = mappedGoals.map(g => Number(g.obj?.monte_carlo_summary?.p50));
+    const values = mappedGoals.map(g => g.obj?.calculation_freshness?.fresh === false
+      ? NaN
+      : Number(g.obj?.monte_carlo_summary?.p50));
     return values.every(value => Number.isFinite(value) && value >= 0)
       ? values.reduce((sum, value) => sum + value, 0)
       : null;
   }, [mappedGoals]);
 
   const totalMonthlySIP = useMemo(() => {
-    const values = dbGoals.map(g => Number(g.recommended_sip));
+    const values = dbGoals.map(g => g.calculation_freshness?.fresh === false ? NaN : Number(g.recommended_sip));
     return values.every(value => Number.isFinite(value) && value >= 0)
       ? values.reduce((sum, value) => sum + value, 0)
       : null;
@@ -501,7 +506,7 @@ const GoalTracker = ({ profile, onNavigate }) => {
 
   // MC projections target inflation-adjusted amounts, so use those for health calculation
   const totalInflationAdjustedTarget = useMemo(() => {
-    const values = dbGoals.map(g => Number(g.inflation_adjusted_target));
+    const values = dbGoals.map(g => g.calculation_freshness?.fresh === false ? NaN : Number(g.inflation_adjusted_target));
     return values.every(value => Number.isFinite(value) && value > 0)
       ? values.reduce((sum, value) => sum + value, 0)
       : null;

@@ -86,6 +86,7 @@ const recommendationSchema = new mongoose.Schema({
   regulatoryRuleVersion: { type: String, required: true },
   profileInputHash: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
   recommendationPolicyVersion: { type: String, default: 'suitability-freeze-1.1.0', required: true },
+  returnAssumptionHash: { type: String, match: /^[a-f0-9]{64}$/, default: null },
   recommendationGeneration: { type: Number, min: 1, default: 1, required: true },
   // Optional unique fields are omitted when absent so the indexes remain
   // compatible with MongoDB and Amazon DocumentDB.

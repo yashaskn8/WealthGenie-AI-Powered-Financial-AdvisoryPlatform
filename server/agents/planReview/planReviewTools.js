@@ -5,7 +5,7 @@ import AuditRecord from '../../models/AuditRecord.js';
 import { buildRecommendationProfile } from '../../services/recommendationProfile.js';
 import { getCurrentRegulatoryRuleVersion } from '../../services/taxEngine.js';
 import { assessRecommendationFreshness } from '../../services/recommendationFreshness.js';
-import { resolveCurrentRecommendationState } from '../../services/recommendationState.js';
+import { assessGoalCalculationFreshness, resolveCurrentRecommendationState } from '../../services/recommendationState.js';
 import { buildGroundedEvidencePacket, makeEvidenceEntry } from '../../services/groundedEvidence.js';
 import { SAFE_PLAN_REVIEW_TOOLS } from './planReviewSchemas.js';
 
@@ -127,6 +127,16 @@ async function getGoalStatusSummary(context) {
     return {
       status: goals.length ? 'AVAILABLE' : 'NONE',
       items: goals.slice(0, 20).map(goal => ({
+        ...(() => {
+          const calculationFreshness = context.currentState
+            ? assessGoalCalculationFreshness(goal, context.currentState)
+            : { fresh: true, reasonCodes: [] };
+          return {
+            calculationFreshness,
+            probabilityOfSuccess: calculationFreshness.fresh ? (goal.probability_of_success ?? null) : null,
+            recommendedSip: calculationFreshness.fresh ? (goal.recommended_sip ?? null) : null,
+          };
+        })(),
         goalId: idOf(goal),
         name: goal.goal_name,
         targetDate: goal.target_date ?? null,
@@ -134,7 +144,6 @@ async function getGoalStatusSummary(context) {
         status: goal.status ?? null,
         currentSavings: goal.current_savings ?? null,
         targetAmount: goal.target_amount ?? null,
-        probabilityOfSuccess: goal.probability_of_success ?? null,
       })),
     };
   } catch {
@@ -199,10 +208,11 @@ export async function loadPlanReviewContext({ userId, profileId, dependencies = 
   const profile = buildRecommendationProfile(storedProfile);
   let recommendation;
   let freshness;
+  let currentState = null;
   if (!dependencies.profileModel && !dependencies.recommendationModel && !dependencies.auditModel) {
-    const state = await resolveCurrentRecommendationState({ userId, profileId, profile });
-    recommendation = state.currentRecommendationView;
-    freshness = state.freshness;
+    currentState = await resolveCurrentRecommendationState({ userId, profileId, profile });
+    recommendation = currentState.currentRecommendationView;
+    freshness = currentState.freshness;
   } else {
     // Test/adapter callers may provide isolated model doubles. Their path is
     // still read-only; production uses the canonical resolver above.
@@ -226,6 +236,7 @@ export async function loadPlanReviewContext({ userId, profileId, dependencies = 
     profile,
     profileContext: buildProfileContext(storedProfile, profile),
     recommendation,
+    currentState,
     recommendationSummary: buildRecommendationSummary(recommendation),
     freshness,
   };

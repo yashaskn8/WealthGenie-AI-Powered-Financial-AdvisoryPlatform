@@ -9,6 +9,9 @@ const recommendationStateSchema = new mongoose.Schema({
   generationRevision: { type: Number, required: true, min: 1 },
   profileInputHash: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
   portfolioFingerprint: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
+  returnAssumptionVersion: { type: String, required: true },
+  returnAssumptionHash: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
+  returnAssumptionSource: { type: String, required: true },
 }, { timestamps: true, strict: 'throw' });
 
 recommendationStateSchema.index({ userId: 1, profileId: 1 }, { unique: true });

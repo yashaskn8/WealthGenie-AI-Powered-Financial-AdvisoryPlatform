@@ -77,7 +77,9 @@ const GoalPlanner = ({ profile }) => {
   const getLiveProbability = (goal) => {
     if (goal?.calculation_freshness?.fresh === false) return null;
     const id = goal._id || goal.goalId;
-    const value = Number(goalSimulations[id]?.probability_of_success ?? goal.probability_of_success);
+      const value = goal.calculation_freshness?.fresh === false
+        ? NaN
+        : Number(goalSimulations[id]?.probability_of_success ?? goal.probability_of_success);
     return Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
   };
 
@@ -210,7 +212,7 @@ const GoalPlanner = ({ profile }) => {
 
   // Summary statistics
   const targetValues = goals.map(goal => Number(goal.target_amount));
-  const sipValues = goals.map(goal => Number(goal.recommended_sip));
+  const sipValues = goals.map(goal => goal.calculation_freshness?.fresh === false ? NaN : Number(goal.recommended_sip));
   const probabilityValues = goals.map(goal => goal.calculation_freshness?.fresh === false ? NaN : Number(goal.probability_of_success));
   const totalTarget = targetValues.every(value => Number.isFinite(value) && value >= 0)
     ? targetValues.reduce((sum, value) => sum + value, 0)

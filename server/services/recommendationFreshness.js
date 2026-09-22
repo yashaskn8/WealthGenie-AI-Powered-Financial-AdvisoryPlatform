@@ -2,7 +2,11 @@ import {
   buildRecommendationProfileHash,
   RECOMMENDATION_POLICY_VERSION,
 } from './recommendationProfile.js';
-import { PROJECTION_ASSUMPTION_VERSION } from './instrumentConstants.js';
+import {
+  PROJECTION_ASSUMPTION_POLICY_HASH,
+  PROJECTION_ASSUMPTION_SOURCE,
+  PROJECTION_ASSUMPTION_VERSION,
+} from './instrumentConstants.js';
 
 export const RECOMMENDATION_FRESHNESS_REASON_CODES = Object.freeze({
   PROFILE_MISSING: 'PROFILE_MISSING',
@@ -23,6 +27,9 @@ export const RECOMMENDATION_FRESHNESS_REASON_CODES = Object.freeze({
   ASSUMPTION_VERSION_MISSING: 'ASSUMPTION_VERSION_MISSING',
   ASSUMPTION_VERSION_CHANGED: 'ASSUMPTION_VERSION_CHANGED',
   ASSUMPTION_SOURCE_MISSING: 'ASSUMPTION_SOURCE_MISSING',
+  ASSUMPTION_SOURCE_CHANGED: 'ASSUMPTION_SOURCE_CHANGED',
+  ASSUMPTION_HASH_MISSING: 'ASSUMPTION_HASH_MISSING',
+  ASSUMPTION_HASH_CHANGED: 'ASSUMPTION_HASH_CHANGED',
   LEGACY_GENERATION_STATE_CONFLICT: 'LEGACY_GENERATION_STATE_CONFLICT',
 });
 
@@ -41,6 +48,8 @@ export function assessRecommendationFreshness({
   currentAllocation = allocationRevision,
   currentAllocationSource = recommendation?.currentAllocationSource ?? null,
   assumptionVersion = PROJECTION_ASSUMPTION_VERSION,
+  assumptionHash = PROJECTION_ASSUMPTION_POLICY_HASH,
+  assumptionSource = PROJECTION_ASSUMPTION_SOURCE,
   requirePolicyVersion = false,
   requireAllocationState = false,
   requireAssumptionProvenance = false,
@@ -108,7 +117,12 @@ export function assessRecommendationFreshness({
       const version = asString(instrument?.returnAssumptionVersion);
       if (!version) reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.ASSUMPTION_VERSION_MISSING);
       else if (version !== assumptionVersion) reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.ASSUMPTION_VERSION_CHANGED);
-      if (!asString(instrument?.returnSource)) reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.ASSUMPTION_SOURCE_MISSING);
+      const source = asString(instrument?.returnSource);
+      if (!source) reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.ASSUMPTION_SOURCE_MISSING);
+      else if (source !== assumptionSource) reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.ASSUMPTION_SOURCE_CHANGED);
+      const hash = asString(instrument?.returnAssumptionHash);
+      if (!hash) reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.ASSUMPTION_HASH_MISSING);
+      else if (hash !== assumptionHash) reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.ASSUMPTION_HASH_CHANGED);
     }
   }
 
@@ -128,5 +142,7 @@ export function assessRecommendationFreshness({
     allocationRevision: revision?.revision ?? null,
     currentAllocationSource,
     assumptionVersion,
+    assumptionHash,
+    assumptionSource,
   });
 }

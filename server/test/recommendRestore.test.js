@@ -8,6 +8,8 @@ import recommendRoutes from '../routes/recommend.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
+import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
+import RecommendationState from '../models/RecommendationState.js';
 import AuditRecord from '../models/AuditRecord.js';
 import {
   buildRecommendationProfile,
@@ -19,6 +21,12 @@ import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
 import { runPipeline } from '../services/RecommendationPipeline.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
+import { buildPortfolioFingerprint } from '../services/recommendationFingerprint.js';
+import {
+  PROJECTION_ASSUMPTION_POLICY_HASH,
+  PROJECTION_ASSUMPTION_SOURCE,
+  PROJECTION_ASSUMPTION_VERSION,
+} from '../services/instrumentConstants.js';
 
 const JWT_SECRET = 'recommendation-restore-test-secret';
 process.env.JWT_SECRET = JWT_SECRET;
@@ -61,7 +69,7 @@ async function createFixture({ userId = userA, stale = false, regulatoryRuleVers
     advisory_text: null,
     advisory_explanation: { status: 'PENDING' },
   };
-  await Recommendation.create({
+  const recommendation = await Recommendation.create({
     _id: recommendationId,
     userId,
     profileId: storedProfile._id,
@@ -73,9 +81,49 @@ async function createFixture({ userId = userA, stale = false, regulatoryRuleVers
     modelVersion,
     regulatoryRuleVersion,
     profileInputHash: stale ? 'b'.repeat(64) : profileInputHash,
+    recommendationGeneration: 1,
+    recommendationPolicyVersion: 'suitability-freeze-1.1.0',
+    returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
     responseSnapshot,
   });
+  await createCanonicalState(recommendation);
   return storedProfile;
+}
+
+async function createCanonicalState(recommendation) {
+  const instruments = recommendation.instruments.map(instrument => instrument.toObject());
+  const portfolioFingerprint = buildPortfolioFingerprint(instruments);
+  const revision = await RecommendationAllocationRevision.create({
+    recommendationId: recommendation._id,
+    profileId: recommendation.profileId,
+    userId: recommendation.userId,
+    revision: 1,
+    previousRevision: null,
+    source: 'ORIGINAL_RECOMMENDATION',
+    instruments,
+    profileInputHash: recommendation.profileInputHash,
+    modelVersion: recommendation.modelVersion,
+    recommendationPolicyVersion: recommendation.recommendationPolicyVersion,
+    regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
+    returnAssumptionVersion: instruments[0].returnAssumptionVersion || PROJECTION_ASSUMPTION_VERSION,
+    returnAssumptionHash: instruments[0].returnAssumptionHash || PROJECTION_ASSUMPTION_POLICY_HASH,
+    returnAssumptionSource: instruments[0].returnSource || PROJECTION_ASSUMPTION_SOURCE,
+    portfolioFingerprint,
+  });
+  await RecommendationState.create({
+    userId: recommendation.userId,
+    profileId: recommendation.profileId,
+    currentRecommendationId: recommendation._id,
+    currentAllocationRevision: 1,
+    currentAllocationRevisionId: revision._id,
+    generationRevision: recommendation.recommendationGeneration,
+    profileInputHash: recommendation.profileInputHash,
+    portfolioFingerprint,
+    returnAssumptionVersion: revision.returnAssumptionVersion,
+    returnAssumptionHash: revision.returnAssumptionHash,
+    returnAssumptionSource: revision.returnAssumptionSource,
+  });
+  return { revision, portfolioFingerprint };
 }
 
 async function createAdvisoryLifecycleFixture() {
@@ -104,7 +152,7 @@ async function createAdvisoryLifecycleFixture() {
       provider: 'snapshot-provider',
     },
   };
-  await Recommendation.create({
+  const recommendation = await Recommendation.create({
     _id: recommendationId,
     userId: userA,
     profileId: storedProfile._id,
@@ -127,8 +175,36 @@ async function createAdvisoryLifecycleFixture() {
     modelVersion,
     regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
     profileInputHash,
+    recommendationGeneration: 1,
+    recommendationPolicyVersion: 'suitability-freeze-1.1.0',
+    returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
     responseSnapshot,
   });
+  const state = await createCanonicalState(recommendation);
+  await Recommendation.updateOne({ _id: recommendationId }, { $set: {
+    advisoryMetadata: {
+      status: 'READY',
+      provider: 'current-provider',
+      model: 'current-model',
+      prompt_version: 'prompt-2',
+      grounding_version: 'grounding-2',
+      evidence_ids_used: ['E_CURRENT'],
+      unavailable_facts: ['CURRENT_FACT_UNAVAILABLE'],
+      citations: [{ id: 'E_CURRENT', title: 'Current evidence' }],
+      validation_status: 'VALID',
+      generated_at: '2026-09-21T00:00:00.000Z',
+      recommendationId: String(recommendation._id),
+      profileId: String(recommendation.profileId),
+      allocationRevision: 1,
+      allocationRevisionId: String(state.revision._id),
+      portfolioFingerprint: state.portfolioFingerprint,
+      profileInputHash,
+      recommendationPolicyVersion: recommendation.recommendationPolicyVersion,
+      regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
+      returnAssumptionHash: recommendation.returnAssumptionHash,
+      generatedAt: new Date('2026-09-21T00:00:00.000Z'),
+    },
+  } });
   return { storedProfile, recommendationId, responseSnapshot };
 }
 
@@ -156,6 +232,7 @@ test.beforeEach(async () => {
   await Promise.all([
     FinancialProfile.deleteMany({ userId: { $in: [userA, userB] } }),
     Recommendation.deleteMany({ userId: { $in: [userA, userB] } }),
+    RecommendationState.deleteMany({ userId: { $in: [userA, userB] } }),
     AuditRecord.deleteMany({ userId: { $in: [userA, userB] } }),
   ]);
 });
@@ -244,15 +321,17 @@ test('falls back to snapshot advisory state when current metadata is absent', as
 
   assert.equal(response.status, 200);
   assert.equal(body.advisory_text, null);
-  assert.deepEqual(body.advisory_explanation, { status: 'PENDING' });
+  assert.equal(body.advisory_explanation.status, 'STALE');
 });
 
-test('returns 404 when no recommendation exists and does not leak ownership', async () => {
+test('fails closed when the canonical pointer references a deleted recommendation', async () => {
   const profile = await createFixture();
   await Recommendation.deleteMany({ profileId: profile._id });
 
   const missing = await request(profile._id);
-  assert.equal(missing.status, 404);
+  assert.equal(missing.status, 503);
+  const missingBody = await missing.json();
+  assert.equal(missingBody.code, 'FINANCIAL_STATE_POINTER_INVALID');
 
   const crossUser = await request(profile._id, userB);
   assert.equal(crossUser.status, 404);

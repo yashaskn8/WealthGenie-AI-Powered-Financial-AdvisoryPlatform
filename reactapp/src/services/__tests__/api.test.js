@@ -85,11 +85,18 @@ describe('frontend API contracts', () => {
     await api.updateRecommendationWeights('64b000000000000000000001', {
       Equity_MF: 0.75,
       Debt_MF: 0.25,
+    }, {
+      recommendationId: '64b000000000000000000002',
+      expectedAllocationRevision: 1,
+      expectedPortfolioFingerprint: 'a'.repeat(64),
     });
 
     const [, config] = fetchMock.mock.calls[0];
     expect(JSON.parse(config.body)).toEqual({
       profileId: '64b000000000000000000001',
+      recommendationId: '64b000000000000000000002',
+      expectedAllocationRevision: 1,
+      expectedPortfolioFingerprint: 'a'.repeat(64),
       weights: {
         Equity_MF: 0.75,
         Debt_MF: 0.25,

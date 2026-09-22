@@ -299,23 +299,12 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
   });
 
   await t.test('13. Concurrent claim prevents duplicate generation (409 Conflict when GENERATING)', async () => {
-    // Create a new recommendation in PENDING state
-    const newRecId = new mongoose.Types.ObjectId();
-    await Recommendation.create({
-      _id: newRecId,
-      userId: userAId,
-      profileId: profile._id,
-      instruments: recData.instruments,
-      advisoryText: null,
-      advisoryMetadata: { status: 'GENERATING', claimedAt: new Date() },
-      confidenceScores: {},
-      mlFallback: false,
-      modelVersion: 'ml_v1',
-      regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
-      profileInputHash: validMlV1ProfileHash,
-    });
+    await Recommendation.updateOne(
+      { _id: recData.recommendationId, userId: userAId },
+      { $set: { advisoryText: null, advisoryMetadata: { status: 'GENERATING', claimedAt: new Date() } } },
+    );
 
-    const res = await fetch(`${baseUrl}/api/recommend/${newRecId}/advisory`, {
+    const res = await fetch(`${baseUrl}/api/recommend/${recData.recommendationId}/advisory`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -329,22 +318,12 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
   });
 
   await t.test('14. Retrying is permitted when advisory status is FAILED', async () => {
-    const failedRecId = new mongoose.Types.ObjectId();
-    await Recommendation.create({
-      _id: failedRecId,
-      userId: userAId,
-      profileId: profile._id,
-      instruments: recData.instruments,
-      advisoryText: null,
-      advisoryMetadata: { status: 'FAILED', error: 'Simulated prior failure' },
-      confidenceScores: {},
-      mlFallback: false,
-      modelVersion: 'ml_v1',
-      regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
-      profileInputHash: validMlV1ProfileHash,
-    });
+    await Recommendation.updateOne(
+      { _id: recData.recommendationId, userId: userAId },
+      { $set: { advisoryText: null, advisoryMetadata: { status: 'FAILED', error: 'Simulated prior failure' } } },
+    );
 
-    const res = await fetch(`${baseUrl}/api/recommend/${failedRecId}/advisory`, {
+    const res = await fetch(`${baseUrl}/api/recommend/${recData.recommendationId}/advisory`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

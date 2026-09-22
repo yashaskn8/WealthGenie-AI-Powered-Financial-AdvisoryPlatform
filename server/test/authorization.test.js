@@ -25,10 +25,18 @@ import { withServer, rawRequest } from '../test-utils/httpTestUtils.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Goal from '../models/Goal.js';
 import Recommendation from '../models/Recommendation.js';
+import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
+import RecommendationState from '../models/RecommendationState.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { canonicalProfile, canonicalProfilePayload } from './helpers/canonicalProfile.js';
 import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
 import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
+import { buildPortfolioFingerprint } from '../services/recommendationFingerprint.js';
+import {
+  PROJECTION_ASSUMPTION_POLICY_HASH,
+  PROJECTION_ASSUMPTION_SOURCE,
+  PROJECTION_ASSUMPTION_VERSION,
+} from '../services/instrumentConstants.js';
 
 const testSecret = ['test', 'auth', 'jwt', 'key'].join('-');
 process.env.JWT_SECRET = process.env.JWT_SECRET || testSecret;
@@ -82,6 +90,9 @@ test.before(async () => {
     instruments: [{
       id: 'index_mf', type: 'Equity_MF', name: 'Nifty 50 Index', assetClass: 'Equity',
       nominalReturn: 12, effectiveYield: 12, postTaxReturn: null, returnBasis: 'PRE_TAX_NOMINAL',
+      returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+      returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
+      returnSource: PROJECTION_ASSUMPTION_SOURCE,
       expenseRatio: 0.003, riskLevel: 'Medium', riskScore: 3, lockIn: 0,
       tags: ['Wealth Growth'], score: 80, scoreFactors: {
         expectedReturn: 60, riskFit: 100, liquidity: 80, goalFit: 100,
@@ -94,6 +105,40 @@ test.before(async () => {
     modelVersion: 'test-rule-fallback-4.0.0',
     regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
     profileInputHash: buildRecommendationProfileHash(profileA.toObject(), { modelVersion: 'test-rule-fallback-4.0.0' }),
+    recommendationGeneration: 1,
+    recommendationPolicyVersion: 'suitability-freeze-1.1.0',
+    returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
+  });
+  const allocationInstruments = recommendationA.instruments.map(instrument => instrument.toObject());
+  const portfolioFingerprint = buildPortfolioFingerprint(allocationInstruments);
+  const revision = await RecommendationAllocationRevision.create({
+    recommendationId: recommendationA._id,
+    profileId: profileA._id,
+    userId: userAId,
+    revision: 1,
+    source: 'ORIGINAL_RECOMMENDATION',
+    instruments: allocationInstruments,
+    profileInputHash: recommendationA.profileInputHash,
+    modelVersion: recommendationA.modelVersion,
+    recommendationPolicyVersion: recommendationA.recommendationPolicyVersion,
+    regulatoryRuleVersion: recommendationA.regulatoryRuleVersion,
+    returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+    returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
+    returnAssumptionSource: PROJECTION_ASSUMPTION_SOURCE,
+    portfolioFingerprint,
+  });
+  await RecommendationState.create({
+    userId: userAId,
+    profileId: profileA._id,
+    currentRecommendationId: recommendationA._id,
+    currentAllocationRevision: 1,
+    currentAllocationRevisionId: revision._id,
+    generationRevision: 1,
+    profileInputHash: recommendationA.profileInputHash,
+    portfolioFingerprint,
+    returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+    returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
+    returnAssumptionSource: PROJECTION_ASSUMPTION_SOURCE,
   });
 });
 
@@ -101,6 +146,7 @@ test.after(async () => {
   try {
     await FinancialProfile.deleteMany({ userId: { $in: [userAId, userBId] } });
     await Goal.deleteMany({ userId: { $in: [userAId, userBId] } });
+    await RecommendationState.deleteMany({ userId: { $in: [userAId, userBId] } });
     await Recommendation.deleteMany({ userId: { $in: [userAId, userBId] } });
   } catch (_) {}
   await teardownTestDatabase();
@@ -194,6 +240,9 @@ test('Authorization: User B cannot UPDATE User A recommendation weights', async 
       },
       body: JSON.stringify({
         profileId: profileA._id.toString(),
+        recommendationId: recommendationA._id.toString(),
+        expectedAllocationRevision: 1,
+        expectedPortfolioFingerprint: 'a'.repeat(64),
         weights: { Equity_MF: 1.0 },
       }),
     });
@@ -220,25 +269,28 @@ test('Suitability: manual weights cannot add an unapproved instrument', async ()
 });
 
 test('Suitability: manual weights reject a recommendation bound to an older profile state', async () => {
-  const validHash = recommendationA.profileInputHash;
-  recommendationA.profileInputHash = buildRecommendationProfileHash(
-    { ...profileA.toObject(), age: profileA.age + 1 },
-    { modelVersion: recommendationA.modelVersion },
-  );
-  await recommendationA.save();
+  const validAge = profileA.age;
+  profileA.age = validAge + 1;
+  await profileA.save();
   try {
     const app = buildTestApp();
     await withServer(app, async (baseUrl) => {
       const res = await rawRequest(`${baseUrl}/api/recommend/weights`, {
         method: 'POST',
         headers: { authorization: `Bearer ${tokenA}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ profileId: profileA._id.toString(), weights: { index_mf: 1 } }),
+        body: JSON.stringify({
+          profileId: profileA._id.toString(),
+          recommendationId: recommendationA._id.toString(),
+          expectedAllocationRevision: 1,
+          expectedPortfolioFingerprint: 'a'.repeat(64),
+          weights: { index_mf: 1 },
+        }),
       });
       assert.equal(res.status, 409);
     });
   } finally {
-    recommendationA.profileInputHash = validHash;
-    await recommendationA.save();
+    profileA.age = validAge;
+    await profileA.save();
   }
 });
 

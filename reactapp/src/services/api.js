@@ -662,7 +662,7 @@ export async function rebalancePortfolio(profileId, currentAllocation, targetAll
   });
 }
 
-export async function updateRecommendationWeights(profileId, weights) {
+export async function updateRecommendationWeights(profileId, weights, stateToken = {}) {
   if (!weights || typeof weights !== 'object' || Array.isArray(weights)) {
     throw new TypeError('weights must be an explicit instrument-weight map');
   }
@@ -672,7 +672,17 @@ export async function updateRecommendationWeights(profileId, weights) {
   }
   const total = entries.reduce((sum, [, value]) => sum + value, 0);
   if (Math.abs(total - 1) > 0.0001) throw new RangeError('Recommendation weights must sum to exactly 1');
-  return request('POST', '/recommend/weights', { profileId, weights });
+  if (!stateToken?.recommendationId || !Number.isInteger(Number(stateToken.expectedAllocationRevision))
+      || !/^[a-f0-9]{64}$/i.test(String(stateToken.expectedPortfolioFingerprint || ''))) {
+    throw new TypeError('A current recommendation state token is required to rebalance');
+  }
+  return request('POST', '/recommend/weights', {
+    profileId,
+    recommendationId: stateToken.recommendationId,
+    expectedAllocationRevision: Number(stateToken.expectedAllocationRevision),
+    expectedPortfolioFingerprint: String(stateToken.expectedPortfolioFingerprint).toLowerCase(),
+    weights,
+  });
 }
 
 export async function optimisePortfolio(profileId, assets, strategy) {

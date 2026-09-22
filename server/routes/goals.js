@@ -1,8 +1,10 @@
 import { Router } from 'express';
+import mongoose from 'mongoose';
 import { verifyJWT, isValidObjectId } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
 import { customGoalSchema, customGoalUpdateSchema, goalSimulationSchema, validateStrict } from '../validation/financialSchemas.js';
 import Goal from '../models/Goal.js';
+import RecommendationState from '../models/RecommendationState.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import { reverseSIP, runMonteCarloWithGoal } from '../services/monteCarloEngine.js';
 import { buildCovarianceMatrix, portfolioReturn, portfolioVol } from '../services/portfolioEngine.js';
@@ -107,6 +109,7 @@ export async function _getBlendedPortfolioMetrics(userId, profileId, profile = u
     returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
     returnAssumptionSource: PROJECTION_ASSUMPTION_SOURCE,
     returnAssumptionHash: state?.allocationRevision?.returnAssumptionHash || null,
+    recommendationFingerprint: state?.recommendationFingerprint || null,
     state,
   };
 }
@@ -157,6 +160,87 @@ export async function persistGoalAtomically(goalData, _profileId, { testHooks = 
   return goal;
 }
 
+function goalStateConflict() {
+  return createError(
+    409,
+    'The financial state changed while the goal calculation was running.',
+    'Recalculate the goal before saving it.',
+    { code: 'GOAL_SOURCE_STATE_CHANGED' },
+  );
+}
+
+function plannedStateMatches(current, planned) {
+  return Boolean(
+    planned?.recommendation?._id
+      && current?.recommendation?._id
+      && String(planned.recommendation._id) === String(current.recommendation._id)
+      && Number(planned.allocationRevision?.revision) === Number(current.allocationRevision?.revision)
+      && String(planned.allocationRevision?._id) === String(current.allocationRevision?._id)
+      && planned.portfolioFingerprint === current.portfolioFingerprint
+      && planned.recommendationFingerprint === current.recommendationFingerprint,
+  );
+}
+
+async function assertGoalPlanStateCurrent({ userId, profileId, profile, plannedState }) {
+  const current = await requireFreshRecommendationState({ userId, profileId, profile });
+  if (!plannedStateMatches(current, plannedState)) throw goalStateConflict();
+  return current;
+}
+
+async function holdGoalSourceState(session, { userId, profileId, state }) {
+  const stateId = state?.provenance?.stateId;
+  if (!stateId || !state.recommendation?._id || !state.allocationRevision?._id) throw goalStateConflict();
+  const result = await RecommendationState.updateOne({
+    _id: stateId,
+    userId,
+    profileId,
+    currentRecommendationId: state.recommendation._id,
+    currentAllocationRevision: state.allocationRevision.revision,
+    currentAllocationRevisionId: state.allocationRevision._id,
+    generationRevision: state.recommendation.recommendationGeneration,
+    profileInputHash: state.recommendation.profileInputHash,
+    portfolioFingerprint: state.portfolioFingerprint,
+    returnAssumptionVersion: state.allocationRevision.returnAssumptionVersion,
+    returnAssumptionHash: state.allocationRevision.returnAssumptionHash,
+    returnAssumptionSource: state.allocationRevision.returnAssumptionSource,
+  }, {
+    // A no-op write makes the source pointer part of the same transaction as
+    // the goal write, so a concurrent state transition causes a write conflict.
+    $set: { portfolioFingerprint: state.portfolioFingerprint },
+  }).session(session);
+  if (result.matchedCount !== 1) throw goalStateConflict();
+}
+
+async function persistGoalWithSourceState(goalData, { userId, profileId, sourceState, testHooks = {} } = {}) {
+  await Goal.init();
+  const session = await mongoose.startSession();
+  let created;
+  try {
+    await session.withTransaction(async () => {
+      await holdGoalSourceState(session, { userId, profileId, state: sourceState });
+      created = new Goal(goalData);
+      await created.save({ session });
+      await testHooks.afterGoalCreate?.(session, created);
+    });
+  } finally {
+    await session.endSession();
+  }
+  return created;
+}
+
+async function saveGoalWithSourceState(goal, { userId, profileId, sourceState } = {}) {
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      await holdGoalSourceState(session, { userId, profileId, state: sourceState });
+      await goal.save({ session });
+    });
+  } finally {
+    await session.endSession();
+  }
+  return goal;
+}
+
 async function calculateGoalPlan({ profile, profileId, userId, targetAmount, targetDate, currentSavings }) {
   const yearsRemaining = computeYearsRemaining(targetDate);
   const metrics = await _getBlendedPortfolioMetrics(userId, profileId, profile);
@@ -176,6 +260,7 @@ async function calculateGoalPlan({ profile, profileId, userId, targetAmount, tar
     currentSavings,
   });
   const lastIndex = validateMonteCarlo(result);
+  await assertGoalPlanStateCurrent({ userId, profileId, profile, plannedState: metrics.state });
   const gap = Math.max(0, requiredSip - profile.monthlySavings);
   return {
     yearsRemaining,
@@ -241,7 +326,9 @@ router.post('/create', verifyJWT, idempotency(), validateStrict(customGoalSchema
     sourceRecommendationPolicyVersion: plan.metrics.state?.recommendation?.recommendationPolicyVersion || null,
     sourceRegulatoryRuleVersion: plan.metrics.state?.recommendation?.regulatoryRuleVersion || null,
     sourceReturnAssumptionVersion: plan.metrics.state?.allocationRevision?.returnAssumptionVersion || plan.metrics.returnAssumptionVersion,
+    sourceReturnAssumptionHash: plan.metrics.state?.allocationRevision?.returnAssumptionHash || plan.metrics.returnAssumptionHash,
     sourceReturnAssumptionSource: plan.metrics.state?.allocationRevision?.returnAssumptionSource || plan.metrics.returnAssumptionSource,
+    sourceRecommendationFingerprint: plan.metrics.state?.recommendationFingerprint || plan.metrics.recommendationFingerprint,
     sourcePortfolioFingerprint: plan.metrics.state?.portfolioFingerprint || null,
     calculationFreshness: { fresh: true, reasonCodes: [], checkedAt: new Date() },
     observed_market_fact: false,
@@ -251,7 +338,17 @@ router.post('/create', verifyJWT, idempotency(), validateStrict(customGoalSchema
   data.gemini_advice = await generateGoalAdvice(data, profile);
   let goal;
   try {
-    goal = await persistGoalAtomically(data, profileId);
+    const currentState = await assertGoalPlanStateCurrent({
+      userId: req.user.userId,
+      profileId,
+      profile,
+      plannedState: plan.metrics.state,
+    });
+    goal = await persistGoalWithSourceState(data, {
+      userId: req.user.userId,
+      profileId,
+      sourceState: currentState,
+    });
   } catch (error) {
     if (error.code === 11000) throw createError(409, `Duplicate goal name: ${goal_name}`, 'A goal with this name already exists.');
     throw error;
@@ -310,6 +407,12 @@ router.post('/:goalId/simulate', verifyJWT, validateStrict(goalSimulationSchema)
     currentSavings: goal.current_savings,
   });
   const lastIndex = validateMonteCarlo(result);
+  await assertGoalPlanStateCurrent({
+    userId: req.user.userId,
+    profileId: goal.profileId,
+    profile,
+    plannedState: metrics.state,
+  });
   const gap = Math.max(0, goal.recommended_sip - monthlyContribution);
   res.json({
     goalId: goal._id,
@@ -363,12 +466,14 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
   if (req.body.target_amount !== undefined) goal.target_amount = req.body.target_amount;
   if (req.body.current_savings !== undefined) goal.current_savings = req.body.current_savings;
 
+  let recalculationState = null;
   if (req.body.target_amount !== undefined || req.body.current_savings !== undefined) {
     const plan = await calculateGoalPlan({
       profile, profileId: goal.profileId, userId: req.user.userId,
       targetAmount: goal.target_amount, targetDate: goal.target_date,
       currentSavings: goal.current_savings,
     });
+    recalculationState = plan.metrics.state;
     goal.inflation_adjusted_target = plan.inflationAdjustedTarget;
     goal.recommended_sip = plan.requiredSip;
     goal.simulated_monthly_contribution = plan.simulatedMonthlyContribution;
@@ -396,7 +501,9 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
     goal.sourceRecommendationPolicyVersion = plan.metrics.state?.recommendation?.recommendationPolicyVersion || null;
     goal.sourceRegulatoryRuleVersion = plan.metrics.state?.recommendation?.regulatoryRuleVersion || null;
     goal.sourceReturnAssumptionVersion = plan.metrics.state?.allocationRevision?.returnAssumptionVersion || plan.metrics.returnAssumptionVersion;
+    goal.sourceReturnAssumptionHash = plan.metrics.state?.allocationRevision?.returnAssumptionHash || plan.metrics.returnAssumptionHash;
     goal.sourceReturnAssumptionSource = plan.metrics.state?.allocationRevision?.returnAssumptionSource || plan.metrics.returnAssumptionSource;
+    goal.sourceRecommendationFingerprint = plan.metrics.state?.recommendationFingerprint || plan.metrics.recommendationFingerprint;
     goal.sourcePortfolioFingerprint = plan.metrics.state?.portfolioFingerprint || null;
     goal.calculationFreshness = { fresh: true, reasonCodes: [], checkedAt: new Date() };
     goal.observed_market_fact = false;
@@ -404,7 +511,21 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
     goal.inflation_assumption = GOAL_INFLATION_ASSUMPTION;
     goal.gemini_advice = await generateGoalAdvice(goal, profile);
   }
-  await goal.save();
+  if (recalculationState) {
+    const currentState = await assertGoalPlanStateCurrent({
+      userId: req.user.userId,
+      profileId: goal.profileId,
+      profile,
+      plannedState: recalculationState,
+    });
+    await saveGoalWithSourceState(goal, {
+      userId: req.user.userId,
+      profileId: goal.profileId,
+      sourceState: currentState,
+    });
+  } else {
+    await goal.save();
+  }
   void triggerPlanHealthCheck({ userId: req.user.userId, profileId: goal.profileId });
   res.json({ success: true, goal });
 }));

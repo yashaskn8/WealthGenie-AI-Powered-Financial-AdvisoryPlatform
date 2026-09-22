@@ -29,6 +29,7 @@ const allocationRevisionSchema = new mongoose.Schema({
   returnAssumptionHash: { type: String, match: /^[a-f0-9]{64}$/, default: null },
   returnAssumptionSource: { type: String, required: true },
   portfolioFingerprint: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
+  recommendationFingerprint: { type: String, match: /^[a-f0-9]{64}$/, default: null },
   auditRecordId: { type: mongoose.Schema.Types.ObjectId, ref: 'AuditRecord', default: null },
   correlationId: { type: String, default: null },
   traceId: { type: String, default: null },
@@ -42,5 +43,14 @@ allocationRevisionSchema.pre('save', function rejectRevisionMutation(next) {
   if (!this.isNew) return next(new Error('Allocation revisions are immutable.'));
   return next();
 });
+
+for (const operation of [
+  'updateOne', 'updateMany', 'findOneAndUpdate', 'replaceOne', 'findOneAndReplace',
+  'deleteOne', 'deleteMany', 'findOneAndDelete', 'findByIdAndDelete', 'bulkWrite',
+]) {
+  allocationRevisionSchema.pre(operation, function rejectRevisionQueryMutation(next) {
+    return next(new Error('Allocation revisions are append-only; query mutation is prohibited.'));
+  });
+}
 
 export default mongoose.model('RecommendationAllocationRevision', allocationRevisionSchema);

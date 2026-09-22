@@ -18,9 +18,17 @@ import { withServer, jsonRequest } from '../test-utils/httpTestUtils.js';
 import Goal from '../models/Goal.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
+import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
+import RecommendationState from '../models/RecommendationState.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
 import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
 import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
+import { buildPortfolioFingerprint } from '../services/recommendationFingerprint.js';
+import {
+  PROJECTION_ASSUMPTION_POLICY_HASH,
+  PROJECTION_ASSUMPTION_SOURCE,
+  PROJECTION_ASSUMPTION_VERSION,
+} from '../services/instrumentConstants.js';
 
 const testSecret = ['wg037', 'test', 'jwt', 'secret', 'key'].join('-');
 process.env.JWT_SECRET = process.env.JWT_SECRET || testSecret;
@@ -64,6 +72,9 @@ async function ensureDb() {
         id: 'fd', type: 'FD', name: 'Bank Fixed Deposit', assetClass: 'Fixed Income',
         allocationWeight: 1, allocation_pct: 100, nominalReturn: 7.5, effectiveYield: 7.5,
         postTaxReturn: null, returnBasis: 'PRE_TAX_NOMINAL', expenseRatio: 0,
+        returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+        returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
+        returnSource: PROJECTION_ASSUMPTION_SOURCE,
         riskLevel: 'Low', riskScore: 1, lockIn: 0, tags: ['Wealth Growth'],
         score: 80, scoreFactors: {
           expectedReturn: 60, riskFit: 100, liquidity: 80, goalFit: 100,
@@ -74,7 +85,45 @@ async function ensureDb() {
       modelVersion: 'test-rule-fallback-4.0.0', generatedAt: new Date(),
       regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
       profileInputHash: buildRecommendationProfileHash(profile.toObject(), { modelVersion: 'test-rule-fallback-4.0.0' }),
+      recommendationGeneration: 1,
+      returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
     },
+    { upsert: true, new: true },
+  );
+  const recommendation = await Recommendation.findOne({ userId: TEST_USER_ID, profileId: profile._id });
+  const instruments = recommendation.instruments.map(instrument => instrument.toObject());
+  const portfolioFingerprint = buildPortfolioFingerprint(instruments);
+  let revision = await RecommendationAllocationRevision.findOne({ recommendationId: recommendation._id, revision: 1 });
+  if (!revision) revision = await RecommendationAllocationRevision.create({
+      recommendationId: recommendation._id,
+      profileId: profile._id,
+      userId: TEST_USER_ID,
+      revision: 1,
+      previousRevision: null,
+      source: 'ORIGINAL_RECOMMENDATION',
+      instruments,
+      profileInputHash: recommendation.profileInputHash,
+      modelVersion: recommendation.modelVersion,
+      recommendationPolicyVersion: recommendation.recommendationPolicyVersion,
+      regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
+      returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+      returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
+      returnAssumptionSource: PROJECTION_ASSUMPTION_SOURCE,
+      portfolioFingerprint,
+    });
+  await RecommendationState.findOneAndUpdate(
+    { userId: TEST_USER_ID, profileId: profile._id },
+    { $set: {
+      currentRecommendationId: recommendation._id,
+      currentAllocationRevision: 1,
+      currentAllocationRevisionId: revision._id,
+      generationRevision: recommendation.recommendationGeneration,
+      profileInputHash: recommendation.profileInputHash,
+      portfolioFingerprint,
+      returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+      returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
+      returnAssumptionSource: PROJECTION_ASSUMPTION_SOURCE,
+    } },
     { upsert: true, new: true },
   );
   return profile;
@@ -83,6 +132,7 @@ async function ensureDb() {
 test.after(async () => {
   try {
     await Goal.deleteMany({ userId: TEST_USER_ID });
+    await RecommendationState.deleteMany({ userId: TEST_USER_ID });
     await Recommendation.deleteMany({ userId: TEST_USER_ID });
     await FinancialProfile.deleteMany({ userId: TEST_USER_ID });
   } catch (_) {}

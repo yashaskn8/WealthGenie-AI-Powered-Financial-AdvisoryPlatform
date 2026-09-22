@@ -4,6 +4,7 @@ import { buildPortfolioFingerprint, buildRecommendationFingerprint } from '../se
 import { assessRecommendationFreshness } from '../services/recommendationFreshness.js';
 import { assessGoalCalculationFreshness } from '../services/recommendationState.js';
 import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
+import { PROJECTION_ASSUMPTION_POLICY_HASH } from '../services/instrumentConstants.js';
 
 const profile = {
   monthlyTakeHome: 100000,
@@ -25,12 +26,12 @@ const instruments = [
   {
     id: 'FD', allocationWeight: 0.6, nominalReturn: 7.5, riskScore: 1,
     returnAssumptionVersion: 'wealthgenie-projection-assumptions-1.0.0',
-    returnAssumptionHash: 'a'.repeat(64), returnSource: 'WEALTHGENIE_MODEL_POLICY',
+    returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH, returnSource: 'WEALTHGENIE_MODEL_POLICY',
   },
   {
     id: 'ETF', allocationWeight: 0.4, nominalReturn: 14.5, riskScore: 3,
     returnAssumptionVersion: 'wealthgenie-projection-assumptions-1.0.0',
-    returnAssumptionHash: 'a'.repeat(64), returnSource: 'WEALTHGENIE_MODEL_POLICY',
+    returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH, returnSource: 'WEALTHGENIE_MODEL_POLICY',
   },
 ];
 
@@ -46,9 +47,22 @@ function state() {
     profileId: recommendation.profileId, userId: recommendation.userId, revision: 2,
     source: 'USER_REBALANCED', instruments, profileInputHash: recommendation.profileInputHash,
     returnAssumptionVersion: 'wealthgenie-projection-assumptions-1.0.0',
+    returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
+    returnAssumptionSource: 'WEALTHGENIE_MODEL_POLICY',
   };
   const portfolioFingerprint = buildPortfolioFingerprint(instruments);
-  return { recommendation, allocationRevision, portfolioFingerprint, freshness: { fresh: true, reasonCodes: [] } };
+  const recommendationFingerprint = buildRecommendationFingerprint({
+    recommendationId: recommendation._id,
+    profileInputHash: recommendation.profileInputHash,
+    modelVersion: recommendation.modelVersion,
+    recommendationPolicyVersion: recommendation.recommendationPolicyVersion,
+    regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
+    returnAssumptionVersion: allocationRevision.returnAssumptionVersion,
+    returnAssumptionHash: allocationRevision.returnAssumptionHash,
+    allocationRevision: allocationRevision.revision,
+    instruments,
+  });
+  return { recommendation, allocationRevision, portfolioFingerprint, recommendationFingerprint, freshness: { fresh: true, reasonCodes: [] } };
 }
 
 test('portfolio fingerprints are deterministic and independent of instrument order', () => {
@@ -98,6 +112,8 @@ test('goal freshness identifies allocation and source-state changes', () => {
     sourceRecommendationPolicyVersion: current.recommendation.recommendationPolicyVersion,
     sourceRegulatoryRuleVersion: current.recommendation.regulatoryRuleVersion,
     sourceReturnAssumptionVersion: current.allocationRevision.returnAssumptionVersion,
+    sourceReturnAssumptionHash: current.allocationRevision.returnAssumptionHash,
+    sourceRecommendationFingerprint: current.recommendationFingerprint,
     sourcePortfolioFingerprint: current.portfolioFingerprint,
   };
   assert.equal(assessGoalCalculationFreshness(goal, current).fresh, true);

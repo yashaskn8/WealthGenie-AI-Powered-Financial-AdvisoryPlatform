@@ -236,6 +236,7 @@ function buildCorePersistencePayload({
       modelVersion,
       regulatoryRuleVersion,
       profileInputHash: inputHash,
+      returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
       marketAdjustment,
       currentAllocationSource: marketAdjustment.currentAllocationSource,
     },
@@ -255,9 +256,9 @@ function buildCorePersistencePayload({
         confidenceScores,
         portfolioReturnAssumption,
         returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+        returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
         modelVersion,
-      recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
-      returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
+        recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
         marketAdjustment,
         advisorySummary: '',
       },
@@ -271,6 +272,7 @@ function buildCorePersistencePayload({
       recommendationId,
       audit_id: auditId,
       audit_hash: inputHash,
+      return_assumption_hash: PROJECTION_ASSUMPTION_POLICY_HASH,
     },
   };
 }

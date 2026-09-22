@@ -8,15 +8,20 @@ import RecommendationState from '../models/RecommendationState.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import { prepareAuditChainEntry, advanceAuditChainHead } from './auditChain.js';
 import { omitUnsetOptionalUniqueFields, optionalUniqueIndex } from '../config/mongoCompatibility.js';
-import { buildPortfolioFingerprint } from './recommendationFingerprint.js';
+import { buildPortfolioFingerprint, buildRecommendationFingerprint } from './recommendationFingerprint.js';
 import {
   PROJECTION_ASSUMPTION_POLICY_HASH,
   PROJECTION_ASSUMPTION_SOURCE,
   PROJECTION_ASSUMPTION_VERSION,
 } from './instrumentConstants.js';
 import { RECOMMENDATION_POLICY_VERSION } from './recommendationProfile.js';
+import { createAllocationRevision } from './recommendationState.js';
 
 let advisoryPersistenceReady = null;
+
+function instrumentsAssumptionHash(instruments = []) {
+  return instruments.find(item => item?.returnAssumptionHash)?.returnAssumptionHash || null;
+}
 
 async function ensureAdvisoryPersistenceReady() {
   if (!advisoryPersistenceReady) {
@@ -99,8 +104,24 @@ export async function persistAdvisoryAtomically({
         ...recommendation,
         recommendationGeneration: generationRevision,
         recommendationPolicyVersion: recommendation.recommendationPolicyVersion || RECOMMENDATION_POLICY_VERSION,
+        returnAssumptionHash: recommendation.returnAssumptionHash
+          || instrumentsAssumptionHash(recommendation.instruments || [])
+          || PROJECTION_ASSUMPTION_POLICY_HASH,
       };
       const initialRevisionId = new mongoose.Types.ObjectId();
+      const returnAssumptionHash = instrumentsAssumptionHash(instruments) || PROJECTION_ASSUMPTION_POLICY_HASH;
+      persistedRecommendation.returnAssumptionHash = returnAssumptionHash;
+      const recommendationFingerprint = buildRecommendationFingerprint({
+        recommendationId: persistedRecommendation._id,
+        profileInputHash: persistedRecommendation.profileInputHash,
+        modelVersion: persistedRecommendation.modelVersion,
+        recommendationPolicyVersion: persistedRecommendation.recommendationPolicyVersion,
+        regulatoryRuleVersion: persistedRecommendation.regulatoryRuleVersion,
+        returnAssumptionVersion: instruments.find(item => item.returnAssumptionVersion)?.returnAssumptionVersion || PROJECTION_ASSUMPTION_VERSION,
+        returnAssumptionHash,
+        allocationRevision: 1,
+        instruments,
+      });
       if (auditRecord.recommendations && typeof auditRecord.recommendations === 'object') {
         auditRecord.recommendations = {
           ...auditRecord.recommendations,
@@ -140,24 +161,28 @@ export async function persistAdvisoryAtomically({
         responseSnapshot: committedResponse,
       })], { session });
 
-      await RecommendationAllocationRevision.create([{
-        _id: initialRevisionId,
-        recommendationId: persistedRecommendation._id,
-        profileId: persistedRecommendation.profileId,
-        userId: persistedRecommendation.userId,
-        revision: 1,
-        previousRevision: null,
-        source: persistedRecommendation.currentAllocationSource || 'ORIGINAL_RECOMMENDATION',
-        instruments,
-        profileInputHash: persistedRecommendation.profileInputHash,
-        modelVersion: persistedRecommendation.modelVersion,
-        recommendationPolicyVersion: persistedRecommendation.recommendationPolicyVersion,
-        regulatoryRuleVersion: persistedRecommendation.regulatoryRuleVersion,
-        returnAssumptionVersion: instruments.find(item => item.returnAssumptionVersion)?.returnAssumptionVersion || PROJECTION_ASSUMPTION_VERSION,
-        returnAssumptionHash: instruments.find(item => item.returnAssumptionHash)?.returnAssumptionHash || PROJECTION_ASSUMPTION_POLICY_HASH,
-        returnAssumptionSource: instruments.find(item => item.returnSource)?.returnSource || PROJECTION_ASSUMPTION_SOURCE,
-        portfolioFingerprint,
-      }], { session });
+      await createAllocationRevision({
+        session,
+        data: {
+          _id: initialRevisionId,
+          recommendationId: persistedRecommendation._id,
+          profileId: persistedRecommendation.profileId,
+          userId: persistedRecommendation.userId,
+          revision: 1,
+          previousRevision: null,
+          source: persistedRecommendation.currentAllocationSource || 'ORIGINAL_RECOMMENDATION',
+          instruments,
+          profileInputHash: persistedRecommendation.profileInputHash,
+          modelVersion: persistedRecommendation.modelVersion,
+          recommendationPolicyVersion: persistedRecommendation.recommendationPolicyVersion,
+          regulatoryRuleVersion: persistedRecommendation.regulatoryRuleVersion,
+          returnAssumptionVersion: instruments.find(item => item.returnAssumptionVersion)?.returnAssumptionVersion || PROJECTION_ASSUMPTION_VERSION,
+          returnAssumptionHash,
+          returnAssumptionSource: instruments.find(item => item.returnSource)?.returnSource || PROJECTION_ASSUMPTION_SOURCE,
+          portfolioFingerprint,
+          recommendationFingerprint,
+        },
+      });
       await RecommendationState.findOneAndUpdate({
         userId: persistedRecommendation.userId,
         profileId: persistedRecommendation.profileId,
@@ -169,6 +194,9 @@ export async function persistAdvisoryAtomically({
           generationRevision,
           profileInputHash: persistedRecommendation.profileInputHash,
           portfolioFingerprint,
+          returnAssumptionVersion: instruments.find(item => item.returnAssumptionVersion)?.returnAssumptionVersion || PROJECTION_ASSUMPTION_VERSION,
+          returnAssumptionHash,
+          returnAssumptionSource: instruments.find(item => item.returnSource)?.returnSource || PROJECTION_ASSUMPTION_SOURCE,
         },
       }, { session, upsert: true, new: true, setDefaultsOnInsert: true });
 

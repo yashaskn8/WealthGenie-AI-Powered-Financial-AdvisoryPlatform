@@ -10,7 +10,9 @@ export const recommendationRequestSchema = Joi.object({
 
 export const recommendationWeightsSchema = Joi.object({
   profileId: objectId.required(),
-  expectedAllocationRevision: Joi.number().integer().min(1).optional(),
+  recommendationId: objectId.required(),
+  expectedAllocationRevision: Joi.number().integer().min(1).required(),
+  expectedPortfolioFingerprint: Joi.string().pattern(/^[a-f0-9]{64}$/).required(),
   weights: Joi.object().pattern(
     Joi.string().trim().min(1).max(100),
     Joi.number().min(0).max(1),

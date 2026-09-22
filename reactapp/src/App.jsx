@@ -333,7 +333,11 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
         weights[item.id] = Number(item.allocationWeight);
       });
 
-      const response = await api.updateRecommendationWeights(profileId, weights);
+      const response = await api.updateRecommendationWeights(profileId, weights, {
+        recommendationId: backendRecs?.recommendationId,
+        expectedAllocationRevision: backendRecs?.allocation_revision,
+        expectedPortfolioFingerprint: backendRecs?.portfolio_fingerprint,
+      });
       
       setBackendRecs(prev => {
         if (!prev) return prev;
@@ -351,12 +355,21 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
            current_allocation_source: response.current_allocation_source,
            generation_market_adjustment: response.generation_market_adjustment,
            market_adjustment: response.market_adjustment,
+           recommendationId: response.recommendation_id || backendRecs?.recommendationId,
+           allocation_revision: response.allocation_revision,
+           allocation_revision_id: response.allocation_revision_id,
+           portfolio_fingerprint: response.portfolio_fingerprint,
+           calculation_freshness: response.calculation_freshness || prev.calculation_freshness,
         };
       });
 
       alert('Rebalanced portfolio saved! Projections and dashboard updated in real-time.');
     } catch (err) {
-      alert('Failed to save rebalanced portfolio: ' + err.message);
+      if (err?.status === 409 || ['ALLOCATION_STATE_CHANGED', 'ALLOCATION_REVISION_CONFLICT', 'RECOMMENDATION_SUPERSEDED'].includes(err?.code)) {
+        alert('Your portfolio changed since this page was loaded. Refresh before saving this rebalance.');
+      } else {
+        alert('Failed to save rebalanced portfolio: ' + err.message);
+      }
     }
   };
 

@@ -55,7 +55,9 @@ const GoalSchema = new mongoose.Schema({
   sourceRecommendationPolicyVersion: { type: String, default: null },
   sourceRegulatoryRuleVersion: { type: String, default: null },
   sourceReturnAssumptionVersion: { type: String, default: null },
+  sourceReturnAssumptionHash: { type: String, match: /^[a-f0-9]{64}$/, default: null },
   sourceReturnAssumptionSource: { type: String, default: null },
+  sourceRecommendationFingerprint: { type: String, match: /^[a-f0-9]{64}$/, default: null },
   sourcePortfolioFingerprint: { type: String, match: /^[a-f0-9]{64}$/, default: null },
   calculationFreshness: {
     fresh: { type: Boolean, default: false },
