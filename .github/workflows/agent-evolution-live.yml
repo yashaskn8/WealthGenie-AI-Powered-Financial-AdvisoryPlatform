@@ -25,6 +25,8 @@ jobs:
       EVOLUTION_MAX_CANDIDATES: ${{ inputs.candidate_limit }}
       E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
       AGENT_EVOLUTION_REFLECTION_MODEL: ${{ vars.AGENT_EVOLUTION_REFLECTION_MODEL }}
+      AGENT_EVOLUTION_TASK_MODEL: ${{ vars.AGENT_EVOLUTION_TASK_MODEL }}
+      AGENT_EVOLUTION_MODEL_API_KEY: ${{ secrets.AGENT_EVOLUTION_MODEL_API_KEY }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,15 +41,21 @@ jobs:
           python-version: '3.12'
       - run: npm ci --prefix server
       - run: python -m pip install --requirement ml-service/requirements.txt
-      - name: Run bounded offline/remote evolution experiment
-        working-directory: ml-service
-        run: python -m agent_evolution.cli --version
+      - name: Validate manual-only evolution flags
+        shell: bash
+        run: |
+          test "$AGENT_SELF_EVOLUTION_ENABLED" = "true"
+          test "$AGENT_SELF_EVOLUTION_GEPA_ENABLED" = "true"
+          test "$AGENT_SELF_EVOLUTION_LIVE_ENABLED" = "true"
+          test "$AGENT_SELF_EVOLUTION_AUTO_PROMOTION_ENABLED" = "false"
+      - name: Run bounded GEPA and candidate experiment
+        run: node server/scripts/run_evolution_experiment.js --gepa-provider dspy --sandbox-mode auto --output-dir evolution-report
       - name: Upload report if generated
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: agent-evolution-report
           path: |
-            evolution-report.json
-            evolution-report.md
-          if-no-files-found: ignore
+            evolution-report/evolution-report.json
+            evolution-report/evolution-report.md
+          if-no-files-found: warn

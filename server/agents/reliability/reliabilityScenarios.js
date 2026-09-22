@@ -15,7 +15,7 @@ const scenarios = [
   { id: 'cancellation-race', family: 'CANCELLATION_RACE', description: 'Cancellation wins a completion race.', durationHours: 1, actions: [{ atHours: 0, action: 'SUBMIT_TASK' }, { atHours: 0.5, action: 'CANCEL_RACE' }], expected: { taskState: 'CANCELED', authorityDelta: 0, noDuplicateCommit: true, safetyContained: true, maxReactionHours: null }, tags: ['cancellation'] },
   { id: 'delayed-prompt-injection', family: 'DELAYED_PROMPT_INJECTION', description: 'Delayed untrusted document instructions remain data.', durationHours: 4, actions: [{ atHours: 0, action: 'SUBMIT_TASK' }, { atHours: 3, action: 'PROMPT_INJECTION' }], expected: { taskState: 'WORKING', authorityDelta: 0, noDuplicateCommit: true, safetyContained: true, maxReactionHours: null }, tags: ['security'] },
   { id: 'long-idle-monitoring', family: 'LONG_IDLE_MONITORING', description: 'Long virtual idle time does not create unnecessary actions.', durationHours: 8761, actions: [{ atHours: 0, action: 'SUBMIT_TASK' }, { atHours: 1, action: 'EVIDENCE_STALE' }, { atHours: 8760, action: 'IDLE_MONITOR' }], expected: { taskState: 'WORKING', authorityDelta: 0, noDuplicateCommit: true, safetyContained: true, maxReactionHours: 8759, }, tags: ['health', 'long-horizon'] },
-];
+].map(scenario => ({ ...scenario, executionMode: 'SYSTEM_ONLY' }));
 
 export const RELIABILITY_SCENARIOS = assertScenarioSet(scenarios);
 

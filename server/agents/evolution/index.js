@@ -7,3 +7,4 @@ export * from './pareto.js';
 export * from './feedback.js';
 export * from './evolutionBudget.js';
 export * from './governedEvolution.js';
+export * from './gepaBridge.js';

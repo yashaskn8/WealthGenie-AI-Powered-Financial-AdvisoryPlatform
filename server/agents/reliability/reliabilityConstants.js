@@ -15,6 +15,7 @@ export const SCENARIO_FAMILIES = Object.freeze([
   'CANCELLATION_RACE',
   'DELAYED_PROMPT_INJECTION',
   'LONG_IDLE_MONITORING',
+  'CANDIDATE_BEHAVIOR',
 ]);
 
 export const SCENARIO_ACTIONS = Object.freeze([

@@ -9,6 +9,8 @@ export * from './constraintRegistry.js';
 export * from './graders.js';
 export * from './reliabilityMetrics.js';
 export * from './reliabilityRunner.js';
+export * from './candidateReliability.js';
+export * from './candidateReliabilityScenarios.js';
 export * from './replay.js';
 export * from './holdout.js';
 export * from './promotionGate.js';

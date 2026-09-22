@@ -1,13 +1,28 @@
 name: Agent Evolution Contract Checks
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'server/agents/evolution/**'
+      - 'server/agents/evals/**'
+      - 'server/agents/reliability/**'
+      - 'server/agents/planReview/**'
+      - 'server/test/governedSelfEvolution.test.js'
+      - 'server/test/gepaBridge.test.js'
+      - 'ml-service/agent_evolution/**'
+      - 'ml-service/tests/test_agent_evolution.py'
+      - '.github/workflows/agent-evolution-ci.yml'
   pull_request:
     paths:
       - 'server/agents/evolution/**'
       - 'server/agents/evals/**'
       - 'server/agents/reliability/**'
       - 'server/test/governedSelfEvolution.test.js'
+      - 'server/test/gepaBridge.test.js'
       - 'ml-service/agent_evolution/**'
+      - 'ml-service/tests/test_agent_evolution.py'
+      - '.github/workflows/agent-evolution-ci.yml'
 
 permissions:
   contents: read
@@ -32,5 +47,16 @@ jobs:
       - name: Run governed self-evolution contract tests
         working-directory: server
         run: node --test --test-concurrency=1 test/governedSelfEvolution.test.js
+      - name: Run backend Node test suite
+        run: npm test --prefix server
       - run: npm run lint --prefix server
+      - run: npm run typecheck --prefix server
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deterministic Python evolution test dependency
+        run: python -m pip install pytest
+      - name: Run Python evolution contract tests
+        working-directory: ml-service
+        run: python -m pytest tests/test_agent_evolution.py -q
       - run: git diff --check

@@ -116,15 +116,24 @@ export function buildCandidateScoreCard({ candidateId, partition, caseDefinition
   });
 }
 
+function normalizeEvaluatorResult(evaluated = {}) {
+  if (!evaluated || typeof evaluated !== 'object') return { result: evaluated, trajectory: [] };
+  const result = evaluated.result && typeof evaluated.result === 'object'
+    ? { ...evaluated.result }
+    : { ...evaluated };
+  for (const field of ['financialAuthorityDelta', 'recommendationDelta', 'authorityMeasurementState', 'sensitiveDataLeak', 'secretLeak', 'budgetExceeded']) {
+    if (evaluated[field] !== undefined) result[field] = evaluated[field];
+  }
+  return { result, trajectory: Array.isArray(evaluated.trajectory) ? evaluated.trajectory : [] };
+}
+
 export function evaluateCandidate({ candidateId, cases = [], evaluator, purpose = 'optimizer' } = {}) {
   if (typeof evaluator !== 'function') throw new TypeError('A candidate evaluator is required.');
   assertHoldoutIsolation(cases, { purpose });
-  const scoreCards = cases.map(item => buildCandidateScoreCard({
-    candidateId,
-    partition: item.partition,
-    caseDefinition: item,
-    ...evaluator(item),
-  }));
+  const scoreCards = cases.map(item => {
+    const evaluated = normalizeEvaluatorResult(evaluator(item));
+    return buildCandidateScoreCard({ candidateId, partition: item.partition, caseDefinition: item, ...evaluated });
+  });
   return {
     candidateId,
     evaluationVersion: AGENT_EVALUATION_VERSION,
@@ -138,13 +147,8 @@ export async function evaluateCandidateAsync({ candidateId, cases = [], evaluato
   assertHoldoutIsolation(cases, { purpose });
   const scoreCards = [];
   for (const item of cases) {
-    const evaluated = await evaluator(item);
-    scoreCards.push(buildCandidateScoreCard({
-      candidateId,
-      partition: item.partition,
-      caseDefinition: item,
-      ...evaluated,
-    }));
+    const evaluated = normalizeEvaluatorResult(await evaluator(item));
+    scoreCards.push(buildCandidateScoreCard({ candidateId, partition: item.partition, caseDefinition: item, ...evaluated }));
   }
   return {
     candidateId,

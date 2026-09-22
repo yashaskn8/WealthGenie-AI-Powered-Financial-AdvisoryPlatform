@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { createOptimizerEvaluationManifest, evaluateCandidateAsync, assertHoldoutIsolation, hashEvaluationData } from '../evals/evaluationV2.js';
 import { verifyCandidateAgainstSealedHoldout } from '../evals/holdoutVerifier.js';
-import { runReliabilitySuite, RELIABILITY_SCENARIOS, buildReliabilityPromotionEvaluation } from '../reliability/index.js';
+import { runCandidateReliabilitySuite, RELIABILITY_SCENARIOS, CANDIDATE_RELIABILITY_SCENARIOS, buildReliabilityPromotionEvaluation } from '../reliability/index.js';
 import { createPlanReviewScaffoldRunner } from './scaffoldEvolution.js';
 import { createScaffoldSpec, assertScaffoldSpecSafe } from './scaffoldSpec.js';
 import { createEvolutionSandboxManifest } from './sandboxManifest.js';
@@ -14,6 +14,8 @@ import { canonicalSha256 } from '../../utils/canonicalJson.js';
 import { PrometheusMetrics } from '../../services/metricsCollector.js';
 
 export const GOVERNED_EVOLUTION_VERSION = 'governed-self-evolution-1.0.0';
+
+const ALL_RELIABILITY_SCENARIOS = Object.freeze([...RELIABILITY_SCENARIOS, ...CANDIDATE_RELIABILITY_SCENARIOS]);
 
 function candidateVersion(base, index) {
   return `${base.version}-candidate-${index + 1}-${crypto.randomUUID().slice(0, 8)}`;
@@ -66,6 +68,24 @@ function measureExecution(observations = []) {
   });
 }
 
+function buildCandidateSandboxWorkspace({ candidate, sandboxManifest }) {
+  const promptHash = JSON.stringify(candidate.promptBundleHash);
+  const scaffoldHash = JSON.stringify(candidate.contentHash);
+  const manifestHash = JSON.stringify(sandboxManifest.manifestHash);
+  return [{
+    path: 'candidate-evaluation',
+    content: [
+      "import test from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      "test('candidate artifact is bound to the sandbox manifest', () => {",
+      `  assert.equal(${promptHash}, ${JSON.stringify(sandboxManifest.promptBundleHash)});`,
+      `  assert.equal(${scaffoldHash}, ${JSON.stringify(sandboxManifest.scaffoldHash)});`,
+      `  assert.equal(${manifestHash}, ${JSON.stringify(sandboxManifest.manifestHash)});`,
+      '});',
+    ].join('\n'),
+  }];
+}
+
 export async function runGovernedEvolution({
   baseSpec,
   cases = [],
@@ -77,7 +97,9 @@ export async function runGovernedEvolution({
   persistCandidate = null,
   persistEvolutionRun = null,
   failureReports = [],
-  reliabilityScenarios = RELIABILITY_SCENARIOS,
+  reliabilityScenarios = ALL_RELIABILITY_SCENARIOS,
+  candidateCaseFactory = null,
+  reliabilityDependencies = {},
   budget: requestedBudget = {},
 } = {}) {
   if (!enabled) return Object.freeze({ status: 'DISABLED', reason: 'AGENT_EVOLUTION_ENABLED is false.' });
@@ -125,7 +147,13 @@ export async function runGovernedEvolution({
       evaluationVersion: manifest.evaluationVersion,
       reliabilityVersion: 'reliability-lab-1.0.0',
     });
-    const sandbox = await provider.run({ manifest: sandboxManifest, candidate, fixture: optimizerCases[0]?.fixture || null });
+    const sandbox = await provider.run({
+      manifest: sandboxManifest,
+      candidate,
+      fixture: optimizerCases[0]?.fixture || null,
+      workspaceFiles: buildCandidateSandboxWorkspace({ candidate, sandboxManifest }),
+      command: 'node --test candidate-evaluation',
+    });
     sandboxRuns += 1;
     const sandboxDurationMs = Math.max(0, new Date(sandbox.completedAt).getTime() - new Date(sandbox.startedAt).getTime());
     if (Number.isFinite(sandboxDurationMs)) sandboxElapsedMs += sandboxDurationMs;
@@ -142,10 +170,16 @@ export async function runGovernedEvolution({
       evaluator: runCandidateCase,
     });
     metricCalls += optimizerCases.length;
-    const reliability = runReliabilitySuite(reliabilityScenarios);
+    const reliability = await runCandidateReliabilitySuite(reliabilityScenarios, {
+      candidate,
+      runner,
+      candidateCaseFactory,
+      systemDependencies: reliabilityDependencies,
+    });
     const reliabilityEvaluationBase = buildReliabilityPromotionEvaluation({
       scorecards: reliability.scorecards,
       holdout: { sealed: true },
+      candidateReliabilityCoverageComplete: reliability.candidateReliabilityCoverageComplete,
     });
     const reliabilityEvaluation = reliability.scorecards.length > 0
       ? reliabilityEvaluationBase
@@ -164,6 +198,7 @@ export async function runGovernedEvolution({
     const budgetExceeded = totalTokenUsage > budget.maxTotalTokens || sandboxElapsedMs > budget.maxSandboxMinutes * 60 * 1000;
     const hardGatePassed = evaluation.passed
       && reliabilityEvaluation.passed
+      && reliabilityEvaluation.candidateReliabilityCoverageComplete === true
       && authorityDelta === 0
       && !budgetExceeded
       && holdoutAvailable

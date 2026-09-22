@@ -10,6 +10,7 @@ import { scanPromptBundleSecurity } from '../agents/evolution/candidateSecurity.
 import { selectParetoFrontier } from '../agents/evolution/pareto.js';
 import { runGovernedEvolution } from '../agents/evolution/governedEvolution.js';
 import { createPlanReviewScaffoldRunner } from '../agents/evolution/scaffoldEvolution.js';
+import { runCandidateReliabilitySuite, CANDIDATE_RELIABILITY_SCENARIOS } from '../agents/reliability/index.js';
 import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
 import { assertValidRuntimeConfig, getRuntimeConfig } from '../config/runtime.js';
 
@@ -141,7 +142,7 @@ test('governed evolution executes the real PlanReview runner and remains shadow-
   const cases = ['train', 'validation', 'holdout'].map(partition => ({
     id: `${partition}-1`,
     partition,
-    expectedAction: 'NONE',
+    expectedAction: null,
     fixture: { userId, profileId, context },
   }));
   const result = await runGovernedEvolution({
@@ -155,13 +156,46 @@ test('governed evolution executes the real PlanReview runner and remains shadow-
       promptBundle: createPromptBundle({ plannerInstruction: 'candidate planner instruction.' }),
     }],
     loadHoldoutCases: async () => [cases[2]],
+    candidateCaseFactory: async () => ({ fixture: { userId, profileId, context } }),
   });
   assert.equal(result.status, 'COMPLETED');
   assert.equal(result.shadowOnly, true);
   assert.equal(result.championCandidateId, null);
   assert.equal(result.financialAuthorityDelta, 0);
   assert.ok(result.candidateRecords[0].evaluation.scoreCards.length === 2);
+  assert.equal(result.candidateRecords[0].evaluation.passed, true);
+  assert.equal(result.candidateRecords[0].reliability.candidateReliabilityCoverageComplete, true);
   assert.match(observedCandidatePrompt, /candidate planner instruction/);
+});
+
+test('candidate-bound reliability executes and binds the actual candidate, with A/B sensitivity', async () => {
+  const runner = createPlanReviewScaffoldRunner({ dependencies: {
+    captureFinancialAuthority: async () => ({ allocation: [{ id: 'fixture-asset', weight: 1 }], suitability: 'Moderate' }),
+    plannerProvider: { generate: async () => ({ text: '{"checks":["get_current_profile_context"]}' }) },
+    loadPlanReviewContext: async () => context,
+    explanationProviders: [],
+    persistAgentRun: async () => undefined,
+    timeoutMs: 2000,
+    toolTimeoutMs: 100,
+  } });
+  const candidateCaseFactory = async () => ({ fixture: { userId, profileId, context } });
+  const candidateA = createScaffoldSpec({ version: 'candidate-a', promptBundle: createPromptBundle({ bundleId: 'candidate-a-prompt', plannerInstruction: 'Candidate A planner instruction.' }) });
+  const candidateB = createScaffoldSpec({ version: 'candidate-b', safeModelRoleRouting: { planner: 'EXPLAINER', synthesis: 'EXPLAINER' } });
+  const run = candidate => runCandidateReliabilitySuite(CANDIDATE_RELIABILITY_SCENARIOS, { candidate, runner, candidateCaseFactory });
+  const [resultA, resultB] = await Promise.all([run(candidateA), run(candidateB)]);
+
+  assert.equal(resultA.candidateReliabilityCoverageComplete, true);
+  assert.equal(resultA.passed, true);
+  assert.ok(resultA.scorecards.every(card => card.candidateExecuted && card.candidateId === candidateA.contentHash && card.scaffoldHash === candidateA.contentHash));
+  assert.equal(resultB.candidateReliabilityCoverageComplete, true);
+  assert.equal(resultB.passed, false);
+  assert.ok(resultB.scorecards.find(card => card.scenarioId === 'candidate-planner-safety').criticalFailures.includes('CANDIDATE_PLANNER_ROLE_MISMATCH'));
+  assert.notEqual(candidateA.contentHash, candidateB.contentHash);
+
+  const missingBridge = await runCandidateReliabilitySuite(CANDIDATE_RELIABILITY_SCENARIOS, { candidate: candidateA, runner });
+  assert.equal(missingBridge.candidateReliabilityCoverageComplete, false);
+  assert.equal(missingBridge.passed, false);
+  assert.equal(missingBridge.scorecards[0].candidateExecuted, false);
 });
 
 test('Pareto frontier excludes dominated candidates while retaining hard-gated alternatives', () => {

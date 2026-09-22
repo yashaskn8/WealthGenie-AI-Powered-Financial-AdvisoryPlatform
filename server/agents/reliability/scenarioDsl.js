@@ -24,6 +24,12 @@ const scenarioSchema = Joi.object({
   actions: Joi.array().items(actionSchema).min(1).max(HARD_LIMITS.maxActions).required(),
   expected: expectedSchema.required(),
   tags: Joi.array().items(Joi.string().max(40)).max(12).default([]),
+  executionMode: Joi.string().valid('SYSTEM_ONLY', 'CANDIDATE_BOUND', 'HYBRID').default('SYSTEM_ONLY'),
+  candidateExpectations: Joi.object({
+    plannerRole: Joi.string().valid('PLANNER', 'EXPLAINER').allow(null).default(null),
+    contextCompressionPolicy: Joi.string().valid('BOUNDED_PROFILE_CONTEXT', 'MINIMAL_PROFILE_CONTEXT').allow(null).default(null),
+    requiredTrajectoryKinds: Joi.array().items(Joi.string().max(80)).max(8).default([]),
+  }).default({}),
 }).unknown(false);
 
 function rejectExecutable(value, path = []) {

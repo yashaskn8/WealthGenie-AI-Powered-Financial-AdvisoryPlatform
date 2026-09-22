@@ -12,6 +12,10 @@ class DspyGepaOptimizer:
     reflection_lm: Any = None
     seed: int = 0
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.max_metric_calls, int) or self.max_metric_calls < 0 or self.max_metric_calls > 12:
+            raise ValueError('max_metric_calls exceeds the immutable GEPA maximum')
+
     def optimize(self, student: Any, trainset: list[Any], valset: list[Any], metric: Callable[..., Any]) -> Any:
         try:
             import dspy
