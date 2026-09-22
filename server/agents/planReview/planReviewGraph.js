@@ -27,6 +27,7 @@ import {
   PLAN_REVIEW_GRAPH_VERSION,
   PLAN_REVIEW_TRAJECTORY_EVENTS,
 } from './planReviewRuntime.js';
+import { resolvePromptBundle } from '../evolution/promptBundle.js';
 
 function uuid() {
   return crypto.randomUUID();
@@ -37,6 +38,14 @@ function configuredLimit(value, fallback, hardMaximum) {
   return Number.isFinite(parsed) && parsed > 0
     ? Math.min(hardMaximum, Math.floor(parsed))
     : fallback;
+}
+
+function scaffoldLimit(dependencies, key, fallback, hardMaximum) {
+  return configuredLimit(
+    dependencies[key] ?? dependencies.scaffoldSpec?.softBudgets?.[key],
+    fallback,
+    hardMaximum,
+  );
 }
 
 function incrementStep(state, dependencies = {}) {
@@ -88,9 +97,9 @@ function allowedTools(dependencies = {}) {
   return SAFE_PLAN_REVIEW_TOOLS.filter(tool => requested.includes(tool));
 }
 
-function plannerPrompt(freshness, profileContext, tools = SAFE_PLAN_REVIEW_TOOLS) {
+function plannerPrompt(freshness, profileContext, tools = SAFE_PLAN_REVIEW_TOOLS, promptBundle = null) {
   return [
-    'You are a bounded routing planner for a read-only financial plan review.',
+    promptBundle?.plannerInstruction || 'You are a bounded routing planner for a read-only financial plan review.',
     'Return JSON only: {"checks":["allowed_tool_name"]}.',
     `Allowed tools: ${tools.join(', ')}.`,
     'Never return mutation, optimizer, rebalance, HTTP, shell, raw database, or unknown tools.',
@@ -99,7 +108,7 @@ function plannerPrompt(freshness, profileContext, tools = SAFE_PLAN_REVIEW_TOOLS
   ].join('\n');
 }
 
-export async function planWithProvider({ freshness, profileContext, provider, tools = SAFE_PLAN_REVIEW_TOOLS }) {
+export async function planWithProvider({ freshness, profileContext, provider, tools = SAFE_PLAN_REVIEW_TOOLS, promptBundle = null }) {
   if (!provider || typeof provider.generate !== 'function') return null;
   const response = await withAgentSpan('gen_ai.chat', {
     'agent.type': 'PLAN_REVIEW',
@@ -107,7 +116,7 @@ export async function planWithProvider({ freshness, profileContext, provider, to
     'gen_ai.request.model': provider.configuredModel?.() || provider.model || 'configured-provider',
   }, async span => {
     const value = await provider.generate({
-      systemPrompt: plannerPrompt(freshness, profileContext, tools),
+      systemPrompt: plannerPrompt(freshness, profileContext, tools, promptBundle),
       recentHistory: [{ role: 'user', parts: [{ text: 'Select only the minimum safe read-only checks.' }] }],
       maxTokens: 240,
       jsonMode: true,
@@ -159,14 +168,16 @@ async function determineChecksNode(state, dependencies) {
   let planner = { provider: 'DETERMINISTIC', model: null, fallback: true };
   let requestedChecks = required;
   let modelCallCount = Number(state.modelCallCount || 0);
+  const promptBundle = resolvePromptBundle({ dependencies, scaffoldSpec: dependencies.scaffoldSpec });
+  const plannerRole = dependencies.scaffoldSpec?.safeModelRoleRouting?.planner || 'PLANNER';
   const plannerProvider = dependencies.plannerProvider || (dependencies.modelGateway && dependencies.modelPlannerEnabled ? {
     name: 'model-gateway',
     configuredModel: () => 'model-gateway',
-    generate: args => dependencies.modelGateway.generate({ role: 'PLANNER', ...args }),
+    generate: args => dependencies.modelGateway.generate({ role: plannerRole, ...args }),
   } : null);
   if (state.profile && plannerProvider) {
     try {
-      if (modelCallCount >= configuredLimit(dependencies.maxModelCalls, 2, 2)) {
+      if (modelCallCount >= scaffoldLimit(dependencies, 'maxModelCalls', 2, 2)) {
         const error = new Error('AGENT_BUDGET_EXCEEDED');
         error.code = 'AGENT_BUDGET_EXCEEDED';
         throw error;
@@ -174,13 +185,16 @@ async function determineChecksNode(state, dependencies) {
       modelCallCount += 1;
       const modelPlan = await planWithProvider({
         freshness: state.freshness,
-        profileContext: state.profileContext,
+        profileContext: dependencies.scaffoldSpec?.contextCompressionPolicy === 'MINIMAL_PROFILE_CONTEXT'
+          ? { available: Boolean(state.profileContext) }
+          : state.profileContext,
         provider: plannerProvider,
         tools,
+        promptBundle,
       });
       if (modelPlan) {
         planner = modelPlan;
-        const maxToolCalls = configuredLimit(dependencies.maxToolCalls, MAX_TOOL_CALLS, MAX_TOOL_CALLS);
+        const maxToolCalls = scaffoldLimit(dependencies, 'maxToolCalls', MAX_TOOL_CALLS, MAX_TOOL_CALLS);
         requestedChecks = unique([...modelPlan.checks, ...required]).filter(tool => tools.includes(tool)).slice(0, maxToolCalls);
       }
     } catch (error) {
@@ -201,7 +215,7 @@ async function executeSafeToolsNode(state, dependencies) {
   const toolCallCounts = { ...(state.toolCallCounts || {}) };
   const repeatedRequests = [];
   let toolCallCount = Number(state.toolCallCount || 0);
-  const maxToolCalls = configuredLimit(dependencies.maxToolCalls, MAX_TOOL_CALLS, MAX_TOOL_CALLS);
+  const maxToolCalls = scaffoldLimit(dependencies, 'maxToolCalls', MAX_TOOL_CALLS, MAX_TOOL_CALLS);
   const maxToolCallsPerTool = configuredLimit(
     dependencies.maxToolCallsPerTool,
     MAX_TOOL_CALLS_PER_TOOL,
@@ -362,7 +376,12 @@ async function researchMeshNode(state, dependencies) {
 
 async function synthesizeNode(state, dependencies) {
   const validated = await validateEvidenceNode(state);
-  const evidence = validated.evidencePacket;
+  const promptBundle = resolvePromptBundle({ dependencies, scaffoldSpec: dependencies.scaffoldSpec });
+  const evidenceEntries = [...(validated.evidencePacket.entries || [])];
+  if (dependencies.scaffoldSpec?.evidenceOrderingPolicy === 'AUTHORITATIVE_FIRST') {
+    evidenceEntries.sort((left, right) => String(left?.sourceTrustTier || '').localeCompare(String(right?.sourceTrustTier || '')));
+  }
+  const evidence = { ...validated.evidencePacket, entries: evidenceEntries };
   const safeProvider = { provider: 'DETERMINISTIC_FALLBACK', model: null, fallback: true };
   let explanation = null;
   let provider = safeProvider;
@@ -373,7 +392,7 @@ async function synthesizeNode(state, dependencies) {
   if (state.profile && state.recommendation && evidence?.status === 'AVAILABLE'
       && validated.evidencePacket.entries.length > 0 && !evidenceHasInjection) {
     try {
-      if (modelCallCount >= configuredLimit(dependencies.maxModelCalls, 2, 2)) {
+      if (modelCallCount >= scaffoldLimit(dependencies, 'maxModelCalls', 2, 2)) {
         const error = new Error('AGENT_BUDGET_EXCEEDED');
         error.code = 'AGENT_BUDGET_EXCEEDED';
         throw error;
@@ -386,11 +405,11 @@ async function synthesizeNode(state, dependencies) {
         const gatewayProvider = dependencies.modelGateway ? {
           name: 'model-gateway',
           configuredModel: () => 'model-gateway',
-          generate: args => dependencies.modelGateway.generate({ role: 'EXPLAINER', ...args }),
+          generate: args => dependencies.modelGateway.generate({ role: dependencies.scaffoldSpec?.safeModelRoleRouting?.synthesis || 'EXPLAINER', ...args }),
         } : null;
         const value = await generateGroundedExplanation({
-          question: 'Review the current saved financial plan for evidence alignment. Do not propose new allocations, weights, products, tax results, or changes. State only what the evidence supports and its limitations.',
-          evidencePacket: validated.evidencePacket,
+          question: promptBundle.synthesisInstruction,
+          evidencePacket: evidence,
         }, {
           providers: gatewayProvider ? [gatewayProvider] : dependencies.explanationProviders,
           getCache: async () => null,

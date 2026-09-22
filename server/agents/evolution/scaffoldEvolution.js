@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { createOptimizerEvaluationManifest, evaluateCandidate, AGENT_EVALUATION_VERSION } from '../evals/evaluationV2.js';
 import { createScaffoldSpec, assertScaffoldSpecSafe } from './scaffoldSpec.js';
 import { invokePlanReviewGraph } from '../planReview/planReviewGraph.js';
+import { canonicalSha256 } from '../../utils/canonicalJson.js';
 
 export const EVOLUTION_VERSION = 'scaffold-evolution-1.0.0';
 
@@ -32,12 +33,16 @@ export function createPlanReviewScaffoldRunner({ dependencies = {} } = {}) {
       },
     });
     const after = await dependencies.captureFinancialAuthority({ caseDefinition, phase: 'after' });
-    const financialAuthorityDelta = before === after ? 0 : 1;
+    const beforeFingerprint = canonicalSha256(before);
+    const afterFingerprint = canonicalSha256(after);
+    const financialAuthorityDelta = beforeFingerprint === afterFingerprint ? 0 : 1;
     return {
       result: review,
       trajectory: review.trajectory || [],
       financialAuthorityDelta,
       authorityMeasurementState: 'MEASURED',
+      authorityBeforeFingerprint: beforeFingerprint,
+      authorityAfterFingerprint: afterFingerprint,
     };
   };
 }

@@ -1,8 +1,12 @@
 import crypto from 'node:crypto';
 import { SAFE_PLAN_REVIEW_TOOLS } from '../planReview/planReviewSchemas.js';
 import { isVerifiedPromotionAuthorization, verifyPromotionAuthorization } from './promotionAuthorization.js';
+import { CURRENT_PROMPT_BUNDLE, verifyPromptBundleHash } from './promptBundle.js';
 
 export const SCAFFOLD_SPEC_VERSION = 'scaffold-spec-1.0.0';
+const SAFE_EVIDENCE_ORDERING_POLICIES = Object.freeze(['AS_RECEIVED', 'AUTHORITATIVE_FIRST', 'FRESHNESS_FIRST']);
+const SAFE_CONTEXT_POLICIES = Object.freeze(['BOUNDED_PROFILE_CONTEXT', 'MINIMAL_PROFILE_CONTEXT']);
+const SAFE_MODEL_ROLES = Object.freeze(['PLANNER', 'EXPLAINER']);
 export const IMMUTABLE_FINANCIAL_SURFACES = Object.freeze([
   'recommendation_service',
   'suitability_gate',
@@ -70,11 +74,25 @@ export function assertScaffoldSpecSafe(spec) {
   if (spec.immutableSurfaces?.some(surface => !IMMUTABLE_FINANCIAL_SURFACES.includes(surface))) {
     throw new Error('Scaffold immutable surface list contains an unknown surface.');
   }
+  if (spec.promptBundleId && (!spec.promptBundleHash || !/^[a-f0-9]{64}$/.test(spec.promptBundleHash))) {
+    throw new Error('Scaffold PromptBundle reference must include a valid hash.');
+  }
+  if (spec.evidenceOrderingPolicy && !SAFE_EVIDENCE_ORDERING_POLICIES.includes(spec.evidenceOrderingPolicy)) {
+    throw new Error('Scaffold evidence ordering policy is not allowlisted.');
+  }
+  if (spec.contextCompressionPolicy && !SAFE_CONTEXT_POLICIES.includes(spec.contextCompressionPolicy)) {
+    throw new Error('Scaffold context compression policy is not allowlisted.');
+  }
+  if (spec.safeModelRoleRouting && Object.values(spec.safeModelRoleRouting).some(role => !SAFE_MODEL_ROLES.includes(role))) {
+    throw new Error('Scaffold model role routing contains an unsafe role.');
+  }
   return true;
 }
 
 export function createScaffoldSpec(input = {}) {
   walk(input);
+  const promptBundle = input.promptBundle || CURRENT_PROMPT_BUNDLE;
+  verifyPromptBundleHash(promptBundle);
   const spec = {
     specVersion: SCAFFOLD_SPEC_VERSION,
     scaffoldId: String(input.scaffoldId || 'plan-review'),
@@ -84,11 +102,25 @@ export function createScaffoldSpec(input = {}) {
     graphVersion: String(input.graphVersion || 'plan-review-graph-1.1.0'),
     tools: [...new Set(input.tools || SAFE_PLAN_REVIEW_TOOLS)],
     promptTemplateVersion: String(input.promptTemplateVersion || 'plan-review-prompts-1.0.0'),
+    promptBundleId: String(input.promptBundleId || promptBundle.bundleId),
+    promptBundleHash: String(input.promptBundleHash || promptBundle.contentHash),
+    promptBundle,
+    evidenceOrderingPolicy: String(input.evidenceOrderingPolicy || 'AS_RECEIVED'),
+    contextCompressionPolicy: String(input.contextCompressionPolicy || 'BOUNDED_PROFILE_CONTEXT'),
+    safeModelRoleRouting: {
+      planner: String(input.safeModelRoleRouting?.planner || 'PLANNER'),
+      synthesis: String(input.safeModelRoleRouting?.synthesis || 'EXPLAINER'),
+    },
+    softBudgets: {
+      maxModelCalls: Math.min(2, Math.max(0, Number(input.softBudgets?.maxModelCalls ?? 2))),
+      maxToolCalls: Math.min(8, Math.max(1, Number(input.softBudgets?.maxToolCalls ?? 8))),
+    },
     immutableSurfaces: [...IMMUTABLE_FINANCIAL_SURFACES],
     featureFlag: String(input.featureFlag || 'AGENT_EVOLUTION_ENABLED'),
     metadata: input.metadata && typeof input.metadata === 'object' ? { ...input.metadata } : {},
   };
   assertScaffoldSpecSafe(spec);
+  verifyPromptBundleHash(promptBundle, spec.promptBundleHash);
   spec.contentHash = crypto.createHash('sha256').update(canonical(spec)).digest('hex');
   return deepFreeze(spec);
 }

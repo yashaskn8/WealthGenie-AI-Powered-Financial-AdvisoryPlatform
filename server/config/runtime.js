@@ -71,6 +71,22 @@ export function getRuntimeConfig(env = process.env) {
     agentWorkflowBackend,
     agentStreamEnabled: booleanValue(env.AGENT_STREAM_ENABLED, !isProduction),
     agentEvolutionEnabled: booleanValue(env.AGENT_EVOLUTION_ENABLED, false),
+    selfEvolution: Object.freeze({
+      enabled: booleanValue(env.AGENT_SELF_EVOLUTION_ENABLED, false),
+      gepaEnabled: booleanValue(env.AGENT_SELF_EVOLUTION_GEPA_ENABLED, false),
+      e2bEnabled: booleanValue(env.AGENT_SELF_EVOLUTION_E2B_ENABLED, false),
+      liveEnabled: booleanValue(env.AGENT_SELF_EVOLUTION_LIVE_ENABLED, false),
+      autoPromotionEnabled: booleanValue(env.AGENT_SELF_EVOLUTION_AUTO_PROMOTION_ENABLED, false),
+      budgets: Object.freeze({
+        maxGenerations: positiveInteger(env.EVOLUTION_MAX_GENERATIONS, 3, { min: 0, max: 3 }),
+        maxCandidates: positiveInteger(env.EVOLUTION_MAX_CANDIDATES, 12, { min: 0, max: 12 }),
+        maxReflectionCalls: positiveInteger(env.EVOLUTION_MAX_REFLECTION_CALLS, 12, { min: 0, max: 12 }),
+        maxMetricCalls: positiveInteger(env.EVOLUTION_MAX_METRIC_CALLS, 1000, { min: 0, max: 1000 }),
+        maxSandboxRuns: positiveInteger(env.EVOLUTION_MAX_SANDBOX_RUNS, 20, { min: 0, max: 20 }),
+        maxSandboxMinutes: positiveInteger(env.EVOLUTION_MAX_SANDBOX_MINUTES, 60, { min: 0, max: 60 }),
+        maxTotalTokens: positiveInteger(env.EVOLUTION_MAX_TOTAL_TOKENS, 15000, { min: 0, max: 15000 }),
+      }),
+    }),
     agentResearchEnabled: booleanValue(env.AGENT_RESEARCH_ENABLED, false),
     researchMesh: Object.freeze({
       a2aV1Enabled: booleanValue(env.AGENT_A2A_V1_ENABLED, false),
@@ -188,6 +204,13 @@ export function assertValidRuntimeConfig(config) {
     if (config.agentIdentityProvider === 'spiffe' && !config.agentIdentity.trustDomain) {
       throw new Error('Production SPIFFE agent identity requires SPIFFE_TRUST_DOMAIN and a runtime SVID verifier.');
     }
+  }
+  const selfEvolution = config.selfEvolution;
+  if (config.isProduction && (selfEvolution.enabled || selfEvolution.gepaEnabled || selfEvolution.e2bEnabled || selfEvolution.liveEnabled || selfEvolution.autoPromotionEnabled)) {
+    throw new Error('Self-evolution is offline/manual-only and cannot be enabled in production runtime.');
+  }
+  if (selfEvolution.autoPromotionEnabled) {
+    throw new Error('Automatic self-evolution promotion is permanently disabled; use the WebAuthn human promotion workflow.');
   }
   const research = config.researchMesh;
   const researchEnabled = research.a2aV1Enabled || research.deepResearchEnabled || research.adaptiveResearchEnabled || research.liveSearchEnabled;

@@ -1,4 +1,4 @@
-import { evaluateHoldoutCandidate } from './evaluationV2.js';
+import { evaluateHoldoutCandidateAsync } from './evaluationV2.js';
 
 /**
  * The optimizer never imports or receives holdout rows. Deployment/CI may
@@ -17,7 +17,7 @@ export async function verifyCandidateAgainstSealedHoldout({ candidateId, runner,
     error.code = 'SEALED_HOLDOUT_INVALID';
     throw error;
   }
-  return evaluateHoldoutCandidate({
+  return evaluateHoldoutCandidateAsync({
     candidateId,
     cases,
     evaluator: item => runner({ caseDefinition: item }),

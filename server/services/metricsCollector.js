@@ -72,6 +72,15 @@ class MetricsCollector {
       research_budget_exhausted_total: 0,
       research_a2a_tasks_total: 0,
       research_a2a_task_failures_total: 0,
+      agent_evolution_runs_total: 0,
+      agent_evolution_candidates_total: 0,
+      agent_evolution_candidates_rejected_total: 0,
+      agent_evolution_sandbox_runs_total: 0,
+      agent_evolution_reflection_calls_total: 0,
+      agent_evolution_metric_calls_total: 0,
+      agent_evolution_holdout_pass_total: 0,
+      agent_evolution_reliability_rejections_total: 0,
+      agent_evolution_authority_rejections_total: 0,
     };
 
     this.gauges = {
@@ -142,6 +151,18 @@ class MetricsCollector {
   recordAgentToolCall(_toolName, success) {
     this.inc('agent_tool_calls_total');
     if (!success) this.inc('agent_tool_calls_failed_total');
+  }
+
+  recordEvolutionRun({ candidates = 0, rejected = 0, sandboxRuns = 0, reflectionCalls = 0, metricCalls = 0, holdoutPassed = 0, reliabilityRejections = 0, authorityRejections = 0 } = {}) {
+    this.inc('agent_evolution_runs_total');
+    this.inc('agent_evolution_candidates_total', candidates);
+    this.inc('agent_evolution_candidates_rejected_total', rejected);
+    this.inc('agent_evolution_sandbox_runs_total', sandboxRuns);
+    this.inc('agent_evolution_reflection_calls_total', reflectionCalls);
+    this.inc('agent_evolution_metric_calls_total', metricCalls);
+    this.inc('agent_evolution_holdout_pass_total', holdoutPassed);
+    this.inc('agent_evolution_reliability_rejections_total', reliabilityRejections);
+    this.inc('agent_evolution_authority_rejections_total', authorityRejections);
   }
 
   recordAgentPolicyRejection() {
@@ -254,6 +275,21 @@ class MetricsCollector {
       'research_a2a_task_failures_total',
     ];
     for (const name of researchCounters) {
+      lines.push(`# TYPE wealthgenie_${name} counter`);
+      lines.push(`wealthgenie_${name} ${this.counters[name]}`);
+    }
+    const evolutionCounters = [
+      'agent_evolution_runs_total',
+      'agent_evolution_candidates_total',
+      'agent_evolution_candidates_rejected_total',
+      'agent_evolution_sandbox_runs_total',
+      'agent_evolution_reflection_calls_total',
+      'agent_evolution_metric_calls_total',
+      'agent_evolution_holdout_pass_total',
+      'agent_evolution_reliability_rejections_total',
+      'agent_evolution_authority_rejections_total',
+    ];
+    for (const name of evolutionCounters) {
       lines.push(`# TYPE wealthgenie_${name} counter`);
       lines.push(`wealthgenie_${name} ${this.counters[name]}`);
     }

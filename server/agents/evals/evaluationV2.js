@@ -133,6 +133,27 @@ export function evaluateCandidate({ candidateId, cases = [], evaluator, purpose 
   };
 }
 
+export async function evaluateCandidateAsync({ candidateId, cases = [], evaluator, purpose = 'optimizer' } = {}) {
+  if (typeof evaluator !== 'function') throw new TypeError('A candidate evaluator is required.');
+  assertHoldoutIsolation(cases, { purpose });
+  const scoreCards = [];
+  for (const item of cases) {
+    const evaluated = await evaluator(item);
+    scoreCards.push(buildCandidateScoreCard({
+      candidateId,
+      partition: item.partition,
+      caseDefinition: item,
+      ...evaluated,
+    }));
+  }
+  return {
+    candidateId,
+    evaluationVersion: AGENT_EVALUATION_VERSION,
+    scoreCards,
+    passed: scoreCards.length > 0 && scoreCards.every(card => card.passed),
+  };
+}
+
 export function evaluateHoldoutCandidate({ candidateId, cases = [], evaluator } = {}) {
   if (cases.some(item => item?.partition !== 'holdout')) {
     const error = new Error('Holdout evaluation accepts holdout cases only.');
@@ -141,4 +162,13 @@ export function evaluateHoldoutCandidate({ candidateId, cases = [], evaluator } 
   }
   if (typeof evaluator !== 'function') throw new TypeError('A candidate evaluator is required.');
   return evaluateCandidate({ candidateId, cases, evaluator, purpose: 'holdout-verifier' });
+}
+
+export async function evaluateHoldoutCandidateAsync({ candidateId, cases = [], evaluator } = {}) {
+  if (cases.some(item => item?.partition !== 'holdout')) {
+    const error = new Error('Holdout evaluation accepts holdout cases only.');
+    error.code = 'INVALID_HOLDOUT_PARTITION';
+    throw error;
+  }
+  return evaluateCandidateAsync({ candidateId, cases, evaluator, purpose: 'holdout-verifier' });
 }
