@@ -22,3 +22,6 @@ data:
   CORS_ORIGINS: "https://wealthgenie.local"
   RATE_LIMIT_WINDOW_MS: "900000"
   RATE_LIMIT_MAX_REQUESTS: "100"
+  AGENT_WORKER_MODE: "external"
+  AGENT_WORKER_ENABLED: "false"
+  PLAN_HEALTH_SCHEDULER_ENABLED: "false"

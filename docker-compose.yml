@@ -45,6 +45,8 @@ services:
       # Docker Compose is the local HTTP integration stack. Production must
       # terminate HTTPS and provide independently managed secrets.
       - NODE_ENV=development
+      - AGENT_WORKER_MODE=external
+      - AGENT_WORKER_ENABLED=false
       - JWT_SECRET=${JWT_SECRET:-local-compose-jwt-secret-at-least-32-characters}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - ML_SERVICE_API_KEY=${ML_SERVICE_API_KEY:-}
@@ -63,6 +65,39 @@ services:
         aliases:
           # Match the Kubernetes Service name used by the shared nginx image.
           - wealthgenie-server
+
+  agent-worker:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: wealthgenie-agent-worker
+    restart: unless-stopped
+    command: ["node", "worker.js"]
+    expose:
+      - "5050"
+    environment:
+      - TRACE_LOG_PATH=/app/traces-worker.jsonl
+      - MONGODB_URI=mongodb://mongodb:27017/wealthgenie?replicaSet=rs0
+      - REDIS_URL=redis://redis:6379
+      - NODE_ENV=development
+      - AGENT_WORKER_MODE=external
+      - AGENT_WORKER_ENABLED=true
+      - AGENT_WORKER_HEALTH_PORT=5050
+      - JWT_SECRET=${JWT_SECRET:-local-compose-jwt-secret-at-least-32-characters}
+      - ML_SERVICE_API_KEY=${ML_SERVICE_API_KEY:-}
+      - REQUIRE_REDIS=${REQUIRE_REDIS:-false}
+      - MONGODB_FLAVOR=${MONGODB_FLAVOR:-mongodb}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://127.0.0.1:5050/health/ready',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
+    networks:
+      default:
+        aliases:
+          - wealthgenie-agent-worker
 
   reactapp:
     build:

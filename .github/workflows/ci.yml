@@ -14,6 +14,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  agent-runtime-contract:
+    name: Agent runtime contract and deployment config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - name: Install backend dependencies
+        run: npm ci --prefix server
+      - name: Run worker, scheduler, fencing, and evaluation gates
+        env:
+          JWT_SECRET: ci-agent-runtime-secret-with-more-than-32-characters
+        run: node --test --test-concurrency=1 server/test/planReviewRuntime.test.js server/test/agentWorkerRuntime.test.js
+      - name: Syntax-check standalone worker
+        run: node --check server/worker.js
+      - name: Validate Compose and Kubernetes worker configuration
+        run: node server/scripts/validate-deployment-config.js
+
   backend-integration-linux:
     name: Backend Linux (Node ${{ matrix.node-version }}, Mongo ${{ matrix.mongodb-version }})
     runs-on: ubuntu-latest

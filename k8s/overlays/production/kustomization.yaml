@@ -24,3 +24,9 @@ patches:
       version: v1
       kind: Deployment
       name: wealthgenie-server
+  - path: worker-patch.yaml
+    target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: wealthgenie-agent-worker

@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wealthgenie-agent-worker
+  namespace: wealthgenie
+  labels:
+    app: wealthgenie-agent-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wealthgenie-agent-worker
+  template:
+    metadata:
+      labels:
+        app: wealthgenie-agent-worker
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent-worker
+          image: wealthgenie-server:latest
+          imagePullPolicy: IfNotPresent
+          command: ["node", "worker.js"]
+          ports:
+            - containerPort: 5050
+              name: health
+          envFrom:
+            - configMapRef:
+                name: wealthgenie-config
+          env:
+            - name: AGENT_WORKER_MODE
+              value: "external"
+            - name: AGENT_WORKER_ENABLED
+              value: "true"
+            - name: PLAN_HEALTH_SCHEDULER_ENABLED
+              value: "true"
+            - name: AGENT_WORKER_HEALTH_PORT
+              value: "5050"
+            - name: TRACE_LOG_PATH
+              value: "/tmp/traces-worker.jsonl"
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: wealthgenie-secrets
+                  key: MONGODB_URI
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: wealthgenie-secrets
+                  key: JWT_SECRET
+            - name: ML_SERVICE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wealthgenie-secrets
+                  key: ML_SERVICE_API_KEY
+            - name: METRICS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: wealthgenie-secrets
+                  key: METRICS_TOKEN
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /health/ready
+              port: health
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: health
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
