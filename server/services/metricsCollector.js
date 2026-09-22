@@ -38,6 +38,27 @@ class MetricsCollector {
       agent_tool_calls_total: 0,
       agent_tool_calls_failed_total: 0,
       agent_policy_rejections_total: 0,
+      agent_queue_runs_completed_total: 0,
+      agent_queue_runs_failed_total: 0,
+      agent_checkpoint_writes_total: 0,
+      agent_cancellation_total: 0,
+      agent_budget_exceeded_total: 0,
+      plan_health_events_total: 0,
+      agent_worker_jobs_completed_total: 0,
+      agent_worker_jobs_failed_total: 0,
+      agent_worker_lease_conflicts_total: 0,
+      agent_worker_stale_write_rejections_total: 0,
+      agent_worker_recovered_runs_total: 0,
+      plan_health_scans_total: 0,
+      plan_health_users_scanned_total: 0,
+      plan_health_events_created_total: 0,
+      plan_health_events_deduplicated_total: 0,
+      agent_live_eval_failures_total: 0,
+    };
+
+    this.gauges = {
+      agent_worker_jobs_active: 0,
+      agent_queue_oldest_age_seconds: 0,
     };
 
     this.toolUsage = {}; // tool_name -> count
@@ -57,6 +78,10 @@ class MetricsCollector {
     if (this.counters[metricName] !== undefined) {
       this.counters[metricName] += value;
     }
+  }
+
+  setGauge(metricName, value) {
+    if (this.gauges[metricName] !== undefined) this.gauges[metricName] = Number(value) || 0;
   }
 
   recordToolExecution(toolName, success) {
@@ -148,8 +173,37 @@ class MetricsCollector {
     lines.push('# TYPE wealthgenie_security_events_total counter');
     lines.push(`wealthgenie_security_events_total{type="prompt_injection"} ${this.counters.prompt_injection_attempts_total}`);
     lines.push(`wealthgenie_security_events_total{type="invalid_action_cards"} ${this.counters.invalid_action_cards_total}`);
+
+    lines.push('\n# HELP wealthgenie_agent_runtime_total Durable agent runtime outcomes');
+    lines.push('# TYPE wealthgenie_agent_runtime_total counter');
+    lines.push(`wealthgenie_agent_runtime_total{type="queue_completed"} ${this.counters.agent_queue_runs_completed_total}`);
+    lines.push(`wealthgenie_agent_runtime_total{type="queue_failed"} ${this.counters.agent_queue_runs_failed_total}`);
+    lines.push(`wealthgenie_agent_runtime_total{type="checkpoint"} ${this.counters.agent_checkpoint_writes_total}`);
+    lines.push(`wealthgenie_agent_runtime_total{type="cancelled"} ${this.counters.agent_cancellation_total}`);
+    lines.push(`wealthgenie_agent_runtime_total{type="budget_exceeded"} ${this.counters.agent_budget_exceeded_total}`);
     lines.push(`wealthgenie_security_events_total{type="arithmetic_corrections"} ${this.counters.arithmetic_corrections_total}`);
     lines.push(`wealthgenie_security_events_total{type="csrf_rejection"} ${this.counters.csrf_rejections_total}`);
+
+    const workerCounters = [
+      'agent_worker_jobs_completed_total',
+      'agent_worker_jobs_failed_total',
+      'agent_worker_lease_conflicts_total',
+      'agent_worker_stale_write_rejections_total',
+      'agent_worker_recovered_runs_total',
+      'plan_health_scans_total',
+      'plan_health_users_scanned_total',
+      'plan_health_events_created_total',
+      'plan_health_events_deduplicated_total',
+      'agent_live_eval_failures_total',
+    ];
+    for (const name of workerCounters) {
+      lines.push(`# TYPE wealthgenie_${name} counter`);
+      lines.push(`wealthgenie_${name} ${this.counters[name]}`);
+    }
+    lines.push('# TYPE wealthgenie_agent_worker_jobs_active gauge');
+    lines.push(`wealthgenie_agent_worker_jobs_active ${this.gauges.agent_worker_jobs_active}`);
+    lines.push('# TYPE wealthgenie_agent_queue_oldest_age_seconds gauge');
+    lines.push(`wealthgenie_agent_queue_oldest_age_seconds ${this.gauges.agent_queue_oldest_age_seconds}`);
 
     const avgLatency = this.latencies.length > 0
       ? (this.latencies.reduce((sum, l) => sum + l.latencyMs, 0) / this.latencies.length).toFixed(2)
@@ -205,6 +259,7 @@ class MetricsCollector {
 
     return {
       counters: { ...this.counters },
+      gauges: { ...this.gauges },
       tool_usage: { ...this.toolUsage },
       average_latency_ms: parseFloat(avgLatency),
       recorded_requests_window: this.latencies.length,

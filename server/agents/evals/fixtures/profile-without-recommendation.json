@@ -1,0 +1,6 @@
+{
+  "description": "Fixture identity only; recommendation lookup is mocked as missing.",
+  "profileId": "64b000000000000000000001",
+  "userId": "64b000000000000000000010",
+  "recommendationStatus": "MISSING"
+}

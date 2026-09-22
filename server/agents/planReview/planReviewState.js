@@ -20,6 +20,7 @@ export const PlanReviewState = Annotation.Root({
   requestedChecks: replace([]),
   toolResults: replace({}),
   toolCallCount: replace(0),
+  modelCallCount: replace(0),
   toolCallCounts: replace({}),
   stepCount: replace(0),
   repeatedRequests: replace([]),
@@ -32,4 +33,5 @@ export const PlanReviewState = Annotation.Root({
   policy: replace({ allowed: false, reasonCodes: [] }),
   errors: append(),
   status: replace('RUNNING'),
+  resumeCheckpoint: replace(null),
 });

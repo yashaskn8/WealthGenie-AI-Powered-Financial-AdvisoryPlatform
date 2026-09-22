@@ -30,6 +30,10 @@ export const planReviewRequestSchema = Joi.object({
   profileId: objectId.required(),
 }).unknown(false);
 
+export const planReviewActionSchema = Joi.object({
+  action: Joi.string().valid('APPROVE_RECOMPUTE', 'REJECT_RECOMPUTE', 'OPEN_PROFILE', 'OPEN_GOALS').required(),
+}).unknown(false);
+
 const plannerCheckSchema = Joi.string().valid(...SAFE_PLAN_REVIEW_TOOLS);
 export const plannerPlanSchema = Joi.object({
   checks: Joi.array().items(plannerCheckSchema).min(1).max(SAFE_PLAN_REVIEW_TOOLS.length).unique().required(),

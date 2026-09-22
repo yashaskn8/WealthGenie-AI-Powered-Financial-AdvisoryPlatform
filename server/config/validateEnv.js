@@ -12,6 +12,14 @@ export function validateEnvironmentConfig(env = process.env) {
   const errors = [];
   errors.push(...validateMongoCompatibilityConfig(env).errors);
 
+  const workerMode = String(env.AGENT_WORKER_MODE || (isProduction ? 'external' : 'embedded')).toLowerCase();
+  if (!['embedded', 'external'].includes(workerMode)) {
+    errors.push('AGENT_WORKER_MODE must be embedded or external');
+  }
+  if (isProduction && workerMode !== 'external') {
+    errors.push('AGENT_WORKER_MODE must be external in production');
+  }
+
   if (!env.JWT_SECRET || !env.JWT_SECRET.trim()) {
     errors.push('JWT_SECRET is required');
   }

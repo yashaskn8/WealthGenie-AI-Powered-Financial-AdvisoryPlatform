@@ -20,6 +20,7 @@ import {
   PROJECTION_ASSUMPTION_SOURCE,
   PROJECTION_ASSUMPTION_VERSION,
 } from '../services/instrumentConstants.js';
+import { triggerPlanHealthCheck } from '../services/planHealthMonitor.js';
 
 const router = Router();
 const GOAL_INFLATION_ASSUMPTION = 0.05;
@@ -242,6 +243,7 @@ router.post('/create', verifyJWT, idempotency(), validateStrict(customGoalSchema
     if (error.code === 11000) throw createError(409, `Duplicate goal name: ${goal_name}`, 'A goal with this name already exists.');
     throw error;
   }
+  void triggerPlanHealthCheck({ userId: req.user.userId, profileId });
   res.status(201).json({ goal: { ...goal.toObject(), goalId: goal._id, chartData: data.chart_data } });
 }));
 
@@ -358,6 +360,7 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
     goal.gemini_advice = await generateGoalAdvice(goal, profile);
   }
   await goal.save();
+  void triggerPlanHealthCheck({ userId: req.user.userId, profileId: goal.profileId });
   res.json({ success: true, goal });
 }));
 
@@ -365,6 +368,7 @@ router.delete('/:goalId', verifyJWT, asyncHandler(async (req, res) => {
   if (!isValidObjectId(req.params.goalId)) throw createError(400, 'Invalid goalId', 'Invalid goal ID.');
   const goal = await Goal.findOneAndDelete({ _id: req.params.goalId, userId: req.user.userId });
   if (!goal) throw createError(404, 'Goal not found', 'Goal not found.');
+  void triggerPlanHealthCheck({ userId: req.user.userId, profileId: goal.profileId });
   res.json({ deleted: true, goalId: goal._id });
 }));
 

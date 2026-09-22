@@ -20,6 +20,11 @@ function booleanValue(value, fallback) {
   return value === 'true';
 }
 
+function enumValue(value, fallback, allowed) {
+  const normalized = String(value || fallback).trim().toLowerCase();
+  return allowed.includes(normalized) ? normalized : fallback;
+}
+
 export function getRuntimeConfig(env = process.env) {
   const nodeEnv = env.NODE_ENV || 'development';
   const isProduction = nodeEnv === 'production';
@@ -28,6 +33,11 @@ export function getRuntimeConfig(env = process.env) {
     .map(origin => origin.trim().replace(/\/+$/, ''))
     .filter(Boolean);
 
+  const agentWorkerMode = enumValue(
+    env.AGENT_WORKER_MODE,
+    isProduction ? 'external' : 'embedded',
+    ['embedded', 'external'],
+  );
   return Object.freeze({
     nodeEnv,
     isProduction,
@@ -43,11 +53,34 @@ export function getRuntimeConfig(env = process.env) {
     // Plan Review is read-only and opt-in in production. Local development can
     // exercise the feature without requiring an extra .env entry.
     agenticPlanReviewEnabled: booleanValue(env.AGENTIC_PLAN_REVIEW_ENABLED, !isProduction),
+    agentWorkerEnabled: booleanValue(env.AGENT_WORKER_ENABLED, true),
+    agentWorkerMode,
     agentPlanReview: Object.freeze({
       maxSteps: positiveInteger(env.AGENT_MAX_STEPS, 6, { min: 1, max: 6 }),
       maxToolCalls: positiveInteger(env.AGENT_MAX_TOOL_CALLS, 8, { min: 1, max: 8 }),
       maxToolCallsPerTool: positiveInteger(env.AGENT_MAX_TOOL_CALLS_PER_TOOL, 2, { min: 1, max: 2 }),
       timeoutMs: positiveInteger(env.AGENT_TIMEOUT_MS, 30000, { min: 1000, max: 60000 }),
+      maxAttempts: positiveInteger(env.AGENT_MAX_ATTEMPTS, 2, { min: 1, max: 2 }),
+      maxModelCalls: positiveInteger(env.AGENT_MAX_MODEL_CALLS, 2, { min: 0, max: 2 }),
+      maxInputTokens: positiveInteger(env.AGENT_MAX_INPUT_TOKENS, 4000, { min: 1, max: 4000 }),
+      maxOutputTokens: positiveInteger(env.AGENT_MAX_OUTPUT_TOKENS, 1200, { min: 1, max: 1200 }),
+      maxTotalTokens: positiveInteger(env.AGENT_MAX_TOTAL_TOKENS, 5200, { min: 1, max: 5200 }),
+      leaseMs: positiveInteger(env.AGENT_LEASE_MS, 60000, { min: 10000, max: 300000 }),
+      heartbeatMs: positiveInteger(env.AGENT_HEARTBEAT_MS, 15000, { min: 1000, max: 100000 }),
+      shutdownGraceMs: positiveInteger(env.AGENT_SHUTDOWN_GRACE_MS, 10000, { min: 1000, max: 60000 }),
+      maxQueuedRunsPerUser: positiveInteger(env.MAX_QUEUED_AGENT_RUNS_PER_USER, 3, { min: 1, max: 100 }),
+      maxActiveRunsPerUser: positiveInteger(env.MAX_ACTIVE_AGENT_RUNS_PER_USER, 1, { min: 1, max: 20 }),
+      maxGlobalQueuedRuns: positiveInteger(env.MAX_GLOBAL_QUEUED_RUNS, 1000, { min: 1, max: 100000 }),
+      queuePriority: 'INTERACTIVE_PLAN_REVIEW',
+      healthPort: positiveInteger(env.AGENT_WORKER_HEALTH_PORT, 5050, { min: 1024, max: 65535 }),
+    }),
+    planHealth: Object.freeze({
+      enabled: booleanValue(env.PLAN_HEALTH_SCHEDULER_ENABLED, true),
+      batchSize: positiveInteger(env.PLAN_HEALTH_BATCH_SIZE, 100, { min: 1, max: 1000 }),
+      intervalMs: positiveInteger(env.PLAN_HEALTH_INTERVAL_MS, 86400000, { min: 3600000, max: 604800000 }),
+      leaseMs: positiveInteger(env.PLAN_HEALTH_LEASE_MS, 300000, { min: 30000, max: 3600000 }),
+      jitterMs: positiveInteger(env.PLAN_HEALTH_JITTER_MS, 900000, { min: 0, max: 3600000 }),
+      concurrency: positiveInteger(env.PLAN_HEALTH_CONCURRENCY, 4, { min: 1, max: 20 }),
     }),
     deepHealthTimeoutMs: positiveInteger(env.DEEP_HEALTH_TIMEOUT_MS, 3000, { min: 100, max: 30000 }),
     mongo: Object.freeze({
@@ -82,5 +115,14 @@ export function assertValidRuntimeConfig(config) {
   assertValidHttpTimeouts(config);
   if (config.mongo.minPoolSize > config.mongo.maxPoolSize) {
     throw new Error('MONGODB_MIN_POOL_SIZE must be less than or equal to MONGODB_MAX_POOL_SIZE');
+  }
+  if (config.isProduction && config.agentWorkerMode !== 'external') {
+    throw new Error('AGENT_WORKER_MODE must be external in production');
+  }
+  if (config.agentWorkerMode === 'embedded' && config.agentWorkerEnabled === false) {
+    return;
+  }
+  if (config.agentPlanReview.heartbeatMs >= config.agentPlanReview.leaseMs) {
+    throw new Error('AGENT_HEARTBEAT_MS must be less than AGENT_LEASE_MS');
   }
 }

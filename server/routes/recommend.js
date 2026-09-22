@@ -33,6 +33,7 @@ import {
   PROJECTION_ASSUMPTION_VERSION,
 } from '../services/instrumentConstants.js';
 import { verifyAuditChain } from '../services/auditChain.js';
+import { triggerPlanHealthCheck } from '../services/planHealthMonitor.js';
 import {
   computeCoreRecommendation,
   buildRecommendationCacheKey,
@@ -131,6 +132,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       `total;dur=${tTotal.toFixed(2)}`,
     ].join(', '));
 
+    void triggerPlanHealthCheck({ userId: req.user.userId, profileId: stored._id });
     return res.json(persisted);
   } catch (error) {
     await releaseAdvisoryIdempotency(idempotencyClaim).catch(releaseError => {

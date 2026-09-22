@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "node --watch server.js",
     "start": "node server.js",
+    "start:worker": "node worker.js",
     "test": "node --test --test-concurrency=1 \"test/**/*.test.js\"",
     "test:unit": "node --test --test-concurrency=1 \"test/**/*.test.js\"",
     "test:coverage": "npx c8 --reporter=text --reporter=text-summary --reporter=json --reporter=lcovonly --reports-dir=reports node --test --test-concurrency=1 \"test/**/*.test.js\"",
@@ -23,6 +24,7 @@
     "qualify:nim": "node scripts/qualifyNvidiaNim.js",
     "export:market-regime-data": "node scripts/exportMarketRegimeDataset.js",
     "eval": "node scripts/run-eval.js",
+    "eval:live": "node scripts/run-live-plan-review-evals.js",
     "profile:migrate": "node scripts/migrateFinancialProfilesV4.js"
   },
   "dependencies": {

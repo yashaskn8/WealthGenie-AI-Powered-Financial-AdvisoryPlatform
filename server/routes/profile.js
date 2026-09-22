@@ -23,6 +23,7 @@ import { idempotency } from '../middleware/idempotency.js';
 import { persistAdvisoryAtomically } from '../services/advisoryPersistence.js';
 import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
 import { PrometheusMetrics } from '../services/metricsCollector.js';
+import { triggerPlanHealthCheck } from '../services/planHealthMonitor.js';
 import {
   computeCoreRecommendation,
   readRecommendationMarketContext,
@@ -267,6 +268,7 @@ router.post(
       });
       const transactionMs = performance.now() - transactionStart;
       if (candidateLease) await consumeProfileRecommendationCandidate(candidateLease);
+      void triggerPlanHealthCheck({ userId: req.user.userId, profileId });
 
       const timings = core.timings || {};
       const totalMs = performance.now() - totalStart;
@@ -347,6 +349,7 @@ router.post(
     });
 
     res.status(201).json(formatProfileResponse(profile));
+    void triggerPlanHealthCheck({ userId: req.user.userId, profileId: profile._id });
   }),
 );
 
@@ -383,6 +386,7 @@ router.put(
       return sendError(req, res, 409, 'Version conflict', 'PROFILE_VERSION_CONFLICT');
     }
 
+    void triggerPlanHealthCheck({ userId: req.user.userId, profileId: updated._id });
     res.json(formatProfileResponse(updated));
   }),
 );

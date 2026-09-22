@@ -1,5 +1,36 @@
 # WealthGenie Plan Review Agent
 
+## Durable runtime
+
+The request path creates an owned `AgentRun` in `QUEUED` state and returns
+`202`. A Mongo-backed worker claims it with a lease and executes the existing
+bounded LangGraph. Bounded checkpoints are written after graph/tool progress so
+worker recovery can reuse completed read-only tool results rather than starting
+an unbounded duplicate run.
+
+```text
+POST /agent/plan-review
+        |
+        v
+owned AgentRun (QUEUED) --> Mongo lease --> LangGraph nodes
+        |                                      |
+        |                                      +--> safe tools --> evidence/policy
+        |                                      +--> checkpoint + ledger + trajectory
+        v
+GET /agent/plan-review/:runId <--- result / approval descriptor
+```
+
+Runs are deduplicated per user/profile while active, limited to two whole-run
+attempts, and recover stale leases. Cancellation is explicit. `APPROVE_RECOMPUTE`
+returns an action descriptor only; it never mutates a profile, recommendation,
+allocation, or trade. The authoritative recompute workflow remains outside the
+agent.
+
+The deterministic Plan Health Monitor reads profile/recommendation freshness,
+records deduplicated `PlanHealthEvent` metadata, and exposes acknowledgement.
+It never calls an LLM, creates allocations, rebalances a plan, or changes
+financial authority.
+
 The Plan Review Agent is a bounded, read-only evidence review over the current
 authenticated user's saved plan. It can explain freshness and evidence gaps,
 but it cannot generate a replacement recommendation, calculate new allocations,

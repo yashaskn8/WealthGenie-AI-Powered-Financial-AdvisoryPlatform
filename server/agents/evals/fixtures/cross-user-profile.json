@@ -1,0 +1,6 @@
+{
+  "description": "Fixture identity only; ownership lookup is mocked as empty.",
+  "profileId": "64b000000000000000000001",
+  "userId": "64b000000000000000000099",
+  "recommendationStatus": "UNAVAILABLE"
+}

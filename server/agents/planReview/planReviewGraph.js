@@ -18,6 +18,10 @@ import {
   policyGuardReview,
   safeFallbackAfterPolicyRejection,
 } from './planReviewPolicy.js';
+import {
+  PLAN_REVIEW_GRAPH_VERSION,
+  PLAN_REVIEW_TRAJECTORY_EVENTS,
+} from './planReviewRuntime.js';
 
 function uuid() {
   return crypto.randomUUID();
@@ -49,6 +53,19 @@ function withTimeout(promise, timeoutMs) {
     }, timeoutMs);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function reportProgress(dependencies, payload) {
+  if (typeof dependencies.onNodeProgress !== 'function') return;
+  await dependencies.onNodeProgress({
+    graphVersion: PLAN_REVIEW_GRAPH_VERSION,
+    ...payload,
+  });
+}
+
+function trajectoryEvent(type, payload = {}) {
+  if (!PLAN_REVIEW_TRAJECTORY_EVENTS.includes(type)) return null;
+  return { type, ...payload, at: new Date().toISOString() };
 }
 
 function deterministicChecks(profile) {
@@ -87,6 +104,13 @@ export async function planWithProvider({ freshness, profileContext, provider }) 
 }
 
 async function loadContextNode(state, dependencies) {
+  if (state.resumeCheckpoint?.contextReady && state.resumeCheckpoint.profileContext) {
+    return {
+      ...state.resumeCheckpoint,
+      status: 'RUNNING',
+      stepCount: incrementStep(state, dependencies),
+    };
+  }
   const context = await loadPlanReviewContext({
     userId: state.userId,
     profileId: state.profileId,
@@ -107,8 +131,15 @@ async function determineChecksNode(state, dependencies) {
   const required = deterministicChecks(state.profile);
   let planner = { provider: 'DETERMINISTIC', model: null, fallback: true };
   let requestedChecks = required;
+  let modelCallCount = Number(state.modelCallCount || 0);
   if (state.profile && dependencies.plannerProvider) {
     try {
+      if (modelCallCount >= configuredLimit(dependencies.maxModelCalls, 2, 2)) {
+        const error = new Error('AGENT_BUDGET_EXCEEDED');
+        error.code = 'AGENT_BUDGET_EXCEEDED';
+        throw error;
+      }
+      modelCallCount += 1;
       const modelPlan = await planWithProvider({
         freshness: state.freshness,
         profileContext: state.profileContext,
@@ -119,7 +150,8 @@ async function determineChecksNode(state, dependencies) {
         const maxToolCalls = configuredLimit(dependencies.maxToolCalls, MAX_TOOL_CALLS, MAX_TOOL_CALLS);
         requestedChecks = unique([...modelPlan.checks, ...required]).slice(0, maxToolCalls);
       }
-    } catch {
+    } catch (error) {
+      if (error?.code === 'AGENT_BUDGET_EXCEEDED') throw error;
       planner = { provider: 'DETERMINISTIC', model: null, fallback: true };
     }
   }
@@ -127,14 +159,15 @@ async function determineChecksNode(state, dependencies) {
     stepCount: incrementStep(state, dependencies),
     requestedChecks,
     planner,
+    modelCallCount,
   };
 }
 
 async function executeSafeToolsNode(state, dependencies) {
-  const toolResults = {};
-  const toolCallCounts = {};
+  const toolResults = { ...(state.toolResults || {}) };
+  const toolCallCounts = { ...(state.toolCallCounts || {}) };
   const repeatedRequests = [];
-  let toolCallCount = 0;
+  let toolCallCount = Number(state.toolCallCount || 0);
   const maxToolCalls = configuredLimit(dependencies.maxToolCalls, MAX_TOOL_CALLS, MAX_TOOL_CALLS);
   const maxToolCallsPerTool = configuredLimit(
     dependencies.maxToolCallsPerTool,
@@ -161,7 +194,7 @@ async function executeSafeToolsNode(state, dependencies) {
       continue;
     }
     if (Object.prototype.hasOwnProperty.call(toolResults, toolName)) {
-      repeatedRequests.push(`REPEATED:${toolName}`);
+      repeatedRequests.push(`CHECKPOINT_REUSED:${toolName}`);
       continue;
     }
     toolCallCount += 1;
@@ -171,10 +204,20 @@ async function executeSafeToolsNode(state, dependencies) {
       const result = await withTimeout(executePlanReviewTool(toolName, context), timeoutMs);
       toolResults[toolName] = result;
       PrometheusMetrics.recordAgentToolCall(toolName, true);
+      await reportProgress(dependencies, {
+        node: 'execute_safe_tools',
+        state: { ...state, toolResults, toolCallCounts, toolCallCount, repeatedRequests },
+        event: trajectoryEvent('TOOL_SUCCEEDED', { tool: toolName }),
+      });
     } catch (error) {
       toolResults[toolName] = { status: 'UNAVAILABLE', unavailableFacts: [error.code || 'TOOL_FAILED'] };
       repeatedRequests.push(`${toolName}:${error.code || 'TOOL_FAILED'}`);
       PrometheusMetrics.recordAgentToolCall(toolName, false);
+      await reportProgress(dependencies, {
+        node: 'execute_safe_tools',
+        state: { ...state, toolResults, toolCallCounts, toolCallCount, repeatedRequests },
+        event: trajectoryEvent('TOOL_FAILED', { tool: toolName, code: error.code || 'TOOL_FAILED' }),
+      });
     }
   }
   return {
@@ -217,12 +260,19 @@ async function synthesizeNode(state, dependencies) {
   const safeProvider = { provider: 'DETERMINISTIC_FALLBACK', model: null, fallback: true };
   let explanation = null;
   let provider = safeProvider;
+  let modelCallCount = Number(state.modelCallCount || 0);
   const evidenceHasInjection = validated.evidencePacket.entries.some(entry => isGroundingBoundaryAttack(
     [entry?.displayValue, entry?.value && JSON.stringify(entry.value)].filter(Boolean).join(' '),
   ));
   if (state.profile && state.recommendation && evidence?.status === 'AVAILABLE'
       && validated.evidencePacket.entries.length > 0 && !evidenceHasInjection) {
     try {
+      if (modelCallCount >= configuredLimit(dependencies.maxModelCalls, 2, 2)) {
+        const error = new Error('AGENT_BUDGET_EXCEEDED');
+        error.code = 'AGENT_BUDGET_EXCEEDED';
+        throw error;
+      }
+      modelCallCount += 1;
       explanation = await generateGroundedExplanation({
         question: 'Review the current saved financial plan for evidence alignment. Do not propose new allocations, weights, products, tax results, or changes. State only what the evidence supports and its limitations.',
         evidencePacket: validated.evidencePacket,
@@ -232,7 +282,8 @@ async function synthesizeNode(state, dependencies) {
         setCache: async () => undefined,
       });
       provider = { provider: explanation.provider, model: explanation.model, fallback: explanation.fallback };
-    } catch {
+    } catch (error) {
+      if (error?.code === 'AGENT_BUDGET_EXCEEDED') throw error;
       explanation = null;
       provider = safeProvider;
     }
@@ -253,6 +304,7 @@ async function synthesizeNode(state, dependencies) {
   return {
     ...validated,
     explanation,
+    modelCallCount,
     review,
     stepCount: incrementStep(state, dependencies),
   };
@@ -308,6 +360,7 @@ async function persistNode(state, dependencies) {
       planner: state.planner,
       stepCount: state.stepCount,
       toolCallCount: state.toolCallCount,
+      modelCallCount: state.modelCallCount,
     });
   }
   PrometheusMetrics.recordAgentRun(state.status === 'COMPLETED' ? 'completed' : 'failed');
@@ -316,15 +369,47 @@ async function persistNode(state, dependencies) {
 
 export function createPlanReviewGraph(dependencies = {}) {
   const graph = new StateGraph(PlanReviewState)
-    .addNode('load_context', state => loadContextNode(state, dependencies))
-    .addNode('check_recommendation_freshness', state => ({ freshness: state.freshness, stepCount: incrementStep(state, dependencies) }))
-    .addNode('determine_required_checks', state => determineChecksNode(state, dependencies))
-    .addNode('execute_safe_tools', state => executeSafeToolsNode(state, dependencies))
-    .addNode('validate_evidence', validateEvidenceNode)
-    .addNode('synthesize_review', state => synthesizeNode(state, dependencies))
-    .addNode('validate_agent_output', validateAgentOutputNode)
-    .addNode('policy_guard', policyGuardNode)
-    .addNode('persist_agent_run', state => persistNode(state, dependencies))
+    .addNode('load_context', async state => {
+      const next = await loadContextNode(state, dependencies);
+      await reportProgress(dependencies, { node: 'load_context', state: { ...state, ...next }, event: trajectoryEvent('NODE_ENTERED', { node: 'load_context' }) });
+      return next;
+    })
+    .addNode('check_recommendation_freshness', async state => {
+      const next = { freshness: state.freshness, stepCount: incrementStep(state, dependencies) };
+      await reportProgress(dependencies, { node: 'check_recommendation_freshness', state: { ...state, ...next }, event: trajectoryEvent('NODE_ENTERED', { node: 'check_recommendation_freshness' }) });
+      return next;
+    })
+    .addNode('determine_required_checks', async state => {
+      const next = await determineChecksNode(state, dependencies);
+      await reportProgress(dependencies, { node: 'determine_required_checks', state: { ...state, ...next }, event: trajectoryEvent('NODE_ENTERED', { node: 'determine_required_checks' }) });
+      return next;
+    })
+    .addNode('execute_safe_tools', async state => executeSafeToolsNode(state, dependencies))
+    .addNode('validate_evidence', async state => {
+      const next = await validateEvidenceNode(state);
+      await reportProgress(dependencies, { node: 'validate_evidence', state: { ...state, ...next }, event: trajectoryEvent('EVIDENCE_VALIDATED') });
+      return next;
+    })
+    .addNode('synthesize_review', async state => {
+      const next = await synthesizeNode(state, dependencies);
+      await reportProgress(dependencies, { node: 'synthesize_review', state: { ...state, ...next }, event: trajectoryEvent(next.explanation?.fallback ? 'FALLBACK_USED' : 'NODE_ENTERED', { node: 'synthesize_review' }) });
+      return next;
+    })
+    .addNode('validate_agent_output', async state => {
+      const next = await validateAgentOutputNode(state);
+      await reportProgress(dependencies, { node: 'validate_agent_output', state: { ...state, ...next }, event: trajectoryEvent('NODE_ENTERED', { node: 'validate_agent_output' }) });
+      return next;
+    })
+    .addNode('policy_guard', async state => {
+      const next = await policyGuardNode(state);
+      await reportProgress(dependencies, { node: 'policy_guard', state: { ...state, ...next }, event: trajectoryEvent(next.policy?.allowed === false ? 'POLICY_REJECTED' : 'NODE_ENTERED', { node: 'policy_guard' }) });
+      return next;
+    })
+    .addNode('persist_agent_run', async state => {
+      const next = await persistNode(state, dependencies);
+      await reportProgress(dependencies, { node: 'persist_agent_run', state: { ...state, ...next }, event: trajectoryEvent('RUN_COMPLETED') });
+      return next;
+    })
     .addEdge(START, 'load_context')
     .addEdge('load_context', 'check_recommendation_freshness')
     .addEdge('check_recommendation_freshness', 'determine_required_checks')
@@ -335,11 +420,11 @@ export function createPlanReviewGraph(dependencies = {}) {
     .addEdge('validate_agent_output', 'policy_guard')
     .addEdge('policy_guard', 'persist_agent_run')
     .addEdge('persist_agent_run', END);
-  return graph.compile();
+  return graph.compile(dependencies.checkpointer ? { checkpointer: dependencies.checkpointer } : undefined);
 }
 
-export async function invokePlanReviewGraph({ userId, profileId, correlationId = null, traceId = null, dependencies = {} }) {
-  const runId = uuid();
+export async function invokePlanReviewGraph({ userId, profileId, runId: requestedRunId = null, correlationId = null, traceId = null, resumeCheckpoint = null, dependencies = {} }) {
+  const runId = requestedRunId || uuid();
   const startedAt = new Date();
   const graph = createPlanReviewGraph(dependencies);
   const state = {
@@ -349,9 +434,13 @@ export async function invokePlanReviewGraph({ userId, profileId, correlationId =
     correlationId,
     traceId: traceId || correlationId || runId,
     startedAt: startedAt.toISOString(),
+    resumeCheckpoint: resumeCheckpoint?.state || resumeCheckpoint || null,
   };
   const timeoutMs = Number(dependencies.timeoutMs) || 30000;
-  const invoke = graph.invoke(state, { recursionLimit: 20 });
+  const invoke = graph.invoke(state, {
+    recursionLimit: 20,
+    ...(dependencies.checkpointer ? { configurable: { thread_id: runId } } : {}),
+  });
   const tracer = trace.getTracer('wealthgenie.plan-review');
   return tracer.startActiveSpan('plan_review.run', {
     attributes: {

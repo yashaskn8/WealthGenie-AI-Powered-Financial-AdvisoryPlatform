@@ -149,20 +149,65 @@ paths:
 
   /api/agent/plan-review:
     post:
-      operationId: runPlanReview
+      operationId: enqueuePlanReview
       tags: [Agent]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       x-csrf-protection: cookie-session
       description: Bounded, read-only evidence review. It never changes profiles, recommendations, goals, allocations, or weights. The feature is controlled by AGENTIC_PLAN_REVIEW_ENABLED.
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PlanReviewRequest' } } } }
-      responses: { '200': { $ref: '#/components/responses/PlanReview' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '429': { $ref: '#/components/responses/Error' }, '503': { $ref: '#/components/responses/Unavailable' } }
+      responses: { '202': { $ref: '#/components/responses/PlanReviewRun' }, '200': { $ref: '#/components/responses/PlanReviewRun' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '429': { $ref: '#/components/responses/Error' }, '503': { $ref: '#/components/responses/Unavailable' } }
+  /api/agent/plan-review/current:
+    get:
+      operationId: getCurrentPlanReviewRun
+      tags: [Agent]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      parameters: [{ name: profileId, in: query, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{24}$' } }]
+      responses: { '200': { $ref: '#/components/responses/PlanReviewRun' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
   /api/agent/plan-review/{runId}:
     get:
       operationId: getPlanReviewRun
       tags: [Agent]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       parameters: [{ name: runId, in: path, required: true, schema: { type: string, format: uuid } }]
-      responses: { '200': { $ref: '#/components/responses/PlanReview' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+      responses: { '200': { $ref: '#/components/responses/PlanReviewRun' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+  /api/agent/plan-review/{runId}/cancel:
+    post:
+      operationId: cancelPlanReviewRun
+      tags: [Agent]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      x-csrf-protection: cookie-session
+      parameters: [{ name: runId, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses: { '200': { $ref: '#/components/responses/Object' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+  /api/agent/plan-review/{runId}/action:
+    post:
+      operationId: actOnPlanReview
+      tags: [Agent]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      x-csrf-protection: cookie-session
+      parameters: [{ name: runId, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [action], properties: { action: { type: string, enum: [APPROVE_RECOMPUTE, REJECT_RECOMPUTE, OPEN_PROFILE, OPEN_GOALS] } } } } } }
+      responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' } }
+  /api/agent/plan-health:
+    get:
+      operationId: inspectPlanHealth
+      tags: [Agent]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      parameters: [{ name: profileId, in: query, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{24}$' } }]
+      responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' } }
+  /api/agent/plan-health/events:
+    get:
+      operationId: listPlanHealthEvents
+      tags: [Agent]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      responses: { '200': { $ref: '#/components/responses/Object' }, '401': { $ref: '#/components/responses/Unauthorized' } }
+  /api/agent/plan-health/events/{eventId}/acknowledge:
+    patch:
+      operationId: acknowledgePlanHealthEvent
+      tags: [Agent]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      x-csrf-protection: cookie-session
+      parameters: [{ name: eventId, in: path, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{24}$' } }]
+      responses: { '200': { $ref: '#/components/responses/Object' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
 
   /api/goals/create:
     post:
@@ -485,6 +530,7 @@ components:
     ProfileCompletion: { description: Atomically committed profile and recommendation, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileCompletion' } } } }
     Recommendation: { description: Recommendation and audit identifiers, content: { application/json: { schema: { $ref: '#/components/schemas/RecommendationResponse' } } } }
     PlanReview: { description: Bounded read-only plan review, content: { application/json: { schema: { $ref: '#/components/schemas/PlanReviewResponse' } } } }
+    PlanReviewRun: { description: Durable plan review run, content: { application/json: { schema: { $ref: '#/components/schemas/PlanReviewRun' } } } }
     Goal: { description: Goal state, content: { application/json: { schema: { $ref: '#/components/schemas/Goal' } } } }
     TaxCalculation: { description: Authoritative tax calculation, content: { application/json: { schema: { $ref: '#/components/schemas/TaxCalculation' } } } }
     TaxComparison: { description: Authoritative regime comparison, content: { application/json: { schema: { $ref: '#/components/schemas/TaxComparison' } } } }
@@ -608,6 +654,19 @@ components:
         evidence: { type: object, additionalProperties: true }
         provider: { type: object, additionalProperties: true }
       additionalProperties: false
+    PlanReviewRun:
+      type: object
+      required: [runId, status, agentVersion, graphVersion]
+      properties:
+        runId: { type: string, format: uuid }
+        status: { type: string, enum: [QUEUED, RUNNING, WAITING_FOR_APPROVAL, COMPLETED, FAILED, CANCELLED, BUDGET_EXCEEDED] }
+        profileId: { type: [string, 'null'] }
+        recommendedAction: { type: string }
+        result: { oneOf: [{ $ref: '#/components/schemas/PlanReviewResponse' }, { type: 'null' }] }
+        progress: { type: object, additionalProperties: true }
+        agentVersion: { type: string }
+        graphVersion: { type: string }
+      additionalProperties: true
     RecommendationResponse:
       type: object
       required: [recommendationId, audit_id, audit_hash, instruments, model_version, recommendation_policy_version, financial_profile_schema_version, return_basis, final_risk_tier]

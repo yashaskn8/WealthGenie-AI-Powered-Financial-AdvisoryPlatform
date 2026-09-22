@@ -1,0 +1,6 @@
+{
+  "description": "Fixture identity only; financial values are supplied by deterministic test dependencies.",
+  "profileId": "64b000000000000000000001",
+  "userId": "64b000000000000000000010",
+  "recommendationStatus": "AVAILABLE"
+}

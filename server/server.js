@@ -10,6 +10,7 @@ import { connectRedis, redisAvailable, redisClient } from './config/redis.js';
 import { getRuntimeConfig, assertValidRuntimeConfig } from './config/runtime.js';
 import { validateEnvironmentConfig } from './config/validateEnv.js';
 import { startMarketDataRefreshJobs, stopMarketDataRefreshJobs } from './jobs/marketDataRefresh.js';
+import { startPlanReviewWorker, stopPlanReviewWorker } from './agents/planReview/planReviewWorker.js';
 import logger from './utils/logger.js';
 import { createRuntimeState } from './services/runtimeState.js';
 import { warmAdvisoryPersistence } from './services/advisoryPersistence.js';
@@ -35,8 +36,9 @@ function closeHttpServer(httpServer) {
   });
 }
 
-async function closeInfrastructure() {
+async function closeInfrastructure({ stopAgentWorker = false } = {}) {
   stopMarketDataRefreshJobs();
+  if (stopAgentWorker) await stopPlanReviewWorker();
   const closers = [];
   if (mongoose.connection.readyState !== 0) closers.push(mongoose.connection.close());
   if (redisClient?.isOpen) closers.push(redisClient.quit());
@@ -97,6 +99,9 @@ export async function startServer({ env = process.env } = {}) {
       server.listen(config.port);
     });
     startMarketDataRefreshJobs();
+    if (config.agentWorkerEnabled && config.agentWorkerMode === 'embedded') {
+      startPlanReviewWorker({ runtimeConfig: config });
+    }
     runtimeState.markReady();
     logger.info('WealthGenie API started', { port: config.port, env: config.nodeEnv });
     return server;
@@ -104,7 +109,7 @@ export async function startServer({ env = process.env } = {}) {
     runtimeState.markStopped();
     await closeHttpServer(server).catch(() => {});
     server = null;
-    await closeInfrastructure();
+    await closeInfrastructure({ stopAgentWorker: config.agentWorkerMode === 'embedded' });
     throw error;
   }
 }
@@ -130,7 +135,7 @@ export async function stopServer({ signal = 'manual', timeoutMs } = {}) {
     await Promise.race([
       (async () => {
         await closeHttpServer(server);
-        await closeInfrastructure();
+        await closeInfrastructure({ stopAgentWorker: config.agentWorkerMode === 'embedded' });
       })(),
       deadline,
     ]);
