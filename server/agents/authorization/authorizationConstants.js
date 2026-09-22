@@ -1,0 +1,71 @@
+export const AUTHORIZATION_VERSION = 'user-intent-mandate-1.0.0';
+export const RECEIPT_VERSION = 'execution-receipt-1.0.0';
+export const AUTHORIZATION_POLICY_VERSION = 'agent-authorization-policy-1.0.0';
+export const AUTHORIZATION_AUDIENCE = 'wealthgenie.authorized-action-executor';
+export const APPROVE_RECOMPUTE = 'APPROVE_RECOMPUTE';
+export const ALLOWED_ACTIONS = Object.freeze([APPROVE_RECOMPUTE]);
+export const MANDATE_STATUSES = Object.freeze([
+  'DRAFT',
+  'PENDING_USER_VERIFICATION',
+  'AUTHORIZED',
+  'EXECUTING',
+  'EXECUTED',
+  'REJECTED',
+  'EXPIRED',
+  'REVOKED',
+  'FAILED',
+]);
+
+export const MANDATE_TRANSITIONS = Object.freeze({
+  DRAFT: ['PENDING_USER_VERIFICATION', 'REJECTED', 'EXPIRED'],
+  PENDING_USER_VERIFICATION: ['AUTHORIZED', 'REJECTED', 'EXPIRED'],
+  AUTHORIZED: ['EXECUTING', 'REVOKED', 'EXPIRED'],
+  EXECUTING: ['EXECUTED', 'FAILED'],
+  EXECUTED: [],
+  REJECTED: [],
+  EXPIRED: [],
+  REVOKED: [],
+  FAILED: [],
+});
+
+export const DEFAULT_MANDATE_TTL_SECONDS = 300;
+export const MAX_MANDATE_TTL_SECONDS = 900;
+export const MAX_CANONICAL_PAYLOAD_BYTES = 16 * 1024;
+
+export const AUTHORIZATION_REASON_CODES = Object.freeze({
+  ALLOW: 'AUTHORIZED',
+  FEATURE_DISABLED: 'VERIFIABLE_ACTIONS_DISABLED',
+  AUTHENTICATION_REQUIRED: 'AUTHENTICATED_USER_REQUIRED',
+  OWNERSHIP_DENIED: 'RESOURCE_OWNERSHIP_DENIED',
+  AGENT_NOT_ALLOWED: 'AGENT_IDENTITY_NOT_ALLOWED',
+  CAPABILITY_DENIED: 'AGENT_CAPABILITY_DENIED',
+  ACTION_NOT_ALLOWED: 'ACTION_NOT_ALLOWLISTED',
+  AUDIENCE_MISMATCH: 'MANDATE_AUDIENCE_MISMATCH',
+  ACTION_MISMATCH: 'MANDATE_ACTION_MISMATCH',
+  SNAPSHOT_MISMATCH: 'MANDATE_STALE',
+  POLICY_MISMATCH: 'MANDATE_POLICY_VERSION_MISMATCH',
+  EXPIRED: 'MANDATE_EXPIRED',
+  REVOKED: 'MANDATE_REVOKED',
+  ALREADY_CONSUMED: 'MANDATE_ALREADY_CONSUMED',
+  INVALID_SIGNATURE: 'MANDATE_SIGNATURE_INVALID',
+  INVALID_APPROVAL: 'TRUSTED_APPROVAL_INVALID',
+  STEP_UP_REQUIRED: 'STEP_UP_ENROLLMENT_REQUIRED',
+});
+
+export function assertMandateTransition(from, to) {
+  if (!MANDATE_TRANSITIONS[from]?.includes(to)) {
+    const error = new Error(`Invalid mandate state transition: ${from} -> ${to}`);
+    error.code = 'INVALID_MANDATE_STATE_TRANSITION';
+    throw error;
+  }
+  return true;
+}
+
+export function mandateError(code, message, status = 409) {
+  const error = new Error(message);
+  error.code = code;
+  error.status = status;
+  error.clientMessage = message;
+  return error;
+}
+

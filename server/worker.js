@@ -6,6 +6,7 @@ import { connectRedis, redisAvailable, redisClient } from './config/redis.js';
 import { getRuntimeConfig, assertValidRuntimeConfig } from './config/runtime.js';
 import { validateEnvironmentConfig } from './config/validateEnv.js';
 import { createPlanReviewWorker } from './agents/planReview/planReviewWorker.js';
+import AgentRunEvent from './models/AgentRunEvent.js';
 import { createWorkerHealthServer } from './services/workerHealthServer.js';
 import { startPlanHealthScheduler, stopPlanHealthScheduler } from './services/planHealthScheduler.js';
 import logger from './utils/logger.js';
@@ -50,7 +51,7 @@ export async function startWorker({ env = process.env } = {}) {
   await connectRedis({ url: env.REDIS_URL });
   if (config.requireRedis && !redisAvailable) throw new Error('Redis is required in this environment but is unavailable');
 
-  worker = createPlanReviewWorker({ runtimeConfig: config });
+  worker = createPlanReviewWorker({ runtimeConfig: config, eventModel: AgentRunEvent });
   worker.start({ intervalMs: Number(env.AGENT_WORKER_POLL_MS) || 500 });
   if (config.planHealth.enabled) startPlanHealthScheduler({ config: config.planHealth });
   healthServer = createWorkerHealthServer({

@@ -30,6 +30,7 @@ export const PlanReviewState = Annotation.Root({
   review: replace(),
   planner: replace({ provider: 'DETERMINISTIC', model: null, fallback: true }),
   validation: replace({ valid: false, errors: [] }),
+  evidenceVerification: replace({ valid: false, unknownEvidenceIds: [], injectionDetected: false }),
   policy: replace({ allowed: false, reasonCodes: [] }),
   errors: append(),
   status: replace('RUNNING'),

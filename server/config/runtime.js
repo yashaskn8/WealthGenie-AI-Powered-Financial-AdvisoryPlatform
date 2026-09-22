@@ -38,6 +38,9 @@ export function getRuntimeConfig(env = process.env) {
     isProduction ? 'external' : 'embedded',
     ['embedded', 'external'],
   );
+  const agentIdentityProvider = enumValue(env.AGENT_IDENTITY_PROVIDER, 'development', ['development', 'oidc', 'spiffe']);
+  const agentWorkflowBackend = enumValue(env.AGENT_WORKFLOW_BACKEND, 'mongo', ['mongo', 'temporal']);
+  const agentApprovalProvider = enumValue(env.AGENT_APPROVAL_PROVIDER, isProduction ? 'webauthn' : 'development', ['development', 'webauthn']);
   return Object.freeze({
     nodeEnv,
     isProduction,
@@ -55,6 +58,20 @@ export function getRuntimeConfig(env = process.env) {
     agenticPlanReviewEnabled: booleanValue(env.AGENTIC_PLAN_REVIEW_ENABLED, !isProduction),
     agentWorkerEnabled: booleanValue(env.AGENT_WORKER_ENABLED, true),
     agentWorkerMode,
+    agentIdentityProvider,
+    agentWorkflowBackend,
+    agentStreamEnabled: booleanValue(env.AGENT_STREAM_ENABLED, !isProduction),
+    agentEvolutionEnabled: booleanValue(env.AGENT_EVOLUTION_ENABLED, false),
+    agentResearchEnabled: booleanValue(env.AGENT_RESEARCH_ENABLED, false),
+    authorization: Object.freeze({
+      verifiableActionsEnabled: booleanValue(env.AGENT_VERIFIABLE_ACTIONS_ENABLED, false),
+      webauthnApprovalEnabled: booleanValue(env.AGENT_WEBAUTHN_APPROVAL_ENABLED, false),
+      ap2ResearchEnabled: booleanValue(env.AGENT_AP2_RESEARCH_ENABLED, false),
+      approvalProvider: agentApprovalProvider,
+      webauthnOrigin: env.WEBAUTHN_ORIGIN?.trim() || null,
+      webauthnRpId: env.WEBAUTHN_RP_ID?.trim() || null,
+      mandateTtlSeconds: positiveInteger(env.AGENT_MANDATE_TTL_SECONDS, 300, { min: 1, max: 900 }),
+    }),
     agentPlanReview: Object.freeze({
       maxSteps: positiveInteger(env.AGENT_MAX_STEPS, 6, { min: 1, max: 6 }),
       maxToolCalls: positiveInteger(env.AGENT_MAX_TOOL_CALLS, 8, { min: 1, max: 8 }),
@@ -118,6 +135,14 @@ export function assertValidRuntimeConfig(config) {
   }
   if (config.isProduction && config.agentWorkerMode !== 'external') {
     throw new Error('AGENT_WORKER_MODE must be external in production');
+  }
+  if (config.authorization.verifiableActionsEnabled && config.isProduction) {
+    if (!config.authorization.webauthnApprovalEnabled || config.authorization.approvalProvider !== 'webauthn') {
+      throw new Error('Production verifiable actions require WebAuthn approval and no development provider.');
+    }
+    if (!config.authorization.webauthnOrigin || !config.authorization.webauthnRpId) {
+      throw new Error('Production WebAuthn approval requires WEBAUTHN_ORIGIN and WEBAUTHN_RP_ID');
+    }
   }
   if (config.agentWorkerMode === 'embedded' && config.agentWorkerEnabled === false) {
     return;

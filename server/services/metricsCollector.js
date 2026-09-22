@@ -54,6 +54,14 @@ class MetricsCollector {
       plan_health_events_created_total: 0,
       plan_health_events_deduplicated_total: 0,
       agent_live_eval_failures_total: 0,
+      mandates_created_total: 0,
+      mandates_authorized_total: 0,
+      mandates_rejected_total: 0,
+      mandates_expired_total: 0,
+      mandates_revoked_total: 0,
+      replay_rejections_total: 0,
+      snapshot_mismatch_rejections_total: 0,
+      capability_denials_total: 0,
     };
 
     this.gauges = {
@@ -66,6 +74,11 @@ class MetricsCollector {
     this.maxLatencyWindow = 500;
     this.httpRequests = {};
     this.httpDuration = {
+      count: 0,
+      sumMs: 0,
+      buckets: { 50: 0, 100: 0, 250: 0, 500: 0, 1000: 0, 3000: 0, 10000: 0 },
+    };
+    this.authorizationLatency = {
       count: 0,
       sumMs: 0,
       buckets: { 50: 0, 100: 0, 250: 0, 500: 0, 1000: 0, 3000: 0, 10000: 0 },
@@ -100,6 +113,15 @@ class MetricsCollector {
       this.latencies.shift();
     }
     this.latencies.push({ provider, latencyMs, timestamp: Date.now() });
+  }
+
+  recordAuthorizationLatency(latencyMs) {
+    const safeDuration = Math.max(0, Number(latencyMs) || 0);
+    this.authorizationLatency.count += 1;
+    this.authorizationLatency.sumMs += safeDuration;
+    for (const boundary of Object.keys(this.authorizationLatency.buckets).map(Number)) {
+      if (safeDuration <= boundary) this.authorizationLatency.buckets[boundary] += 1;
+    }
   }
 
   recordAgentRun(status) {
@@ -200,6 +222,23 @@ class MetricsCollector {
       lines.push(`# TYPE wealthgenie_${name} counter`);
       lines.push(`wealthgenie_${name} ${this.counters[name]}`);
     }
+    const authorizationCounters = [
+      'mandates_created_total', 'mandates_authorized_total', 'mandates_rejected_total',
+      'mandates_expired_total', 'mandates_revoked_total', 'replay_rejections_total',
+      'snapshot_mismatch_rejections_total', 'capability_denials_total',
+    ];
+    for (const name of authorizationCounters) {
+      lines.push(`# TYPE wealthgenie_${name} counter`);
+      lines.push(`wealthgenie_${name} ${this.counters[name]}`);
+    }
+    lines.push('# HELP wealthgenie_authorization_latency_ms Authorization decision and execution latency');
+    lines.push('# TYPE wealthgenie_authorization_latency_ms histogram');
+    for (const [boundary, count] of Object.entries(this.authorizationLatency.buckets)) {
+      lines.push(`wealthgenie_authorization_latency_ms_bucket{le="${boundary}"} ${count}`);
+    }
+    lines.push(`wealthgenie_authorization_latency_ms_bucket{le="+Inf"} ${this.authorizationLatency.count}`);
+    lines.push(`wealthgenie_authorization_latency_ms_sum ${this.authorizationLatency.sumMs.toFixed(3)}`);
+    lines.push(`wealthgenie_authorization_latency_ms_count ${this.authorizationLatency.count}`);
     lines.push('# TYPE wealthgenie_agent_worker_jobs_active gauge');
     lines.push(`wealthgenie_agent_worker_jobs_active ${this.gauges.agent_worker_jobs_active}`);
     lines.push('# TYPE wealthgenie_agent_queue_oldest_age_seconds gauge');
@@ -270,6 +309,11 @@ class MetricsCollector {
         duration_count: this.httpDuration.count,
         duration_sum_ms: Number(this.httpDuration.sumMs.toFixed(3)),
         overload_total: this.counters.http_overload_total,
+      },
+      authorization_latency: {
+        count: this.authorizationLatency.count,
+        sum_ms: Number(this.authorizationLatency.sumMs.toFixed(3)),
+        buckets: { ...this.authorizationLatency.buckets },
       },
       timestamp: new Date().toISOString(),
     };

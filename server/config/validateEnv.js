@@ -75,6 +75,12 @@ export function validateEnvironmentConfig(env = process.env) {
     if (env.EXPOSE_AUTH_TOKEN === 'true') {
       errors.push('EXPOSE_AUTH_TOKEN cannot be enabled in production');
     }
+    if (env.AGENT_VERIFIABLE_ACTIONS_ENABLED === 'true') {
+      if (env.AGENT_WEBAUTHN_APPROVAL_ENABLED !== 'true') errors.push('AGENT_WEBAUTHN_APPROVAL_ENABLED must be true when verifiable actions are enabled in production');
+      if (String(env.AGENT_APPROVAL_PROVIDER || 'webauthn').toLowerCase() !== 'webauthn') errors.push('AGENT_APPROVAL_PROVIDER must be webauthn when verifiable actions are enabled in production');
+      if (!env.WEBAUTHN_ORIGIN || !env.WEBAUTHN_RP_ID) errors.push('WEBAUTHN_ORIGIN and WEBAUTHN_RP_ID are required for production verifiable actions');
+      if (!env.AUTHORIZATION_SIGNING_PRIVATE_KEY || !env.AUTHORIZATION_SIGNING_PUBLIC_KEY) errors.push('Authorization signing keys are required for production verifiable actions');
+    }
   }
 
   return {

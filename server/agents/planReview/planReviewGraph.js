@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { END, START, StateGraph } from '@langchain/langgraph';
-import { trace } from '../../config/tracing.js';
+import { recordAgentError, startAgentSpan, withAgentSpan } from '../observability/agentTelemetry.js';
+import { verifyEvidencePacket } from '../a2a/evidenceVerifier.js';
 import { PrometheusMetrics } from '../../services/metricsCollector.js';
 import { generateGroundedExplanation, isGroundingBoundaryAttack } from '../../services/groundedExplanationService.js';
 import { parseGroundedModelJson, validateGroundedExplanation } from '../../services/groundingValidator.js';
@@ -57,9 +58,14 @@ function withTimeout(promise, timeoutMs) {
 
 async function reportProgress(dependencies, payload) {
   if (typeof dependencies.onNodeProgress !== 'function') return;
-  await dependencies.onNodeProgress({
-    graphVersion: PLAN_REVIEW_GRAPH_VERSION,
-    ...payload,
+  await withAgentSpan('agent.step', {
+    'agent.type': 'PLAN_REVIEW',
+    'agent.name': payload.node,
+    'agent.graph_version': PLAN_REVIEW_GRAPH_VERSION,
+    'agent.status': payload.event?.type || 'NODE_ENTERED',
+  }, async span => {
+    await dependencies.onNodeProgress({ graphVersion: PLAN_REVIEW_GRAPH_VERSION, ...payload });
+    span.setAttribute('agent.status', 'COMPLETED');
   });
 }
 
@@ -85,12 +91,21 @@ function plannerPrompt(freshness, profileContext) {
 
 export async function planWithProvider({ freshness, profileContext, provider }) {
   if (!provider || typeof provider.generate !== 'function') return null;
-  const response = await provider.generate({
-    systemPrompt: plannerPrompt(freshness, profileContext),
-    recentHistory: [{ role: 'user', parts: [{ text: 'Select only the minimum safe read-only checks.' }] }],
-    maxTokens: 240,
-    jsonMode: true,
-    tools: null,
+  const response = await withAgentSpan('gen_ai.chat', {
+    'agent.type': 'PLAN_REVIEW',
+    'gen_ai.operation.name': 'planner',
+    'gen_ai.request.model': provider.configuredModel?.() || provider.model || 'configured-provider',
+  }, async span => {
+    const value = await provider.generate({
+      systemPrompt: plannerPrompt(freshness, profileContext),
+      recentHistory: [{ role: 'user', parts: [{ text: 'Select only the minimum safe read-only checks.' }] }],
+      maxTokens: 240,
+      jsonMode: true,
+      tools: null,
+    });
+    if (value?.model) span.setAttribute('gen_ai.response.model', value.model);
+    if (value?.tokensUsed) span.setAttribute('gen_ai.usage.total_tokens', Number(value.tokensUsed));
+    return value;
   });
   if (!response?.text) return null;
   const parsed = parseGroundedModelJson(response.text);
@@ -201,7 +216,14 @@ async function executeSafeToolsNode(state, dependencies) {
     toolCallCounts[toolName] = (toolCallCounts[toolName] || 0) + 1;
     try {
       const timeoutMs = Number(dependencies.toolTimeoutMs) || 5000;
-      const result = await withTimeout(executePlanReviewTool(toolName, context), timeoutMs);
+      const result = await withAgentSpan('agent.tool', {
+        'agent.type': 'PLAN_REVIEW',
+        'agent.tool_name': toolName,
+      }, async span => {
+        const value = await withTimeout(executePlanReviewTool(toolName, context), timeoutMs);
+        span.setAttribute('agent.tool_outcome', 'SUCCEEDED');
+        return value;
+      });
       toolResults[toolName] = result;
       PrometheusMetrics.recordAgentToolCall(toolName, true);
       await reportProgress(dependencies, {
@@ -273,13 +295,22 @@ async function synthesizeNode(state, dependencies) {
         throw error;
       }
       modelCallCount += 1;
-      explanation = await generateGroundedExplanation({
-        question: 'Review the current saved financial plan for evidence alignment. Do not propose new allocations, weights, products, tax results, or changes. State only what the evidence supports and its limitations.',
-        evidencePacket: validated.evidencePacket,
-      }, {
-        providers: dependencies.explanationProviders,
-        getCache: async () => null,
-        setCache: async () => undefined,
+      explanation = await withAgentSpan('gen_ai.chat', {
+        'agent.type': 'PLAN_REVIEW',
+        'gen_ai.operation.name': 'explainer',
+      }, async span => {
+        const value = await generateGroundedExplanation({
+          question: 'Review the current saved financial plan for evidence alignment. Do not propose new allocations, weights, products, tax results, or changes. State only what the evidence supports and its limitations.',
+          evidencePacket: validated.evidencePacket,
+        }, {
+          providers: dependencies.explanationProviders,
+          getCache: async () => null,
+          setCache: async () => undefined,
+        });
+        if (value?.model) span.setAttribute('gen_ai.response.model', value.model);
+        if (value?.tokensUsed) span.setAttribute('gen_ai.usage.total_tokens', Number(value.tokensUsed));
+        span.setAttribute('agent.fallback_used', Boolean(value?.fallback));
+        return value;
       });
       provider = { provider: explanation.provider, model: explanation.model, fallback: explanation.fallback };
     } catch (error) {
@@ -310,11 +341,18 @@ async function synthesizeNode(state, dependencies) {
   };
 }
 
-async function validateAgentOutputNode(state) {
+async function validateAgentOutputNode(state, dependencies = {}) {
   if (!state.review) {
     return { validation: { valid: false, errors: ['REVIEW_MISSING'] } };
   }
-  if (!state.explanation) return { validation: { valid: true, errors: [] } };
+  const verifier = dependencies.evidenceVerifier || verifyEvidencePacket;
+  const evidenceVerification = await verifier({ review: state.review, evidencePacket: state.evidencePacket });
+  if (!state.explanation) {
+    return {
+      validation: { valid: evidenceVerification.valid, errors: evidenceVerification.valid ? [] : ['EVIDENCE_VERIFICATION_FAILED'] },
+      evidenceVerification,
+    };
+  }
   const candidate = {
     text: state.explanation.text,
     evidenceIdsUsed: state.explanation.evidenceIdsUsed,
@@ -322,7 +360,14 @@ async function validateAgentOutputNode(state) {
     unavailableFacts: state.explanation.unavailableFacts,
   };
   const validation = validateGroundedExplanation(candidate, state.evidencePacket);
-  return { validation };
+  return {
+    validation: {
+      ...validation,
+      valid: validation.valid && evidenceVerification.valid,
+      errors: [...(validation.errors || []), ...(evidenceVerification.valid ? [] : ['EVIDENCE_VERIFICATION_FAILED'])],
+    },
+    evidenceVerification,
+  };
 }
 
 async function policyGuardNode(state) {
@@ -396,7 +441,7 @@ export function createPlanReviewGraph(dependencies = {}) {
       return next;
     })
     .addNode('validate_agent_output', async state => {
-      const next = await validateAgentOutputNode(state);
+      const next = await validateAgentOutputNode(state, dependencies);
       await reportProgress(dependencies, { node: 'validate_agent_output', state: { ...state, ...next }, event: trajectoryEvent('NODE_ENTERED', { node: 'validate_agent_output' }) });
       return next;
     })
@@ -441,12 +486,13 @@ export async function invokePlanReviewGraph({ userId, profileId, runId: requeste
     recursionLimit: 20,
     ...(dependencies.checkpointer ? { configurable: { thread_id: runId } } : {}),
   });
-  const tracer = trace.getTracer('wealthgenie.plan-review');
-  return tracer.startActiveSpan('plan_review.run', {
+  return startAgentSpan('plan_review.run', {
     attributes: {
       'agent.type': 'PLAN_REVIEW',
       'agent.run_id': runId,
       'agent.correlation_id_present': Boolean(correlationId),
+      'agent.graph_version': PLAN_REVIEW_GRAPH_VERSION,
+      'agent.version': 'plan-review-agent-2.0.0',
     },
   }, async span => {
     try {
@@ -462,8 +508,7 @@ export async function invokePlanReviewGraph({ userId, profileId, runId: requeste
       span.setAttribute('agent.tool_call_count', Number(result.toolCallCount || 0));
       return result;
     } catch (error) {
-      span.recordException(error);
-      span.setStatus({ code: 2 });
+      recordAgentError(span, error);
       throw error;
     } finally {
       span.end();

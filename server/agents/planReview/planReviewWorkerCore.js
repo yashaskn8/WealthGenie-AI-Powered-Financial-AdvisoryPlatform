@@ -59,6 +59,7 @@ function checkpointState(state) {
       text: state.explanation.text,
     } : null,
     validation: state.validation,
+    evidenceVerification: state.evidenceVerification,
     policy: state.policy,
     contextReady: Boolean(state.profileContext),
   }, 120);
@@ -168,9 +169,10 @@ async function updateQueueMetrics(model) {
 }
 
 class PlanReviewWorker {
-  constructor({ model = AgentRun, checkpointModel = AgentCheckpoint, runtimeConfig = null, worker = null } = {}) {
+  constructor({ model = AgentRun, checkpointModel = AgentCheckpoint, eventModel = null, runtimeConfig = null, worker = null } = {}) {
     this.model = model;
     this.checkpointModel = checkpointModel;
+    this.eventModel = eventModel;
     this.runtimeConfig = runtimeConfig;
     this.workerId = worker || `plan-review-worker-${crypto.randomUUID()}`;
     this.leaseMs = runtimeConfig?.agentPlanReview?.leaseMs || 60000;
@@ -278,10 +280,36 @@ class PlanReviewWorker {
       PrometheusMetrics.inc('agent_worker_stale_write_rejections_total');
       throw staleLeaseError();
     }
+    await this.appendEvent(run, sequence, payload.event, payload.node);
+  }
+
+  async appendEvent(run, sequence, event, node = null) {
+    if (!this.eventModel?.create || !event?.type) return;
+    try {
+      await this.eventModel.create({
+        runId: run.runId,
+        userId: run.userId,
+        executionGeneration: run.executionGeneration,
+        sequence,
+        eventType: event.type,
+        node: node || null,
+        data: {
+          type: event.type,
+          node: node || null,
+          tool: event.tool || null,
+          code: event.code || null,
+          at: event.at || now().toISOString(),
+        },
+      });
+    } catch (error) {
+      // Event streaming is a progress surface. A transient event write must
+      // never change the authoritative AgentRun result or financial outcome.
+      if (error?.code !== 11000) PrometheusMetrics.inc('agent_event_persistence_failures_total');
+    }
   }
 
   async finishRun(run, review) {
-    await this.assertLease(run);
+    const current = await this.assertLease(run);
     const result = review || null;
     const status = result?.recommendedAction === 'RECOMPUTE_PLAN' ? 'WAITING_FOR_APPROVAL' : 'COMPLETED';
     const update = {
@@ -308,6 +336,10 @@ class PlanReviewWorker {
       PrometheusMetrics.inc('agent_worker_stale_write_rejections_total');
       throw staleLeaseError();
     }
+    await this.appendEvent(run, Number(current?.checkpointSequence || 0) + 1, {
+      type: 'RUN_COMPLETED',
+      at: now().toISOString(),
+    }, 'persist_agent_run');
   }
 
   async failRun(run, error) {
@@ -335,6 +367,11 @@ class PlanReviewWorker {
       PrometheusMetrics.inc('agent_worker_stale_write_rejections_total');
       throw staleLeaseError();
     }
+    await this.appendEvent(run, Number(run.checkpointSequence || 0) + 1, {
+      type: cancelled ? 'RUN_CANCELLED' : 'RUN_FAILED',
+      code: classification,
+      at: now().toISOString(),
+    }, run.currentNode);
   }
 
   async processNext() {

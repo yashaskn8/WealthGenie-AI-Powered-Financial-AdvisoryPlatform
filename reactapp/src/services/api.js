@@ -403,6 +403,40 @@ export async function actOnPlanReview(runId, action, options = {}) {
   return request('POST', `/agent/plan-review/${encodeURIComponent(runId)}/action`, { action }, { retries: 0, ...options });
 }
 
+export async function listAuthorizedMandates(options = {}) {
+  return request('GET', '/agent/mandates', null, { retries: 0, ...options });
+}
+
+export async function getAuthorizedMandate(mandateId, options = {}) {
+  if (!mandateId) throw new TypeError('A mandate ID is required.');
+  return request('GET', `/agent/mandates/${encodeURIComponent(mandateId)}`, null, { retries: 0, ...options });
+}
+
+export async function getMandateApprovalOptions(mandateId, options = {}) {
+  if (!mandateId) throw new TypeError('A mandate ID is required.');
+  return request('POST', `/agent/mandates/${encodeURIComponent(mandateId)}/approval/options`, {}, { retries: 0, ...options });
+}
+
+export async function verifyMandateApproval(mandateId, assertion, options = {}) {
+  if (!mandateId || !assertion) throw new TypeError('A mandate ID and approval assertion are required.');
+  return request('POST', `/agent/mandates/${encodeURIComponent(mandateId)}/approval/verify`, assertion, { retries: 0, ...options });
+}
+
+export async function revokeAuthorizedMandate(mandateId, reason, options = {}) {
+  if (!mandateId) throw new TypeError('A mandate ID is required.');
+  return request('POST', `/agent/mandates/${encodeURIComponent(mandateId)}/revoke`, { reason }, { retries: 0, ...options });
+}
+
+export async function executeAuthorizedMandate(mandateId, options = {}) {
+  if (!mandateId) throw new TypeError('A mandate ID is required.');
+  return request('POST', `/agent/mandates/${encodeURIComponent(mandateId)}/execute`, {}, { retries: 0, ...options });
+}
+
+export async function getExecutionReceipt(receiptId, options = {}) {
+  if (!receiptId) throw new TypeError('A receipt ID is required.');
+  return request('GET', `/agent/receipts/${encodeURIComponent(receiptId)}`, null, { retries: 0, ...options });
+}
+
 export async function getPlanHealth(profileId, options = {}) {
   if (!profileId) throw new TypeError('A profile ID is required.');
   return request('GET', `/agent/plan-health?profileId=${encodeURIComponent(profileId)}`, null, options);
@@ -665,7 +699,7 @@ const api = {
   setAuthToken, getAuthToken, clearAuthToken, clearUserSession,
   subscribeAuth, getAuthSnapshot,
   setUserInfo, getUserInfo,
-  buildProfile, precomputeProfile, completeFinancialProfile, getCurrentProfile, getCurrentRecommendation, getFinancialHealthScore, updateProfile, getRecommendations, runPlanReview, getPlanReviewRun, getCurrentPlanReviewRun, cancelPlanReviewRun, actOnPlanReview, getPlanHealth, getPlanHealthEvents, getInstruments, rankInvestmentCandidates, getProjections, calculateStepUpProjection, calculateAllocationSplit, compareInvestmentProjection, getCustomPortfolioProjection, runInstrumentStressTest,
+  buildProfile, precomputeProfile, completeFinancialProfile, getCurrentProfile, getCurrentRecommendation, getFinancialHealthScore, updateProfile, getRecommendations, runPlanReview, getPlanReviewRun, getCurrentPlanReviewRun, cancelPlanReviewRun, actOnPlanReview, listAuthorizedMandates, getAuthorizedMandate, getMandateApprovalOptions, verifyMandateApproval, revokeAuthorizedMandate, executeAuthorizedMandate, getExecutionReceipt, getPlanHealth, getPlanHealthEvents, getInstruments, rankInvestmentCandidates, getProjections, calculateStepUpProjection, calculateAllocationSplit, compareInvestmentProjection, getCustomPortfolioProjection, runInstrumentStressTest,
   runMonteCarlo, runPortfolioMonteCarlo, createGoal, getGoals, updateGoal, simulateGoal, deleteGoal, healthCheck,
   getMarketRates, getBenchmarkMarketFacts, getMutualFundNavFacts, refreshMarketRates,
   sendChatMessage, getChatHistory, clearChatSession, rebalancePortfolio,

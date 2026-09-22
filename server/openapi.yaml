@@ -163,6 +163,20 @@ paths:
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       parameters: [{ name: profileId, in: query, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{24}$' } }]
       responses: { '200': { $ref: '#/components/responses/PlanReviewRun' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+  /api/agent/cards:
+    get:
+      operationId: listAgentCards
+      tags: [Agent]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      description: Allowlisted A2A capability cards for the Plan Review and Evidence Verifier agents.
+      responses: { '200': { $ref: '#/components/responses/Object' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+  /api/agent/cards/{agentType}:
+    get:
+      operationId: getAgentCard
+      tags: [Agent]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      parameters: [{ name: agentType, in: path, required: true, schema: { type: string, enum: [PLAN_REVIEW, EVIDENCE_VERIFIER] } }]
+      responses: { '200': { $ref: '#/components/responses/Object' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
   /api/agent/plan-review/{runId}:
     get:
       operationId: getPlanReviewRun
@@ -170,6 +184,22 @@ paths:
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       parameters: [{ name: runId, in: path, required: true, schema: { type: string, format: uuid } }]
       responses: { '200': { $ref: '#/components/responses/PlanReviewRun' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+  /api/agent/plan-review/{runId}/events:
+    get:
+      operationId: streamPlanReviewEvents
+      tags: [Agent]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      parameters:
+        - { name: runId, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: Last-Event-ID, in: header, required: false, schema: { type: integer, minimum: 0 } }
+      responses: { '200': { description: Owned AG-UI-compatible event stream, content: { text/event-stream: { schema: { type: string } } } }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+  /api/agent/plan-review/{runId}/ui:
+    get:
+      operationId: getPlanReviewA2UI
+      tags: [Agent]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      parameters: [{ name: runId, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses: { '200': { $ref: '#/components/responses/Object' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
   /api/agent/plan-review/{runId}/cancel:
     post:
       operationId: cancelPlanReviewRun
@@ -187,6 +217,79 @@ paths:
       parameters: [{ name: runId, in: path, required: true, schema: { type: string, format: uuid } }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [action], properties: { action: { type: string, enum: [APPROVE_RECOMPUTE, REJECT_RECOMPUTE, OPEN_PROFILE, OPEN_GOALS] } } } } } }
       responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' } }
+  /api/agent/mandates:
+    get:
+      operationId: listUserIntentMandates
+      tags: [AgentAuthorization]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      description: Read-only list of owned AP2-inspired verifiable action mandates. This is not a payment mandate API.
+      responses: { '200': { description: Owned mandates, content: { application/json: { schema: { type: object, required: [mandates], properties: { mandates: { type: array, items: { $ref: '#/components/schemas/UserIntentMandate' } } } } } } }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+  /api/agent/passkeys/registration/options:
+    post:
+      operationId: createPasskeyRegistrationOptions
+      tags: [AgentAuthorization]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      x-csrf-protection: cookie-session
+      description: Creates WebAuthn passkey registration options for the authenticated user. Private keys and biometric data never reach WealthGenie.
+      responses: { '200': { $ref: '#/components/responses/Object' }, '401': { $ref: '#/components/responses/Unauthorized' }, '503': { $ref: '#/components/responses/Unavailable' } }
+  /api/agent/passkeys/registration/verify:
+    post:
+      operationId: verifyPasskeyRegistration
+      tags: [AgentAuthorization]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      x-csrf-protection: cookie-session
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PasskeyRegistrationResponse' } } } }
+      responses: { '201': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '409': { $ref: '#/components/responses/Conflict' }, '503': { $ref: '#/components/responses/Unavailable' } }
+  /api/agent/mandates/{mandateId}:
+    get:
+      operationId: getUserIntentMandate
+      tags: [AgentAuthorization]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      parameters: [{ name: mandateId, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses: { '200': { $ref: '#/components/responses/UserIntentMandate' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+  /api/agent/mandates/{mandateId}/approval/options:
+    post:
+      operationId: createMandateApprovalOptions
+      tags: [AgentAuthorization]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      x-csrf-protection: cookie-session
+      parameters: [{ name: mandateId, in: path, required: true, schema: { type: string, format: uuid } }]
+      description: Creates one-time step-up approval options bound to one mandate hash. Production uses WebAuthn/passkeys and fails closed when unavailable.
+      responses: { '200': { $ref: '#/components/responses/Object' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' }, '428': { $ref: '#/components/responses/Error' }, '503': { $ref: '#/components/responses/Unavailable' } }
+  /api/agent/mandates/{mandateId}/approval/verify:
+    post:
+      operationId: verifyMandateApproval
+      tags: [AgentAuthorization]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      x-csrf-protection: cookie-session
+      parameters: [{ name: mandateId, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/MandateApprovalAssertion' } } } }
+      responses: { '200': { $ref: '#/components/responses/UserIntentMandate' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '409': { $ref: '#/components/responses/Conflict' }, '503': { $ref: '#/components/responses/Unavailable' } }
+  /api/agent/mandates/{mandateId}/revoke:
+    post:
+      operationId: revokeUserIntentMandate
+      tags: [AgentAuthorization]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      x-csrf-protection: cookie-session
+      parameters: [{ name: mandateId, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody: { required: false, content: { application/json: { schema: { type: object, additionalProperties: false, properties: { reason: { type: string, maxLength: 240 } } } } } }
+      responses: { '200': { $ref: '#/components/responses/UserIntentMandate' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' } }
+  /api/agent/mandates/{mandateId}/execute:
+    post:
+      operationId: executeAuthorizedAction
+      tags: [AgentAuthorization]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      x-csrf-protection: cookie-session
+      parameters: [{ name: mandateId, in: path, required: true, schema: { type: string, format: uuid } }]
+      description: Executes only a cryptographically authorized, single-use APPROVE_RECOMPUTE mandate. The request body must be empty; no model-controlled parameters are accepted.
+      responses: { '200': { $ref: '#/components/responses/ExecutionResult' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' }, '503': { $ref: '#/components/responses/Unavailable' } }
+  /api/agent/receipts/{receiptId}:
+    get:
+      operationId: getExecutionReceipt
+      tags: [AgentAuthorization]
+      security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      parameters: [{ name: receiptId, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses: { '200': { $ref: '#/components/responses/ExecutionReceipt' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
   /api/agent/plan-health:
     get:
       operationId: inspectPlanHealth
@@ -531,6 +634,9 @@ components:
     Recommendation: { description: Recommendation and audit identifiers, content: { application/json: { schema: { $ref: '#/components/schemas/RecommendationResponse' } } } }
     PlanReview: { description: Bounded read-only plan review, content: { application/json: { schema: { $ref: '#/components/schemas/PlanReviewResponse' } } } }
     PlanReviewRun: { description: Durable plan review run, content: { application/json: { schema: { $ref: '#/components/schemas/PlanReviewRun' } } } }
+    UserIntentMandate: { description: Cryptographically bound AP2-inspired WealthGenie action authorization, content: { application/json: { schema: { $ref: '#/components/schemas/UserIntentMandate' } } } }
+    ExecutionReceipt: { description: Tamper-evident authorized action execution receipt, content: { application/json: { schema: { $ref: '#/components/schemas/ExecutionReceipt' } } } }
+    ExecutionResult: { description: Authorized action result and execution receipt, content: { application/json: { schema: { type: object, required: [receipt], properties: { receipt: { $ref: '#/components/schemas/ExecutionReceipt' }, response: { type: object, additionalProperties: true } } } } } }
     Goal: { description: Goal state, content: { application/json: { schema: { $ref: '#/components/schemas/Goal' } } } }
     TaxCalculation: { description: Authoritative tax calculation, content: { application/json: { schema: { $ref: '#/components/schemas/TaxCalculation' } } } }
     TaxComparison: { description: Authoritative regime comparison, content: { application/json: { schema: { $ref: '#/components/schemas/TaxComparison' } } } }
@@ -667,6 +773,78 @@ components:
         agentVersion: { type: string }
         graphVersion: { type: string }
       additionalProperties: true
+    UserIntentMandate:
+      type: object
+      required: [mandateId, version, action, agentType, runId, profileId, financialSnapshotHash, recommendationFingerprint, policyVersion, actionPayloadHash, constraints, issuedAt, expiresAt, singleUse, approvalMethod, status, mandateHash]
+      properties:
+        mandateId: { type: string, format: uuid }
+        version: { type: string, const: user-intent-mandate-1.0.0 }
+        action: { type: string, const: APPROVE_RECOMPUTE }
+        agentType: { type: string, const: PLAN_REVIEW }
+        agentVersion: { type: string }
+        runId: { type: string, format: uuid }
+        profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+        recommendationId: { type: [string, 'null'] }
+        financialSnapshotHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        recommendationFingerprint: { type: string, pattern: '^[a-f0-9]{64}$' }
+        policyVersion: { type: string }
+        actionPayloadHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        constraints: { type: object, additionalProperties: false, required: [maxAgeSeconds, allowedAgentType, resourceVersion, noFinancialMutationByAgent], properties: { maxAgeSeconds: { type: integer, minimum: 1, maximum: 900 }, allowedAgentType: { type: string, const: PLAN_REVIEW }, resourceVersion: { type: integer, minimum: 1 }, noFinancialMutationByAgent: { type: boolean, const: true } } }
+        issuedAt: { type: string, format: date-time }
+        notBefore: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        singleUse: { type: boolean, const: true }
+        approvalMethod: { type: string, enum: [DEVELOPMENT, WEBAUTHN] }
+        status: { type: string, enum: [DRAFT, PENDING_USER_VERIFICATION, AUTHORIZED, EXECUTING, EXECUTED, REJECTED, EXPIRED, REVOKED, FAILED] }
+        mandateHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        signatureMetadata: { type: [object, 'null'], additionalProperties: true }
+        approval: { type: [object, 'null'], additionalProperties: true }
+        receiptId: { type: [string, 'null'] }
+      additionalProperties: false
+    MandateApprovalAssertion:
+      type: object
+      additionalProperties: false
+      required: [method, mandateId, mandateHash]
+      properties:
+        method: { type: string, enum: [DEVELOPMENT, WEBAUTHN] }
+        mandateId: { type: string, format: uuid }
+        mandateHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        credentialId: { type: [string, 'null'] }
+        response: { type: [object, 'null'], additionalProperties: true }
+    PasskeyRegistrationResponse:
+      type: object
+      additionalProperties: false
+      required: [id, rawId, type, response, clientExtensionResults]
+      properties:
+        id: { type: string }
+        rawId: { type: string }
+        type: { type: string, const: public-key }
+        response: { type: object, additionalProperties: true }
+        clientExtensionResults: { type: object, additionalProperties: true }
+    ExecutionReceipt:
+      type: object
+      required: [receiptId, version, mandateId, action, status, executedByServiceIdentity, runId, resourceId, beforeSnapshotHash, startedAt, completedAt, policyDecisionId, policyVersion, mandateHash, resultMetadata, receiptHash, signatureMetadata]
+      properties:
+        receiptId: { type: string, format: uuid }
+        version: { type: string, const: execution-receipt-1.0.0 }
+        mandateId: { type: string, format: uuid }
+        action: { type: string, const: APPROVE_RECOMPUTE }
+        status: { type: string, const: EXECUTED }
+        executedByServiceIdentity: { type: string }
+        runId: { type: string, format: uuid }
+        resourceId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+        beforeSnapshotHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        afterSnapshotHash: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }
+        startedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+        policyDecisionId: { type: string }
+        policyVersion: { type: string }
+        mandateHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        previousReceiptHash: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }
+        resultMetadata: { type: object, additionalProperties: true }
+        receiptHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        signatureMetadata: { type: object, additionalProperties: false, required: [algorithm, keyId, signature, environment], properties: { algorithm: { type: string, const: Ed25519 }, keyId: { type: string }, signature: { type: string }, environment: { type: string, enum: [development, configured] } } }
+      additionalProperties: false
     RecommendationResponse:
       type: object
       required: [recommendationId, audit_id, audit_hash, instruments, model_version, recommendation_policy_version, financial_profile_schema_version, return_basis, final_risk_tier]
