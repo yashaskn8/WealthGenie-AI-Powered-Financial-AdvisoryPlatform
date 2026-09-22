@@ -8,9 +8,11 @@ resource "random_id" "final_snapshot_suffix" {
 }
 
 locals {
-  final_snapshot_identifier = var.documentdb_final_snapshot_identifier != null
+  final_snapshot_identifier = (
+    var.documentdb_final_snapshot_identifier != null
     ? var.documentdb_final_snapshot_identifier
     : "wealthgenie-${var.environment}-final-${random_id.final_snapshot_suffix.hex}"
+  )
 }
 
 resource "aws_docdb_subnet_group" "main" {
