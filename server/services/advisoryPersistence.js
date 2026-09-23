@@ -17,7 +17,10 @@ import {
 import { createAllocationRevision } from './recommendationState.js';
 import { buildRecommendationProfile, buildRecommendationProfileHash, RECOMMENDATION_POLICY_VERSION } from './recommendationProfile.js';
 import { getCurrentRegulatoryRuleVersion } from './taxEngine.js';
-import { buildCanonicalAdvisoryResponse } from './advisoryResponse.js';
+import {
+  buildPostCommitAdvisoryResponse,
+  committedResponseReconciliationError,
+} from './advisoryResponse.js';
 
 let advisoryPersistenceReady = null;
 
@@ -107,6 +110,8 @@ export async function persistAdvisoryAtomically({
   const session = await mongoose.startSession();
   let committedResponse = null;
   let committedRecommendationId = null;
+  let committedRecommendationGeneration = null;
+  let transactionCommitted = false;
   try {
     await session.withTransaction(async () => {
       const currentProfile = profile || await FinancialProfile.findOne({
@@ -228,6 +233,7 @@ export async function persistAdvisoryAtomically({
         portfolio_fingerprint: portfolioFingerprint,
       };
       committedRecommendationId = persistedRecommendation._id;
+      committedRecommendationGeneration = generationRevision;
 
       if (profile) {
         await FinancialProfile.create([profile], { session });
@@ -319,15 +325,29 @@ export async function persistAdvisoryAtomically({
       writeConcern: { w: 'majority' },
     });
 
-    return await buildCanonicalAdvisoryResponse({
+    transactionCommitted = true;
+    await testHooks.afterCommitBeforeReconcile?.({
+      recommendationId: committedRecommendationId,
+      recommendationGeneration: committedRecommendationGeneration,
+    });
+    return await buildPostCommitAdvisoryResponse({
       userId: recommendation.userId,
       profileId: recommendation.profileId,
       responseTemplate: committedResponse,
-      expectedRecommendationId: committedRecommendationId,
+      committedRecommendationId,
+      committedRecommendationGeneration,
     });
   } catch (error) {
+    if (transactionCommitted) throw committedResponseReconciliationError(error);
     throw transactionRequirementError(error);
   } finally {
-    await session.endSession();
+    try {
+      await session.endSession();
+    } catch (error) {
+      if (!transactionCommitted) throw error;
+      // Cleanup failure cannot turn an already committed financial mutation
+      // with a reconciled response into a client-visible mutation failure.
+      console.warn('[AdvisoryPersistence] Mongo session cleanup failed after commit:', error.message);
+    }
   }
 }

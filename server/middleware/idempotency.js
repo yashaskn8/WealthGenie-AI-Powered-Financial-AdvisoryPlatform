@@ -3,7 +3,7 @@ import IdempotencyKey from '../models/IdempotencyKey.js';
 import Recommendation from '../models/Recommendation.js';
 import { canonicalSha256 } from '../utils/canonicalJson.js';
 import { sendError } from './errorHandler.js';
-import { buildCanonicalAdvisoryResponse } from '../services/advisoryResponse.js';
+import { buildPostCommitAdvisoryResponse } from '../services/advisoryResponse.js';
 
 // ARCHITECTURE: No in-memory Map. All idempotency state lives in shared infra.
 // Primary: Redis (fast, atomic SET NX). Fallback: MongoDB IdempotencyKey collection.
@@ -81,10 +81,12 @@ async function completedResponseFromRecommendation(recommendation) {
   return {
     status: 200,
     headers: { 'content-type': 'application/json; charset=utf-8' },
-    body: await buildCanonicalAdvisoryResponse({
+    body: await buildPostCommitAdvisoryResponse({
       userId: recommendation.userId,
       profileId: recommendation.profileId,
       responseTemplate: recommendation.responseSnapshot,
+      committedRecommendationId: recommendation._id,
+      committedRecommendationGeneration: recommendation.recommendationGeneration,
       replayed: true,
     }),
   };

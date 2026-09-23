@@ -33,6 +33,7 @@ class MetricsCollector {
       profile_complete_candidate_profile_mismatch_total: 0,
       profile_complete_candidate_version_mismatch_total: 0,
       profile_complete_recomputed_total: 0,
+      post_commit_reconciled_to_newer_recommendation_total: 0,
       agent_runs_completed_total: 0,
       agent_runs_failed_total: 0,
       agent_tool_calls_total: 0,
@@ -248,6 +249,7 @@ class MetricsCollector {
       'plan_health_events_created_total',
       'plan_health_events_deduplicated_total',
       'agent_live_eval_failures_total',
+      'post_commit_reconciled_to_newer_recommendation_total',
     ];
     for (const name of workerCounters) {
       lines.push(`# TYPE wealthgenie_${name} counter`);

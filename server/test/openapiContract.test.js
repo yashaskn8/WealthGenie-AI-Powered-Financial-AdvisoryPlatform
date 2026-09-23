@@ -195,3 +195,17 @@ test('profile completion nests the same strict authoritative recommendation sche
     'portfolio_fingerprint', 'calculation_freshness', 'state_provenance',
   ].every(field => recommendation.required.includes(field)));
 });
+
+test('committed superseded operations document their result separately from current financial state', () => {
+  const recommendationOperation = contract.paths['/api/recommend'].post;
+  assert.ok(recommendationOperation.responses['503'], 'post-commit reconciliation integrity failure uses a documented service-unavailable response');
+  const recommendationResponse = resolveLocalRef('#/components/schemas/RecommendationResponse');
+  assert.equal(recommendationResponse.properties.operation_result.$ref, '#/components/schemas/CommittedOperationResult');
+  const completionResponse = resolveLocalRef('#/components/schemas/ProfileCompletion');
+  assert.equal(completionResponse.properties.operation_result.$ref, '#/components/schemas/CommittedOperationResult');
+
+  const operationResult = resolveLocalRef('#/components/schemas/CommittedOperationResult');
+  assert.deepEqual(operationResult.required, ['committed', 'generated_recommendation_id', 'superseded_before_response']);
+  assert.equal(operationResult.properties.committed.const, true);
+  assert.equal(operationResult.properties.superseded_before_response.const, true);
+});

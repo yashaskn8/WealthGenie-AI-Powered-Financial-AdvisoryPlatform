@@ -13,6 +13,8 @@ import {
   releaseAdvisoryIdempotency,
 } from '../middleware/idempotency.js';
 import { persistAdvisoryAtomically } from '../services/advisoryPersistence.js';
+import { buildCanonicalAdvisoryResponse } from '../services/advisoryResponse.js';
+import { verifyAuditChain } from '../services/auditChain.js';
 import { createManualAllocationRevision } from '../services/recommendationState.js';
 import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
 import { buildRecommendationProfileHash, RECOMMENDATION_POLICY_VERSION } from '../services/recommendationProfile.js';
@@ -27,11 +29,11 @@ import {
 const userId = new mongoose.Types.ObjectId();
 const profileId = new mongoose.Types.ObjectId();
 const testProfile = canonicalProfile({ monthlyTakeHome: 100000, monthlySavings: 25000, age: 30 });
-const profileInputHash = buildRecommendationProfileHash(testProfile, { modelVersion: 'rule_fallback' });
 
-function makeOperation(claim, suffix = '') {
+function makeOperation(claim, suffix = '', { profileInput = testProfile, profileVersion = 1 } = {}) {
   const recommendationId = new mongoose.Types.ObjectId();
   const auditId = new mongoose.Types.ObjectId();
+  const profileInputHash = buildRecommendationProfileHash(profileInput, { modelVersion: 'rule_fallback' });
   const response = {
     recommendationId,
     audit_id: auditId,
@@ -62,7 +64,7 @@ function makeOperation(claim, suffix = '') {
       mlFallback: true,
       modelVersion: 'rule_fallback',
       regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
-      profileVersion: 1,
+      profileVersion,
       recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
       profileInputHash,
     },
@@ -117,7 +119,7 @@ test.beforeEach(async () => {
     RecommendationAllocationRevision.collection.deleteMany({ userId }),
     RecommendationState.deleteMany({ userId }),
     AuditRecord.deleteMany({ userId }),
-    AuditChainHead.deleteMany({ userId }),
+    AuditChainHead.deleteMany({ _id: userId }),
     IdempotencyKey.deleteMany({ userId }),
   ]);
   await FinancialProfile.create({
@@ -135,7 +137,7 @@ test.after(async () => {
     RecommendationAllocationRevision.collection.deleteMany({ userId }),
     RecommendationState.deleteMany({ userId }),
     AuditRecord.deleteMany({ userId }),
-    AuditChainHead.deleteMany({ userId }),
+    AuditChainHead.deleteMany({ _id: userId }),
     IdempotencyKey.deleteMany({ userId }),
   ]).catch(() => {});
   await teardownTestDatabase();
@@ -220,6 +222,189 @@ test('successful advisory transaction persists exactly one recommendation and au
   assert.equal(String(persistedRevision.recommendationId), String(operation.recommendation._id));
   assert.equal(persistedRevision.revision, result.allocation_revision);
   assert.equal(persistedRevision.portfolioFingerprint, result.portfolio_fingerprint);
+});
+
+test('post-commit supersession returns newer canonical state and idempotent replay creates no duplicate effects', async () => {
+  const keyA = 'atomic-post-commit-race-a';
+  const keyB = 'atomic-post-commit-race-b';
+  const payloadA = { profileId: profileId.toString(), request: 'race-a' };
+  const payloadB = { profileId: profileId.toString(), request: 'race-b' };
+  const claimA = await claim(keyA, payloadA);
+  const claimB = await claim(keyB, payloadB);
+  const operationA = makeOperation(claimA, 'race-A');
+  operationA.response = {
+    profile: { profileId: String(profileId), generation: 'from-A' },
+    recommendation: { recommendationId: String(operationA.recommendation._id) },
+    completion: {
+      status: 'COMMITTED',
+      profileId: String(profileId),
+      recommendationId: String(operationA.recommendation._id),
+    },
+  };
+  const operationB = makeOperation(claimB, 'race-B');
+  const barrier = createBarrier();
+  const pendingA = persistAdvisoryAtomically({
+    ...operationA,
+    testHooks: { afterCommitBeforeReconcile: barrier.pause },
+  });
+
+  await barrier.entered;
+  const idA = String(operationA.recommendation._id);
+  assert.equal(await Recommendation.countDocuments({ _id: idA, userId, idempotencyOperationId: claimA.operationId }), 1);
+  assert.equal(String((await RecommendationState.findOne({ userId, profileId }).lean()).currentRecommendationId), idA);
+
+  const resultB = await persistAdvisoryAtomically(operationB);
+  const idB = String(operationB.recommendation._id);
+  assert.equal(String(resultB.recommendationId), idB);
+  barrier.release();
+  const resultA = await pendingA;
+
+  const currentState = await RecommendationState.findOne({ userId, profileId }).lean();
+  const currentRevision = await RecommendationAllocationRevision.findOne({
+    _id: currentState.currentAllocationRevisionId,
+    recommendationId: operationB.recommendation._id,
+  }).lean();
+  assert.equal(String(currentState.currentRecommendationId), idB);
+  assert.equal(String(resultA.recommendation.recommendationId), idB);
+  assert.equal(resultA.recommendation.response_state, 'CURRENT');
+  assert.equal(resultA.recommendation.calculation_freshness.fresh, true);
+  assert.equal(resultA.recommendation.profile_input_hash, operationB.recommendation.profileInputHash);
+  assert.equal(resultA.recommendation.allocation_revision_id, String(currentRevision._id));
+  assert.equal(resultA.recommendation.portfolio_fingerprint, currentRevision.portfolioFingerprint);
+  assert.equal(resultA.recommendation.recommendation_fingerprint, currentRevision.recommendationFingerprint);
+  assert.deepEqual(resultA.recommendation.instruments.map(item => item.id), ['fixture-race-B']);
+  assert.equal(resultA.completion.recommendationId, idB);
+  assert.deepEqual(resultA.operation_result, {
+    committed: true,
+    generated_recommendation_id: idA,
+    superseded_before_response: true,
+  });
+
+  await assert.rejects(
+    buildCanonicalAdvisoryResponse({ userId, profileId, expectedRecommendationId: idA }),
+    error => error.code === 'RECOMMENDATION_SUPERSEDED',
+  );
+
+  const replayA = await claim(keyA, payloadA);
+  const replayB = await claim(keyB, payloadB);
+  assert.equal(replayA.state, 'REPLAY');
+  assert.equal(replayB.state, 'REPLAY');
+  assert.equal(String(replayA.response.body.recommendation.recommendationId), idB);
+  assert.equal(replayA.response.body.recommendation.response_state, 'CURRENT');
+  assert.deepEqual(replayA.response.body.operation_result, resultA.operation_result);
+  assert.equal(String(replayB.response.body.recommendationId), idB);
+  assert.equal(replayB.response.body.response_state, 'CURRENT');
+
+  assert.equal(await Recommendation.countDocuments({ userId }), 2);
+  assert.equal(await Recommendation.countDocuments({ _id: { $in: [operationA.recommendation._id, operationB.recommendation._id] }, userId }), 2);
+  assert.equal(await RecommendationAllocationRevision.countDocuments({ userId }), 2);
+  assert.equal(await AuditRecord.countDocuments({ userId }), 2);
+  assert.equal((await IdempotencyKey.find({ userId }).lean()).filter(item => item.status === 'DONE').length, 2);
+  const auditVerification = await verifyAuditChain(userId);
+  assert.equal(auditVerification.valid, true, JSON.stringify(auditVerification.errors));
+  assert.equal(auditVerification.checkedRecords, 2);
+});
+
+test('post-commit canonical pointer corruption is explicit and retry cannot duplicate the committed operation', async () => {
+  const key = 'atomic-post-commit-corrupt-pointer';
+  const payload = { profileId: profileId.toString(), request: 'corrupt-pointer' };
+  const operationClaim = await claim(key, payload);
+  const operation = makeOperation(operationClaim, 'corrupt-pointer');
+  await assert.rejects(
+    persistAdvisoryAtomically({
+      ...operation,
+      testHooks: {
+        afterCommitBeforeReconcile: async () => {
+          await RecommendationState.deleteOne({ userId, profileId });
+        },
+      },
+    }),
+    error => error.code === 'COMMITTED_BUT_RESPONSE_RECONCILIATION_FAILED'
+      && error.committed === true
+      && error.cause?.code === 'FINANCIAL_STATE_MISSING',
+  );
+
+  assert.equal(await Recommendation.countDocuments({ _id: operation.recommendation._id, userId }), 1);
+  assert.equal(await RecommendationAllocationRevision.countDocuments({ recommendationId: operation.recommendation._id, userId }), 1);
+  assert.equal(await AuditRecord.countDocuments({ recommendationId: operation.recommendation._id, userId }), 1);
+  assert.equal((await IdempotencyKey.findById(operationClaim.operationId).lean()).status, 'DONE');
+  await assert.rejects(claim(key, payload), error => error.code === 'COMMITTED_BUT_RESPONSE_RECONCILIATION_FAILED');
+  assert.equal(await Recommendation.countDocuments({ userId }), 1);
+  assert.equal(await RecommendationAllocationRevision.countDocuments({ userId }), 1);
+  assert.equal(await AuditRecord.countDocuments({ userId }), 1);
+});
+
+test('profile version change after commit never returns the stale generation as current', async () => {
+  const key = 'atomic-post-commit-profile-change';
+  const payload = { profileId: profileId.toString(), request: 'profile-change' };
+  const operationClaim = await claim(key, payload);
+  const operation = makeOperation(operationClaim, 'profile-change');
+  const barrier = createBarrier();
+  const pending = persistAdvisoryAtomically({
+    ...operation,
+    testHooks: { afterCommitBeforeReconcile: barrier.pause },
+  });
+  await barrier.entered;
+  await FinancialProfile.updateOne({ _id: profileId, userId }, {
+    $set: { monthlySavings: 30000 },
+    $inc: { version: 1, financialStateFence: 1 },
+  });
+  barrier.release();
+
+  await assert.rejects(pending, error => error.code === 'COMMITTED_BUT_RESPONSE_RECONCILIATION_FAILED'
+    && error.committed === true);
+  assert.equal(await Recommendation.countDocuments({ _id: operation.recommendation._id, userId }), 1);
+  assert.equal(String((await RecommendationState.findOne({ userId, profileId }).lean()).currentRecommendationId), String(operation.recommendation._id));
+  await assert.rejects(claim(key, payload), error => error.code === 'COMMITTED_BUT_RESPONSE_RECONCILIATION_FAILED');
+  assert.equal(await Recommendation.countDocuments({ userId }), 1);
+  assert.equal(await RecommendationAllocationRevision.countDocuments({ userId }), 1);
+  assert.equal(await AuditRecord.countDocuments({ userId }), 1);
+});
+
+test('profile completion reconciles to a fresh successor after a profile version change', async () => {
+  const keyA = 'atomic-completion-profile-race-a';
+  const keyB = 'atomic-completion-profile-race-b';
+  const payloadA = { profileId: profileId.toString(), request: 'completion-a' };
+  const payloadB = { profileId: profileId.toString(), request: 'completion-b' };
+  const claimA = await claim(keyA, payloadA);
+  const claimB = await claim(keyB, payloadB);
+  const operationA = makeOperation(claimA, 'completion-A');
+  operationA.response = {
+    profile: { profileId: String(profileId), staleGeneration: true },
+    recommendation: { recommendationId: String(operationA.recommendation._id) },
+    completion: { status: 'COMMITTED', profileId: String(profileId), recommendationId: String(operationA.recommendation._id) },
+  };
+  const barrier = createBarrier();
+  const pendingA = persistAdvisoryAtomically({
+    ...operationA,
+    testHooks: { afterCommitBeforeReconcile: barrier.pause },
+  });
+  await barrier.entered;
+  await FinancialProfile.updateOne({ _id: profileId, userId }, {
+    $set: { monthlySavings: 30000 },
+    $inc: { version: 1, financialStateFence: 1 },
+  });
+
+  const currentProfile = canonicalProfile({ monthlyTakeHome: 100000, monthlySavings: 30000, age: 30 });
+  const operationB = makeOperation(claimB, 'completion-B', { profileInput: currentProfile, profileVersion: 2 });
+  const resultB = await persistAdvisoryAtomically(operationB);
+  barrier.release();
+  const resultA = await pendingA;
+
+  assert.equal(resultA.recommendation.response_state, 'CURRENT');
+  assert.equal(resultA.recommendation.calculation_freshness.fresh, true);
+  assert.equal(String(resultA.recommendation.recommendationId), String(operationB.recommendation._id));
+  assert.equal(resultA.completion.profileId, String(profileId));
+  assert.equal(resultA.completion.recommendationId, String(operationB.recommendation._id));
+  assert.deepEqual(resultA.operation_result, {
+    committed: true,
+    generated_recommendation_id: String(operationA.recommendation._id),
+    superseded_before_response: true,
+  });
+  assert.equal(await Recommendation.countDocuments({ userId }), 2);
+  assert.equal(await RecommendationAllocationRevision.countDocuments({ userId }), 2);
+  assert.equal(await AuditRecord.countDocuments({ userId }), 2);
+  assert.equal(String(resultB.recommendationId), String(operationB.recommendation._id));
 });
 
 test('idempotency replay reconstructs the canonical allocation after rebalance and newer generation', async () => {

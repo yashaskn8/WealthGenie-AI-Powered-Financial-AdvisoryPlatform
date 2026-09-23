@@ -38,6 +38,31 @@ async function committedAdvisory(models, userId, mandateId, responseBuilder = bu
   return { recommendation, response };
 }
 
+async function committedOperationRecommendation(models, userId, profileId, mandateId) {
+  const recommendation = await resolve(models.recommendationModel.findOne({
+    idempotencyOperationId: advisoryOperationId(userId, mandateId),
+    userId,
+    profileId,
+  }));
+  if (!recommendation?.responseSnapshot) {
+    throw mandateError('AUTHORIZED_EXECUTION_RECONCILIATION_REQUIRED', 'The committed recommendation history is unavailable.');
+  }
+  return recommendation;
+}
+
+function committedOperationAuditHash(recommendation, response) {
+  const historical = recommendation?.responseSnapshot;
+  const historicalHash = historical?.audit_hash || historical?.recommendation?.audit_hash;
+  if (historicalHash) return historicalHash;
+
+  const responseBody = response?.body || response;
+  const responseRecommendationId = responseBody?.recommendation?.recommendationId
+    || responseBody?.recommendationId
+    || responseBody?.recommendation_id;
+  if (String(responseRecommendationId || '') !== String(recommendation?._id || '')) return null;
+  return responseBody?.audit_hash || responseBody?.recommendation?.audit_hash || null;
+}
+
 async function reconcileCommittedExecution({ models, stored, attempt, committed, keyProvider, userId }) {
   const resultReference = attempt?.resultReference || {};
   const recommendation = committed?.recommendation;
@@ -254,6 +279,7 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
         if (alreadyCommitted) {
           persisted = alreadyCommitted.response;
           core = { recommendationData: alreadyCommitted.recommendation };
+          core.profileInputHash = alreadyCommitted.recommendation.profileInputHash;
         } else {
           core = await computeCoreRecommendation({
             canonicalProfile,
@@ -271,9 +297,18 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
             payload: { mandateId, action: stored.action, snapshotHash: stored.financialSnapshotHash },
           });
           try {
-            persisted = idempotencyClaim.state === 'REPLAY'
-              ? idempotencyClaim.response
-              : await persistAdvisoryAtomically({ recommendation: core.recommendationData, auditRecord: core.auditRecordData, response: core.response, idempotencyClaim });
+            if (idempotencyClaim.state === 'REPLAY') {
+              persisted = idempotencyClaim.response?.body || idempotencyClaim.response;
+              // The replay response is the current canonical state, which may
+              // be newer than the immutable recommendation created by this
+              // authorized operation. Bind the receipt to the original row.
+              core.recommendationData = await committedOperationRecommendation(models, userId, stored.profileId, mandateId);
+              core.profileInputHash = core.recommendationData.profileInputHash;
+            } else {
+              persisted = await persistAdvisoryAtomically({ recommendation: core.recommendationData, auditRecord: core.auditRecordData, response: core.response, idempotencyClaim });
+              core.recommendationData = await committedOperationRecommendation(models, userId, stored.profileId, mandateId);
+              core.profileInputHash = core.recommendationData.profileInputHash;
+            }
           } catch (error) {
             await releaseAdvisoryIdempotency(idempotencyClaim).catch(() => {});
             throw error;
@@ -285,7 +320,7 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
         if (!recommendationId) throw mandateError('AUTHORIZED_EXECUTION_RECONCILIATION_REQUIRED', 'The committed recommendation reference is unavailable.');
         const resultReference = {
           recommendationId,
-          auditHash: persisted.audit_hash || persisted.recommendation?.audit_hash || null,
+          auditHash: committedOperationAuditHash(core.recommendationData, persisted),
           afterSnapshotHash: afterSnapshot.financialSnapshotHash,
           responseHash: canonicalSha256(persisted),
           policyDecisionId: decision.decisionId,
@@ -304,7 +339,7 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
           completedAt,
           resultMetadata: {
             recommendationId,
-            auditHash: persisted.audit_hash || persisted.recommendation?.audit_hash || null,
+            auditHash: committedOperationAuditHash(core.recommendationData, persisted),
             recommendationProfileHash: core.profileInputHash,
             status: 'COMMITTED',
           },
