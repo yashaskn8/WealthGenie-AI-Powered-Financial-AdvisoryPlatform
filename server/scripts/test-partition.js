@@ -49,17 +49,31 @@ if (!manifestMatches) {
 
 if (mode === 'verify') {
   const packageJson = JSON.parse(await readFile(path.join(serverDir, 'package.json'), 'utf8'));
-  const fullSuite = packageJson.scripts?.['test:coverage'] || '';
-  if (!fullSuite.includes('test/**/*.test.js')) {
-    console.error('Mongo integration coverage script no longer selects the complete test/**/*.test.js suite.');
+  const fullSuiteScripts = ['test', 'test:unit', 'test:coverage', 'test:coverage:unit'];
+  const scriptsUseFullPartition = fullSuiteScripts.every(scriptName => {
+    const command = packageJson.scripts?.[scriptName] || '';
+    return /\bnode\s+scripts\/test-partition\.js\s+full(?:\s|$)/.test(command);
+  });
+  if (!scriptsUseFullPartition) {
+    console.error('All backend test scripts must select the full explicit *.test.js partition.');
     process.exit(1);
   }
-  console.log(`Mongo partition verified: ${mongoRequired.length} Mongo-required suites are included in the full Linux test glob.`);
+  console.log(`Mongo partition verified: ${mongoRequired.length} Mongo-required suites are included in the full Node test selection.`);
   process.exit(0);
 }
 
+if (mode === 'full') {
+  console.log(`Running the full backend suite: ${testFiles.length} explicit *.test.js files.`);
+  const result = spawnSync(process.execPath, ['--test', '--test-concurrency=1', ...testFiles], {
+    cwd: serverDir,
+    env: process.env,
+    stdio: 'inherit',
+  });
+  process.exit(result.status ?? 1);
+}
+
 if (mode !== 'no-mongo') {
-  console.error('Usage: node scripts/test-partition.js <verify|no-mongo>');
+  console.error('Usage: node scripts/test-partition.js <verify|full|no-mongo>');
   process.exit(2);
 }
 
