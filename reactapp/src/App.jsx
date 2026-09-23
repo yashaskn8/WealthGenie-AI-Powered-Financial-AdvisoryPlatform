@@ -91,6 +91,35 @@ export async function fetchDeferredAdvisoryWithBoundedRetry(
   }
 }
 
+// eslint-disable-next-line react-refresh/only-export-components
+export function advisoryMatchesCurrentFinancialState(current, advisory) {
+  const currentRecommendationId = current?.recommendationId;
+  const advisoryRecommendationId = advisory?.recommendationId;
+  const currentRevision = Number(current?.allocation_revision);
+  const advisoryRevision = Number(advisory?.allocation_revision);
+  const currentRevisionId = current?.allocation_revision_id;
+  const advisoryRevisionId = advisory?.allocation_revision_id;
+  const currentFingerprint = current?.portfolio_fingerprint;
+  const advisoryFingerprint = advisory?.portfolio_fingerprint;
+
+  return typeof currentRecommendationId === 'string'
+    && currentRecommendationId.length > 0
+    && typeof advisoryRecommendationId === 'string'
+    && advisoryRecommendationId === currentRecommendationId
+    && Number.isSafeInteger(currentRevision)
+    && currentRevision > 0
+    && Number.isSafeInteger(advisoryRevision)
+    && advisoryRevision === currentRevision
+    && typeof currentRevisionId === 'string'
+    && currentRevisionId.length > 0
+    && typeof advisoryRevisionId === 'string'
+    && advisoryRevisionId === currentRevisionId
+    && typeof currentFingerprint === 'string'
+    && currentFingerprint.length > 0
+    && typeof advisoryFingerprint === 'string'
+    && advisoryFingerprint === currentFingerprint;
+}
+
 /* ===== DASHBOARD SHELL - Sidebar + Pages + Chatbot ===== */
 const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = null }) => {
   const navigate = useNavigate();
@@ -166,7 +195,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
                 onConflict: () => {
                   if (!cancelled) {
                     setBackendRecs(prev => {
-                      if (!prev || prev.recommendationId !== recResponse.recommendationId) return prev;
+                      if (!advisoryMatchesCurrentFinancialState(prev, recResponse)) return prev;
                       return {
                         ...prev,
                         advisory_explanation: {
@@ -181,7 +210,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
             );
             if (!cancelled && advResponse) {
               setBackendRecs(prev => {
-                if (!prev || prev.recommendationId !== recResponse.recommendationId) return prev;
+                if (!advisoryMatchesCurrentFinancialState(prev, advResponse)) return prev;
                 return {
                   ...prev,
                   // A null/omitted server value means the advisory is not
@@ -197,7 +226,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
                 // 409 Conflict: Another request is generating the advisory.
                 // Keep advisory state as GENERATING, never mark FAILED on 409.
                 setBackendRecs(prev => {
-                  if (!prev || prev.recommendationId !== recResponse.recommendationId) return prev;
+                  if (!advisoryMatchesCurrentFinancialState(prev, recResponse)) return prev;
                   return {
                     ...prev,
                     advisory_explanation: {
@@ -209,7 +238,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
               } else {
                 console.warn('Deferred advisory generation failed:', advErr);
                 setBackendRecs(prev => {
-                  if (!prev || prev.recommendationId !== recResponse.recommendationId) return prev;
+                  if (!advisoryMatchesCurrentFinancialState(prev, recResponse)) return prev;
                   return {
                     ...prev,
                     advisory_explanation: {
@@ -408,12 +437,37 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
         setIsAdvisoryLoading(true);
         try {
           const advisory = await fetchDeferredAdvisoryWithBoundedRetry(api.fetchAdvisory, recResponse.recommendationId, {
-            onConflict: () => undefined,
+            onConflict: () => {
+              setBackendRecs(prev => {
+                if (!advisoryMatchesCurrentFinancialState(prev, recResponse)) return prev;
+                return {
+                  ...prev,
+                  advisory_explanation: {
+                    ...(prev.advisory_explanation || {}),
+                    status: 'GENERATING',
+                  },
+                };
+              });
+            },
           });
           if (advisory) {
-            setBackendRecs(prev => prev && prev.recommendationId === recResponse.recommendationId
+            setBackendRecs(prev => advisoryMatchesCurrentFinancialState(prev, advisory)
               ? { ...prev, advisory_text: advisory.advisory_text ?? null, advisory_explanation: advisory.advisory_explanation || { status: 'GENERATING' } }
               : prev);
+          }
+        } catch (advisoryError) {
+          if (advisoryError?.code !== 'REQUEST_ABORTED' && advisoryError?.name !== 'AbortError') {
+            setBackendRecs(prev => {
+              if (!advisoryMatchesCurrentFinancialState(prev, recResponse)) return prev;
+              return {
+                ...prev,
+                advisory_explanation: {
+                  ...(prev.advisory_explanation || {}),
+                  status: advisoryError?.status === 409 ? 'GENERATING' : 'FAILED',
+                  ...(advisoryError?.status === 409 ? {} : { error: advisoryError.message }),
+                },
+              };
+            });
           }
         } finally {
           setIsAdvisoryLoading(false);

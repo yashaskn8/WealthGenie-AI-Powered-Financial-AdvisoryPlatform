@@ -145,7 +145,7 @@ paths:
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       x-csrf-protection: cookie-session
       parameters: [{ name: recommendationId, in: path, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{24}$' } }]
-      responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' } }
+      responses: { '200': { $ref: '#/components/responses/DeferredAdvisory' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' } }
 
   /api/agent/plan-review:
     post:
@@ -649,6 +649,7 @@ components:
     ProfileCandidate: { description: Short-lived non-authoritative precomputation handle, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileCandidate' } } } }
     ProfileCompletion: { description: Atomically committed profile and recommendation, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileCompletion' } } } }
     Recommendation: { description: Recommendation and audit identifiers, content: { application/json: { schema: { $ref: '#/components/schemas/RecommendationResponse' } } } }
+    DeferredAdvisory: { description: Advisory explanation bound to its exact recommendation allocation state, content: { application/json: { schema: { $ref: '#/components/schemas/DeferredAdvisoryResponse' } } } }
     PlanReview: { description: Bounded read-only plan review, content: { application/json: { schema: { $ref: '#/components/schemas/PlanReviewResponse' } } } }
     PlanReviewRun: { description: Durable plan review run, content: { application/json: { schema: { $ref: '#/components/schemas/PlanReviewRun' } } } }
     UserIntentMandate: { description: Cryptographically bound AP2-inspired WealthGenie action authorization, content: { application/json: { schema: { $ref: '#/components/schemas/UserIntentMandate' } } } }
@@ -866,6 +867,26 @@ components:
       type: object
       required: [recommendationId, audit_id, audit_hash, instruments, model_version, recommendation_policy_version, financial_profile_schema_version, return_basis, final_risk_tier]
       properties: { recommendationId: { type: string }, audit_id: { type: string }, audit_hash: { type: string }, instruments: { type: array, items: { type: object, additionalProperties: true } }, generation_instruments: { type: array, items: { type: object, additionalProperties: true } }, allocation_revision: { type: integer, minimum: 1 }, allocation_revision_id: { type: [string, 'null'] }, portfolio_fingerprint: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }, calculation_freshness: { type: object, additionalProperties: true }, state_provenance: { type: object, additionalProperties: true }, confidence_scores: { type: object, additionalProperties: true }, market_adjustment: { $ref: '#/components/schemas/MarketAdjustmentMetadata' }, current_allocation_source: { type: string, enum: [ORIGINAL_RECOMMENDATION, MARKET_CONTEXT_ADJUSTED, USER_REBALANCED] }, model_version: { type: string }, ml_fallback: { type: boolean }, optional_profile_fields_unknown: { type: array, items: { type: string } }, ml_input_fields_unknown: { type: array, items: { type: string } }, recommendation_policy_version: { type: string }, financial_profile_schema_version: { type: string }, return_basis: { type: string, const: PRE_TAX_NOMINAL }, final_risk_tier: { type: string }, excluded_due_to_eligibility: { type: array, items: { type: object, additionalProperties: true } } }
+      additionalProperties: true
+    DeferredAdvisoryResponse:
+      type: object
+      required: [recommendationId, allocation_revision, allocation_revision_id, portfolio_fingerprint, advisory_text, advisory_explanation]
+      properties:
+        recommendationId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+        allocation_revision: { type: integer, minimum: 1 }
+        allocation_revision_id: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+        portfolio_fingerprint: { type: string, pattern: '^[a-f0-9]{64}$' }
+        advisory_text: { type: [string, 'null'] }
+        advisory_explanation:
+          type: object
+          required: [recommendationId, allocation_revision, allocation_revision_id, portfolio_fingerprint]
+          properties:
+            recommendationId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+            allocation_revision: { type: integer, minimum: 1 }
+            allocation_revision_id: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+            portfolio_fingerprint: { type: string, pattern: '^[a-f0-9]{64}$' }
+            status: { type: string }
+          additionalProperties: true
       additionalProperties: true
     AuditMetadata:
       type: object

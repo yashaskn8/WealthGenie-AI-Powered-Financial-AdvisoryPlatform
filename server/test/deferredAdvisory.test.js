@@ -30,6 +30,7 @@ import AuditRecord from '../models/AuditRecord.js';
 import { ProviderManager } from '../services/providerAbstraction.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
+import { installFinancialStateTestHook } from '../services/financialStateTestHooks.js';
 
 const JWT_SECRET = 'deferred-advisory-test-secret-key-32ch';
 process.env.JWT_SECRET = JWT_SECRET;
@@ -81,6 +82,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     recommendationProfileVersion: 'financial-profile-1.0.0',
   });
   let recData = null;
+  let sourceState = null;
   let serverTimingHeader = null;
 
   await t.test('1. Core /api/recommend returns authoritative data immediately with PENDING advisory', async () => {
@@ -120,6 +122,16 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     assert.ok(recData.recommendation_policy_version, 'Must return recommendation_policy_version');
     assert.ok(recData.market_adjustment, 'Must publish bounded market adjustment metadata');
     assert.match(serverTimingHeader, /market-context;dur=/);
+
+    const currentResponse = await fetch(`${baseUrl}/api/recommend/current?profileId=${profile._id}`, {
+      headers: { 'Authorization': `Bearer ${tokenA}` },
+    });
+    assert.equal(currentResponse.status, 200);
+    sourceState = await currentResponse.json();
+    assert.equal(sourceState.recommendationId, recData.recommendationId);
+    assert.ok(Number.isSafeInteger(sourceState.allocation_revision) && sourceState.allocation_revision > 0);
+    assert.ok(sourceState.allocation_revision_id);
+    assert.ok(sourceState.portfolio_fingerprint);
 
     // Execution should be rapid (sub-second without LLM)
     assert.ok(elapsed < 10000, `Core response took ${elapsed}ms; should not block on LLM`);
@@ -246,6 +258,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     assert.equal(advisoryData.recommendationId, recData.recommendationId);
     assert.ok(typeof advisoryData.advisory_text === 'string' && advisoryData.advisory_text.length > 0, 'Must return advisory text');
     assert.ok(['GROUNDED_EXPLANATION_AVAILABLE', 'GROUNDED_EXPLANATION_FALLBACK', 'READY'].includes(advisoryData.advisory_explanation?.status));
+    assertAdvisoryBinding(advisoryData, sourceState);
   });
 
   await t.test('9. Recommendation document has updated advisoryText and advisoryMetadata', async () => {
@@ -287,6 +300,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     assert.equal(res.status, 200);
     const cachedAdvisory = await res.json();
     assert.equal(cachedAdvisory.advisory_text, advisoryData.advisory_text);
+    assertAdvisoryBinding(cachedAdvisory, sourceState);
     // Short circuit should return in under 200ms
     assert.ok(elapsed < 1000, `Short circuit should be fast; took ${elapsed}ms`);
   });
@@ -328,5 +342,68 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     const retryData = await res.json();
     assert.ok(retryData.advisory_text);
     assert.ok(['GROUNDED_EXPLANATION_AVAILABLE', 'GROUNDED_EXPLANATION_FALLBACK', 'READY'].includes(retryData.advisory_explanation?.status));
+    assertAdvisoryBinding(retryData, sourceState);
+  });
+
+  await t.test('15. A concurrent-ready response binds all provenance fields to its source allocation', async () => {
+    await Recommendation.updateOne(
+      { _id: recData.recommendationId, userId: userAId },
+      { $set: { advisoryText: null, advisoryMetadata: { status: 'PENDING' } } },
+    );
+
+    const removeHook = installFinancialStateTestHook(async (boundary, { state }) => {
+      if (boundary !== 'recommendation.advisory.beforeClaim') return;
+      await Recommendation.updateOne(
+        { _id: recData.recommendationId, userId: userAId },
+        {
+          $set: {
+            advisoryText: 'Concurrent advisory for the captured allocation',
+            advisoryMetadata: {
+              status: 'READY',
+              generatedAt: new Date().toISOString(),
+              recommendationId: String(state.recommendation._id),
+              profileId: String(state.recommendation.profileId),
+              allocationRevision: state.allocationRevision.revision,
+              allocationRevisionId: String(state.allocationRevision._id),
+              portfolioFingerprint: state.portfolioFingerprint,
+              profileInputHash: state.recommendation.profileInputHash,
+              recommendationPolicyVersion: state.recommendation.recommendationPolicyVersion,
+              regulatoryRuleVersion: state.recommendation.regulatoryRuleVersion,
+              returnAssumptionHash: state.allocationRevision.returnAssumptionHash,
+              profileVersion: state.profileVersion,
+            },
+          },
+        },
+      );
+    });
+
+    let res;
+    try {
+      res = await fetch(`${baseUrl}/api/recommend/${recData.recommendationId}/advisory`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${tokenA}`,
+        },
+      });
+    } finally {
+      removeHook();
+    }
+
+    assert.equal(res.status, 200);
+    const concurrentReady = await res.json();
+    assert.equal(concurrentReady.advisory_text, 'Concurrent advisory for the captured allocation');
+    assertAdvisoryBinding(concurrentReady, sourceState);
   });
 });
+
+function assertAdvisoryBinding(response, source) {
+  assert.equal(response.recommendationId, source.recommendationId);
+  assert.equal(response.allocation_revision, source.allocation_revision);
+  assert.equal(response.allocation_revision_id, source.allocation_revision_id);
+  assert.equal(response.portfolio_fingerprint, source.portfolio_fingerprint);
+  assert.equal(response.advisory_explanation?.recommendationId, source.recommendationId);
+  assert.equal(response.advisory_explanation?.allocation_revision, source.allocation_revision);
+  assert.equal(response.advisory_explanation?.allocation_revision_id, source.allocation_revision_id);
+  assert.equal(response.advisory_explanation?.portfolio_fingerprint, source.portfolio_fingerprint);
+}

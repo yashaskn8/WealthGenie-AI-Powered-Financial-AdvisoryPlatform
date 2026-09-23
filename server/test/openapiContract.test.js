@@ -145,3 +145,15 @@ test('advisory idempotency is required and profile/goal idempotency is documente
   assert.equal(operations.get('POST /api/profile/build')['x-idempotency-key'], 'optional');
   assert.equal(operations.get('POST /api/goals/create')['x-idempotency-key'], 'optional');
 });
+
+test('deferred advisory success contract requires exact allocation provenance', () => {
+  const operation = contractOperations().find(entry => operationKey(entry) === 'POST /api/recommend/{recommendationId}/advisory')?.operation;
+  assert.ok(operation);
+  const response = resolveLocalRef(operation.responses['200'].$ref);
+  const schema = resolveLocalRef(response.content['application/json'].schema.$ref);
+  assert.ok(['recommendationId', 'allocation_revision', 'allocation_revision_id', 'portfolio_fingerprint', 'advisory_text', 'advisory_explanation']
+    .every(field => schema.required.includes(field)));
+  const explanation = schema.properties.advisory_explanation;
+  assert.ok(['recommendationId', 'allocation_revision', 'allocation_revision_id', 'portfolio_fingerprint']
+    .every(field => explanation.required.includes(field)));
+});

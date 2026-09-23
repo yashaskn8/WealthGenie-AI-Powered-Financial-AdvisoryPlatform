@@ -88,6 +88,36 @@ function advisoryBindingStatus(metadata, state) {
   return matches ? { fresh: true, reason: null } : { fresh: false, reason: 'ADVISORY_SOURCE_STATE_CHANGED' };
 }
 
+function buildAdvisoryResponse({ recommendationId, state, advisoryText, advisoryExplanation }) {
+  const allocationRevision = state?.allocationRevision?.revision;
+  const allocationRevisionId = state?.allocationRevision?._id;
+  const portfolioFingerprint = state?.portfolioFingerprint;
+  if (!Number.isSafeInteger(Number(allocationRevision))
+      || Number(allocationRevision) < 1
+      || !allocationRevisionId
+      || typeof portfolioFingerprint !== 'string'
+      || portfolioFingerprint.length === 0) {
+    throw createError(503, 'The advisory source-state binding is unavailable.', 'Refresh the current recommendation before loading its advisory.', {
+      code: 'ADVISORY_PROVENANCE_MISSING',
+    });
+  }
+
+  const binding = {
+    recommendationId: String(recommendationId),
+    allocation_revision: Number(allocationRevision),
+    allocation_revision_id: String(allocationRevisionId),
+    portfolio_fingerprint: portfolioFingerprint,
+  };
+  return {
+    ...binding,
+    advisory_text: advisoryText ?? null,
+    advisory_explanation: {
+      ...(advisoryExplanation || {}),
+      ...binding,
+    },
+  };
+}
+
 export async function persistAdvisoryIfCurrent({ recommendationId, userId, state, claimToken, advisoryText, advisoryMetadata }) {
   await reachFinancialStateTestHook('recommendation.advisory.beforePersistence', { recommendationId, userId, state });
   const session = await Recommendation.startSession();
@@ -337,10 +367,11 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
     || (Boolean(recommendation.advisoryText) && !['PENDING', 'GENERATING', 'FAILED'].includes(recommendation.advisoryMetadata?.status)));
 
   if (isReady) {
-    return res.json({
+    return res.json(buildAdvisoryResponse({
       recommendationId: recommendation._id,
-      advisory_text: recommendation.advisoryText,
-      advisory_explanation: {
+      state: recommendationState,
+      advisoryText: recommendation.advisoryText,
+      advisoryExplanation: {
         status: recommendation.advisoryMetadata?.status || 'GROUNDED_EXPLANATION_AVAILABLE',
         provider: recommendation.advisoryMetadata?.provider,
         model: recommendation.advisoryMetadata?.model,
@@ -351,11 +382,15 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
         citations: recommendation.advisoryMetadata?.citations || [],
         validation_status: recommendation.advisoryMetadata?.validation?.status || recommendation.advisoryMetadata?.validation_status,
         generated_at: recommendation.advisoryMetadata?.generatedAt || recommendation.advisoryMetadata?.generated_at,
-        allocation_revision: currentAllocationRevision,
-        portfolio_fingerprint: currentPortfolioFingerprint,
       },
-    });
+    }));
   }
+
+  await reachFinancialStateTestHook('recommendation.advisory.beforeClaim', {
+    recommendationId,
+    userId: req.user.userId,
+    state: recommendationState,
+  });
 
   const claimToken = crypto.randomUUID();
   // Atomic PENDING/FAILED -> GENERATING claim via conditional update
@@ -421,10 +456,11 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
           portfolio_fingerprint: currentPortfolioFingerprint,
         });
       }
-      return res.json({
+      return res.json(buildAdvisoryResponse({
         recommendationId: current._id,
-        advisory_text: current.advisoryText,
-        advisory_explanation: {
+        state: recommendationState,
+        advisoryText: current.advisoryText,
+        advisoryExplanation: {
           status: current.advisoryMetadata?.status || 'GROUNDED_EXPLANATION_AVAILABLE',
           provider: current.advisoryMetadata?.provider,
           model: current.advisoryMetadata?.model,
@@ -436,7 +472,7 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
           validation_status: current.advisoryMetadata?.validation?.status || current.advisoryMetadata?.validation_status,
           generated_at: current.advisoryMetadata?.generatedAt || current.advisoryMetadata?.generated_at,
         },
-      });
+      }));
     }
 
     return res.status(409).json({
@@ -512,10 +548,11 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
       advisoryMetadata,
     });
 
-    return res.json({
+    return res.json(buildAdvisoryResponse({
       recommendationId: recommendation._id,
-      advisory_text: advisory.text,
-      advisory_explanation: {
+      state: currentState,
+      advisoryText: advisory.text,
+      advisoryExplanation: {
         status: advisory.status,
         provider: advisory.provider,
         model: advisory.model,
@@ -527,7 +564,7 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
         validation_status: advisory.validation?.status,
         generated_at: advisory.generatedAt,
       },
-    });
+    }));
   } catch (error) {
     await Recommendation.updateOne(
       {
