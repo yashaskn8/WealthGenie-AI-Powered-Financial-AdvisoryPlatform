@@ -30,6 +30,7 @@ import { verifyAuditChain } from '../services/auditChain.js';
 import { triggerPlanHealthCheck } from '../services/planHealthMonitor.js';
 import { requireFreshRecommendationState, createManualAllocationRevision } from '../services/recommendationState.js';
 import { buildCurrentRecommendationResponse } from '../services/recommendationResponse.js';
+import { reachFinancialStateTestHook } from '../services/financialStateTestHooks.js';
 import {
   computeCoreRecommendation,
   buildRecommendationCacheKey,
@@ -87,7 +88,8 @@ function advisoryBindingStatus(metadata, state) {
   return matches ? { fresh: true, reason: null } : { fresh: false, reason: 'ADVISORY_SOURCE_STATE_CHANGED' };
 }
 
-async function persistAdvisoryIfCurrent({ recommendationId, userId, state, claimToken, advisoryText, advisoryMetadata }) {
+export async function persistAdvisoryIfCurrent({ recommendationId, userId, state, claimToken, advisoryText, advisoryMetadata }) {
+  await reachFinancialStateTestHook('recommendation.advisory.beforePersistence', { recommendationId, userId, state });
   const session = await Recommendation.startSession();
   try {
     await session.withTransaction(async () => {

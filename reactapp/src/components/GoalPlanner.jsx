@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Target, Plus, Trash2, AlertTriangle, CheckCircle, TrendingUp, ArrowUpRight, Clock, ShieldCheck, Sparkles, Activity, Layers } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import SebiDisclaimer from './SebiDisclaimer';
@@ -7,6 +7,7 @@ import GoalForm from './GoalForm';
 import GoalDetailPane from './GoalDetailPane';
 import { submitGoal } from '../utils/goalSubmission';
 import { isFinancialCalculationFresh } from '../utils/financialFreshness';
+import { isPresentFiniteNumber } from '../utils/financialValues';
 
 const STATUS_CONFIG = {
   on_track:  { color: '#10b981', bg: 'rgba(16, 185, 129, 0.14)', label: 'ON TRACK',  icon: CheckCircle, glow: 'rgba(16, 185, 129, 0.4)' },
@@ -22,6 +23,8 @@ const UNKNOWN_STATUS_CONFIG = {
 const PRIORITY_ORDER = { Critical: 0, High: 1, Medium: 2, Low: 3 };
 
 const formatINR = (value) => {
+  if (value === null || value === undefined || value === '' || !Number.isFinite(Number(value))) return '—';
+  value = Number(value);
   if (value >= 10000000) return `₹${(value / 10000000).toFixed(2)} Cr`;
   if (value >= 100000) return `₹${(value / 100000).toFixed(1)} L`;
   return `₹${Math.round(value).toLocaleString('en-IN')}`;
@@ -37,30 +40,51 @@ const GoalPlanner = ({ profile }) => {
   const [simulationLoading, setSimulationLoading] = useState(false);
   const [simulationError, setSimulationError] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
+  const goalsFetchGeneration = useRef(0);
 
   const fetchGoals = useCallback(async () => {
+    const generation = ++goalsFetchGeneration.current;
     try {
       const res = await api.getGoals();
-      setGoals(res.goals || []);
-      setSimulatedSips(Object.fromEntries((res.goals || []).map(goal => [
+      if (generation !== goalsFetchGeneration.current) return;
+      const nextGoals = Array.isArray(res?.goals) ? res.goals : [];
+      setGoals(nextGoals);
+      setGoalSimulations({});
+      setSimulationError(null);
+      setSimulatedSips(Object.fromEntries(nextGoals.map(goal => [
         goal._id || goal.goalId,
         isFinancialCalculationFresh(goal.calculation_freshness)
-          && Number.isFinite(Number(goal.simulated_monthly_contribution))
+          && isPresentFiniteNumber(goal.simulated_monthly_contribution)
           ? Number(goal.simulated_monthly_contribution)
           : null,
       ])));
-      if (res.goals && res.goals.length > 0) {
-        const first = res.goals[0];
-        setSelectedGoal(first);
-      }
+      setSelectedGoal(previous => {
+        const previousId = previous?._id || previous?.goalId;
+        return nextGoals.find(goal => (goal._id || goal.goalId) === previousId)
+          || nextGoals[0]
+          || null;
+      });
     } catch (err) {
       console.error('Failed to fetch goals:', err);
+      if (generation !== goalsFetchGeneration.current) return;
+      // A failed refresh cannot leave an earlier profile/allocation's
+      // personalized calculations visible as if they were still current.
+      setGoals([]);
+      setSelectedGoal(null);
+      setSimulatedSips({});
+      setGoalSimulations({});
     }
   }, []);
 
   useEffect(() => {
-    fetchGoals();
-  }, [fetchGoals]);
+    setGoals([]);
+    setSelectedGoal(null);
+    setSimulatedSips({});
+    setGoalSimulations({});
+    setSimulationError(null);
+    void fetchGoals();
+    return () => { goalsFetchGeneration.current += 1; };
+  }, [fetchGoals, profile]);
 
   // Sort goals: Critical first, then by probability (lowest first = most urgent)
   const sortedGoals = useMemo(() => {
@@ -68,8 +92,8 @@ const GoalPlanner = ({ profile }) => {
       const pa = PRIORITY_ORDER[a.priority] ?? Number.MAX_SAFE_INTEGER;
       const pb = PRIORITY_ORDER[b.priority] ?? Number.MAX_SAFE_INTEGER;
       if (pa !== pb) return pa - pb;
-      const probabilityA = isFinancialCalculationFresh(a.calculation_freshness) ? Number(a.probability_of_success) : NaN;
-      const probabilityB = isFinancialCalculationFresh(b.calculation_freshness) ? Number(b.probability_of_success) : NaN;
+      const probabilityA = isFinancialCalculationFresh(a.calculation_freshness) && isPresentFiniteNumber(a.probability_of_success) ? Number(a.probability_of_success) : NaN;
+      const probabilityB = isFinancialCalculationFresh(b.calculation_freshness) && isPresentFiniteNumber(b.probability_of_success) ? Number(b.probability_of_success) : NaN;
       if (!Number.isFinite(probabilityA)) return Number.isFinite(probabilityB) ? 1 : 0;
       if (!Number.isFinite(probabilityB)) return -1;
       return probabilityA - probabilityB;
@@ -79,9 +103,8 @@ const GoalPlanner = ({ profile }) => {
   const getLiveProbability = (goal) => {
     if (!isFinancialCalculationFresh(goal?.calculation_freshness)) return null;
     const id = goal._id || goal.goalId;
-      const value = isFinancialCalculationFresh(goal.calculation_freshness)
-        ? Number(goalSimulations[id]?.probability_of_success ?? goal.probability_of_success)
-        : NaN;
+    const candidate = goalSimulations[id]?.probability_of_success ?? goal.probability_of_success;
+    const value = isPresentFiniteNumber(candidate) ? Number(candidate) : NaN;
     return Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
   };
 
@@ -145,7 +168,7 @@ const GoalPlanner = ({ profile }) => {
         setSimulatedSips(prev => ({
           ...prev,
           [gid]: isFinancialCalculationFresh(res.goal.calculation_freshness)
-            && Number.isFinite(Number(res.goal.simulated_monthly_contribution))
+            && isPresentFiniteNumber(res.goal.simulated_monthly_contribution)
             ? Number(res.goal.simulated_monthly_contribution)
             : null,
         }));
@@ -188,6 +211,15 @@ const GoalPlanner = ({ profile }) => {
       if (res.goal) {
         setGoals(prev => prev.map(g => (g._id === gid || g.goalId === gid) ? res.goal : g));
         setSelectedGoal(res.goal);
+        setSimulatedSips(prev => ({
+          ...prev,
+          [gid]: isFinancialCalculationFresh(res.goal.calculation_freshness)
+            && isPresentFiniteNumber(res.goal.simulated_monthly_contribution)
+            ? Number(res.goal.simulated_monthly_contribution)
+            : null,
+        }));
+        setGoalSimulations({});
+        setSimulationError(null);
       }
     } catch (err) {
       alert('Failed to update priority: ' + err.message);
@@ -203,20 +235,39 @@ const GoalPlanner = ({ profile }) => {
         current_savings: updates.currentSavings
       });
       if (res.goal) {
+        setGoals(previous => previous.map(goal => (
+          (goal._id === gid || goal.goalId === gid) ? res.goal : goal
+        )));
+        setSelectedGoal(res.goal);
+        setGoalSimulations({});
+        setSimulationError(null);
         const freshList = await api.getGoals();
-        setGoals(freshList.goals || []);
-        const freshGoal = (freshList.goals || []).find(g => g._id === gid || g.goalId === gid);
-        setSelectedGoal(freshGoal || res.goal);
+        const nextGoals = Array.isArray(freshList?.goals) ? freshList.goals : [];
+        setGoals(nextGoals);
+        setSimulatedSips(Object.fromEntries(nextGoals.map(goal => [
+          goal._id || goal.goalId,
+          isFinancialCalculationFresh(goal.calculation_freshness)
+            && isPresentFiniteNumber(goal.simulated_monthly_contribution)
+            ? Number(goal.simulated_monthly_contribution)
+            : null,
+        ])));
+        setSelectedGoal(nextGoals.find(goal => (goal._id || goal.goalId) === gid)
+          || nextGoals[0]
+          || null);
       }
     } catch (err) {
       alert('Failed to update goal settings: ' + err.message);
+      setGoals([]);
+      setSelectedGoal(null);
+      setSimulatedSips({});
+      setGoalSimulations({});
     }
   };
 
   // Summary statistics
-  const targetValues = goals.map(goal => Number(goal.target_amount));
-  const sipValues = goals.map(goal => isFinancialCalculationFresh(goal.calculation_freshness) ? Number(goal.recommended_sip) : NaN);
-  const probabilityValues = goals.map(goal => isFinancialCalculationFresh(goal.calculation_freshness) ? Number(goal.probability_of_success) : NaN);
+  const targetValues = goals.map(goal => isPresentFiniteNumber(goal.target_amount) ? Number(goal.target_amount) : NaN);
+  const sipValues = goals.map(goal => isFinancialCalculationFresh(goal.calculation_freshness) && isPresentFiniteNumber(goal.recommended_sip) ? Number(goal.recommended_sip) : NaN);
+  const probabilityValues = goals.map(goal => isFinancialCalculationFresh(goal.calculation_freshness) && isPresentFiniteNumber(goal.probability_of_success) ? Number(goal.probability_of_success) : NaN);
   const totalTarget = targetValues.every(value => Number.isFinite(value) && value >= 0)
     ? targetValues.reduce((sum, value) => sum + value, 0)
     : null;
@@ -508,15 +559,15 @@ const GoalPlanner = ({ profile }) => {
               const probColor = !hasProbability ? '#64748b' : probPct >= 75 ? '#10b981' : probPct >= 50 ? '#f59e0b' : '#f43f5e';
               
               // Clamp funded savings to target amount for display so huge test values don't break UI
-              const rawSavings = Number(goal.current_savings);
-              const targetAmount = Number(goal.target_amount);
+              const rawSavings = isPresentFiniteNumber(goal.current_savings) ? Number(goal.current_savings) : NaN;
+              const targetAmount = isPresentFiniteNumber(goal.target_amount) ? Number(goal.target_amount) : NaN;
               const hasFundingData = Number.isFinite(rawSavings) && rawSavings >= 0
                 && Number.isFinite(targetAmount) && targetAmount > 0;
               const fundedSavings = hasFundingData ? Math.min(targetAmount, rawSavings) : null;
               const savingsProgress = hasFundingData
                 ? Math.min(100, Math.round((fundedSavings / targetAmount) * 100))
                 : null;
-              const yearsLeft = calculationFresh && Number.isFinite(Number(goal.years_remaining)) ? Number(goal.years_remaining) : null;
+              const yearsLeft = calculationFresh && isPresentFiniteNumber(goal.years_remaining) ? Number(goal.years_remaining) : null;
 
               return (
                 <motion.div

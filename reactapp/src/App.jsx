@@ -11,6 +11,7 @@ import { assertKnownBackendInstrumentTypes } from './utils/instrumentTypeMap';
 import { investmentDatabase } from './investmentDatabase';
 import { financialProfileKey } from './utils/financialProfile';
 import { assertBackendRecommendationInstrument } from './utils/recommendationPresentation';
+import { isFinancialCalculationFresh } from './utils/financialFreshness';
 import { fromSearchParams, toSearchParams, resolveNavigation, NAV_PAGES } from './utils/navigationMap';
 
 // ── Lazy-loaded page components (code-split for faster initial load) ──
@@ -143,6 +144,9 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
           ? initialRecommendation
           : await api.getRecommendations(activeProfileId, { signal: controller.signal });
         if (cancelled) return;
+        if (!isFinancialCalculationFresh(recResponse?.calculation_freshness)) {
+          throw new Error('The server did not confirm that this recommendation matches the current financial state.');
+        }
         setBackendRecs({
           ...recResponse,
           profileId: activeProfileId,
@@ -180,7 +184,9 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
                 if (!prev || prev.recommendationId !== recResponse.recommendationId) return prev;
                 return {
                   ...prev,
-                  advisory_text: advResponse.advisory_text ?? prev.advisory_text ?? null,
+                  // A null/omitted server value means the advisory is not
+                  // available for this response; never resurrect prior text.
+                  advisory_text: advResponse.advisory_text ?? null,
                   advisory_explanation: advResponse.advisory_explanation || { status: 'GENERATING' },
                 };
               });
@@ -247,14 +253,19 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
   };
 
   // Backend response is the only source of personalized recommendation truth.
+  const currentRecommendationState = isFinancialCalculationFresh(backendRecs?.calculation_freshness)
+    ? backendRecs
+    : null;
+
   const recommendations = useMemo(() => {
     if (!backendRecs) return [];
+    if (!currentRecommendationState) return [];
 
-    assertKnownBackendInstrumentTypes(backendRecs.instruments?.map(bi => bi.type), 'recommendation merge');
+    assertKnownBackendInstrumentTypes(currentRecommendationState.instruments?.map(bi => bi.type), 'recommendation merge');
 
     // Treat backend response as the single source of truth for order, ranking, and allocations.
     // Map over backend instruments directly to preserve their exact order and allocations.
-    const merged = (backendRecs.instruments || []).map((bi) => {
+    const merged = (currentRecommendationState.instruments || []).map((bi) => {
       assertBackendRecommendationInstrument(bi);
 
       // Look up full display attributes from the investment database catalog
@@ -268,7 +279,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
         throw new Error(`Backend returned an invalid allocation weight for ${bi.id || bi.type}`);
       }
 
-      const allocation = Number(backendRecs.dashboard_projection?.instrument_monthly_allocations?.[bi.id]);
+      const allocation = Number(currentRecommendationState.dashboard_projection?.instrument_monthly_allocations?.[bi.id]);
       if (!Number.isFinite(allocation) || allocation <= 0) {
         throw new Error(`Backend did not return a valid monthly allocation for ${bi.id || bi.type}`);
       }
@@ -303,8 +314,8 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
         allocation_pct: Number(bi.allocation_pct),
         score: Number(bi.score),
         scoreFactors: { ...bi.scoreFactors },
-        ml_confidence: backendRecs.confidence_scores?.[bi.type] ?? null,
-        advisory_text: backendRecs.advisory_text,
+        ml_confidence: currentRecommendationState.confidence_scores?.[bi.type] ?? null,
+        advisory_text: currentRecommendationState.advisory_text,
         _source: 'backend',
       };
     });
@@ -314,7 +325,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
       throw new Error(`Backend allocation weights must total 1; received ${weightTotal}`);
     }
     return merged;
-  }, [backendRecs]);
+  }, [backendRecs, currentRecommendationState]);
   const handleLearnMore = (investment, initialTab = 'Overview') => {
     setDeepDiveInitialTab(initialTab || 'Overview');
     setDeepDiveInvestment(investment);
@@ -322,7 +333,10 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
 
   const handleRebalanceSave = async (updated) => {
     try {
-      const profileId = backendRecs?.profileId || userProfile.profileId;
+      if (!currentRecommendationState) {
+        throw new Error('The current recommendation is unavailable until its financial-state freshness is verified.');
+      }
+      const profileId = currentRecommendationState.profileId || userProfile.profileId;
 
       if (!profileId) {
         throw new Error("Could not build user profile for database update.");
@@ -334,9 +348,9 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
       });
 
       const response = await api.updateRecommendationWeights(profileId, weights, {
-        recommendationId: backendRecs?.recommendationId,
-        expectedAllocationRevision: backendRecs?.allocation_revision,
-        expectedPortfolioFingerprint: backendRecs?.portfolio_fingerprint,
+        recommendationId: currentRecommendationState.recommendationId,
+        expectedAllocationRevision: currentRecommendationState.allocation_revision,
+        expectedPortfolioFingerprint: currentRecommendationState.portfolio_fingerprint,
       });
       
       setBackendRecs(prev => {
@@ -359,11 +373,13 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
            current_allocation_source: response.current_allocation_source,
            generation_market_adjustment: response.generation_market_adjustment,
            market_adjustment: response.market_adjustment,
-           recommendationId: response.recommendation_id || backendRecs?.recommendationId,
+           recommendationId: response.recommendation_id ?? null,
            allocation_revision: response.allocation_revision,
            allocation_revision_id: response.allocation_revision_id,
            portfolio_fingerprint: response.portfolio_fingerprint,
-           calculation_freshness: response.calculation_freshness || prev.calculation_freshness,
+           // Freshness is proof, not mergeable metadata. A partial response
+           // must invalidate prior proof instead of inheriting it.
+           calculation_freshness: response.calculation_freshness ?? null,
         };
       });
 
@@ -383,6 +399,9 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
     setBackendFallback(null);
     try {
       const recResponse = await api.getRecommendations(profileId, { retries: 0 });
+      if (!isFinancialCalculationFresh(recResponse?.calculation_freshness)) {
+        throw new Error('The server did not confirm that this recommendation matches the current financial state.');
+      }
       setBackendRecs({ ...recResponse, profileId });
       setIsRecommendationLoading(false);
       if (recResponse?.recommendationId && (recResponse.advisory_explanation?.status === 'PENDING' || !recResponse.advisory_text)) {
@@ -393,7 +412,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
           });
           if (advisory) {
             setBackendRecs(prev => prev && prev.recommendationId === recResponse.recommendationId
-              ? { ...prev, advisory_text: advisory.advisory_text ?? prev.advisory_text ?? null, advisory_explanation: advisory.advisory_explanation || { status: 'GENERATING' } }
+              ? { ...prev, advisory_text: advisory.advisory_text ?? null, advisory_explanation: advisory.advisory_explanation || { status: 'GENERATING' } }
               : prev);
           }
         } finally {
@@ -416,10 +435,10 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
             <RecommendationDashboard
               userProfile={userProfile}
               recommendations={recommendations}
-              recommendationMeta={backendRecs}
+              recommendationMeta={currentRecommendationState}
               isLoading={isRecommendationLoading}
               isAdvisoryLoading={isAdvisoryLoading}
-              explanation={backendRecs?.explanation || null}
+              explanation={currentRecommendationState?.explanation || null}
               fallbackNotice={backendFallback}
               onDismissFallbackNotice={() => setBackendFallback(null)}
               onRecalculate={() => navigateTo(NAV_PAGES.ACCOUNT)}
@@ -436,7 +455,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
             <AllocationPlanner
               profile={userProfile}
               recommendations={recommendations}
-              recommendationMeta={backendRecs}
+              recommendationMeta={currentRecommendationState}
               onRecomputePlan={handleAuthoritativeRecompute}
             />
           </ErrorBoundary>
@@ -449,7 +468,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
               userProfile={userProfile}
               recommendationsLoading={isRecommendationLoading}
               recommendationsError={backendFallback?.message || null}
-              recommendationMeta={backendRecs}
+              recommendationMeta={currentRecommendationState}
               onLearnMore={handleLearnMore}
               onSelectInvestment={setDeepDiveInvestment}
             />
@@ -488,7 +507,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
               onTabChange={(newTab) => navigateTo({ page: NAV_PAGES.ADVANCED, tab: newTab })}
               profile={userProfile}
               recommendations={recommendations}
-              recommendationMeta={backendRecs}
+              recommendationMeta={currentRecommendationState}
               onNavigateHome={() => navigateTo(NAV_PAGES.HOME)}
             />
           </ErrorBoundary>
@@ -558,7 +577,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
           onSelectInvestment={setDeepDiveInvestment}
           userProfile={userProfile}
           allRecommendations={recommendations}
-          recommendationMeta={backendRecs}
+          recommendationMeta={currentRecommendationState}
           horizon={userProfile.investment_horizon_years}
           initialTab={deepDiveInitialTab}
         />

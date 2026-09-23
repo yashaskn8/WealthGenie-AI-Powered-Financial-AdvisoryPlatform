@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Target, Palmtree, Diamond, FileText, Shield, TrendingUp, AlertTriangle, CheckCircle, Clock, IndianRupee, Lightbulb, Wallet, Save, Sparkles, RefreshCw, Layers, Trash2, Umbrella, Home, GraduationCap, Car } from 'lucide-react';
 import { formatINR } from '../utils/indianNumberFormat';
@@ -6,6 +6,7 @@ import api from '../services/api';
 import './GoalTracker.css';
 import { getGoalTypeByLabel, hexToRgb } from '../config/goalCatalog';
 import { isAdvisoryFresh, isFinancialCalculationFresh } from '../utils/financialFreshness';
+import { isPresentFiniteNumber } from '../utils/financialValues';
 
 const ICON_MAP = {
   Umbrella,
@@ -37,7 +38,7 @@ function getDisplayDefaults(goal) {
 }
 
 function formatShort(val) {
-  if (!Number.isFinite(Number(val))) return '—';
+  if (val === null || val === undefined || val === '' || !Number.isFinite(Number(val))) return '—';
   const numericValue = Number(val);
   if (numericValue >= 10000000) return `₹${(numericValue / 10000000).toFixed(2)} Cr`;
   if (numericValue >= 100000) return `₹${(numericValue / 100000).toFixed(1)}L`;
@@ -90,24 +91,32 @@ const GoalCard = ({
     setCurrentSaved(initialSaved);
   }, [initialTarget, initialSaved]);
 
-  const actualTarget = Number(target) || 0;
-  const actualSaved = Number(currentSaved) || 0;
-  const projectedCandidate = isCalculationFresh ? Number(goalObj?.monte_carlo_summary?.p50) : NaN;
+  const actualTarget = isPresentFiniteNumber(target) ? Number(target) : null;
+  const actualSaved = isPresentFiniteNumber(currentSaved) ? Number(currentSaved) : null;
+  const projectedCandidate = isCalculationFresh && isPresentFiniteNumber(goalObj?.monte_carlo_summary?.p50)
+    ? Number(goalObj.monte_carlo_summary.p50)
+    : NaN;
   const hasProjection = Number.isFinite(projectedCandidate) && projectedCandidate >= 0;
   const projectedValue = hasProjection ? projectedCandidate : null;
 
   // MC projections target the inflation-adjusted amount, so compare against that
-  const comparisonTargetCandidate = isCalculationFresh ? Number(goalObj?.inflation_adjusted_target) : NaN;
+  const comparisonTargetCandidate = isCalculationFresh && isPresentFiniteNumber(goalObj?.inflation_adjusted_target)
+    ? Number(goalObj.inflation_adjusted_target)
+    : NaN;
   const hasComparisonTarget = Number.isFinite(comparisonTargetCandidate) && comparisonTargetCandidate > 0;
   const comparisonTarget = hasComparisonTarget ? comparisonTargetCandidate : null;
 
-  const progressPercent = Math.min((actualSaved / (actualTarget || 1)) * 100, 100);
+  const progressPercent = actualSaved !== null && actualTarget !== null
+    ? Math.min((actualSaved / (actualTarget || 1)) * 100, 100)
+    : 0;
   const projectedPercent = hasProjection && hasComparisonTarget
     ? Math.min((projectedValue / comparisonTarget) * 100, 100)
     : 0;
 
   const isFullyFunded = isCalculationFresh && goalObj?.status === 'on_track';
-  const gapCandidate = isCalculationFresh ? Number(goalObj?.gap_amount) : NaN;
+  const gapCandidate = isCalculationFresh && isPresentFiniteNumber(goalObj?.gap_amount)
+    ? Number(goalObj.gap_amount)
+    : NaN;
   const hasGap = Number.isFinite(gapCandidate) && gapCandidate >= 0;
   const gap = hasGap ? gapCandidate : null;
   const gapPositive = !isFullyFunded && hasGap && gap > 0;
@@ -124,11 +133,11 @@ const GoalCard = ({
       status = 'Slightly Behind (Needs Boost)'; statusClass = 'status--almost'; StatusIcon = TrendingUp;
     } else if (goalObj.status === 'off_track') {
       status = 'Off Track (Action Required)'; statusClass = 'status--behind'; StatusIcon = AlertTriangle;
-  } else if (isDbGoal) {
-    status = 'Recalculation Required'; statusClass = 'status--warning'; StatusIcon = AlertTriangle;
-  } else {
+    } else {
       status = 'Projection Unavailable'; statusClass = 'status--behind'; StatusIcon = Clock;
     }
+  } else if (isDbGoal) {
+    status = 'Recalculation Required'; statusClass = 'status--warning'; StatusIcon = AlertTriangle;
   } else { status = 'Awaiting Backend Plan'; statusClass = 'status--behind'; StatusIcon = AlertTriangle; }
 
   const IconComponent = defaults.icon || Target;
@@ -180,7 +189,7 @@ const GoalCard = ({
               {priority}
             </span>
           </div>
-          <p className="goal-card-desc">{isDbGoal && goalObj.recommended_instrument ? `Saving through ${goalObj.recommended_instrument.replace('_', ' ')}` : defaults.description}</p>
+          <p className="goal-card-desc">{isDbGoal && isCalculationFresh && goalObj.recommended_instrument ? `Saving through ${goalObj.recommended_instrument.replace('_', ' ')}` : defaults.description}</p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginLeft: 'auto', flexShrink: 0 }}>
           <span className={`goal-status-badge ${statusClass}`} style={{ margin: 0 }}>
@@ -359,7 +368,7 @@ const GoalCard = ({
 
       {/* Actionable Insight */}
       <div className="goal-action-container">
-        {isDbGoal && goalObj.gemini_advice && isAdvisoryFresh(goalObj.advisory_freshness) ? (
+        {isDbGoal && isCalculationFresh && goalObj.gemini_advice && isAdvisoryFresh(goalObj.advisory_freshness) ? (
           <motion.div className="goal-action-card">
             <div className="action-card-highlight" style={{ background: gapPositive ? '#eab308' : '#10b981' }}></div>
             <Sparkles size={16} color={gapPositive ? '#eab308' : '#10b981'} style={{ flexShrink: 0, marginTop: 2, zIndex: 1 }} />
@@ -384,29 +393,38 @@ const GoalTracker = ({ profile, onNavigate }) => {
   const [loading, setLoading] = useState(true);
   const [isInitializing, setIsInitializing] = useState(false);
   const [bootstrapResult, setBootstrapResult] = useState(null);
+  const goalsFetchGeneration = useRef(0);
 
-  const totalSavings = Number(profile?.monthly_savings);
+  const totalSavings = isPresentFiniteNumber(profile?.monthly_savings) ? Number(profile.monthly_savings) : NaN;
 
-  useEffect(() => {
-    fetchActiveGoals();
-  }, []);
-
-  const fetchActiveGoals = async () => {
+  const fetchActiveGoals = useCallback(async () => {
+    const generation = ++goalsFetchGeneration.current;
     try {
       setLoading(true);
       setBootstrapResult(null);
       const res = await api.getGoals();
-      setDbGoals(res.goals || []);
+      if (generation !== goalsFetchGeneration.current) return;
+      setDbGoals(Array.isArray(res?.goals) ? res.goals : []);
     } catch (e) {
       console.error("Failed to load goals for tracker:", e);
+      if (generation !== goalsFetchGeneration.current) return;
+      setDbGoals([]);
       setBootstrapResult({
         type: 'error',
         message: e?.message || 'Your saved goals could not be loaded. Please try again.',
       });
     } finally {
-      setLoading(false);
+      if (generation === goalsFetchGeneration.current) setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    // A changed financial profile invalidates the freshness proof held by the
+    // previously loaded DTO until the backend re-resolves the source state.
+    setDbGoals([]);
+    void fetchActiveGoals();
+    return () => { goalsFetchGeneration.current += 1; };
+  }, [fetchActiveGoals, profile]);
 
   const handleInitializeDefaults = async () => {
     setIsInitializing(true);
@@ -427,10 +445,12 @@ const GoalTracker = ({ profile, onNavigate }) => {
       const res = await api.updateGoal(goalId, patchData);
       if (res.success) {
         // Fetch list to ensure recalculations are pulled
+        setDbGoals([]);
         const freshList = await api.getGoals();
-        setDbGoals(freshList.goals || []);
+        setDbGoals(Array.isArray(freshList?.goals) ? freshList.goals : []);
       }
     } catch (err) {
+      setDbGoals([]);
       alert("Failed to save changes: " + (err.message || "Unknown error"));
     }
   };
@@ -440,10 +460,12 @@ const GoalTracker = ({ profile, onNavigate }) => {
     try {
       const res = await api.deleteGoal(goalId);
       if (res.deleted) {
+        setDbGoals([]);
         const freshList = await api.getGoals();
-        setDbGoals(freshList.goals || []);
+        setDbGoals(Array.isArray(freshList?.goals) ? freshList.goals : []);
       }
     } catch (err) {
+      setDbGoals([]);
       alert("Failed to delete goal: " + (err.message || "Unknown error"));
     }
   };
@@ -458,7 +480,9 @@ const GoalTracker = ({ profile, onNavigate }) => {
       isDb: true,
       obj: g,
       key: g._id || g.goalId,
-      horizon: Number(g.years_remaining),
+      horizon: isFinancialCalculationFresh(g.calculation_freshness) && isPresentFiniteNumber(g.years_remaining)
+        ? Number(g.years_remaining)
+        : NaN,
       defaults: getDisplayDefaults(g),
     }));
   }, [dbGoals]);
@@ -468,7 +492,9 @@ const GoalTracker = ({ profile, onNavigate }) => {
     const allocs = {};
 
     mappedGoals.forEach(g => {
-      const value = isFinancialCalculationFresh(g.obj?.calculation_freshness) ? Number(g.obj?.recommended_sip) : NaN;
+      const value = isFinancialCalculationFresh(g.obj?.calculation_freshness) && isPresentFiniteNumber(g.obj?.recommended_sip)
+        ? Number(g.obj.recommended_sip)
+        : NaN;
       allocs[g.name] = Number.isFinite(value) && value >= 0 ? value : null;
     });
     return allocs;
@@ -476,14 +502,14 @@ const GoalTracker = ({ profile, onNavigate }) => {
 
   // Combined calculations for the HUD
   const totalTarget = useMemo(() => {
-    const values = dbGoals.map(goal => Number(goal.target_amount));
+    const values = dbGoals.map(goal => isPresentFiniteNumber(goal.target_amount) ? Number(goal.target_amount) : NaN);
     return values.every(value => Number.isFinite(value) && value > 0)
       ? values.reduce((sum, value) => sum + value, 0)
       : null;
   }, [dbGoals]);
 
   const totalCurrent = useMemo(() => {
-    const values = dbGoals.map(goal => Number(goal.current_savings));
+    const values = dbGoals.map(goal => isPresentFiniteNumber(goal.current_savings) ? Number(goal.current_savings) : NaN);
     return values.every(value => Number.isFinite(value) && value >= 0)
       ? values.reduce((sum, value) => sum + value, 0)
       : null;
@@ -491,6 +517,7 @@ const GoalTracker = ({ profile, onNavigate }) => {
 
   const totalProjected = useMemo(() => {
     const values = mappedGoals.map(g => isFinancialCalculationFresh(g.obj?.calculation_freshness)
+      && isPresentFiniteNumber(g.obj?.monte_carlo_summary?.p50)
       ? Number(g.obj?.monte_carlo_summary?.p50)
       : NaN);
     return values.every(value => Number.isFinite(value) && value >= 0)
@@ -499,7 +526,9 @@ const GoalTracker = ({ profile, onNavigate }) => {
   }, [mappedGoals]);
 
   const totalMonthlySIP = useMemo(() => {
-    const values = dbGoals.map(g => isFinancialCalculationFresh(g.calculation_freshness) ? Number(g.recommended_sip) : NaN);
+    const values = dbGoals.map(g => isFinancialCalculationFresh(g.calculation_freshness) && isPresentFiniteNumber(g.recommended_sip)
+      ? Number(g.recommended_sip)
+      : NaN);
     return values.every(value => Number.isFinite(value) && value >= 0)
       ? values.reduce((sum, value) => sum + value, 0)
       : null;
@@ -507,7 +536,9 @@ const GoalTracker = ({ profile, onNavigate }) => {
 
   // MC projections target inflation-adjusted amounts, so use those for health calculation
   const totalInflationAdjustedTarget = useMemo(() => {
-    const values = dbGoals.map(g => isFinancialCalculationFresh(g.calculation_freshness) ? Number(g.inflation_adjusted_target) : NaN);
+    const values = dbGoals.map(g => isFinancialCalculationFresh(g.calculation_freshness) && isPresentFiniteNumber(g.inflation_adjusted_target)
+      ? Number(g.inflation_adjusted_target)
+      : NaN);
     return values.every(value => Number.isFinite(value) && value > 0)
       ? values.reduce((sum, value) => sum + value, 0)
       : null;

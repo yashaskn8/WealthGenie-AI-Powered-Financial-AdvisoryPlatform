@@ -29,6 +29,7 @@ import {
 } from '../services/recommendationState.js';
 import { buildCurrentGoalResponse, buildGoalAdvisoryMetadata } from '../services/goalResponse.js';
 import { buildGoalCalculationInputFingerprint, GOAL_CALCULATION_POLICY_VERSION } from '../services/goalCalculationProvenance.js';
+import { reachFinancialStateTestHook } from '../services/financialStateTestHooks.js';
 
 const router = Router();
 const GOAL_INFLATION_ASSUMPTION = 0.05;
@@ -270,6 +271,7 @@ async function calculateGoalPlan({ profile, profileId, userId, targetAmount, tar
     currentSavings,
   });
   const lastIndex = validateMonteCarlo(result);
+  await reachFinancialStateTestHook('goal.calculation.beforeStateRecheck', { userId, profileId, state: metrics.state });
   await assertGoalPlanStateCurrent({ userId, profileId, profile, plannedState: metrics.state });
   const gap = Math.max(0, requiredSip - profile.monthlySavings);
   return {
@@ -362,6 +364,9 @@ router.post('/create', verifyJWT, idempotency(), validateStrict(customGoalSchema
       plannedState: plan.metrics.state,
     });
     data.gemini_advice = await generateGoalAdvice(data, profile);
+    await reachFinancialStateTestHook('goal.advisory.beforePersistence', {
+      userId: req.user.userId, profileId, goalId: data._id, sourceState: currentState,
+    });
     data.advisoryMetadata = buildGoalAdvisoryMetadata({ goal: data, state: currentState });
     goal = await persistGoalWithSourceState(data, {
       userId: req.user.userId,
@@ -484,6 +489,9 @@ router.patch('/:goalId/refresh-advice', verifyJWT, asyncHandler(async (req, res)
     });
   }
   goal.gemini_advice = await generateGoalAdvice(goal, profile);
+  await reachFinancialStateTestHook('goal.advisory.beforePersistence', {
+    userId: req.user.userId, profileId: goal.profileId, goalId: goal._id, sourceState: state,
+  });
   goal.advisoryMetadata = buildGoalAdvisoryMetadata({ goal, state });
   await saveGoalWithSourceState(goal, {
     userId: req.user.userId,
@@ -567,6 +575,9 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
       plannedState: recalculationState,
     });
     goal.gemini_advice = await generateGoalAdvice(goal, profile);
+    await reachFinancialStateTestHook('goal.advisory.beforePersistence', {
+      userId: req.user.userId, profileId: goal.profileId, goalId: goal._id, sourceState: currentState,
+    });
     goal.advisoryMetadata = buildGoalAdvisoryMetadata({ goal, state: currentState });
     await saveGoalWithSourceState(goal, {
       userId: req.user.userId,

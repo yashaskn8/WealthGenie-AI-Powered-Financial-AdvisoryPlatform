@@ -232,6 +232,7 @@ export async function persistAdvisoryAtomically({
           returnAssumptionVersion: instruments.find(item => item.returnAssumptionVersion)?.returnAssumptionVersion || PROJECTION_ASSUMPTION_VERSION,
           returnAssumptionHash,
           returnAssumptionSource: instruments.find(item => item.returnSource)?.returnSource || PROJECTION_ASSUMPTION_SOURCE,
+          profileVersion: currentProfile.version ?? 1,
           portfolioFingerprint,
           recommendationFingerprint,
         },

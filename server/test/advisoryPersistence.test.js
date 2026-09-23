@@ -85,6 +85,14 @@ async function claim(key, payload = { profileId: profileId.toString() }) {
   return claimAdvisoryIdempotency({ key, userId, profileId, payload, waitMs: 10000 });
 }
 
+function createBarrier() {
+  let markEntered;
+  let open;
+  const entered = new Promise(resolve => { markEntered = resolve; });
+  const released = new Promise(resolve => { open = resolve; });
+  return { entered, async pause() { markEntered(); await released; }, release() { open(); } };
+}
+
 test.before(async () => {
   await setupTestDatabase({ requireReplicaSet: true });
   await Promise.all([Recommendation.init(), AuditRecord.init(), IdempotencyKey.init()]);
@@ -138,25 +146,36 @@ test('failure after recommendation creation rolls back recommendation and audit'
   assert.equal(await AuditRecord.countDocuments({ userId }), 0);
 });
 
-test('recommendation commit rejects a profile edited while computation was in flight', async () => {
+test('barrier-controlled recommendation generation loses to a concurrently committed profile edit', async () => {
   const operationClaim = await claim('atomic-profile-race-001');
-  let changed = false;
-  await assert.rejects(persistAdvisoryAtomically({
+  const barrier = createBarrier();
+  let paused = false;
+  const pending = persistAdvisoryAtomically({
     ...makeOperation(operationClaim, 'profile-race'),
     testHooks: {
       afterSourceProfileRead: async () => {
-        if (changed) return;
-        changed = true;
-        await FinancialProfile.updateOne({ _id: profileId, userId }, {
-          $set: { monthlySavings: 30000 },
-          $inc: { version: 1, financialStateFence: 1 },
-        });
+        if (paused) return;
+        paused = true;
+        await barrier.pause();
       },
     },
-  }), error => error.code === 'PROFILE_STATE_CHANGED' || /write conflict/i.test(error.message));
+  });
+  await barrier.entered;
+  await FinancialProfile.updateOne({ _id: profileId, userId }, {
+    $set: { monthlySavings: 30000 },
+    $inc: { version: 1, financialStateFence: 1 },
+  });
+  barrier.release();
+  await assert.rejects(pending, error => error.code === 'PROFILE_STATE_CHANGED' || /write conflict/i.test(error.message));
   await releaseAdvisoryIdempotency(operationClaim);
+  const changedProfile = await FinancialProfile.findOne({ _id: profileId, userId }).lean();
+  assert.equal(changedProfile.version, 2);
+  assert.equal(changedProfile.financialStateFence, 1);
   assert.equal(await Recommendation.countDocuments({ userId }), 0);
+  assert.equal(await RecommendationAllocationRevision.countDocuments({ userId }), 0);
+  assert.equal(await RecommendationState.countDocuments({ userId }), 0);
   assert.equal(await AuditRecord.countDocuments({ userId }), 0);
+  assert.equal(await AuditChainHead.countDocuments({ _id: userId }), 0);
 });
 
 test('audit write validation failure rolls back recommendation and audit', async () => {

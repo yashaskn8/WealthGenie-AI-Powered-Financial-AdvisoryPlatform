@@ -5,6 +5,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import GoalTracker from '../GoalTracker';
 import api from '../../services/api';
 
+vi.mock('framer-motion', async () => {
+  const ReactModule = await import('react');
+  const components = new Map();
+  const motion = new Proxy({}, {
+    get(_target, tag) {
+      if (!components.has(tag)) {
+        components.set(tag, ReactModule.forwardRef((props, ref) => {
+          const motionOnlyProps = new Set([
+            'initial', 'animate', 'exit', 'transition', 'whileHover', 'whileTap',
+            'layout', 'layoutId',
+          ]);
+          const domProps = Object.fromEntries(Object.entries(props)
+            .filter(([key]) => key !== 'children' && !motionOnlyProps.has(key)));
+          return ReactModule.createElement(tag, { ...domProps, ref }, props.children);
+        }));
+      }
+      return components.get(tag);
+    },
+  });
+  return { motion, AnimatePresence: ({ children }) => children };
+});
+
 vi.mock('../../services/api', () => ({
   default: {
     getGoals: vi.fn(),
@@ -97,6 +119,68 @@ describe('GoalTracker custom-goal boundary', () => {
     expect(screen.queryByText('Increase the goal contribution when cash flow allows.')).toBeNull();
   });
 
+  it.each([
+    ['false', { fresh: false }],
+    ['missing', {}],
+    ['undefined', undefined],
+    ['null', null],
+    ['numeric false-like', { fresh: 0 }],
+    ['string true-like', { fresh: 'true' }],
+    ['numeric true-like', { fresh: 1 }],
+  ])('blocks derived goal data when calculation freshness is %s', async (_label, freshness) => {
+    const goal = { ...savedGoal, calculation_freshness: freshness };
+    if (_label === 'missing') delete goal.calculation_freshness;
+    api.getGoals.mockResolvedValue({ goals: [goal] });
+    render(<GoalTracker profile={profile} />);
+
+    expect(await screen.findByText('Dream Studio')).toBeTruthy();
+    expect(screen.getByText('Recalculation Required')).toBeTruthy();
+    expect(screen.queryByText('Slightly Behind (Needs Boost)')).toBeNull();
+    expect(screen.queryByText('₹2.5L')).toBeNull();
+    expect(screen.queryByText('₹3.5L')).toBeNull();
+    expect(screen.queryByText('₹5,000')).toBeNull();
+    expect(screen.queryByText('₹0')).toBeNull();
+  });
+
+  it.each([
+    ['false', { fresh: false }],
+    ['missing', undefined],
+    ['malformed', { fresh: 'true' }],
+  ])('hides advice unless advisory freshness is literal true (%s)', async (_label, freshness) => {
+    api.getGoals.mockResolvedValue({ goals: [{
+      ...savedGoal,
+      advisory_freshness: freshness,
+    }] });
+    render(<GoalTracker profile={profile} />);
+
+    expect(await screen.findByText('Dream Studio')).toBeTruthy();
+    expect(screen.queryByText('Increase the goal contribution when cash flow allows.')).toBeNull();
+    expect(screen.getAllByText('₹2.5L')).toHaveLength(2);
+  });
+
+  it('replaces previously fresh goal data after a stale refresh instead of retaining old values or advice', async () => {
+    api.getGoals
+      .mockResolvedValueOnce({ goals: [savedGoal] })
+      .mockResolvedValueOnce({ goals: [{
+        ...savedGoal,
+        calculation_freshness: { fresh: false, reasonCodes: ['STALE_ALLOCATION'] },
+        advisory_freshness: { fresh: false, reasonCodes: ['STALE_ALLOCATION'] },
+      }] });
+    render(<GoalTracker profile={profile} />);
+
+    await screen.findByText('Dream Studio');
+    fireEvent.change(screen.getAllByRole('spinbutton')[0], { target: { value: '550000' } });
+    fireEvent.click(await screen.findByRole('button', { name: /save changes & update projections/i }));
+
+    await waitFor(() => expect(api.getGoals).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('Recalculation Required')).toBeTruthy();
+    expect(screen.queryByText('Slightly Behind (Needs Boost)')).toBeNull();
+    expect(screen.queryByText('Increase the goal contribution when cash flow allows.')).toBeNull();
+    expect(screen.queryByText('₹2.5L')).toBeNull();
+    expect(screen.queryByText('₹3.5L')).toBeNull();
+    expect(screen.queryByText('₹0')).toBeNull();
+  });
+
   it('updates only explicit target facts and then refreshes server calculations', async () => {
     api.getGoals
       .mockResolvedValueOnce({ goals: [savedGoal] })
@@ -106,7 +190,7 @@ describe('GoalTracker custom-goal boundary', () => {
     await screen.findByText('Dream Studio');
     const [targetInput] = screen.getAllByRole('spinbutton');
     fireEvent.change(targetInput, { target: { value: '550000' } });
-    fireEvent.click(screen.getByRole('button', { name: /save changes & update projections/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /save changes & update projections/i }));
 
     await waitFor(() => expect(api.updateGoal).toHaveBeenCalledWith('goal-1', {
       target_amount: 550000,

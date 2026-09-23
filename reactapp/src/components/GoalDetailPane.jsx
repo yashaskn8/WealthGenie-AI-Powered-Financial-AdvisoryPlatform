@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import ProjectionBand from './ProjectionBand';
 import JargonTooltip from './JargonTooltip';
 import { isAdvisoryFresh, isFinancialCalculationFresh } from '../utils/financialFreshness';
+import { isPresentFiniteNumber } from '../utils/financialValues';
 
 const getGoalIcon = (name = '') => {
   const lower = name.toLowerCase();
@@ -23,7 +24,7 @@ const PRIORITY_CONFIG = {
 };
 
 const formatINR = (value) => {
-  if (!Number.isFinite(Number(value))) return '—';
+  if (value === null || value === undefined || value === '' || !Number.isFinite(Number(value))) return '—';
   value = Number(value);
   if (value >= 10000000) return `₹${(value / 10000000).toFixed(2)} Cr`;
   if (value >= 100000) return `₹${(value / 100000).toFixed(1)} L`;
@@ -191,14 +192,17 @@ export const GoalDetailPane = ({
 
   const goalId = selectedGoal?._id || selectedGoal?.goalId;
   const isCalculationFresh = isFinancialCalculationFresh(calculationFreshness);
-  const currentSipCandidate = isCalculationFresh
-    ? Number(simulatedSips[goalId] ?? selectedGoal?.simulated_monthly_contribution)
+  const currentSipSource = simulatedSips[goalId] ?? selectedGoal?.simulated_monthly_contribution;
+  const currentSipCandidate = isCalculationFresh && isPresentFiniteNumber(currentSipSource)
+    ? Number(currentSipSource)
     : NaN;
   const currentSip = Number.isFinite(currentSipCandidate) && currentSipCandidate >= 0 ? currentSipCandidate : null;
-  const liveProbability = getLiveProbability(selectedGoal);
-  const recommendedSipCandidate = isCalculationFresh ? Number(selectedGoal.recommended_sip) : NaN;
+  const liveProbability = isCalculationFresh ? getLiveProbability(selectedGoal) : null;
+  const recommendedSipCandidate = isCalculationFresh && isPresentFiniteNumber(selectedGoal.recommended_sip)
+    ? Number(selectedGoal.recommended_sip)
+    : NaN;
   const recommendedSip = Number.isFinite(recommendedSipCandidate) && recommendedSipCandidate >= 0 ? recommendedSipCandidate : null;
-  const capacityCandidate = Number(monthlySavingsCapacity);
+  const capacityCandidate = isPresentFiniteNumber(monthlySavingsCapacity) ? Number(monthlySavingsCapacity) : NaN;
   const sliderMax = Number.isFinite(capacityCandidate) && capacityCandidate > 0 ? capacityCandidate : 0;
   const hasSimulationInput = currentSip !== null && recommendedSip !== null && sliderMax > 0;
   const sliderMin = hasSimulationInput
@@ -211,7 +215,9 @@ export const GoalDetailPane = ({
     ? Number(simulationResult?.monte_carlo_summary?.simulations_run ?? selectedGoal.monte_carlo_summary?.simulations_run)
     : NaN;
   const simulationsRun = Number.isInteger(simulationsRunCandidate) && simulationsRunCandidate > 0 ? simulationsRunCandidate : null;
-  const inflationAssumption = isCalculationFresh ? Number(selectedGoal.inflation_assumption) : NaN;
+  const inflationAssumption = isCalculationFresh && isPresentFiniteNumber(selectedGoal.inflation_assumption)
+    ? Number(selectedGoal.inflation_assumption)
+    : NaN;
   const inflationLabel = Number.isFinite(inflationAssumption)
     ? `${(inflationAssumption * 100).toFixed(1).replace(/\.0$/, '')}%`
     : 'server-specified';
@@ -310,7 +316,7 @@ export const GoalDetailPane = ({
                   fontSize: '0.7rem', color: '#94a3b8', fontWeight: 700
                 }}>
                   <Clock size={11} color="#38bdf8" />
-                  <span>{isCalculationFresh && Number.isFinite(Number(selectedGoal.years_remaining)) ? `${Number(selectedGoal.years_remaining)} Yrs Horizon` : 'Horizon unavailable'}</span>
+                  <span>{isCalculationFresh && isPresentFiniteNumber(selectedGoal.years_remaining) ? `${Number(selectedGoal.years_remaining)} Yrs Horizon` : 'Horizon unavailable'}</span>
                 </div>
 
                 <div style={{
@@ -360,7 +366,7 @@ export const GoalDetailPane = ({
                   boxShadow: 'inset 0 1px 1px rgba(255,255,255,0.05)'
                 }}>
                   <Info size={14} color="#8b5cf6" style={{ flexShrink: 0 }} />
-                  <span>Inflation-Adjusted Target: <strong style={{ color: '#fff' }}>{formatINR(selectedGoal.inflation_adjusted_target)}</strong> ({inflationLabel} annual inflation assumption over {Number.isFinite(Number(selectedGoal.years_remaining)) ? selectedGoal.years_remaining : '–'} yrs).</span>
+                  <span>Inflation-Adjusted Target: <strong style={{ color: '#fff' }}>{formatINR(selectedGoal.inflation_adjusted_target)}</strong> ({inflationLabel} annual inflation assumption over {isPresentFiniteNumber(selectedGoal.years_remaining) ? selectedGoal.years_remaining : '–'} yrs).</span>
                 </div>
               )}
             </>
@@ -498,9 +504,9 @@ export const GoalDetailPane = ({
             />
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#475569', marginTop: 4, marginBottom: 14 }}>
-            <span>MIN: {formatINR(sliderMin)}</span>
+            <span>MIN: {hasSimulationInput ? formatINR(sliderMin) : 'Unavailable'}</span>
             <span style={{ color: '#38bdf8', fontWeight: 700 }}>RECOMMENDED: {formatINR(recommendedSip)}</span>
-            <span>MAX: {formatINR(sliderMax)}</span>
+            <span>MAX: {hasSimulationInput ? formatINR(sliderMax) : 'Unavailable'}</span>
           </div>
 
           {(simulationLoading || simulationError) && (

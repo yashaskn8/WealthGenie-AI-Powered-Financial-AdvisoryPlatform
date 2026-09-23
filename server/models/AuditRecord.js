@@ -1,6 +1,27 @@
 import mongoose from 'mongoose';
 import { optionalUniqueIndex } from '../config/mongoCompatibility.js';
 
+const allocationTransitionSchema = new mongoose.Schema({
+  recommendationId: { type: mongoose.Schema.Types.ObjectId, required: true },
+  profileId: { type: mongoose.Schema.Types.ObjectId, required: true },
+  previousAllocationRevision: { type: Number, required: true, min: 1 },
+  previousAllocationRevisionId: { type: mongoose.Schema.Types.ObjectId, required: true },
+  newAllocationRevision: { type: Number, required: true, min: 2 },
+  newAllocationRevisionId: { type: mongoose.Schema.Types.ObjectId, required: true },
+  oldPortfolioFingerprint: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
+  newPortfolioFingerprint: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
+  recommendationFingerprint: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
+  profileInputHash: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
+  profileVersion: { type: Number, required: true, min: 1 },
+  modelVersion: { type: String, required: true },
+  recommendationPolicyVersion: { type: String, required: true },
+  regulatoryRuleVersion: { type: String, required: true },
+  returnAssumptionVersion: { type: String, required: true },
+  returnAssumptionHash: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
+  returnAssumptionSource: { type: String, required: true },
+  source: { type: String, enum: ['USER_REBALANCED'], required: true },
+}, { _id: false, strict: 'throw' });
+
 const auditRecordSchema = new mongoose.Schema({
   userId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -49,6 +70,10 @@ const auditRecordSchema = new mongoose.Schema({
   recommendations: {
     type: mongoose.Schema.Types.Mixed,
     required: true,
+  },
+  allocation_transition: {
+    type: allocationTransitionSchema,
+    default: undefined,
   },
   cited_rag_chunk_ids: {
     type: [String],

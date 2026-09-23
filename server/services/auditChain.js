@@ -7,7 +7,7 @@ export const AUDIT_SCHEMA_VERSION = '1.0';
 export const AUDIT_GENESIS_HASH = 'GENESIS';
 
 export function auditHashPayload(record) {
-  return {
+  const payload = {
     schema_version: record.schema_version,
     hash_algorithm: record.hash_algorithm,
     previous_hash: record.previous_hash,
@@ -26,6 +26,10 @@ export function auditHashPayload(record) {
     engine: record.engine,
     timestamp: record.timestamp,
   };
+  // Preserve the existing v1 hash for historical events; allocation
+  // transitions opt into the additional explicitly versioned payload field.
+  if (record.allocation_transition) payload.allocation_transition = record.allocation_transition;
+  return payload;
 }
 
 export function calculateAuditRecordHash(record) {
@@ -135,4 +139,3 @@ export async function verifyAuditChain(userId) {
     errors,
   };
 }
-

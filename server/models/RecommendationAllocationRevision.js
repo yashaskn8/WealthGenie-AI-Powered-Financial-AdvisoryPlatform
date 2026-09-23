@@ -15,6 +15,7 @@ const allocationRevisionSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   revision: { type: Number, required: true, min: 1 },
   previousRevision: { type: Number, default: null, min: 1 },
+  previousAllocationRevisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'RecommendationAllocationRevision', default: null },
   source: {
     type: String,
     enum: ['ORIGINAL_RECOMMENDATION', 'MARKET_CONTEXT_ADJUSTED', 'USER_REBALANCED'],
@@ -28,6 +29,7 @@ const allocationRevisionSchema = new mongoose.Schema({
   returnAssumptionVersion: { type: String, required: true },
   returnAssumptionHash: { type: String, match: /^[a-f0-9]{64}$/, default: null },
   returnAssumptionSource: { type: String, required: true },
+  profileVersion: { type: Number, default: null, min: 1 },
   portfolioFingerprint: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
   recommendationFingerprint: { type: String, match: /^[a-f0-9]{64}$/, default: null },
   auditRecordId: { type: mongoose.Schema.Types.ObjectId, ref: 'AuditRecord', default: null },
