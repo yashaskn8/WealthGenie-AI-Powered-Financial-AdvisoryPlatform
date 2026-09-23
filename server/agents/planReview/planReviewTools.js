@@ -13,10 +13,6 @@ function idOf(value) {
   return value?._id ? String(value._id) : value ? String(value) : null;
 }
 
-function latestOwnedRecommendationQuery(profileId, userId, recommendationModel = Recommendation) {
-  return recommendationModel.findOne({ profileId, userId }).sort({ generatedAt: -1 }).lean();
-}
-
 export function buildProfileContext(storedProfile, canonicalProfile = null) {
   if (!storedProfile || !canonicalProfile) return null;
   return {
@@ -34,8 +30,18 @@ export function buildProfileContext(storedProfile, canonicalProfile = null) {
   };
 }
 
-export function buildRecommendationSummary(recommendation) {
+export function buildRecommendationSummary(recommendation, freshness = null) {
   if (!recommendation) return { status: 'MISSING', recommendationId: null, profileId: null, instruments: [] };
+  if (freshness?.fresh !== true) {
+    return {
+      status: 'UNAVAILABLE',
+      recommendationId: idOf(recommendation),
+      profileId: idOf(recommendation.profileId),
+      reasonCodes: [...new Set(freshness?.reasonCodes || ['RECOMMENDATION_STALE'])],
+      instruments: [],
+      unavailableFacts: [...new Set(freshness?.reasonCodes || ['RECOMMENDATION_STALE'])],
+    };
+  }
   return {
     status: 'AVAILABLE',
     recommendationId: idOf(recommendation),
@@ -76,11 +82,15 @@ async function checkRecommendationFreshness(context) {
 }
 
 async function getPlanEvidenceSnapshot(context) {
-  if (!context.profile || !context.recommendation) {
+  const current = context.freshness?.fresh === true;
+  if (!context.profile || !context.recommendation || !current) {
     return {
       status: 'UNAVAILABLE',
       entries: [],
-      unavailableFacts: ['CURRENT_PLAN_EVIDENCE_UNAVAILABLE'],
+      unavailableFacts: [...new Set([
+        'CURRENT_PLAN_EVIDENCE_UNAVAILABLE',
+        ...(context.freshness?.reasonCodes || []),
+      ])],
     };
   }
   const profileForEvidence = {
@@ -102,9 +112,9 @@ async function getPlanEvidenceSnapshot(context) {
   const packet = buildGroundedEvidencePacket({
     question: 'Review the current financial plan and its evidence status.',
     profile: profileForEvidence,
-    recommendation: context.recommendation,
+    recommendation: current ? context.recommendation : null,
     additionalEntries: [freshnessEntry],
-    unavailableFacts: context.freshness.fresh ? [] : context.freshness.reasonCodes,
+    unavailableFacts: current ? [] : context.freshness.reasonCodes,
     purpose: 'PLAN_REVIEW',
   });
   return {
@@ -126,25 +136,27 @@ async function getGoalStatusSummary(context) {
       .lean();
     return {
       status: goals.length ? 'AVAILABLE' : 'NONE',
-      items: goals.slice(0, 20).map(goal => ({
-        ...(() => {
-          const calculationFreshness = context.currentState
-            ? assessGoalCalculationFreshness(goal, context.currentState)
-            : { fresh: true, reasonCodes: [] };
-          return {
-            calculationFreshness,
-            probabilityOfSuccess: calculationFreshness.fresh ? (goal.probability_of_success ?? null) : null,
-            recommendedSip: calculationFreshness.fresh ? (goal.recommended_sip ?? null) : null,
-          };
-        })(),
-        goalId: idOf(goal),
-        name: goal.goal_name,
-        targetDate: goal.target_date ?? null,
-        priority: goal.priority ?? null,
-        status: goal.status ?? null,
-        currentSavings: goal.current_savings ?? null,
-        targetAmount: goal.target_amount ?? null,
-      })),
+      items: goals.slice(0, 20).map(goal => {
+        const calculationFreshness = context.currentState
+          ? assessGoalCalculationFreshness(goal, context.currentState)
+          : { fresh: false, reasonCodes: ['SOURCE_MISSING'] };
+        const calculationIsFresh = calculationFreshness.fresh === true;
+        return {
+          calculationFreshness,
+          probabilityOfSuccess: calculationIsFresh ? (goal.probability_of_success ?? null) : null,
+          recommendedSip: calculationIsFresh ? (goal.recommended_sip ?? null) : null,
+          gapAmount: calculationIsFresh ? (goal.gap_amount ?? null) : null,
+          projectedValue: calculationIsFresh ? (goal.monte_carlo_summary?.p50 ?? null) : null,
+          // A stale status is a derived financial conclusion, not a user fact.
+          status: calculationIsFresh ? (goal.status ?? null) : null,
+          goalId: idOf(goal),
+          name: goal.goal_name,
+          targetDate: goal.target_date ?? null,
+          priority: goal.priority ?? null,
+          currentSavings: goal.current_savings ?? null,
+          targetAmount: goal.target_amount ?? null,
+        };
+      }),
     };
   } catch {
     return { status: 'UNAVAILABLE', items: [], unavailableFacts: ['GOALS_UNAVAILABLE'] };
@@ -188,6 +200,15 @@ export async function executePlanReviewTool(toolName, context) {
   const override = context?.dependencies?.toolOverrides?.[toolName];
   if (typeof override === 'function') return override(context);
   return tool.execute(context);
+}
+
+async function latestOwnedRecommendationQuery(profileId, userId, recommendationModel) {
+  // Only the isolated dependency-adapter path uses this legacy lookup. The
+  // production path above resolves through RecommendationState and therefore
+  // cannot treat timestamp order as current financial authority.
+  return recommendationModel.findOne({ profileId, userId })
+    .sort({ recommendationGeneration: -1, generatedAt: -1, _id: -1 })
+    .lean();
 }
 
 export async function loadPlanReviewContext({ userId, profileId, dependencies = {} }) {
@@ -237,7 +258,7 @@ export async function loadPlanReviewContext({ userId, profileId, dependencies = 
     profileContext: buildProfileContext(storedProfile, profile),
     recommendation,
     currentState,
-    recommendationSummary: buildRecommendationSummary(recommendation),
+    recommendationSummary: buildRecommendationSummary(recommendation, freshness),
     freshness,
   };
 }

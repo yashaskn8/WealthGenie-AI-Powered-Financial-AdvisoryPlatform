@@ -1,4 +1,4 @@
-import { CESS_RATE } from './instrumentConstants.js';
+import { buildTaxRuleMetadata } from './taxRuleMetadata.js';
 /**
  * Dynamically computes India's current fiscal year (April 1st to March 31st).
  * @returns {string} e.g. "FY2026-27"
@@ -150,8 +150,8 @@ const TAX_SOURCES = Object.freeze({
         }),
         Object.freeze({
             authority: 'Income Tax Department — Government of India',
-            title: 'Budget 2026 tax FAQs and slab/rebate explanation',
-            url: 'https://www.incometaxindia.gov.in/documents/d/guest/FAQs-Budget-2026.pdf',
+            title: 'Updated Budget 2026 tax FAQs and slab/rebate explanation',
+            url: 'https://www.incometaxindia.gov.in/documents/20117/15766092/FAQs-Budget-2026%2BUpdated.pdf/daf54d14-aca9-c4ea-b786-598fd2f8d4c4',
             role: 'TAX_POLICY',
         }),
         Object.freeze({
@@ -204,6 +204,20 @@ const TAX_POLICY_RULES = Object.freeze({
         capitalGainsHoldingPeriodMonths: Object.freeze({ listed: 12, other: 24 }),
         bankInterestTdsThreshold: Object.freeze({ general: 50000, senior: 100000 }),
         bankInterestTdsRate: 0.10,
+        healthAndEducationCessRate: 0.04,
+        deductionLimits: Object.freeze({
+            section80C: 150000,
+            section80CCD1B: 50000,
+            section80DSelf: 25000,
+            section80DSelfSenior: 50000,
+            section80DParents: 25000,
+            section80DParentsSenior: 50000,
+            section80DCombined: 100000,
+            homeLoanInterest: 200000,
+            section80EEA: 150000,
+            section80TTA: 10000,
+            section80TTB: 50000,
+        }),
     }),
     'FY2026-27': Object.freeze({
         newRegime87ALimit: 1200000,
@@ -221,22 +235,26 @@ const TAX_POLICY_RULES = Object.freeze({
         capitalGainsHoldingPeriodMonths: Object.freeze({ listed: 12, other: 24 }),
         bankInterestTdsThreshold: Object.freeze({ general: 50000, senior: 100000 }),
         bankInterestTdsRate: 0.10,
+        healthAndEducationCessRate: 0.04,
+        deductionLimits: Object.freeze({
+            section80C: 150000,
+            section80CCD1B: 50000,
+            section80DSelf: 25000,
+            section80DSelfSenior: 50000,
+            section80DParents: 25000,
+            section80DParentsSenior: 50000,
+            section80DCombined: 100000,
+            homeLoanInterest: 200000,
+            section80EEA: 150000,
+            section80TTA: 10000,
+            section80TTB: 50000,
+        }),
     }),
 });
 
-export const TAX_DEDUCTION_LIMITS = Object.freeze({
-    section80C: 150000,
-    section80CCD1B: 50000,
-    section80DSelf: 25000,
-    section80DSelfSenior: 50000,
-    section80DParents: 25000,
-    section80DParentsSenior: 50000,
-    section80DCombined: 100000,
-    homeLoanInterest: 200000,
-    section80EEA: 150000,
-    section80TTA: 10000,
-    section80TTB: 50000,
-});
+// Historical compatibility export only. Runtime calculations resolve limits
+// from the selected fiscal-year policy below.
+export const TAX_DEDUCTION_LIMITS = Object.freeze({ ...TAX_POLICY_RULES['FY2025-26'].deductionLimits });
 
 export const TAX_SLABS_BY_FY = Object.freeze({
     'FY2025-26': Object.freeze({
@@ -244,7 +262,14 @@ export const TAX_SLABS_BY_FY = Object.freeze({
         policyVersion: 'tax-policy-FY2025-26-v2',
         sourceReferences: TAX_SOURCES['FY2025-26'],
         statuteMetadata: TAX_STATUTE_METADATA['FY2025-26'],
-        verifiedRuleIds: Object.freeze(['FY2025-26_NEW_SLABS', 'FY2025-26_OLD_SLABS', 'FY2025-26_CESS', 'FY2025-26_CAPITAL_GAINS']),
+        verifiedRuleIds: Object.freeze([
+            'FY2025-26_NEW_SLABS', 'FY2025-26_OLD_SLABS', 'FY2025-26_STANDARD_DEDUCTION',
+            'FY2025-26_FAMILY_PENSION_DEDUCTION', 'FY2025-26_OLD_REGIME_DEDUCTION_LIMITS',
+            'FY2025-26_HEALTH_DEDUCTION_LIMITS', 'FY2025-26_HOUSING_INTEREST_LIMIT',
+            'FY2025-26_SAVINGS_INTEREST_LIMITS', 'FY2025-26_EMPLOYER_NPS_LIMITS',
+            'FY2025-26_REBATE', 'FY2025-26_MARGINAL_RELIEF', 'FY2025-26_SURCHARGE',
+            'FY2025-26_CESS', 'FY2025-26_CAPITAL_GAINS', 'FY2025-26_BANK_INTEREST_TDS',
+        ]),
         new: FY2025_26_NEW_SLABS,
         old: FY2025_26_OLD_NON_SENIOR_SLABS,
         oldByAge: Object.freeze({
@@ -258,7 +283,16 @@ export const TAX_SLABS_BY_FY = Object.freeze({
         policyVersion: 'tax-policy-FY2026-27-v2',
         sourceReferences: TAX_SOURCES['FY2026-27'],
         statuteMetadata: TAX_STATUTE_METADATA['FY2026-27'],
-        verifiedRuleIds: Object.freeze(['FY2026-27_NEW_SLABS', 'FY2026-27_OLD_SLABS', 'FY2026-27_STANDARD_DEDUCTION', 'FY2026-27_REBATE', 'FY2026-27_CESS', 'FY2026-27_CAPITAL_GAINS', 'FY2026-27_SGB_MATURITY_QUALIFICATION']),
+        verifiedRuleIds: Object.freeze([
+            'FY2026-27_NEW_SLABS', 'FY2026-27_OLD_SLABS', 'FY2026-27_STANDARD_DEDUCTION',
+            'FY2026-27_FAMILY_PENSION_DEDUCTION', 'FY2026-27_OLD_REGIME_DEDUCTION_LIMITS',
+            'FY2026-27_HEALTH_DEDUCTION_LIMITS', 'FY2026-27_HOUSING_INTEREST_LIMIT',
+            'FY2026-27_SAVINGS_INTEREST_LIMITS', 'FY2026-27_EMPLOYER_NPS_LIMITS',
+            'FY2026-27_REBATE', 'FY2026-27_MARGINAL_RELIEF', 'FY2026-27_SURCHARGE',
+            'FY2026-27_CESS', 'FY2026-27_CAPITAL_GAINS', 'FY2026-27_BANK_INTEREST_TDS',
+            'FY2026-27_PPF_CONDITIONAL_EXCLUSION', 'FY2026-27_SSY_CONDITIONAL_EXCLUSION',
+            'FY2026-27_SGB_MATURITY_QUALIFICATION',
+        ]),
         new: FY2026_27_NEW_SLABS,
         old: FY2026_27_OLD_NON_SENIOR_SLABS,
         oldByAge: Object.freeze({
@@ -296,10 +330,7 @@ export function getTaxPolicyMetadata(fiscalYear) {
         statuteMetadata: policy.statuteMetadata,
         verifiedRuleIds: policy.verifiedRuleIds,
         sourceReferences: policy.sourceReferences.map(source => ({ ...source })),
-        rules: {
-            ...rules,
-            healthAndEducationCessRate: CESS_RATE,
-        },
+        rules: { ...rules, deductionLimits: { ...rules.deductionLimits } },
     };
 }
 export function getSupportedFiscalYears() {
@@ -477,6 +508,10 @@ export function calculateTaxableIncome(annualIncome, regime, deductions = {}, in
     validateTaxContext(annualIncome, regime, incomeSource);
     const resolvedFiscalYear = fiscalYear || getCurrentFiscalYear();
     const policyRules = getTaxPolicyRules(resolvedFiscalYear);
+    const deductionLimits = policyRules.deductionLimits;
+    if (Number(deductions.other) > 0) {
+        throw new TypeError('Unclassified deductions are not accepted; submit only a supported, explicitly named deduction.');
+    }
     const userAge = requireUserAge(regime, deductions, explicitUserAge);
     let standardDeduction = 0;
     if (incomeSource === 'salary' || incomeSource === 'pension') {
@@ -500,8 +535,8 @@ export function calculateTaxableIncome(annualIncome, regime, deductions = {}, in
                 : policyRules.employerNpsLimitPct.nonGovernmentOldRegime);
         nps80CCD2 = Math.min(requestedNps80CCD2, deductions.basicSalary * nps80CCD2LimitPercent);
     }
-    const section80C = Math.min(deductions.section80C || 0, TAX_DEDUCTION_LIMITS.section80C);
-    const nps80CCD1B = Math.min(deductions.nps80CCD1B || deductions.section80CCD || 0, TAX_DEDUCTION_LIMITS.section80CCD1B);
+    const section80C = Math.min(deductions.section80C || 0, deductionLimits.section80C);
+    const nps80CCD1B = Math.min(deductions.nps80CCD1B || deductions.section80CCD || 0, deductionLimits.section80CCD1B);
     // Section 80D Granular Self vs. Parents
     const healthOrInterestFactsPresent = Number(deductions.section80D || 0) > 0
         || Number(deductions.section80D_self || 0) > 0
@@ -515,8 +550,8 @@ export function calculateTaxableIncome(annualIncome, regime, deductions = {}, in
     const age = userAge ?? 0;
     const selfSenior = age >= 60 || deductions.self_senior === true;
     const parentsSenior = deductions.parents_senior === true;
-    const max80D_self = selfSenior ? TAX_DEDUCTION_LIMITS.section80DSelfSenior : TAX_DEDUCTION_LIMITS.section80DSelf;
-    const max80D_parents = parentsSenior ? TAX_DEDUCTION_LIMITS.section80DParentsSenior : TAX_DEDUCTION_LIMITS.section80DParents;
+    const max80D_self = selfSenior ? deductionLimits.section80DSelfSenior : deductionLimits.section80DSelf;
+    const max80D_parents = parentsSenior ? deductionLimits.section80DParentsSenior : deductionLimits.section80DParents;
     let allowed80D = 0;
     if (deductions.section80D_self !== undefined || deductions.section80D_parents !== undefined) {
         const allowed80D_self = Math.min(deductions.section80D_self || 0, max80D_self);
@@ -524,12 +559,11 @@ export function calculateTaxableIncome(annualIncome, regime, deductions = {}, in
         allowed80D = allowed80D_self + allowed80D_parents;
     }
     else {
-        allowed80D = Math.min(deductions.section80D || 0, TAX_DEDUCTION_LIMITS.section80DCombined);
+        allowed80D = Math.min(deductions.section80D || 0, deductionLimits.section80DCombined);
     }
     const hra = deductions.hra || 0;
-    const homeLoanInterest = Math.min(deductions.homeLoanInterest || 0, TAX_DEDUCTION_LIMITS.homeLoanInterest);
-    const section80EEA = Math.min(deductions.section80EEA || 0, TAX_DEDUCTION_LIMITS.section80EEA);
-    const otherDeductions = deductions.other || 0;
+    const homeLoanInterest = Math.min(deductions.homeLoanInterest || 0, deductionLimits.homeLoanInterest);
+    const section80EEA = Math.min(deductions.section80EEA || 0, deductionLimits.section80EEA);
     const savingsInterest = deductions.savingsInterest || 0;
     let section80TTA = deductions.section80TTA || 0;
     let section80TTB = deductions.section80TTB || 0;
@@ -541,10 +575,10 @@ export function calculateTaxableIncome(annualIncome, regime, deductions = {}, in
             section80TTA = Math.max(section80TTA, savingsInterest);
         }
     }
-    const allowed80TTA = age < 60 ? Math.min(section80TTA, TAX_DEDUCTION_LIMITS.section80TTA) : 0;
-    const allowed80TTB = age >= 60 ? Math.min(section80TTB, TAX_DEDUCTION_LIMITS.section80TTB) : 0;
+    const allowed80TTA = age < 60 ? Math.min(section80TTA, deductionLimits.section80TTA) : 0;
+    const allowed80TTB = age >= 60 ? Math.min(section80TTB, deductionLimits.section80TTB) : 0;
     const oldRegimeDeductions = regime === 'old'
-        ? (section80C + nps80CCD1B + allowed80D + hra + homeLoanInterest + section80EEA + allowed80TTA + allowed80TTB + otherDeductions)
+        ? (section80C + nps80CCD1B + allowed80D + hra + homeLoanInterest + section80EEA + allowed80TTA + allowed80TTB)
         : 0;
     const taxableIncome = Math.max(0, annualIncome - standardDeduction - nps80CCD2 - oldRegimeDeductions);
     return { standardDeduction, oldRegimeDeductions, taxableIncome, nps80CCD2, allowed80D, userAge };
@@ -593,12 +627,29 @@ export function computeTax(annualIncome, regime, deductions = {}, incomeSource, 
     const relief = computeMarginalRelief(taxBeforeCess, surcharge, taxableIncome, regime, fiscalYear, userAge);
     const taxAfterSurcharge = taxBeforeCess + surcharge - relief;
     // 4% Health & Education Cess (applied on tax + surcharge)
-    const cess = taxAfterSurcharge * CESS_RATE;
+    const cess = taxAfterSurcharge * policyRules.healthAndEducationCessRate;
     const taxAmount = taxAfterSurcharge + cess;
     const effectiveRate = annualIncome > 0
         ? parseFloat(((taxAmount / annualIncome) * 100).toFixed(2))
         : 0;
     const policy = getTaxPolicyMetadata(fiscalYear);
+    const rulesApplied = [
+        `${regime.toUpperCase()}_REGIME_SLABS`,
+        rebateApplied ? 'SECTION_87A_REBATE' : null,
+        (marginalReliefApplied || relief > 0) ? 'MARGINAL_RELIEF' : null,
+        surcharge > 0 ? 'SURCHARGE' : null,
+        regime === 'old' ? `OLD_REGIME_${getOldRegimeAgeBand(userAge).toUpperCase()}_SLABS` : null,
+        incomeSource === 'family_pension' ? 'FAMILY_PENSION_VERSIONED_DEDUCTION' : null,
+        standardDeduction > 0 ? 'STANDARD_DEDUCTION' : null,
+        oldRegimeDeductions > 0 ? 'OLD_REGIME_DEDUCTIONS' : null,
+        allowed80D > 0 ? 'HEALTH_INSURANCE_DEDUCTION' : null,
+        Number(deductions.homeLoanInterest) > 0 ? 'HOUSING_INTEREST_DEDUCTION' : null,
+        Number(deductions.savingsInterest) > 0 || Number(deductions.section80TTA) > 0 || Number(deductions.section80TTB) > 0
+            ? 'SAVINGS_INTEREST_DEDUCTION' : null,
+        nps80CCD2 > 0 ? 'SECTION_80CCD_2_VERSIONED_LIMIT' : null,
+        'HEALTH_AND_EDUCATION_CESS',
+    ].filter(Boolean);
+    const taxRuleMetadata = buildTaxRuleMetadata({ statuteMetadata: policy.statuteMetadata, identifiers: rulesApplied });
     return {
         taxAmount: Math.round(taxAmount),
         effectiveRate,
@@ -629,16 +680,8 @@ export function computeTax(annualIncome, regime, deductions = {}, incomeSource, 
             fiscalYear,
             deductions: { ...deductions },
         },
-        rulesApplied: [
-            `${regime.toUpperCase()}_REGIME_SLABS`,
-            rebateApplied ? 'SECTION_87A_REBATE' : null,
-            (marginalReliefApplied || relief > 0) ? 'MARGINAL_RELIEF' : null,
-            surcharge > 0 ? 'SURCHARGE' : null,
-            regime === 'old' ? `OLD_REGIME_${getOldRegimeAgeBand(userAge).toUpperCase()}_SLABS` : null,
-            incomeSource === 'family_pension' ? 'FAMILY_PENSION_VERSIONED_DEDUCTION' : null,
-            nps80CCD2 > 0 ? 'SECTION_80CCD_2_VERSIONED_LIMIT' : null,
-            'HEALTH_AND_EDUCATION_CESS',
-        ].filter(Boolean),
+        rulesApplied: taxRuleMetadata?.rulesApplied || rulesApplied,
+        taxRuleMetadata,
         assumptions: [],
         unavailableReasons: [],
     };
@@ -714,7 +757,7 @@ export function computeCapitalGainsTaxBuckets({
 
     const available112AExemption = Math.max(0, policyRules.capitalGains112AExemption - section112AExemptionUsed);
     if (section112AExemptionAppliedOverride !== null && section112AExemptionAppliedOverride > available112AExemption) {
-        throw new RangeError('section112AExemptionAppliedOverride exceeds the remaining verified Section 112A exemption');
+        throw new RangeError('section112AExemptionAppliedOverride exceeds the remaining fiscal-year policy exemption');
     }
     const exemptionApplied = section112AExemptionAppliedOverride === null
         ? Math.min(longTerm112AGain, available112AExemption)
@@ -727,15 +770,17 @@ export function computeCapitalGainsTaxBuckets({
     const surchargeRate = Math.min(getSpecialRateSurchargeRate(combinedTaxableIncome), policyRules.specialRateSurchargeCap);
     const surcharge = taxBeforeSurcharge * surchargeRate;
     const taxAfterSurcharge = taxBeforeSurcharge + surcharge;
-    const cess = taxAfterSurcharge * CESS_RATE;
+    const cess = taxAfterSurcharge * policyRules.healthAndEducationCessRate;
     const taxAmount = Math.round(taxAfterSurcharge + cess);
-    const rulesApplied = [];
-    if (shortTerm111AGain > 0) rulesApplied.push('SECTION_111A_STCG_SPECIAL_RATE');
-    if (longTerm112AGain > 0) rulesApplied.push('SECTION_112A_LTCG_SPECIAL_RATE');
-    if (longTermOtherGain > 0) rulesApplied.push('SECTION_112_LTCG_SPECIAL_RATE');
-    if (exemptionApplied > 0) rulesApplied.push('SECTION_112A_ANNUAL_EXEMPTION');
-    if (surcharge > 0) rulesApplied.push('SPECIAL_RATE_SURCHARGE_CAPPED_AT_15_PERCENT');
-    rulesApplied.push('SPECIAL_RATE_INCOME_EXCLUDED_FROM_87A_REBATE', 'HEALTH_AND_EDUCATION_CESS');
+    const rawRulesApplied = [];
+    if (shortTerm111AGain > 0) rawRulesApplied.push('SECTION_111A_STCG_SPECIAL_RATE');
+    if (longTerm112AGain > 0) rawRulesApplied.push('SECTION_112A_LTCG_SPECIAL_RATE');
+    if (longTermOtherGain > 0) rawRulesApplied.push('SECTION_112_LTCG_SPECIAL_RATE');
+    if (exemptionApplied > 0) rawRulesApplied.push('SECTION_112A_ANNUAL_EXEMPTION');
+    if (surcharge > 0) rawRulesApplied.push('SPECIAL_RATE_SURCHARGE_CAPPED_AT_15_PERCENT');
+    rawRulesApplied.push('SPECIAL_RATE_INCOME_EXCLUDED_FROM_87A_REBATE', 'HEALTH_AND_EDUCATION_CESS');
+    const taxRuleMetadata = buildTaxRuleMetadata({ statuteMetadata: policy.statuteMetadata, identifiers: rawRulesApplied });
+    const rulesApplied = taxRuleMetadata?.rulesApplied || rawRulesApplied;
 
     return {
         status: 'CALCULATED',
@@ -754,6 +799,7 @@ export function computeCapitalGainsTaxBuckets({
         fiscalYear,
         policyVersion: policy.policyVersion,
         statuteMetadata: policy.statuteMetadata,
+        taxRuleMetadata,
         userAge: ordinary.userAge,
         sourceReferences: policy.sourceReferences,
         rulesApplied,
@@ -805,6 +851,11 @@ export function computeEquityCapitalGainsTax({
     return {
         ...result,
         taxClass: isLongTerm ? 'EQUITY_LTCG_SECTION_112A' : 'EQUITY_STCG_SECTION_111A',
+        taxClassificationMetadata: buildTaxRuleMetadata({
+            statuteMetadata: result.statuteMetadata,
+            identifiers: result.rulesApplied,
+            taxClass: isLongTerm ? 'EQUITY_LTCG_SECTION_112A' : 'EQUITY_STCG_SECTION_111A',
+        }),
     };
 }
 /**
@@ -889,7 +940,7 @@ export function buildTaxSlabBreakdown(computation, fiscalYear) {
 
     if (computation.rebateApplied && baseTax > 0) {
         rows.push({
-            label: 'Government Tax Rebate (Section 87A)',
+            label: 'Government tax rebate under the selected fiscal-year policy',
             rate: '',
             taxableInSlab: 0,
             taxInSlab: -baseTax,
@@ -913,21 +964,23 @@ export function buildTaxSlabBreakdown(computation, fiscalYear) {
  */
 export function analyzeTaxOptimization(annualIncome, deductions = {}, incomeSource, fiscalYear, userAge) {
     validateTaxContext(annualIncome, 'old', incomeSource);
-    const section80C = Math.min(Number(deductions.section80C) || 0, TAX_DEDUCTION_LIMITS.section80C);
-    const nps80CCD1B = Math.min(Number(deductions.nps80CCD1B ?? deductions.section80CCD) || 0, TAX_DEDUCTION_LIMITS.section80CCD1B);
+    const policyRules = getTaxPolicyRules(fiscalYear || getCurrentFiscalYear());
+    const limits = policyRules.deductionLimits;
+    const section80C = Math.min(Number(deductions.section80C) || 0, limits.section80C);
+    const nps80CCD1B = Math.min(Number(deductions.nps80CCD1B ?? deductions.section80CCD) || 0, limits.section80CCD1B);
     const age = Number.isInteger(deductions.age) ? deductions.age : null;
     const parentsSeniorKnown = typeof deductions.parents_senior === 'boolean';
     const parentsSenior = deductions.parents_senior === true;
     const deductionLimits = {
-        section80C: TAX_DEDUCTION_LIMITS.section80C,
-        section80CCD1B: TAX_DEDUCTION_LIMITS.section80CCD1B,
+        section80C: limits.section80C,
+        section80CCD1B: limits.section80CCD1B,
         section80DSelf: age !== null && age >= 60
-            ? TAX_DEDUCTION_LIMITS.section80DSelfSenior
-            : TAX_DEDUCTION_LIMITS.section80DSelf,
+            ? limits.section80DSelfSenior
+            : limits.section80DSelf,
         section80DParents: parentsSeniorKnown
             ? (parentsSenior
-                ? TAX_DEDUCTION_LIMITS.section80DParentsSenior
-                : TAX_DEDUCTION_LIMITS.section80DParents)
+                ? limits.section80DParentsSenior
+                : limits.section80DParents)
             : null,
     };
     const remaining = {

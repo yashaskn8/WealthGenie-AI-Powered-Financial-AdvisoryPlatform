@@ -3,6 +3,7 @@ import { Target, TrendingUp, Calendar, DollarSign, Sliders, Sparkles, Save, Aler
 import { motion, AnimatePresence } from 'framer-motion';
 import ProjectionBand from './ProjectionBand';
 import JargonTooltip from './JargonTooltip';
+import { isAdvisoryFresh, isFinancialCalculationFresh } from '../utils/financialFreshness';
 
 const getGoalIcon = (name = '') => {
   const lower = name.toLowerCase();
@@ -189,8 +190,10 @@ export const GoalDetailPane = ({
   };
 
   const goalId = selectedGoal?._id || selectedGoal?.goalId;
-  const isCalculationFresh = calculationFreshness?.fresh !== false;
-  const currentSipCandidate = Number(simulatedSips[goalId] ?? selectedGoal?.simulated_monthly_contribution);
+  const isCalculationFresh = isFinancialCalculationFresh(calculationFreshness);
+  const currentSipCandidate = isCalculationFresh
+    ? Number(simulatedSips[goalId] ?? selectedGoal?.simulated_monthly_contribution)
+    : NaN;
   const currentSip = Number.isFinite(currentSipCandidate) && currentSipCandidate >= 0 ? currentSipCandidate : null;
   const liveProbability = getLiveProbability(selectedGoal);
   const recommendedSipCandidate = isCalculationFresh ? Number(selectedGoal.recommended_sip) : NaN;
@@ -204,9 +207,11 @@ export const GoalDetailPane = ({
   const sliderStep = recommendedSip !== null && recommendedSip < 2000 ? 250 : 500;
   const hasProbability = Number.isFinite(liveProbability) && liveProbability >= 0 && liveProbability <= 1;
   const probPct = hasProbability ? Math.round(liveProbability * 100) : null;
-  const simulationsRunCandidate = Number(simulationResult?.monte_carlo_summary?.simulations_run ?? selectedGoal.monte_carlo_summary?.simulations_run);
+  const simulationsRunCandidate = isCalculationFresh
+    ? Number(simulationResult?.monte_carlo_summary?.simulations_run ?? selectedGoal.monte_carlo_summary?.simulations_run)
+    : NaN;
   const simulationsRun = Number.isInteger(simulationsRunCandidate) && simulationsRunCandidate > 0 ? simulationsRunCandidate : null;
-  const inflationAssumption = Number(selectedGoal.inflation_assumption);
+  const inflationAssumption = isCalculationFresh ? Number(selectedGoal.inflation_assumption) : NaN;
   const inflationLabel = Number.isFinite(inflationAssumption)
     ? `${(inflationAssumption * 100).toFixed(1).replace(/\.0$/, '')}%`
     : 'server-specified';
@@ -305,7 +310,7 @@ export const GoalDetailPane = ({
                   fontSize: '0.7rem', color: '#94a3b8', fontWeight: 700
                 }}>
                   <Clock size={11} color="#38bdf8" />
-                  <span>{Number.isFinite(Number(selectedGoal.years_remaining)) ? `${Number(selectedGoal.years_remaining)} Yrs Horizon` : 'Horizon unavailable'}</span>
+                  <span>{isCalculationFresh && Number.isFinite(Number(selectedGoal.years_remaining)) ? `${Number(selectedGoal.years_remaining)} Yrs Horizon` : 'Horizon unavailable'}</span>
                 </div>
 
                 <div style={{
@@ -344,10 +349,10 @@ export const GoalDetailPane = ({
                 <MetricCard label="Target Goal" value={formatINR(selectedGoal.target_amount)} icon={<Target size={18} />} accentColor="#38bdf8" />
                 <MetricCard label="Recommended SIP" value={recommendedSip === null ? '—' : `${formatINR(recommendedSip)}/mo`} icon={<TrendingUp size={18} />} accentColor="#10b981" />
                 <MetricCard label="Target Deadline" value={new Date(selectedGoal.target_date).toLocaleDateString('en-IN', { year: 'numeric', month: 'short' })} icon={<Calendar size={18} />} accentColor="#8b5cf6" />
-                <MetricCard label="Allocated Instrument" value={(selectedGoal.recommended_instrument || '').replace('_', ' ')} icon={<DollarSign size={18} />} accentColor="#f59e0b" />
+                <MetricCard label="Allocated Instrument" value={isCalculationFresh ? (selectedGoal.recommended_instrument || 'Unavailable').replace('_', ' ') : 'Unavailable'} icon={<DollarSign size={18} />} accentColor="#f59e0b" />
               </div>
 
-              {selectedGoal.inflation_adjusted_target && selectedGoal.inflation_adjusted_target !== selectedGoal.target_amount && (
+              {isCalculationFresh && selectedGoal.inflation_adjusted_target && selectedGoal.inflation_adjusted_target !== selectedGoal.target_amount && (
                 <div style={{
                   marginTop: 14, padding: '10px 16px', borderRadius: 12,
                   background: 'rgba(139, 92, 246, 0.08)', border: '1px solid rgba(139, 92, 246, 0.2)',
@@ -418,7 +423,7 @@ export const GoalDetailPane = ({
           </div>
 
           {/* Gap Warning */}
-          {selectedGoal.gap_amount > 0 && (
+          {isCalculationFresh && selectedGoal.gap_amount > 0 && (
             <motion.div 
               initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}
               style={{
@@ -510,7 +515,7 @@ export const GoalDetailPane = ({
               QUICK PRESETS:
             </span>
             {[
-              { label: 'Reset', val: hasSimulationInput ? Number(selectedGoal.simulated_monthly_contribution) : null },
+              { label: 'Reset', val: hasSimulationInput && isCalculationFresh ? Number(selectedGoal.simulated_monthly_contribution) : null },
               { label: '+25%', val: hasSimulationInput ? Math.min(sliderMax, Math.round(recommendedSip * 1.25 / 250) * 250) : null },
               { label: '+50%', val: hasSimulationInput ? Math.min(sliderMax, Math.round(recommendedSip * 1.5 / 250) * 250) : null },
               { label: '2x Double', val: hasSimulationInput ? Math.min(sliderMax, recommendedSip * 2) : null },
@@ -574,7 +579,7 @@ export const GoalDetailPane = ({
         </motion.div>
 
         {/* ─── Neural AI Insight Card ──────────────────────────────────── */}
-        {selectedGoal.gemini_advice && isCalculationFresh && (
+        {selectedGoal.gemini_advice && isCalculationFresh && isAdvisoryFresh(selectedGoal.advisory_freshness) && (
           <motion.div 
             initial={{ opacity: 0, y: 15 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.25 }}
             style={{
@@ -642,9 +647,9 @@ export const GoalDetailPane = ({
                 >
                   <ProjectionBand
                     chartData={getSimulatedChartData(selectedGoal)}
-                    targetAmount={selectedGoal.inflation_adjusted_target}
+                    targetAmount={isCalculationFresh ? selectedGoal.inflation_adjusted_target : null}
                     goalProbability={liveProbability}
-                    instrumentName={(selectedGoal.recommended_instrument || '').replace('_', ' ')}
+                    instrumentName={isCalculationFresh ? (selectedGoal.recommended_instrument || '').replace('_', ' ') : ''}
                     simulationsRun={simulationsRun}
                   />
                 </motion.div>

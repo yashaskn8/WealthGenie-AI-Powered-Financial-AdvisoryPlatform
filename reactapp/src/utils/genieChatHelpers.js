@@ -32,7 +32,7 @@ export function generateContextualPills(lastQuestion) {
   if (!lastQuestion) return [];
   const question = lastQuestion.toLowerCase();
   if (question.includes('rebalance') || question.includes('allocation')) return ['Show ideal asset allocation', 'Explain portfolio risk', 'Compare balanced options'];
-  if (question.includes('tax')) return ['Which regime saves more?', 'Section 80C breakdown', 'Post-tax return'];
+  if (question.includes('tax')) return ['Which regime saves more?', 'Eligible deduction breakdown', 'Post-tax return'];
   if (question.includes('sip') || question.includes('invest') || question.includes('step')) return ['Show a SIP projection', 'Explain yearly step-up', 'Review my savings capacity'];
   if (question.includes('retire') || question.includes('goal')) return ['Am I on track?', 'Review my goal horizon', 'Explain goal funding'];
   if (question.includes('crash') || question.includes('market')) return ['Explain crash risk', 'How does diversification help?', 'Review portfolio risk'];

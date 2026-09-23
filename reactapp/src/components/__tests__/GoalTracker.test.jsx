@@ -33,6 +33,8 @@ const savedGoal = {
   status: 'at_risk',
   recommended_instrument: 'balanced_fund',
   monte_carlo_summary: { p50: 250000 },
+  calculation_freshness: { fresh: true, reasonCodes: [] },
+  advisory_freshness: { fresh: true, reasonCodes: [] },
   gemini_advice: 'Increase the goal contribution when cash flow allows.',
 };
 
@@ -84,6 +86,15 @@ describe('GoalTracker custom-goal boundary', () => {
     expect(screen.getByText('Increase the goal contribution when cash flow allows.')).toBeTruthy();
     expect(screen.getAllByText('₹2.5L')).toHaveLength(2);
     expect(screen.getByText('₹3.5L')).toBeTruthy();
+  });
+
+  it('does not render derived values or advice when freshness proof is missing', async () => {
+    api.getGoals.mockResolvedValue({ goals: [{ ...savedGoal, calculation_freshness: undefined, advisory_freshness: undefined }] });
+    render(<GoalTracker profile={profile} />);
+
+    expect(await screen.findByText('Dream Studio')).toBeTruthy();
+    expect(screen.getAllByText('Awaiting backend calculation').length).toBeGreaterThan(0);
+    expect(screen.queryByText('Increase the goal contribution when cash flow allows.')).toBeNull();
   });
 
   it('updates only explicit target facts and then refreshes server calculations', async () => {

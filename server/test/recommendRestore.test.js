@@ -11,6 +11,7 @@ import Recommendation from '../models/Recommendation.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import RecommendationState from '../models/RecommendationState.js';
 import AuditRecord from '../models/AuditRecord.js';
+import AuditChainHead from '../models/AuditChainHead.js';
 import {
   buildRecommendationProfile,
   buildRecommendationProfileHash,
@@ -21,7 +22,7 @@ import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
 import { runPipeline } from '../services/RecommendationPipeline.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
-import { buildPortfolioFingerprint } from '../services/recommendationFingerprint.js';
+import { buildPortfolioFingerprint, buildRecommendationFingerprint } from '../services/recommendationFingerprint.js';
 import {
   PROJECTION_ASSUMPTION_POLICY_HASH,
   PROJECTION_ASSUMPTION_SOURCE,
@@ -93,6 +94,19 @@ async function createFixture({ userId = userA, stale = false, regulatoryRuleVers
 async function createCanonicalState(recommendation) {
   const instruments = recommendation.instruments.map(instrument => instrument.toObject());
   const portfolioFingerprint = buildPortfolioFingerprint(instruments);
+  const returnAssumptionVersion = instruments[0].returnAssumptionVersion || PROJECTION_ASSUMPTION_VERSION;
+  const returnAssumptionHash = instruments[0].returnAssumptionHash || PROJECTION_ASSUMPTION_POLICY_HASH;
+  const recommendationFingerprint = buildRecommendationFingerprint({
+    recommendationId: recommendation._id,
+    profileInputHash: recommendation.profileInputHash,
+    modelVersion: recommendation.modelVersion,
+    recommendationPolicyVersion: recommendation.recommendationPolicyVersion,
+    regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
+    returnAssumptionVersion,
+    returnAssumptionHash,
+    allocationRevision: 1,
+    instruments,
+  });
   const revision = await RecommendationAllocationRevision.create({
     recommendationId: recommendation._id,
     profileId: recommendation.profileId,
@@ -105,10 +119,11 @@ async function createCanonicalState(recommendation) {
     modelVersion: recommendation.modelVersion,
     recommendationPolicyVersion: recommendation.recommendationPolicyVersion,
     regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
-    returnAssumptionVersion: instruments[0].returnAssumptionVersion || PROJECTION_ASSUMPTION_VERSION,
-    returnAssumptionHash: instruments[0].returnAssumptionHash || PROJECTION_ASSUMPTION_POLICY_HASH,
+    returnAssumptionVersion,
+    returnAssumptionHash,
     returnAssumptionSource: instruments[0].returnSource || PROJECTION_ASSUMPTION_SOURCE,
     portfolioFingerprint,
+    recommendationFingerprint,
   });
   await RecommendationState.create({
     userId: recommendation.userId,
@@ -202,6 +217,7 @@ async function createAdvisoryLifecycleFixture() {
       recommendationPolicyVersion: recommendation.recommendationPolicyVersion,
       regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
       returnAssumptionHash: recommendation.returnAssumptionHash,
+      profileVersion: storedProfile.version,
       generatedAt: new Date('2026-09-21T00:00:00.000Z'),
     },
   } });
@@ -211,6 +227,17 @@ async function createAdvisoryLifecycleFixture() {
 async function request(profileId, userId = userA) {
   return fetch(`${baseUrl}/api/recommend/current?profileId=${profileId}`, {
     headers: { Authorization: `Bearer ${signToken(userId)}` },
+  });
+}
+
+async function submitWeights(payload, userId = userA) {
+  return fetch(`${baseUrl}/api/recommend/weights`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${signToken(userId)}`,
+    },
+    body: JSON.stringify(payload),
   });
 }
 
@@ -234,6 +261,7 @@ test.beforeEach(async () => {
     Recommendation.deleteMany({ userId: { $in: [userA, userB] } }),
     RecommendationState.deleteMany({ userId: { $in: [userA, userB] } }),
     AuditRecord.deleteMany({ userId: { $in: [userA, userB] } }),
+    AuditChainHead.deleteMany({ _id: { $in: [userA, userB] } }),
   ]);
 });
 
@@ -344,4 +372,35 @@ test('rejects a recommendation whose profile hash is stale', async () => {
 
   assert.equal(response.status, 409);
   assert.equal(body.code, 'STALE_RECOMMENDATION');
+});
+
+test('concurrent manual rebalances create exactly one immutable next allocation revision', async () => {
+  const profile = await createFixture();
+  const currentResponse = await request(profile._id);
+  assert.equal(currentResponse.status, 200);
+  const current = await currentResponse.json();
+  const weights = Object.fromEntries(current.instruments.map(instrument => [instrument.id, instrument.allocationWeight]));
+  const payload = {
+    profileId: String(profile._id),
+    recommendationId: current.recommendationId,
+    expectedAllocationRevision: current.allocation_revision,
+    expectedPortfolioFingerprint: current.portfolio_fingerprint,
+    weights,
+  };
+
+  const responses = await Promise.all([submitWeights(payload), submitWeights(payload)]);
+  const results = await Promise.all(responses.map(async response => ({ status: response.status, body: await response.json() })));
+  assert.deepEqual(results.map(result => result.status).sort(), [200, 409]);
+  const rejected = results.find(result => result.status === 409);
+  assert.ok(['ALLOCATION_REVISION_CONFLICT', 'ALLOCATION_STATE_CHANGED'].includes(rejected.body.code));
+
+  const latest = await request(profile._id);
+  assert.equal(latest.status, 200);
+  const latestBody = await latest.json();
+  assert.equal(latestBody.allocation_revision, 2);
+  assert.equal(latestBody.generation_instruments[0].allocationWeight, current.generation_instruments[0].allocationWeight);
+  assert.equal(await RecommendationAllocationRevision.countDocuments({ recommendationId: current.recommendationId }), 2);
+  assert.equal(await AuditRecord.countDocuments({ userId: userA, recommendationId: current.recommendationId }), 1);
+  const chainHead = await AuditChainHead.findById(userA).lean();
+  assert.equal(chainHead.sequence, 1);
 });

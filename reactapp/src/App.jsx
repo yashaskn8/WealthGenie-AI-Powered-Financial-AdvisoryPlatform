@@ -344,6 +344,10 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
         return {
           ...prev,
           instruments: response.instruments,
+          advisory_text: response.advisory_text ?? null,
+          advisory_explanation: response.advisory_explanation || { status: 'STALE' },
+          explanation: response.explanation ?? null,
+          generation_explanation: response.generation_explanation ?? prev.generation_explanation ?? null,
           portfolio_return_assumption: response.portfolio_return_assumption,
           return_data_class: response.return_data_class,
           return_assumption_version: response.return_assumption_version,

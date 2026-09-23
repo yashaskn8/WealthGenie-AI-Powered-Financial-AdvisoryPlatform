@@ -69,7 +69,7 @@ function advisoryBindingStatus(metadata, state) {
   const required = [
     'recommendationId', 'profileId', 'allocationRevision', 'allocationRevisionId',
     'portfolioFingerprint', 'profileInputHash', 'recommendationPolicyVersion',
-    'regulatoryRuleVersion', 'returnAssumptionHash', 'generatedAt',
+    'regulatoryRuleVersion', 'returnAssumptionHash', 'profileVersion', 'generatedAt',
   ];
   if (!metadata || required.some(field => metadata[field] === null || metadata[field] === undefined || metadata[field] === '')) {
     return { fresh: false, reason: 'ADVISORY_PROVENANCE_MISSING' };
@@ -82,7 +82,8 @@ function advisoryBindingStatus(metadata, state) {
     && metadata.profileInputHash === state.recommendation.profileInputHash
     && metadata.recommendationPolicyVersion === state.recommendation.recommendationPolicyVersion
     && metadata.regulatoryRuleVersion === state.recommendation.regulatoryRuleVersion
-    && metadata.returnAssumptionHash === state.allocationRevision.returnAssumptionHash;
+    && metadata.returnAssumptionHash === state.allocationRevision.returnAssumptionHash
+    && Number(metadata.profileVersion) === Number(state.profileVersion);
   return matches ? { fresh: true, reason: null } : { fresh: false, reason: 'ADVISORY_SOURCE_STATE_CHANGED' };
 }
 
@@ -90,6 +91,21 @@ async function persistAdvisoryIfCurrent({ recommendationId, userId, state, claim
   const session = await Recommendation.startSession();
   try {
     await session.withTransaction(async () => {
+      const profileCas = await FinancialProfile.updateOne({
+        _id: state.recommendation.profileId,
+        userId,
+        version: state.profileVersion,
+      }, {
+        // A real write fence serializes an overlapping profile edit with this
+        // provenance-bound advisory write under Mongo snapshot isolation.
+        $inc: { financialStateFence: 1 },
+      }, { session });
+      if (profileCas.matchedCount !== 1) {
+        const error = new Error('The financial profile changed while advisory text was being generated.');
+        error.code = 'ADVISORY_SOURCE_STATE_CHANGED';
+        error.status = 409;
+        throw error;
+      }
       const pointer = await RecommendationState.findOne({
         _id: state.provenance?.stateId,
         userId,
@@ -126,6 +142,7 @@ async function persistAdvisoryIfCurrent({ recommendationId, userId, state, claim
           returnAssumptionHash: state.allocationRevision.returnAssumptionHash,
           returnAssumptionSource: state.allocationRevision.returnAssumptionSource,
         },
+        $inc: { financialStateFence: 1 },
       }, { session });
       if (stateCas.matchedCount !== 1) {
         const error = new Error('The financial state changed while advisory text was being generated.');
@@ -361,6 +378,7 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
             { 'advisoryMetadata.recommendationPolicyVersion': { $exists: false } },
             { 'advisoryMetadata.regulatoryRuleVersion': { $exists: false } },
             { 'advisoryMetadata.returnAssumptionHash': { $exists: false } },
+            { 'advisoryMetadata.profileVersion': { $exists: false } },
           ],
         },
       ],
@@ -379,6 +397,7 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
         'advisoryMetadata.recommendationPolicyVersion': recommendation.recommendationPolicyVersion || RECOMMENDATION_POLICY_VERSION,
         'advisoryMetadata.regulatoryRuleVersion': recommendation.regulatoryRuleVersion,
         'advisoryMetadata.returnAssumptionHash': recommendationState.allocationRevision.returnAssumptionHash,
+        'advisoryMetadata.profileVersion': recommendationState.profileVersion,
       },
     },
     { new: true },
@@ -478,6 +497,7 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
       recommendationPolicyVersion: recommendation.recommendationPolicyVersion || RECOMMENDATION_POLICY_VERSION,
       regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
       returnAssumptionHash: currentState.allocationRevision.returnAssumptionHash,
+      profileVersion: currentState.profileVersion,
       claimToken,
     };
 
@@ -625,9 +645,21 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
     if (error.code === 'ALLOCATION_STATE_CHANGED') {
       throw createError(409, error.message, 'This portfolio changed before the rebalance completed. Refresh and retry.', { code: error.code });
     }
+    if (error.code === 'PROFILE_STATE_CHANGED') {
+      throw createError(409, error.message, 'The Financial Profile changed before the rebalance completed. Refresh and retry.', { code: error.code });
+    }
     throw error;
   }
-  await delCache(buildRecommendationCacheKey(req.user.userId, stored._id, profile, recommendation.modelVersion));
+  await delCache(buildRecommendationCacheKey(req.user.userId, stored._id, profile, recommendation.modelVersion)).catch(error => {
+    // The revision and audit record have already committed atomically. Cache
+    // invalidation is best-effort and must not turn a committed rebalance into
+    // a client-visible failure that may be retried as a second mutation.
+    logger.warn('Recommendation cache invalidation failed after committed allocation revision', {
+      error: error.message,
+      recommendationId: String(recommendation._id),
+      allocationRevision: revisionResult.revision.revision,
+    });
+  });
   const currentResponse = buildCurrentRecommendationResponse({
     profile,
     recommendation,

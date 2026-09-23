@@ -16,28 +16,49 @@ const masterCatalog = JSON.parse(
   readFileSync(resolve(__dirname, 'investment_master.json'), 'utf8')
 );
 
+const TAX_CATALOG_UNAVAILABLE = Object.freeze({
+  status: 'TAX_CLASSIFICATION_UNAVAILABLE',
+  label: 'Tax treatment requires a current server calculation',
+  desc: 'Static catalog tax fields are legacy references, not current tax authority. Use an explicit fiscal-year calculation with qualified product and taxpayer facts.',
+});
+
+const TAX_CLAIM_TEXT = /\b(?:tax(?:ation|able|free|es|ed)?|eee|ltcg|stcg|section\s*(?:80|87|111|112|115|50)\w*)\b/i;
+
+function sanitizeStaticTaxClaims(value, key = '') {
+  if (key === 'taxation') return { ...TAX_CATALOG_UNAVAILABLE };
+  if (typeof value === 'string') return TAX_CLAIM_TEXT.test(value) ? TAX_CATALOG_UNAVAILABLE.desc : value;
+  if (Array.isArray(value)) return value.map(item => sanitizeStaticTaxClaims(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [
+      childKey,
+      sanitizeStaticTaxClaims(childValue, childKey),
+    ]));
+  }
+  return value;
+}
+
 // ─── TAX INFO LOOKUP ──────────────────────────────────────────────
 export const TAX_INFO = {
   eee: {
     label: "EEE — Exempt-Exempt-Exempt",
-    desc: "Investment, growth, and withdrawal are all 100% tax-free. Best possible tax treatment."
+    desc: "Tax treatment depends on account eligibility, applicable fiscal-year law and the specific contribution, accrual and withdrawal facts."
   },
   slab: {
     label: "Taxed at Income Slab Rate",
-    desc: "Interest/gains added to taxable income and taxed at your marginal income tax rate.",
-    debtNote: "Post Finance Act 2023: debt MF gains are taxed at slab rates regardless of holding period. Indexation and 20% LTCG benefits no longer apply."
+    desc: "Tax treatment depends on the selected fiscal-year law and verified product classification.",
+    debtNote: "Debt-fund tax treatment depends on acquisition date, holding period, product classification and the selected fiscal-year policy."
   },
   ltcg: {
-    label: "LTCG — 12.5% on gains above ₹1.25L",
-    desc: "Long-term capital gains above ₹1.25 lakh taxed at 12.5%. Gains below threshold are tax-free."
+    label: "Long-term capital-gains treatment",
+    desc: "The applicable fiscal-year policy determines the tax treatment from the verified product class, holding period and taxpayer inputs."
   },
   elss: {
-    label: "ELSS — 80C + LTCG",
-    desc: "Investment qualifies for ₹1.5L deduction under 80C. Gains taxed as LTCG at 12.5% above ₹1.25L."
+    label: "ELSS — fiscal-year eligibility applies",
+    desc: "Tax treatment depends on the selected fiscal year, tax regime, holding period and verified product classification."
   },
   nps: {
-    label: "NPS — 80CCD(1B) Extra Deduction",
-    desc: "Additional ₹50,000 deduction under 80CCD(1B) beyond the ₹1.5L 80C limit. 60% lump sum at retirement is tax-free."
+    label: "NPS — fiscal-year contribution rules apply",
+    desc: "NPS contribution and withdrawal treatment depends on the selected fiscal year, tax regime, contribution type and exit facts."
   },
   sgb: {
     label: "2.5% Interest Taxable · Maturity Tax Depends on Acquisition Facts",
@@ -154,6 +175,7 @@ export function recommendationTypeForCatalogInstrument(instrument) {
 
 // Map masterCatalog instruments to the old flat structure for backward compatibility
 export const investmentDatabase = masterCatalog.instruments.map(inst => {
+  const safeStaticData = sanitizeStaticTaxClaims(inst.staticData);
   const legacyType = SPECIFIC_ID_TYPE_MAP[inst.id] || (
     inst.dynamicData?.taxType === 'elss' || inst.taxType === 'elss'
       ? 'ELSS'
@@ -175,17 +197,17 @@ export const investmentDatabase = masterCatalog.instruments.map(inst => {
     metadata: inst.metadata,
     
     // Static fields flattened
-    description: inst.staticData.description,
-    desc: inst.staticData.description, // desc mapped to description
-    pros: inst.staticData.pros,
-    cons: inst.staticData.cons,
-    faq: inst.staticData.faq,
-    taxation: inst.staticData.taxation,
-    suitability: inst.staticData.suitability,
-    trustBadge: inst.staticData.trustBadge,
-    alternatives: inst.staticData.alternatives,
-    explainer: inst.staticData.explainer,
-    cardSubtitle: inst.staticData.cardSubtitle,
+    description: safeStaticData.description,
+    desc: safeStaticData.description, // desc mapped to description
+    pros: safeStaticData.pros,
+    cons: safeStaticData.cons,
+    faq: safeStaticData.faq,
+    taxation: safeStaticData.taxation,
+    suitability: safeStaticData.suitability,
+    trustBadge: safeStaticData.trustBadge,
+    alternatives: safeStaticData.alternatives,
+    explainer: safeStaticData.explainer,
+    cardSubtitle: safeStaticData.cardSubtitle,
     
     // Dynamic fields flattened
     expectedReturn: inst.dynamicData.expectedReturn.avg,
@@ -214,7 +236,7 @@ export const investmentDatabase = masterCatalog.instruments.map(inst => {
     goalTags: inst.dynamicData.goalTags,
     
     // Keep nested references for new code
-    staticData: inst.staticData,
+    staticData: safeStaticData,
     dynamicData: inst.dynamicData
   };
 });

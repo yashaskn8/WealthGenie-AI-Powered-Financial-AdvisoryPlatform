@@ -11,6 +11,7 @@ import { getCurrentRegulatoryRuleVersion } from './taxEngine.js';
 import { PROJECTION_ASSUMPTION_POLICY_HASH, PROJECTION_ASSUMPTION_SOURCE, PROJECTION_ASSUMPTION_VERSION } from './instrumentConstants.js';
 import { assessRecommendationFreshness, RECOMMENDATION_FRESHNESS_REASON_CODES } from './recommendationFreshness.js';
 import { buildPortfolioFingerprint, buildRecommendationFingerprint } from './recommendationFingerprint.js';
+import { buildGoalCalculationInputFingerprint, GOAL_CALCULATION_POLICY_VERSION } from './goalCalculationProvenance.js';
 
 export const ALLOCATION_SOURCES = Object.freeze({
   ORIGINAL_RECOMMENDATION: 'ORIGINAL_RECOMMENDATION',
@@ -61,7 +62,11 @@ function modelQuery(model, operation, ...args) {
 }
 
 async function resolveProfile({ userId, profileId, profile, profileModel }) {
-  if (profile) return plain(profile);
+  // Callers often pass the canonical allowlisted profile, which intentionally
+  // excludes persistence metadata. Load the owned document when the version
+  // token is absent so long-running financial work can bind to it.
+  if (profile && profile.version !== null && profile.version !== undefined
+      && Number.isInteger(Number(profile.version)) && Number(profile.version) > 0 && profile._id) return plain(profile);
   return modelQuery(profileModel, 'findOne', { _id: profileId, userId }).lean();
 }
 
@@ -84,7 +89,13 @@ function integrityFailure(code, message) {
   return { code, message };
 }
 
-function verifyPersistedStateGraph({ state, recommendation, allocationRevision, recomputedFingerprint }) {
+function verifyPersistedStateGraph({
+  state,
+  recommendation,
+  allocationRevision,
+  recomputedFingerprint,
+  recomputedRecommendationFingerprint,
+}) {
   if (!state) return integrityFailure('FINANCIAL_STATE_MISSING', 'The canonical financial state pointer is missing.');
   if (!sameId(state.userId, recommendation.userId) || !sameId(state.profileId, recommendation.profileId)) {
     return integrityFailure('FINANCIAL_STATE_POINTER_INVALID', 'The canonical financial state owner binding is invalid.');
@@ -133,7 +144,26 @@ function verifyPersistedStateGraph({ state, recommendation, allocationRevision, 
       || recomputedFingerprint !== state.portfolioFingerprint) {
     return integrityFailure('ALLOCATION_FINGERPRINT_MISMATCH', 'The allocation fingerprint does not match its contents.');
   }
+  if (!allocationRevision.recommendationFingerprint
+      || recomputedRecommendationFingerprint !== allocationRevision.recommendationFingerprint) {
+    return integrityFailure('RECOMMENDATION_FINGERPRINT_MISMATCH', 'The recommendation fingerprint does not match its authoritative state.');
+  }
   return null;
+}
+
+function fingerprintForRevision(recommendation, allocationRevision) {
+  if (!recommendation || !allocationRevision) return null;
+  return buildRecommendationFingerprint({
+    recommendationId: recommendation._id,
+    profileInputHash: recommendation.profileInputHash,
+    modelVersion: recommendation.modelVersion,
+    recommendationPolicyVersion: recommendation.recommendationPolicyVersion || RECOMMENDATION_POLICY_VERSION,
+    regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
+    returnAssumptionVersion: allocationRevision.returnAssumptionVersion,
+    returnAssumptionHash: allocationRevision.returnAssumptionHash,
+    allocationRevision: allocationRevision.revision,
+    instruments: allocationRevision.instruments,
+  });
 }
 
 function legacyRevision(recommendation) {
@@ -269,6 +299,7 @@ export async function resolveCurrentRecommendationState({
       recommendation,
       allocationRevision,
       recomputedFingerprint,
+      recomputedRecommendationFingerprint: fingerprintForRevision(recommendation, allocationRevision),
     })
     : null;
   const currentAllocation = allocationRevision && !persistedIntegrityFailure
@@ -328,6 +359,10 @@ export async function resolveCurrentRecommendationState({
   };
   const result = {
     profile: currentProfile,
+    profileVersion: currentProfile?.version !== null && currentProfile?.version !== undefined
+      && Number.isInteger(Number(currentProfile.version)) && Number(currentProfile.version) > 0
+      ? Number(currentProfile.version)
+      : null,
     recommendation,
     currentRecommendationView,
     generationSnapshot,
@@ -358,6 +393,7 @@ export async function resolveCurrentRecommendationState({
       'ALLOCATION_REVISION_ID_MISMATCH',
       'ALLOCATION_REVISION_NUMBER_MISMATCH',
       'ALLOCATION_FINGERPRINT_MISMATCH',
+      'RECOMMENDATION_FINGERPRINT_MISMATCH',
       'RECOMMENDATION_SUPERSEDED',
     ]);
     const primaryCode = freshness.reasonCodes.find(code => integrityCodes.has(code));
@@ -387,16 +423,31 @@ export function assessGoalCalculationFreshness(goal, state) {
   }
   if (String(goal.sourceRecommendationId || '') !== String(state.recommendation._id || '')) reasonCodes.push('STALE_RECOMMENDATION');
   if (Number(goal.sourceAllocationRevision) !== Number(state.allocationRevision.revision)) reasonCodes.push('STALE_ALLOCATION');
+  if (String(goal.sourceAllocationRevisionId || '') !== String(state.allocationRevision._id || '')) reasonCodes.push('STALE_ALLOCATION');
   if (goal.sourceProfileInputHash !== state.recommendation.profileInputHash) reasonCodes.push('STALE_PROFILE');
   if (goal.sourceModelVersion !== state.recommendation.modelVersion) reasonCodes.push('STALE_RECOMMENDATION');
-  if (goal.sourceRecommendationPolicyVersion && goal.sourceRecommendationPolicyVersion !== (state.recommendation.recommendationPolicyVersion || RECOMMENDATION_POLICY_VERSION)) reasonCodes.push('STALE_POLICY');
+  if (goal.sourceRecommendationPolicyVersion !== (state.recommendation.recommendationPolicyVersion || RECOMMENDATION_POLICY_VERSION)) reasonCodes.push('STALE_POLICY');
   if (goal.sourceRegulatoryRuleVersion !== state.recommendation.regulatoryRuleVersion) reasonCodes.push('STALE_POLICY');
   if (goal.sourceReturnAssumptionVersion !== state.allocationRevision.returnAssumptionVersion) reasonCodes.push('STALE_ASSUMPTION');
   if (goal.sourceReturnAssumptionHash !== state.allocationRevision.returnAssumptionHash) reasonCodes.push('STALE_ASSUMPTION');
+  if (goal.return_assumption_source !== state.allocationRevision.returnAssumptionSource) reasonCodes.push('STALE_ASSUMPTION');
   if (goal.sourceRecommendationFingerprint !== state.recommendationFingerprint) reasonCodes.push('STALE_RECOMMENDATION');
   if (goal.sourcePortfolioFingerprint !== state.portfolioFingerprint) reasonCodes.push('STALE_ALLOCATION');
+  const currentGoalInputFingerprint = buildGoalCalculationInputFingerprint(goal);
+  if (!currentGoalInputFingerprint
+      || goal.sourceGoalCalculationInputFingerprint !== currentGoalInputFingerprint
+      || goal.sourceGoalCalculationPolicyVersion !== GOAL_CALCULATION_POLICY_VERSION) {
+    reasonCodes.push(goal.sourceGoalCalculationInputFingerprint ? 'STALE_GOAL_INPUTS' : 'SOURCE_MISSING');
+  }
+  if (state.profileVersion !== null && state.profileVersion !== undefined
+      && Number(goal.sourceProfileVersion) !== Number(state.profileVersion)) reasonCodes.push('STALE_PROFILE');
   if (!goal.sourceRecommendationId || !goal.sourceAllocationRevision || !goal.sourceProfileInputHash
-      || !goal.sourceReturnAssumptionHash || !goal.sourceRecommendationFingerprint || !goal.sourcePortfolioFingerprint) {
+      || !goal.sourceAllocationRevisionId || !goal.sourceReturnAssumptionHash
+      || !goal.sourceReturnAssumptionVersion || !goal.return_assumption_source
+      || !goal.sourceModelVersion || !goal.sourceRecommendationPolicyVersion
+      || !goal.sourceRegulatoryRuleVersion || !goal.sourceRecommendationFingerprint || !goal.sourcePortfolioFingerprint
+      || !goal.sourceGoalCalculationInputFingerprint || !goal.sourceGoalCalculationPolicyVersion
+      || (state.profileVersion !== null && state.profileVersion !== undefined && !goal.sourceProfileVersion)) {
     reasonCodes.push('SOURCE_MISSING');
   }
   return { fresh: reasonCodes.length === 0 && state.freshness.fresh, reasonCodes: [...new Set(reasonCodes.concat(state.freshness.fresh ? [] : state.freshness.reasonCodes))] };
@@ -427,6 +478,7 @@ async function ensurePersistedCurrentState({ session, recommendation }) {
     recommendation,
     allocationRevision: revision,
     recomputedFingerprint: buildPortfolioFingerprint(revision.instruments),
+    recomputedRecommendationFingerprint: fingerprintForRevision(recommendation, revision),
   });
   if (graphFailure) throw errorWithCode(graphFailure.message, graphFailure.code, 503);
   return { state, revision };
@@ -449,6 +501,14 @@ export async function createManualAllocationRevision({
       const profileDocument = await FinancialProfile.findOne({ _id: profileId, userId }).session(session).lean();
       const recommendation = await Recommendation.findOne({ _id: recommendationId, profileId, userId }).session(session);
       if (!profileDocument || !recommendation) throw errorWithCode('Recommendation state is unavailable.', 'RECOMMENDATION_REQUIRED');
+      const profileCas = await FinancialProfile.updateOne(
+        { _id: profileId, userId, version: profileDocument.version },
+        { $inc: { financialStateFence: 1 } },
+        { session },
+      );
+      if (profileCas.matchedCount !== 1) {
+        throw errorWithCode('The financial profile changed before the rebalance completed.', 'PROFILE_STATE_CHANGED');
+      }
       const { state, revision: current } = await ensurePersistedCurrentState({ session, recommendation });
       if (!expectedRecommendationId || !sameId(expectedRecommendationId, recommendationId)) {
         throw errorWithCode('A recommendation identity is required for rebalance concurrency.', 'ALLOCATION_STATE_CHANGED');
@@ -525,6 +585,7 @@ export async function createManualAllocationRevision({
           returnAssumptionHash: revision.returnAssumptionHash,
           returnAssumptionSource: revision.returnAssumptionSource,
         },
+        $inc: { financialStateFence: 1 },
       }, { session });
       if (advanced.matchedCount !== 1) throw errorWithCode('Allocation revision conflict. Refresh before retrying.', 'ALLOCATION_REVISION_CONFLICT');
       await advanceAuditChainHead(auditEntry, session);

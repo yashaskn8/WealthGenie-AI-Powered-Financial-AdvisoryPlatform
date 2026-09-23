@@ -309,9 +309,9 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
           />
         </label>
         <label style={{ display: 'grid', gap: 7, color: '#cbd5e1', fontSize: '0.8rem', fontWeight: 700 }}>
-          Section 80C already used (₹)
+          Eligible investment deductions already claimed (₹)
           <input
-            aria-label="Section 80C used"
+            aria-label="Eligible investment deductions already claimed"
             type="number"
             min="0"
             max="150000"
@@ -322,9 +322,9 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
           />
         </label>
         <label style={{ display: 'grid', gap: 7, color: '#cbd5e1', fontSize: '0.8rem', fontWeight: 700 }}>
-          NPS 80CCD(1B) already used (₹)
+          Qualifying NPS contributions already counted (₹)
           <input
-            aria-label="NPS 80CCD(1B) used"
+            aria-label="Qualifying NPS contributions already counted"
             type="number"
             min="0"
             max="50000"
@@ -335,9 +335,9 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
           />
         </label>
         <label style={{ display: 'grid', gap: 7, color: '#cbd5e1', fontSize: '0.8rem', fontWeight: 700 }}>
-          112A exemption already used (₹)
+          Annual equity long-term gains exclusion already used (₹)
           <input
-            aria-label="112A exemption already used"
+            aria-label="Annual equity long-term gains exclusion already used"
             type="number"
             min="0"
             max="125000"
@@ -354,14 +354,14 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
           </p>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 12, marginTop: 10 }}>
             {[
-              ['nps80CCD2', 'NPS 80CCD(2) (₹)', '100000000'],
-              ['basicSalary', 'Basic salary for 80CCD(2) (₹)', '1000000000'],
-              ['section80D_self', '80D self/ family (₹)', '50000'],
-              ['section80D_parents', '80D parents (₹)', '50000'],
-              ['hra', 'HRA deduction (₹)', '100000000'],
+              ['nps80CCD2', 'Employer NPS contribution (₹)', '100000000'],
+              ['basicSalary', 'Basic salary for employer NPS limit (₹)', '1000000000'],
+              ['section80D_self', 'Eligible health-insurance payments for self / family (₹)', '50000'],
+              ['section80D_parents', 'Eligible health-insurance payments for parents (₹)', '50000'],
+              ['hra', 'Eligible rent-related deduction (₹)', '100000000'],
               ['homeLoanInterest', 'Home-loan interest (₹)', '200000'],
-              ['section80TTA', '80TTA interest (₹)', '10000'],
-              ['section80TTB', '80TTB interest (₹)', '50000'],
+              ['section80TTA', 'Eligible savings-interest deduction (₹)', '10000'],
+              ['section80TTB', 'Eligible senior-citizen savings-interest deduction (₹)', '50000'],
             ].map(([key, label, max]) => (
               <label key={key} style={{ display: 'grid', gap: 6, color: '#94a3b8', fontSize: '0.76rem', fontWeight: 700 }}>
                 {label}
@@ -378,9 +378,9 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
               </label>
             ))}
             <label style={{ display: 'grid', gap: 6, color: '#94a3b8', fontSize: '0.76rem', fontWeight: 700 }}>
-              Government employee for 80CCD(2)?
+              Government employee for employer NPS limit?
               <select
-                aria-label="Government employee for 80CCD(2)?"
+                aria-label="Government employee for employer NPS limit?"
                 value={advancedDeductions.isGovtEmployee || ''}
                 onChange={event => setAdvancedDeductions(current => ({ ...current, isGovtEmployee: event.target.value }))}
                 className="tax-input"
@@ -391,9 +391,9 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
               </select>
             </label>
             <label style={{ display: 'grid', gap: 6, color: '#94a3b8', fontSize: '0.76rem', fontWeight: 700 }}>
-              Parents senior citizen for 80D?
+              Are the parents senior citizens?
               <select
-                aria-label="Parents senior citizen for 80D?"
+                aria-label="Are the parents senior citizens?"
                 value={advancedDeductions.parents_senior || ''}
                 onChange={event => setAdvancedDeductions(current => ({ ...current, parents_senior: event.target.value }))}
                 className="tax-input"

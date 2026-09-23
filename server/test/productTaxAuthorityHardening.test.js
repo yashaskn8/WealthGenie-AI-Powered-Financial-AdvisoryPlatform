@@ -43,6 +43,9 @@ test('special-rate equity tax is separate from ordinary slabs and does not consu
   });
   assert.equal(result.status, 'CALCULATED');
   assert.equal(result.taxClass, 'EQUITY_LTCG_SECTION_112A');
+  assert.equal(result.taxClassificationMetadata.statute, 'INCOME_TAX_ACT_2025');
+  assert.equal(result.taxClassificationMetadata.classificationId, 'INCOME_TAX_ACT_2025_EQUITY_LTCG_TAX_CLASSIFICATION');
+  assert.equal(result.taxClassificationMetadata.legacyClassificationAlias, 'EQUITY_LTCG_SECTION_112A');
   assert.equal(result.exemptionApplied, 0);
   assert.equal(result.rebateApplied, false);
   assert.equal(result.taxAmount, 13000);

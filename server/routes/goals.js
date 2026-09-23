@@ -22,17 +22,16 @@ import {
   PROJECTION_ASSUMPTION_VERSION,
 } from '../services/instrumentConstants.js';
 import { triggerPlanHealthCheck } from '../services/planHealthMonitor.js';
-import { assessGoalCalculationFreshness, requireFreshRecommendationState } from '../services/recommendationState.js';
+import {
+  assessGoalCalculationFreshness,
+  requireFreshRecommendationState,
+  resolveCurrentRecommendationState,
+} from '../services/recommendationState.js';
+import { buildCurrentGoalResponse, buildGoalAdvisoryMetadata } from '../services/goalResponse.js';
+import { buildGoalCalculationInputFingerprint, GOAL_CALCULATION_POLICY_VERSION } from '../services/goalCalculationProvenance.js';
 
 const router = Router();
 const GOAL_INFLATION_ASSUMPTION = 0.05;
-
-const staleAdvicePatterns = ['temporarily unavailable', 'could not process', 'api key not configured'];
-
-function isStaleAdvice(advice) {
-  if (!advice || typeof advice !== 'string') return true;
-  return staleAdvicePatterns.some(pattern => advice.toLowerCase().includes(pattern));
-}
 
 function determineGoalStatus(probability, gap, monthlyCapacity) {
   if (probability >= 0.65 && gap <= 0) return 'on_track';
@@ -67,9 +66,9 @@ function toDecimalRate(value) {
 }
 
 /** Uses only the persisted authoritative recommendation for this exact profile. */
-export async function _getBlendedPortfolioMetrics(userId, profileId, profile = undefined, overrideRec = null) {
-  let state = null;
-  const recommendation = overrideRec || (state = await requireFreshRecommendationState({ userId, profileId, profile })).currentRecommendationView;
+export async function _getBlendedPortfolioMetrics(userId, profileId, profile = undefined) {
+  const state = await requireFreshRecommendationState({ userId, profileId, profile });
+  const recommendation = state.currentRecommendationView;
   const instruments = recommendation?.instruments;
   if (!instruments?.length) {
     const error = new Error('Generate an authoritative recommendation before creating or recalculating goals.');
@@ -108,8 +107,8 @@ export async function _getBlendedPortfolioMetrics(userId, profileId, profile = u
     returnDataClass: PROJECTION_ASSUMPTION_DATA_CLASS,
     returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
     returnAssumptionSource: PROJECTION_ASSUMPTION_SOURCE,
-    returnAssumptionHash: state?.allocationRevision?.returnAssumptionHash || null,
-    recommendationFingerprint: state?.recommendationFingerprint || null,
+    returnAssumptionHash: state.allocationRevision?.returnAssumptionHash || null,
+    recommendationFingerprint: state.recommendationFingerprint || null,
     state,
   };
 }
@@ -190,6 +189,18 @@ async function assertGoalPlanStateCurrent({ userId, profileId, profile, plannedS
 async function holdGoalSourceState(session, { userId, profileId, state }) {
   const stateId = state?.provenance?.stateId;
   if (!stateId || !state.recommendation?._id || !state.allocationRevision?._id) throw goalStateConflict();
+  if (state.profileVersion !== null && state.profileVersion !== undefined) {
+    const profileResult = await FinancialProfile.updateOne({
+      _id: profileId,
+      userId,
+      version: state.profileVersion,
+    }, {
+      // A real write fence makes overlapping profile edits conflict under
+      // Mongo snapshot isolation; a no-op update is not a reliable lock.
+      $inc: { financialStateFence: 1 },
+    }).session(session);
+    if (profileResult.matchedCount !== 1) throw goalStateConflict();
+  }
   const result = await RecommendationState.updateOne({
     _id: stateId,
     userId,
@@ -204,9 +215,8 @@ async function holdGoalSourceState(session, { userId, profileId, state }) {
     returnAssumptionHash: state.allocationRevision.returnAssumptionHash,
     returnAssumptionSource: state.allocationRevision.returnAssumptionSource,
   }, {
-    // A no-op write makes the source pointer part of the same transaction as
-    // the goal write, so a concurrent state transition causes a write conflict.
-    $set: { portfolioFingerprint: state.portfolioFingerprint },
+    // A real write fence binds this calculation to the resolved pointer.
+    $inc: { financialStateFence: 1 },
   }).session(session);
   if (result.matchedCount !== 1) throw goalStateConflict();
 }
@@ -292,6 +302,7 @@ router.post('/create', verifyJWT, idempotency(), validateStrict(customGoalSchema
     targetDate: target_date, currentSavings: current_savings,
   });
   const data = {
+    _id: new mongoose.Types.ObjectId(),
     userId: req.user.userId,
     profileId,
     goal_name,
@@ -321,7 +332,9 @@ router.post('/create', verifyJWT, idempotency(), validateStrict(customGoalSchema
     return_assumption_source: plan.metrics.returnAssumptionSource,
     sourceRecommendationId: plan.metrics.state?.recommendation?._id || null,
     sourceAllocationRevision: plan.metrics.state?.allocationRevision?.revision || null,
+    sourceAllocationRevisionId: plan.metrics.state?.allocationRevision?._id || null,
     sourceProfileInputHash: plan.metrics.state?.recommendation?.profileInputHash || null,
+    sourceProfileVersion: plan.metrics.state?.profileVersion || null,
     sourceModelVersion: plan.metrics.state?.recommendation?.modelVersion || null,
     sourceRecommendationPolicyVersion: plan.metrics.state?.recommendation?.recommendationPolicyVersion || null,
     sourceRegulatoryRuleVersion: plan.metrics.state?.recommendation?.regulatoryRuleVersion || null,
@@ -335,7 +348,11 @@ router.post('/create', verifyJWT, idempotency(), validateStrict(customGoalSchema
     provider_forecast: false,
     inflation_assumption: GOAL_INFLATION_ASSUMPTION,
   };
-  data.gemini_advice = await generateGoalAdvice(data, profile);
+  data.sourceGoalCalculationInputFingerprint = buildGoalCalculationInputFingerprint(data);
+  data.sourceGoalCalculationPolicyVersion = GOAL_CALCULATION_POLICY_VERSION;
+  if (!data.sourceGoalCalculationInputFingerprint) {
+    throw new Error('Could not establish the goal calculation input fingerprint.');
+  }
   let goal;
   try {
     const currentState = await assertGoalPlanStateCurrent({
@@ -344,6 +361,8 @@ router.post('/create', verifyJWT, idempotency(), validateStrict(customGoalSchema
       profile,
       plannedState: plan.metrics.state,
     });
+    data.gemini_advice = await generateGoalAdvice(data, profile);
+    data.advisoryMetadata = buildGoalAdvisoryMetadata({ goal: data, state: currentState });
     goal = await persistGoalWithSourceState(data, {
       userId: req.user.userId,
       profileId,
@@ -354,7 +373,12 @@ router.post('/create', verifyJWT, idempotency(), validateStrict(customGoalSchema
     throw error;
   }
   void triggerPlanHealthCheck({ userId: req.user.userId, profileId });
-  res.status(201).json({ goal: { ...goal.toObject(), goalId: goal._id, chartData: data.chart_data } });
+  const currentState = await resolveCurrentRecommendationState({
+    userId: req.user.userId,
+    profileId,
+    requireFresh: false,
+  });
+  res.status(201).json({ goal: buildCurrentGoalResponse(goal, { state: currentState }) });
 }));
 
 router.get('/', verifyJWT, asyncHandler(async (req, res) => {
@@ -364,7 +388,11 @@ router.get('/', verifyJWT, asyncHandler(async (req, res) => {
   const stateByProfile = new Map();
   await Promise.all([...new Set(goals.map(goal => String(goal.profileId)))].map(async profileId => {
     try {
-      const state = await requireFreshRecommendationState({ userId: req.user.userId, profileId });
+      const state = await resolveCurrentRecommendationState({
+        userId: req.user.userId,
+        profileId,
+        requireFresh: false,
+      });
       stateByProfile.set(profileId, state);
     } catch (error) {
       stateByProfile.set(profileId, { error });
@@ -372,15 +400,8 @@ router.get('/', verifyJWT, asyncHandler(async (req, res) => {
   }));
   res.json({ goals: goals.map(goal => {
     const state = stateByProfile.get(String(goal.profileId));
-    const freshness = state?.recommendation
-      ? assessGoalCalculationFreshness(goal, state)
-      : { fresh: false, reasonCodes: state?.error?.reasonCodes || ['SOURCE_MISSING'] };
-    return ({
-    ...goal,
-    chartData: goal.chart_data,
-    advice_stale: isStaleAdvice(goal.gemini_advice),
-    calculation_freshness: freshness,
-  }); }) });
+    return buildCurrentGoalResponse(goal, { state: state?.recommendation ? state : null });
+  }) });
 }));
 
 router.post('/:goalId/simulate', verifyJWT, validateStrict(goalSimulationSchema), asyncHandler(async (req, res) => {
@@ -396,6 +417,15 @@ router.post('/:goalId/simulate', verifyJWT, validateStrict(goalSimulationSchema)
   }
   const yearsRemaining = computeYearsRemaining(goal.target_date);
   const metrics = await _getBlendedPortfolioMetrics(req.user.userId, goal.profileId, profile);
+  const goalFreshness = assessGoalCalculationFreshness(goal, metrics.state);
+  if (!goalFreshness.fresh) {
+    throw createError(
+      409,
+      'Goal calculation is stale for the current financial state.',
+      'Recalculate the goal before running this simulation.',
+      { code: 'GOAL_CALCULATION_STALE', calculationFreshness: goalFreshness },
+    );
+  }
   const result = runMonteCarloWithGoal({
     monthlyInvestment: monthlyContribution,
     annualExpectedReturn: metrics.expectedReturn,
@@ -430,6 +460,9 @@ router.post('/:goalId/simulate', verifyJWT, validateStrict(goalSimulationSchema)
     return_data_class: metrics.returnDataClass,
     return_assumption_version: metrics.returnAssumptionVersion,
     return_assumption_source: metrics.returnAssumptionSource,
+    allocation_revision: metrics.state.allocationRevision.revision,
+    allocation_revision_id: metrics.state.allocationRevision._id,
+    portfolio_fingerprint: metrics.state.portfolioFingerprint,
     observed_market_fact: false,
     provider_forecast: false,
     inflation_assumption: GOAL_INFLATION_ASSUMPTION,
@@ -451,8 +484,17 @@ router.patch('/:goalId/refresh-advice', verifyJWT, asyncHandler(async (req, res)
     });
   }
   goal.gemini_advice = await generateGoalAdvice(goal, profile);
-  await goal.save();
-  res.json({ goalId: goal._id, gemini_advice: goal.gemini_advice });
+  goal.advisoryMetadata = buildGoalAdvisoryMetadata({ goal, state });
+  await saveGoalWithSourceState(goal, {
+    userId: req.user.userId,
+    profileId: goal.profileId,
+    sourceState: state,
+  });
+  res.json({
+    goal: buildCurrentGoalResponse(goal, { state }),
+    goalId: goal._id,
+    gemini_advice: goal.gemini_advice,
+  });
 }));
 
 router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyncHandler(async (req, res) => {
@@ -496,7 +538,9 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
     goal.return_assumption_source = plan.metrics.returnAssumptionSource;
     goal.sourceRecommendationId = plan.metrics.state?.recommendation?._id || null;
     goal.sourceAllocationRevision = plan.metrics.state?.allocationRevision?.revision || null;
+    goal.sourceAllocationRevisionId = plan.metrics.state?.allocationRevision?._id || null;
     goal.sourceProfileInputHash = plan.metrics.state?.recommendation?.profileInputHash || null;
+    goal.sourceProfileVersion = plan.metrics.state?.profileVersion || null;
     goal.sourceModelVersion = plan.metrics.state?.recommendation?.modelVersion || null;
     goal.sourceRecommendationPolicyVersion = plan.metrics.state?.recommendation?.recommendationPolicyVersion || null;
     goal.sourceRegulatoryRuleVersion = plan.metrics.state?.recommendation?.regulatoryRuleVersion || null;
@@ -509,7 +553,11 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
     goal.observed_market_fact = false;
     goal.provider_forecast = false;
     goal.inflation_assumption = GOAL_INFLATION_ASSUMPTION;
-    goal.gemini_advice = await generateGoalAdvice(goal, profile);
+    goal.sourceGoalCalculationInputFingerprint = buildGoalCalculationInputFingerprint(goal);
+    goal.sourceGoalCalculationPolicyVersion = GOAL_CALCULATION_POLICY_VERSION;
+    if (!goal.sourceGoalCalculationInputFingerprint) {
+      throw new Error('Could not establish the goal calculation input fingerprint.');
+    }
   }
   if (recalculationState) {
     const currentState = await assertGoalPlanStateCurrent({
@@ -518,6 +566,8 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
       profile,
       plannedState: recalculationState,
     });
+    goal.gemini_advice = await generateGoalAdvice(goal, profile);
+    goal.advisoryMetadata = buildGoalAdvisoryMetadata({ goal, state: currentState });
     await saveGoalWithSourceState(goal, {
       userId: req.user.userId,
       profileId: goal.profileId,
@@ -527,7 +577,12 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
     await goal.save();
   }
   void triggerPlanHealthCheck({ userId: req.user.userId, profileId: goal.profileId });
-  res.json({ success: true, goal });
+  const currentState = await resolveCurrentRecommendationState({
+    userId: req.user.userId,
+    profileId: goal.profileId,
+    requireFresh: false,
+  });
+  res.json({ success: true, goal: buildCurrentGoalResponse(goal, { state: currentState }) });
 }));
 
 router.delete('/:goalId', verifyJWT, asyncHandler(async (req, res) => {

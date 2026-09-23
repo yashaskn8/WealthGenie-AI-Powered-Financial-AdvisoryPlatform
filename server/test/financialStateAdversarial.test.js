@@ -6,7 +6,7 @@ import { recommendationWeightsSchema } from '../validation/financialSchemas.js';
 import { buildCurrentRecommendationResponse } from '../services/recommendationResponse.js';
 import { resolveCurrentRecommendationState } from '../services/recommendationState.js';
 import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
-import { buildPortfolioFingerprint } from '../services/recommendationFingerprint.js';
+import { buildPortfolioFingerprint, buildRecommendationFingerprint } from '../services/recommendationFingerprint.js';
 import {
   PROJECTION_ASSUMPTION_POLICY_HASH,
   PROJECTION_ASSUMPTION_SOURCE,
@@ -74,6 +74,17 @@ function fixture() {
     },
   };
   const portfolioFingerprint = buildPortfolioFingerprint(instruments);
+  const recommendationFingerprint = buildRecommendationFingerprint({
+    recommendationId: recommendation._id,
+    profileInputHash: recommendation.profileInputHash,
+    modelVersion: recommendation.modelVersion,
+    recommendationPolicyVersion: recommendation.recommendationPolicyVersion,
+    regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
+    returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+    returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
+    allocationRevision: 1,
+    instruments,
+  });
   const revision = {
     _id: ids.revision,
     recommendationId: ids.recommendation,
@@ -90,6 +101,7 @@ function fixture() {
     returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
     returnAssumptionSource: PROJECTION_ASSUMPTION_SOURCE,
     portfolioFingerprint,
+    recommendationFingerprint,
   };
   const state = {
     _id: '64b000000000000000000005',
@@ -132,6 +144,28 @@ test('current response cannot resurrect generation-snapshot allocation fields', 
   assert.equal(response.recommendation_id, ids.recommendation);
 });
 
+test('a rebalance never presents the generation-time explanation as current', () => {
+  const { recommendation, revision } = fixture();
+  recommendation.responseSnapshot.explanation = { summary: 'Explains original portfolio' };
+  const currentRevision = {
+    ...revision,
+    _id: '64b000000000000000000006',
+    revision: 2,
+    previousRevision: 1,
+    source: 'USER_REBALANCED',
+  };
+  const response = buildCurrentRecommendationResponse({
+    profile,
+    recommendation,
+    allocationRevision: currentRevision,
+    freshness: { fresh: true, reasonCodes: [] },
+    provenance: { status: 'PERSISTED_REVISION' },
+    portfolioFingerprint: currentRevision.portfolioFingerprint,
+  });
+  assert.equal(response.explanation, null);
+  assert.deepEqual(response.generation_explanation, { summary: 'Explains original portfolio' });
+});
+
 test('valid canonical pointer resolves only the pointed revision', async () => {
   const { dependencies } = fixture();
   const state = await resolveCurrentRecommendationState({
@@ -153,6 +187,18 @@ test('tampered allocation contents fail closed through fingerprint verification'
   await assert.rejects(
     resolveCurrentRecommendationState({ userId: ids.user, profileId: ids.profile, profile, requireFresh: true, dependencies }),
     error => error.code === 'ALLOCATION_FINGERPRINT_MISMATCH' || error.reasonCodes?.includes('ALLOCATION_FINGERPRINT_MISMATCH'),
+  );
+});
+
+test('tampered recommendation provenance fingerprint fails closed', async () => {
+  const { dependencies, revision } = fixture();
+  dependencies.revisionModel = {
+    findOne: () => query({ ...revision, recommendationFingerprint: 'f'.repeat(64) }),
+  };
+  await assert.rejects(
+    resolveCurrentRecommendationState({ userId: ids.user, profileId: ids.profile, profile, requireFresh: true, dependencies }),
+    error => error.code === 'RECOMMENDATION_FINGERPRINT_MISMATCH'
+      || error.reasonCodes?.includes('RECOMMENDATION_FINGERPRINT_MISMATCH'),
   );
 });
 

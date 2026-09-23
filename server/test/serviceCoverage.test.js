@@ -385,12 +385,13 @@ test('riskProfiler classifies profiles and encodes categories', () => {
   assert.throws(() => encodeRiskCategory('Unknown'), /Unknown risk category/);
 });
 
-test('postTaxCalculator respects EEE exemptions and taxable instruments', () => {
+test('postTaxCalculator does not infer PPF exemption without account facts and calculates taxable instruments', () => {
   const ppf = calculatePostTaxReturn('PPF', 0.071, 1200000, 15, 'new', 10000, 35, 'salary', true, 'FY2026-27');
   const fd = calculatePostTaxReturnSafe('FD', 0.07, 3000000, 3, 'new', 10000, 35, 'salary', true, 'FY2026-27');
 
-  assert.equal(ppf.taxRate, 0);
-  assert.equal(ppf.postTaxReturn, 0.071);
+  assert.equal(ppf.status, 'TAX_CLASSIFICATION_REQUIRES_ACQUISITION_FACTS');
+  assert.equal(ppf.taxRate, null);
+  assert.equal(ppf.postTaxReturn, null);
   assert.ok(fd.postTaxReturn < 0.07);
   assert.throws(
     () => calculatePostTaxReturn('FD', Number.NaN, -1, -1, 'new', 0, 35, 'salary'),
@@ -456,4 +457,3 @@ test('ragClient and mlClient propagate verified X-Verified-User-Id header downst
   assert.ok(mlRes);
   assert.equal(mlCapturedHeaders?.['X-Verified-User-Id'], testUserId);
 });
-

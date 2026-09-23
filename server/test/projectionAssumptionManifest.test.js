@@ -1,0 +1,16 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  PROJECTION_ASSUMPTION_DATA_CLASS,
+  PROJECTION_ASSUMPTION_POLICY_HASH,
+  PROJECTION_ASSUMPTION_POLICY_MANIFEST,
+  PROJECTION_ASSUMPTION_SOURCE,
+  PROJECTION_ASSUMPTION_VERSION,
+} from '../services/instrumentConstants.js';
+
+test('projection assumptions match the committed policy manifest', () => {
+  assert.equal(PROJECTION_ASSUMPTION_POLICY_MANIFEST.version, PROJECTION_ASSUMPTION_VERSION);
+  assert.equal(PROJECTION_ASSUMPTION_POLICY_MANIFEST.source, PROJECTION_ASSUMPTION_SOURCE);
+  assert.equal(PROJECTION_ASSUMPTION_POLICY_MANIFEST.dataClass, PROJECTION_ASSUMPTION_DATA_CLASS);
+  assert.equal(PROJECTION_ASSUMPTION_POLICY_MANIFEST.expectedHash, PROJECTION_ASSUMPTION_POLICY_HASH);
+});

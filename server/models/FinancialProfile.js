@@ -38,6 +38,9 @@ const financialProfileSchema = new mongoose.Schema({
   },
 
   version: { type: Number, default: 1 },
+  // Shared write fence for profile changes and financial work committed
+  // against this source, so overlapping transactions conflict reliably.
+  financialStateFence: { type: Number, min: 0, default: 0 },
   createdAt: { type: Date, default: Date.now },
 }, {
   optimisticConcurrency: true,

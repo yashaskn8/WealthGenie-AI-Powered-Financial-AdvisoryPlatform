@@ -118,6 +118,9 @@ test('OCC: PUT /api/profile/:id with stale version returns 409 Conflict', async 
     );
 
     assert.equal(update1Res.status, 200, `First update failed: ${JSON.stringify(update1Body)}`);
+    const updatedProfile = await FinancialProfile.findById(profileId).lean();
+    assert.equal(updatedProfile.version, createBody.version + 1);
+    assert.equal(updatedProfile.financialStateFence, 1, 'profile update must perform a real transactional fence write');
 
     // 3. Second update with STALE version (version 1) — should get 409
     const { response: update2Res, body: update2Body } = await jsonFetch(

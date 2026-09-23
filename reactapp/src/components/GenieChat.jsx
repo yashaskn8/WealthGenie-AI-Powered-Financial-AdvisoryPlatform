@@ -669,7 +669,7 @@ const GenieChat = ({ profile, onNavigate }) => {
 
                       <div className="sandbox-group">
                         <div className="sandbox-label-row">
-                          <span className="sandbox-label"><Percent size={14} /> <JargonTooltip term="Section 80C">80C Deduction Input</JargonTooltip></span>
+                          <span className="sandbox-label"><Percent size={14} /> <JargonTooltip term="Eligible investment deductions">Enter eligible investment deductions already counted</JargonTooltip></span>
                           <span className="sandbox-val text-orange">{formatFullINR(tax80C)}</span>
                         </div>
                         <input type="range" min="0" max={Number.isFinite(section80CLimit) ? section80CLimit : 0} step="5000" value={tax80C} onChange={e => setTax80C(Number(e.target.value))} className="sandbox-slider" disabled={!Number.isFinite(section80CLimit)} />
@@ -703,7 +703,7 @@ const GenieChat = ({ profile, onNavigate }) => {
                           <div className="tax-td text-center text-green">-{formatFullINR(taxes.standardDeductionOld)}</div>
                         </div>
                         <div className="tax-table-row">
-                          <div className="tax-td">Your Savings (80C + NPS)</div>
+                          <div className="tax-td">Eligible deductions in this scenario</div>
                           <div className="tax-td text-center text-grey">Nil</div>
                           <div className="tax-td text-center text-green">-{formatFullINR(taxes.oldRegimeDeductions)}</div>
                         </div>

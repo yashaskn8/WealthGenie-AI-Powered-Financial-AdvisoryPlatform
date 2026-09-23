@@ -31,7 +31,7 @@ import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelp
 import { canonicalProfile, canonicalProfilePayload } from './helpers/canonicalProfile.js';
 import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
 import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
-import { buildPortfolioFingerprint } from '../services/recommendationFingerprint.js';
+import { buildPortfolioFingerprint, buildRecommendationFingerprint } from '../services/recommendationFingerprint.js';
 import {
   PROJECTION_ASSUMPTION_POLICY_HASH,
   PROJECTION_ASSUMPTION_SOURCE,
@@ -111,6 +111,17 @@ test.before(async () => {
   });
   const allocationInstruments = recommendationA.instruments.map(instrument => instrument.toObject());
   const portfolioFingerprint = buildPortfolioFingerprint(allocationInstruments);
+  const recommendationFingerprint = buildRecommendationFingerprint({
+    recommendationId: recommendationA._id,
+    profileInputHash: recommendationA.profileInputHash,
+    modelVersion: recommendationA.modelVersion,
+    recommendationPolicyVersion: recommendationA.recommendationPolicyVersion,
+    regulatoryRuleVersion: recommendationA.regulatoryRuleVersion,
+    returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+    returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
+    allocationRevision: 1,
+    instruments: allocationInstruments,
+  });
   const revision = await RecommendationAllocationRevision.create({
     recommendationId: recommendationA._id,
     profileId: profileA._id,
@@ -126,6 +137,7 @@ test.before(async () => {
     returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
     returnAssumptionSource: PROJECTION_ASSUMPTION_SOURCE,
     portfolioFingerprint,
+    recommendationFingerprint,
   });
   await RecommendationState.create({
     userId: userAId,

@@ -21,9 +21,9 @@ import Recommendation from '../models/Recommendation.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import RecommendationState from '../models/RecommendationState.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
-import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
+import { buildRecommendationProfileHash, RECOMMENDATION_POLICY_VERSION } from '../services/recommendationProfile.js';
 import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
-import { buildPortfolioFingerprint } from '../services/recommendationFingerprint.js';
+import { buildPortfolioFingerprint, buildRecommendationFingerprint } from '../services/recommendationFingerprint.js';
 import {
   PROJECTION_ASSUMPTION_POLICY_HASH,
   PROJECTION_ASSUMPTION_SOURCE,
@@ -64,9 +64,9 @@ async function ensureDb() {
       recommendationProfileVersion: 'financial-profile-1.0.0',
     });
   }
-  await Recommendation.findOneAndUpdate(
-    { userId: TEST_USER_ID, profileId: profile._id },
-    {
+  let recommendation = await Recommendation.findOne({ userId: TEST_USER_ID, profileId: profile._id });
+  if (!recommendation) {
+    recommendation = await Recommendation.create({
       userId: TEST_USER_ID, profileId: profile._id,
       instruments: [{
         id: 'fd', type: 'FD', name: 'Bank Fixed Deposit', assetClass: 'Fixed Income',
@@ -83,16 +83,26 @@ async function ensureDb() {
       }],
       advisoryText: 'Fixture recommendation', mlFallback: true,
       modelVersion: 'test-rule-fallback-4.0.0', generatedAt: new Date(),
+      recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
       regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
       profileInputHash: buildRecommendationProfileHash(profile.toObject(), { modelVersion: 'test-rule-fallback-4.0.0' }),
       recommendationGeneration: 1,
       returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
-    },
-    { upsert: true, new: true },
-  );
-  const recommendation = await Recommendation.findOne({ userId: TEST_USER_ID, profileId: profile._id });
+    });
+  }
   const instruments = recommendation.instruments.map(instrument => instrument.toObject());
   const portfolioFingerprint = buildPortfolioFingerprint(instruments);
+  const recommendationFingerprint = buildRecommendationFingerprint({
+    recommendationId: recommendation._id,
+    profileInputHash: recommendation.profileInputHash,
+    modelVersion: recommendation.modelVersion,
+    recommendationPolicyVersion: recommendation.recommendationPolicyVersion,
+    regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
+    returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+    returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
+    allocationRevision: 1,
+    instruments,
+  });
   let revision = await RecommendationAllocationRevision.findOne({ recommendationId: recommendation._id, revision: 1 });
   if (!revision) revision = await RecommendationAllocationRevision.create({
       recommendationId: recommendation._id,
@@ -110,6 +120,7 @@ async function ensureDb() {
       returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
       returnAssumptionSource: PROJECTION_ASSUMPTION_SOURCE,
       portfolioFingerprint,
+      recommendationFingerprint,
     });
   await RecommendationState.findOneAndUpdate(
     { userId: TEST_USER_ID, profileId: profile._id },

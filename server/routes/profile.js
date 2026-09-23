@@ -380,7 +380,7 @@ router.put(
     const suitability = assessSuitabilityRisk(canonical);
     const updated = await FinancialProfile.findOneAndUpdate(
       { _id: req.params.profileId, userId: req.user.userId, version: expectedVersion },
-      { $set: toProfilePersistence(canonical, suitability), $inc: { version: 1 } },
+      { $set: toProfilePersistence(canonical, suitability), $inc: { version: 1, financialStateFence: 1 } },
       { new: true, runValidators: true },
     );
     if (!updated) {

@@ -214,7 +214,8 @@ test('React labels catalog returns, tax references, and Monte Carlo values by th
   const jargon = readFileSync(resolve(process.cwd(), '..', 'reactapp/src/components/JargonTooltip.jsx'), 'utf8');
   const goals = readFileSync(resolve(process.cwd(), '..', 'reactapp/src/components/GoalPlanner.jsx'), 'utf8');
   assert.match(comparison, /MODEL RETURN ASSUMPTION/);
-  assert.match(comparison, /REFERENCE TAX TAG/);
+  assert.match(comparison, /TAX RESULT/);
+  assert.match(comparison, /Use fiscal-year tax analysis/);
   assert.doesNotMatch(comparison, /Expected Growth|PRE-TAX NOMINAL/);
   assert.match(taxTab, /TAX_CLASSIFICATION_UNAVAILABLE/);
   assert.doesNotMatch(taxTab, /policy\?\.ltcg|inv\?\.tax_benefit/);

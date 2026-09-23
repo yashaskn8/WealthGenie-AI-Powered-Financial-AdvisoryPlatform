@@ -21,7 +21,9 @@ export const taxDeductionFields = {
   savingsInterest: Joi.number().min(0).max(100000000).optional(),
   section80TTA: Joi.number().min(0).max(10000).optional(),
   section80TTB: Joi.number().min(0).max(50000).optional(),
-  other: Joi.number().min(0).max(100000000).optional(),
+  // Retain the legacy zero-valued field for older clients; positive arbitrary
+  // deductions are not an identifiable statutory category and fail closed.
+  other: Joi.number().valid(0).optional(),
   age: Joi.number().integer().min(18).max(120).optional(),
 };
 

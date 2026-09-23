@@ -15,7 +15,8 @@
  * 3. Never use a fake marginal-rate shortcut (rate * (1 - marginalRate)) that ignores progressive slabs.
  * 4. Never show exact future post-tax returns for mutual funds; label as HISTORICAL (not a forecast).
  * 5. Handle RBI FRSB correctly: "Current coupon after tax", disclaiming semiannual reset (never guaranteed 7-year).
- * 6. Handle PPF / SSY correctly: Section 10(11)/10(11A) EEE tax-free (incrementalTax = 0).
+ * 6. PPF / SSY treatment is versioned by fiscal year and account facts; no legacy
+ *    section label is emitted as current statutory authority.
  * 7. Generate deterministic, plain-English "Why this fits you", risk tier, and access-to-money copy.
  */
 
@@ -35,6 +36,7 @@ import {
   PRODUCT_TAX_CLASSES,
   PRODUCT_TAX_STATUSES,
 } from './productTaxAuthority.js';
+import { buildTaxRuleMetadata, LEGACY_RULE_SEMANTICS } from './taxRuleMetadata.js';
 
 export const POST_TAX_SERVICE_VERSION = 'product-post-tax-calculator-2.0.0';
 
@@ -76,6 +78,7 @@ function createAnalysis({
   isHistoricalEstimate = false,
   historicalObservationWindowMonths = null,
   rulesApplied = [],
+  legacyRuleAliases = [],
 }) {
   const sourceReferences = [];
   const seenReferences = new Set();
@@ -96,11 +99,37 @@ function createAnalysis({
   addReferences(taxMetadata?.sourceReferences, 'PRODUCT_RULE');
   addReferences(policy?.sourceReferences, 'TAX_POLICY');
 
+  const rawRulesApplied = [
+    ...(taxMetadata?.rulesApplied || []),
+    ...rulesApplied,
+  ];
+  const taxRuleMetadata = buildTaxRuleMetadata({
+    statuteMetadata: policy?.statuteMetadata,
+    identifiers: rawRulesApplied,
+    taxClass: taxMetadata?.taxClass || null,
+  });
+  const completeTaxRuleMetadata = taxRuleMetadata ? {
+    ...taxRuleMetadata,
+    legacyAliases: [...new Set([...taxRuleMetadata.legacyAliases, ...legacyRuleAliases])],
+  } : null;
+  const visibleRulesApplied = completeTaxRuleMetadata?.rulesApplied
+    || rawRulesApplied.filter(identifier => !LEGACY_RULE_SEMANTICS[identifier]);
   return {
     status,
     calculationClass,
     taxClass: taxMetadata?.taxClass || null,
     taxClassification: taxMetadata?.taxClass || null,
+    taxClassificationMetadata: completeTaxRuleMetadata ? {
+      statute: completeTaxRuleMetadata.statute,
+      classificationId: completeTaxRuleMetadata.classificationId,
+      legacyClassificationAlias: completeTaxRuleMetadata.legacyClassificationAlias,
+    } : (taxMetadata?.taxClass ? {
+      statute: null,
+      classificationId: null,
+      legacyClassificationAlias: taxMetadata.taxClass,
+      status: 'STATUTE_POLICY_UNAVAILABLE',
+    } : null),
+    taxRuleMetadata: completeTaxRuleMetadata,
     fiscalYear,
     policyVersion,
     inputBasis,
@@ -119,10 +148,7 @@ function createAnalysis({
     assumptions,
     unavailableReasons,
     sourceReferences,
-    rulesApplied: [
-      ...(taxMetadata?.rulesApplied || []),
-      ...rulesApplied,
-    ],
+    rulesApplied: visibleRulesApplied,
     requiredTaxInputs,
     metricLabel,
     disclosure,
@@ -225,41 +251,20 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
   const annualRate = Number(product?.officialRate?.value);
   const isEee = [PRODUCT_TAX_CLASSES.PPF_EEE, PRODUCT_TAX_CLASSES.SSY_EEE].includes(taxType);
   if (isEee) {
-    if (!Number.isFinite(annualRate) || annualRate <= 0) {
-      return createAnalysis({
-        status: PRODUCT_TAX_STATUSES.PRODUCT_FACTS_UNAVAILABLE,
-        taxMetadata,
-        policy,
-        fiscalYear,
-        policyVersion: policy.policyVersion,
-        principal,
-        dataClass: 'UNAVAILABLE',
-        assumptions,
-        unavailableReasons: ['CURRENT_OFFICIAL_RATE_UNAVAILABLE'],
-        metricLabel: 'Current after-tax rate',
-        disclosure: 'The current official rate is unavailable.',
-      });
-    }
-    const grossGain = Math.round(principal * (annualRate / 100));
     return createAnalysis({
-      status: PRODUCT_TAX_STATUSES.CALCULATED,
+      status: PRODUCT_TAX_STATUSES.TAX_CLASSIFICATION_REQUIRES_ACQUISITION_FACTS,
       taxMetadata,
       policy,
       fiscalYear,
       policyVersion: policy.policyVersion,
       principal,
-      grossGain,
-      taxableGain: 0,
-      exemptionApplied: grossGain,
-      incrementalTax: 0,
-      cess: 0,
-      surcharge: 0,
-      netGain: grossGain,
-      postTaxRatePct: Number(annualRate.toFixed(2)),
+      dataClass: 'UNAVAILABLE',
       assumptions,
-      metricLabel: 'Current after-tax rate',
-      disclosure: 'Current provider rate illustration. The qualified scheme treatment is tax-exempt under the cited official source; this is not a full-tenure maturity IRR.',
-      rulesApplied: ['CURRENT_RATE_ONLY_NOT_FULL_TENURE_IRR'],
+      requiredTaxInputs,
+      unavailableReasons: ['PPF_SSY_EXCLUSION_ELIGIBILITY_NOT_ESTABLISHED', ...requiredTaxInputs],
+      metricLabel: 'After-tax result',
+      disclosure: 'No account-qualification or contribution/exit evidence is available to establish the statutory exclusion for this account. No tax-free result or after-tax rate is inferred from the product name or scheme category.',
+      message: 'Verified account and payment evidence is required before this tax treatment can be classified.',
     });
   }
 
@@ -407,7 +412,7 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
       assumptions: [...assumptions, 'HISTORICAL_RETURN_IS_NOT_A_FORECAST'],
       metricLabel: 'Historical 1Y after-tax return',
       historicalObservationWindowMonths: 12,
-      disclosure: 'HISTORICAL — NOT A FORECAST. Qualified Section 50AA metadata establishes slab treatment; the comparison uses the explicit holding period and current tax inputs. No future return is claimed.',
+      disclosure: 'HISTORICAL — NOT A FORECAST. Qualified debt mutual-fund tax metadata establishes the applicable slab treatment; the comparison uses the explicit holding period and current tax inputs. No future return is claimed.',
       isHistoricalEstimate: true,
     });
   }
@@ -483,10 +488,11 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
     dataClass: 'HISTORICAL_PROVIDER_FACT',
     assumptions: [...assumptions, 'HISTORICAL_RETURN_IS_NOT_A_FORECAST'],
     metricLabel: 'Historical 1Y after-tax return',
-    disclosure: `HISTORICAL — NOT A FORECAST. The provider return window is a verified 1-year observation; it is not the user's realized gain or a future return. ${capitalGains.taxClass === 'EQUITY_LTCG_SECTION_112A' ? 'Section 112A LTCG treatment uses the explicit holding period and the remaining taxpayer-level annual exemption.' : 'Section 111A STCG treatment uses the explicit holding period.'} Special-rate tax is separate from ordinary slabs and Section 87A is not applied to it.`,
+    disclosure: `HISTORICAL — NOT A FORECAST. The provider return window is a verified 1-year observation; it is not the user's realized gain or a future return. ${capitalGains.taxClass === 'EQUITY_LTCG_SECTION_112A' ? 'Equity long-term capital-gains treatment uses the explicit holding period and remaining taxpayer-level annual exemption.' : 'Equity short-term capital-gains treatment uses the explicit holding period.'} Special-rate tax is separate from ordinary slab tax and applicable rebate rules.`,
     isHistoricalEstimate: true,
     historicalObservationWindowMonths: 12,
     rulesApplied: capitalGains.rulesApplied,
+    legacyRuleAliases: capitalGains.taxRuleMetadata?.legacyAliases || [],
   });
 }
 
@@ -541,13 +547,13 @@ export function generateBeginnerSuitability({ product, profile = {}, parentCatal
   } else if (parentId === 'rbi_bonds' || canonicalId.includes('rbi')) {
     accessToMoney = '7-year lock-in (premature exit only for senior citizens age 60+)';
   } else if (parentId.includes('elss') || name.includes('elss')) {
-    accessToMoney = '3-year lock-in (mandatory under Section 80C)';
+    accessToMoney = '3-year lock-in; tax eligibility depends on the selected fiscal-year policy and regime';
   }
 
   // 3. Why this fits you (plain-English explanation)
   let whyThisFitsYou = '';
   if (parentId === 'ppf' || parentId === 'sukanya') {
-    whyThisFitsYou = `Shown because you selected ${goals}. Backed by the Government of India with 100% sovereign safety and tax-free returns matching your conservative capital protection needs.`;
+    whyThisFitsYou = `Shown because you selected ${goals}. Backed by the Government of India with sovereign backing; applicable tax treatment depends on the selected fiscal-year policy and your account facts.`;
   } else if (parentId === 'rbi_bonds') {
     whyThisFitsYou = `Shown because you selected ${goals} with a ${horizon} horizon. Issued directly by the RBI with sovereign safety, paying a floating coupon that automatically resets every 6 months.`;
   } else if (parentId === 'fd' || parentId === 'sbi_fd') {
@@ -557,7 +563,7 @@ export function generateBeginnerSuitability({ product, profile = {}, parentCatal
   } else if (['nsc', 'kvp', 'pomis'].includes(parentId)) {
     whyThisFitsYou = `Shown because you selected ${goals}. A dependable small-savings option backed by the Government of India for steady capital accumulation.`;
   } else if (parentId.includes('elss')) {
-    whyThisFitsYou = `Shown because you selected ${goals}. Offers dual benefits of equity compounding and Section 80C tax deduction with the shortest lock-in (3 years) among tax-saving instruments.`;
+    whyThisFitsYou = `Shown because you selected ${goals}. This equity fund has a 3-year lock-in; any tax treatment depends on the selected fiscal-year policy, regime and your eligibility.`;
   } else if (parentId.includes('debt') || parentId.includes('liquid') || parentId.includes('gilt')) {
     whyThisFitsYou = `Shown because you selected ${goals}. Provides liquidity and portfolio stability with lower price volatility, matching your ${riskCapacity} suitability tier.`;
   } else {

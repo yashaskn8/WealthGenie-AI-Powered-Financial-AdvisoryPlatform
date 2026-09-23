@@ -50,7 +50,9 @@ const GoalSchema = new mongoose.Schema({
   inflation_assumption: { type: Number, min: 0, max: 1 },
   sourceRecommendationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Recommendation', default: null },
   sourceAllocationRevision: { type: Number, min: 1, default: null },
+  sourceAllocationRevisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'RecommendationAllocationRevision', default: null },
   sourceProfileInputHash: { type: String, match: /^[a-f0-9]{64}$/, default: null },
+  sourceProfileVersion: { type: Number, min: 1, default: null },
   sourceModelVersion: { type: String, default: null },
   sourceRecommendationPolicyVersion: { type: String, default: null },
   sourceRegulatoryRuleVersion: { type: String, default: null },
@@ -59,11 +61,14 @@ const GoalSchema = new mongoose.Schema({
   sourceReturnAssumptionSource: { type: String, default: null },
   sourceRecommendationFingerprint: { type: String, match: /^[a-f0-9]{64}$/, default: null },
   sourcePortfolioFingerprint: { type: String, match: /^[a-f0-9]{64}$/, default: null },
+  sourceGoalCalculationInputFingerprint: { type: String, match: /^[a-f0-9]{64}$/, default: null },
+  sourceGoalCalculationPolicyVersion: { type: String, default: null },
   calculationFreshness: {
     fresh: { type: Boolean, default: false },
     reasonCodes: { type: [String], default: [] },
     checkedAt: { type: Date, default: null },
   },
+  advisoryMetadata: { type: mongoose.Schema.Types.Mixed, default: null },
   gemini_advice: { type: String, maxlength: 2000 },
 }, { timestamps: true });
 

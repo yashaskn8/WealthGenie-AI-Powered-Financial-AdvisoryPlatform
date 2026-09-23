@@ -189,7 +189,7 @@ const AdvancedHub = ({
                       <li><strong>SBI:</strong> Retail domestic term-deposit published card rates for FD comparison.</li>
                       <li><strong>India Post / DEA:</strong> Official quarterly small-savings scheme rates (PPF, Sukanya Samriddhi, NSC).</li>
                       <li><strong>RBI:</strong> Floating Rate Savings Bond linked semiannually to NSC reference rate + 35 bps.</li>
-                      <li><strong>Tax Engine:</strong> Incremental fiscal-year versioned calculations with Section 112A and 50AA compliance.</li>
+                      <li><strong>Tax Engine:</strong> Incremental fiscal-year calculations using statute-versioned rules and verified product classifications.</li>
                     </ul>
                   </div>
                 </div>

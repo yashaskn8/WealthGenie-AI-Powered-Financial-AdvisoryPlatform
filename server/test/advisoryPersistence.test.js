@@ -2,18 +2,26 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import mongoose from 'mongoose';
 import Recommendation from '../models/Recommendation.js';
+import FinancialProfile from '../models/FinancialProfile.js';
 import AuditRecord from '../models/AuditRecord.js';
+import AuditChainHead from '../models/AuditChainHead.js';
 import IdempotencyKey from '../models/IdempotencyKey.js';
+import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
+import RecommendationState from '../models/RecommendationState.js';
 import {
   claimAdvisoryIdempotency,
   releaseAdvisoryIdempotency,
 } from '../middleware/idempotency.js';
 import { persistAdvisoryAtomically } from '../services/advisoryPersistence.js';
 import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
+import { buildRecommendationProfileHash, RECOMMENDATION_POLICY_VERSION } from '../services/recommendationProfile.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 
 const userId = new mongoose.Types.ObjectId();
 const profileId = new mongoose.Types.ObjectId();
+const testProfile = canonicalProfile({ monthlyTakeHome: 100000, monthlySavings: 25000, age: 30 });
+const profileInputHash = buildRecommendationProfileHash(testProfile, { modelVersion: 'rule_fallback' });
 
 function makeOperation(claim, suffix = '') {
   const recommendationId = new mongoose.Types.ObjectId();
@@ -45,7 +53,8 @@ function makeOperation(claim, suffix = '') {
       mlFallback: true,
       modelVersion: 'rule_fallback',
       regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
-      profileInputHash: 'a'.repeat(64),
+      recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
+      profileInputHash,
     },
     auditRecord: {
       _id: auditId,
@@ -59,7 +68,7 @@ function makeOperation(claim, suffix = '') {
       input_hash: `input-hash-${suffix}`,
       inputs: {
         financial_profile_schema_version: 'financial-profile-1.0.0',
-        recommendation_policy_version: 'suitability-freeze-1.0.0',
+        recommendation_policy_version: RECOMMENDATION_POLICY_VERSION,
         age: 30, monthly_take_home: 100000, monthly_savings: 25000,
       },
       recommendations: { instruments: [{ id: `fixture-${suffix}`, allocationWeight: 1 }] },
@@ -83,16 +92,32 @@ test.before(async () => {
 
 test.beforeEach(async () => {
   await Promise.all([
+    FinancialProfile.deleteMany({ userId }),
     Recommendation.deleteMany({ userId }),
+    // Production blocks deletion to preserve append-only history. The test
+    // harness clears its fixture rows through the raw collection instead.
+    RecommendationAllocationRevision.collection.deleteMany({ userId }),
+    RecommendationState.deleteMany({ userId }),
     AuditRecord.deleteMany({ userId }),
+    AuditChainHead.deleteMany({ userId }),
     IdempotencyKey.deleteMany({ userId }),
   ]);
+  await FinancialProfile.create({
+    _id: profileId,
+    userId,
+    ...testProfile,
+    recommendationProfileVersion: 'financial-profile-1.1.0',
+  });
 });
 
 test.after(async () => {
   await Promise.all([
+    FinancialProfile.deleteMany({ userId }),
     Recommendation.deleteMany({ userId }),
+    RecommendationAllocationRevision.collection.deleteMany({ userId }),
+    RecommendationState.deleteMany({ userId }),
     AuditRecord.deleteMany({ userId }),
+    AuditChainHead.deleteMany({ userId }),
     IdempotencyKey.deleteMany({ userId }),
   ]).catch(() => {});
   await teardownTestDatabase();
@@ -109,6 +134,27 @@ test('failure after recommendation creation rolls back recommendation and audit'
   );
   await releaseAdvisoryIdempotency(operationClaim);
 
+  assert.equal(await Recommendation.countDocuments({ userId }), 0);
+  assert.equal(await AuditRecord.countDocuments({ userId }), 0);
+});
+
+test('recommendation commit rejects a profile edited while computation was in flight', async () => {
+  const operationClaim = await claim('atomic-profile-race-001');
+  let changed = false;
+  await assert.rejects(persistAdvisoryAtomically({
+    ...makeOperation(operationClaim, 'profile-race'),
+    testHooks: {
+      afterSourceProfileRead: async () => {
+        if (changed) return;
+        changed = true;
+        await FinancialProfile.updateOne({ _id: profileId, userId }, {
+          $set: { monthlySavings: 30000 },
+          $inc: { version: 1, financialStateFence: 1 },
+        });
+      },
+    },
+  }), error => error.code === 'PROFILE_STATE_CHANGED' || /write conflict/i.test(error.message));
+  await releaseAdvisoryIdempotency(operationClaim);
   assert.equal(await Recommendation.countDocuments({ userId }), 0);
   assert.equal(await AuditRecord.countDocuments({ userId }), 0);
 });

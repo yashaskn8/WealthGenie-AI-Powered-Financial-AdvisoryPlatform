@@ -13,6 +13,7 @@ import {
   buildTaxSlabBreakdown as buildTaxSlabBreakdownForFiscalYear,
   analyzeTaxOptimization as analyzeTaxOptimizationForFiscalYear,
 } from '../services/taxEngine.js';
+import { taxDeductionSchema } from '../validation/taxSchemas.js';
 
 const TEST_FISCAL_YEAR = 'FY2026-27';
 const withTaxAge = (regime, deductions = {}) => (
@@ -28,6 +29,15 @@ const compareTaxRegimes = (income, deductions, incomeSource, fiscalYear = TEST_F
   compareTaxRegimesForFiscalYear(income, withTaxAge('old', deductions), incomeSource, fiscalYear);
 const getEffectiveMarginalRate = (income, regime, deductions, incomeSource, fiscalYear = TEST_FISCAL_YEAR) =>
   getEffectiveMarginalRateForFiscalYear(income, regime, withTaxAge(regime, deductions), incomeSource, fiscalYear);
+
+test('unclassified legacy other-deduction input cannot reduce taxable income', () => {
+  assert.equal(taxDeductionSchema.validate({ other: 0 }).error, undefined);
+  assert.ok(taxDeductionSchema.validate({ other: 20_000 }).error);
+  assert.throws(
+    () => calculateTaxableIncome(2_000_000, 'old', { other: 20_000, age: 30 }, 'salary', TEST_FISCAL_YEAR),
+    /unclassified.*deduction/i,
+  );
+});
 const buildTaxSlabBreakdown = (computation, fiscalYear = TEST_FISCAL_YEAR) =>
   buildTaxSlabBreakdownForFiscalYear(computation, fiscalYear);
 const analyzeTaxOptimization = (income, deductions, incomeSource, fiscalYear = TEST_FISCAL_YEAR) =>
@@ -139,14 +149,17 @@ test('calculateTaxableIncome applies old regime deductions (80C, 80CCD(1B), HRA,
     homeLoanInterest: 250_000, // capped at 200,000
     section80EEA: 200_000, // capped at 150,000
     savingsInterest: 15_000, // 80TTA capped at 10,000
-    other: 20_000,
     age: 30,
   }, 'salary');
 
-  // Allowed: 150k (80C) + 50k (NPS) + 25k (80D self) + 120k (HRA) + 200k (Loan) + 150k (80EEA) + 10k (80TTA) + 20k (Other) = 725,000
+  // Allowed: 150k + 50k + 25k + 120k + 200k + 150k + 10k = 705,000.
   assert.equal(young.allowed80D, 25_000);
-  assert.equal(young.oldRegimeDeductions, 725_000);
-  assert.equal(young.taxableIncome, 2_000_000 - 50_000 - 725_000);
+  assert.equal(young.oldRegimeDeductions, 705_000);
+  assert.equal(young.taxableIncome, 2_000_000 - 50_000 - 705_000);
+  assert.throws(
+    () => calculateTaxableIncome(2_000_000, 'old', { other: 20_000, age: 30 }, 'salary', TEST_FISCAL_YEAR),
+    /unclassified.*deduction/i,
+  );
 
   // Senior citizen (Age >= 60) with 80TTB
   const senior = calculateTaxableIncome(2_000_000, 'old', {

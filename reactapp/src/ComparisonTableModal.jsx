@@ -154,7 +154,7 @@ const ComparisonDetailPanel = ({ selectedInvestments, onBack }) => {
     { key: 'rate', label: 'Model Return Assumption', fmt: v => Number.isFinite(v) ? `${v}%` : 'Unavailable', icon: <TrendingUp size={14}/>, higher: true },
     { key: 'riskLabel', label: 'Risk Level', fmt: v => v, icon: <Shield size={14}/> },
     { key: 'lockIn', label: 'Lock-in (yrs)', fmt: v => v === 0 ? 'None' : Number.isFinite(v) ? `${v} yrs` : 'Unavailable', icon: <Lock size={14}/>, higher: false },
-    { key: 'taxType', label: 'Reference Tax Tag', fmt: v => v?.toUpperCase() || 'Unavailable', icon: <Zap size={14}/> },
+    { key: 'taxType', label: 'Tax result', fmt: () => 'Use fiscal-year tax analysis', icon: <Zap size={14}/> },
     { key: 'minMonthlyInvestment', label: 'Min Investment', fmt: v => formatINR(v), icon: <BarChart3 size={14}/>, higher: false },
   ];
   const finiteRates = selectedInvestments.map(instrument => Number(instrument.rate)).filter(Number.isFinite);
@@ -301,7 +301,8 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
           if (cat.toLowerCase() !== filterCategory.toLowerCase()) return false;
         }
       }
-      const hasTax = inv.taxType === "eee" || inv.taxType === "elss" || inv.taxType === "nps" || inv.tax_benefit;
+      const hasTax = inv.postTaxAnalysis?.status === 'CALCULATED'
+        && Boolean(inv.postTaxAnalysis?.taxRuleMetadata?.statute);
       if (filterTax && !hasTax) return false;
       const minInv = Number(inv.minMonthlyInvestment ?? inv.min_investment_inr);
       if (!Number.isFinite(minInv) || minInv > minInvRange) return false;
@@ -396,7 +397,7 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
             </div>
             
             <div className="toggle-group" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>Filter by Reference Tax Tag</span>
+              <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>Filter by completed tax calculation</span>
               <label className="switch">
                 <input type="checkbox" checked={filterTax} onChange={e => setFilterTax(e.target.checked)} />
                 <span className="slider"></span>
@@ -546,7 +547,7 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
                   <th>MODEL RETURN ASSUMPTION</th>
                   <th>RISK & LIQUIDITY</th>
                   <th>LOCK-IN <span style={{fontSize: '0.6rem'}}>(YRS)</span></th>
-                  <th>REFERENCE TAX TAG</th>
+                  <th>TAX RESULT</th>
                   <th>MIN. INV.</th>
                   <th>SELECT</th>
                 </tr>
@@ -557,8 +558,9 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
                   const lockIn = inv.lockIn;
                   const riskLbl = inv.riskLbl;
                   const liquidity = getLiquidityLevel(lockIn);
-                  const hasTax = inv.taxType === "eee" || inv.taxType === "elss" || inv.taxType === "nps" || inv.tax_benefit;
-                  const taxLabel = inv.taxType ? inv.taxType.toUpperCase() : (inv.tax_section || 'None');
+                  const hasTax = inv.postTaxAnalysis?.status === 'CALCULATED'
+                    && Boolean(inv.postTaxAnalysis?.taxRuleMetadata?.statute);
+                  const taxLabel = hasTax ? 'Calculated for supplied facts' : 'Use tax analysis';
                   const minInvCandidate = Number(inv.minMonthlyInvestment ?? inv.min_investment_inr);
                   const minInv = Number.isFinite(minInvCandidate) ? minInvCandidate : null;
                   const rate = inv.rate;
@@ -566,7 +568,7 @@ const ComparisonTableModal = ({ isOpen, onClose, allInvestments = [], recommenda
                   const isSelected = selectedIds.includes(invId);
                   const matchScore = inv.matchScore;
 
-                  const defaultTaxText = inv.taxType?.toUpperCase() || inv.tax_section || 'Unavailable';
+                  const defaultTaxText = 'Use fiscal-year tax analysis';
 
                   const matchColor = matchScore >= 85 ? '#10b981' : matchScore >= 60 ? '#38bdf8' : '#64748b';
                   const matchBg = matchScore >= 85 ? 'rgba(16,185,129,0.12)' : matchScore >= 60 ? 'rgba(56,189,248,0.12)' : 'rgba(100,116,139,0.12)';

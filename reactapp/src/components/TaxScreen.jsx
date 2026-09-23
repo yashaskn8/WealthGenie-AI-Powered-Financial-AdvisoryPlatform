@@ -16,7 +16,6 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
   const [existing80CCD, setExisting80CCD] = useState('');
   const [existingHRA, setExistingHRA] = useState('');
   const [existingHomeLoan, setExistingHomeLoan] = useState('');
-  const [existingOther, setExistingOther] = useState('');
   const [existing80DSelf, setExisting80DSelf] = useState('');
   const [existing80DParents, setExisting80DParents] = useState('');
   const [parentsSenior, setParentsSenior] = useState(null);
@@ -59,7 +58,6 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
           nps80CCD1B: existing80CCD === '' ? 0 : Number(existing80CCD),
           hra: existingHRA === '' ? 0 : Number(existingHRA),
           homeLoanInterest: existingHomeLoan === '' ? 0 : Number(existingHomeLoan),
-          other: existingOther === '' ? 0 : Number(existingOther),
           section80D_self: existing80DSelf === '' ? 0 : Number(existing80DSelf),
           section80D_parents: existing80DParents === '' ? 0 : Number(existing80DParents),
           parents_senior: existing80DParents === '' ? undefined : parentsSenior,
@@ -88,7 +86,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
       active = false;
       clearTimeout(timer);
     };
-  }, [annualIncome, fiscalYear, incomeSource, existing80C, existing80CCD, existingHRA, existingHomeLoan, existingOther, existing80DSelf, existing80DParents, parentsSenior, profile?.age]);
+  }, [annualIncome, fiscalYear, incomeSource, existing80C, existing80CCD, existingHRA, existingHomeLoan, existing80DSelf, existing80DParents, parentsSenior, profile?.age]);
 
   const section80CLimit = serverTaxData?.deduction_limits?.section80C ?? null;
   const section80CCDLimit = serverTaxData?.deduction_limits?.section80CCD1B ?? null;
@@ -413,7 +411,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
               {/* 80C Deduction */}
               <div className="tax-control-card tax-control-card--small">
                 <label className="tax-input-label" htmlFor="tax-80c-input">
-                  <JargonTooltip term="Section 80C">Tax-Saving Investments (80C)</JargonTooltip>
+                  <JargonTooltip term="Eligible investment deductions">Eligible investment deductions</JargonTooltip>
                 </label>
                 <div className="tax-input-subtext">
                   Enter only deductions you have independently established as eligible.
@@ -422,7 +420,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                   <span className="tax-input-prefix">₹</span>
                   <input 
                     id="tax-80c-input"
-                    aria-label="Tax-Saving Investments Section 80C"
+                    aria-label="Eligible investment deductions already claimed"
                     type="number" 
                     value={existing80C} 
                     onChange={e => setExisting80C(e.target.value)} 
@@ -446,7 +444,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                   <span className="tax-input-prefix">₹</span>
                   <input 
                     id="tax-nps-input"
-                    aria-label="Pension NPS Savings Section 80CCD 1B"
+                    aria-label="Qualifying NPS contributions already claimed"
                     type="number" 
                     value={existing80CCD} 
                     onChange={e => setExisting80CCD(e.target.value)} 
@@ -493,7 +491,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                   <span className="tax-input-prefix">₹</span>
                   <input 
                     id="tax-homeloan-input"
-                    aria-label="Home Loan Interest Section 24b"
+                    aria-label="Home loan interest"
                     type="number" 
                     value={existingHomeLoan} 
                     onChange={e => setExistingHomeLoan(e.target.value === '' ? '' : Math.min(200000, Number(e.target.value)))} 
@@ -511,13 +509,13 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                   <Heart size={13} /> Medical Insurance
                 </label>
                 <div className="tax-input-subtext" style={{ minHeight: '34px' }}>
-                  Self, spouse, and children (Sec 80D)
+                  Self, spouse, and children
                 </div>
                 <div className="tax-input-wrapper">
                   <span className="tax-input-prefix">₹</span>
                   <input
                     id="tax-80d-self-input"
-                    aria-label="Medical Insurance Self and Family Section 80D"
+                    aria-label="Medical insurance for self and family"
                     type="number"
                     value={existing80DSelf}
                     onChange={e => setExisting80DSelf(e.target.value)}
@@ -547,7 +545,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                   <span className="tax-input-prefix">₹</span>
                   <input
                     id="tax-80d-parents-input"
-                    aria-label="Medical Insurance Parents Section 80D"
+                    aria-label="Medical insurance for parents"
                     type="number"
                     value={existing80DParents}
                     onChange={e => setExisting80DParents(e.target.value)}
@@ -559,27 +557,6 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
                 <div className="tax-input-hint">Limit: {parents80DLimit === null ? 'specify senior-citizen status to calculate' : `${formatINR(parents80DLimit)} per year`}</div>
               </div>
 
-              {/* Other Deductions */}
-              <div className="tax-control-card tax-control-card--small" style={{ gridColumn: 'span 3' }}>
-                <label className="tax-input-label" htmlFor="tax-other-input">
-                  Other Deductions
-                </label>
-                <div className="tax-input-subtext">
-                  LTA, education loan interest, donations, and other eligible deductions.
-                </div>
-                <div className="tax-input-wrapper">
-                  <span className="tax-input-prefix">₹</span>
-                  <input 
-                    id="tax-other-input"
-                    aria-label="Other eligible tax deductions"
-                    type="number" 
-                    value={existingOther} 
-                    onChange={e => setExistingOther(e.target.value === '' ? '' : Number(e.target.value))} 
-                    className="tax-input" 
-                    placeholder="0"
-                  />
-                </div>
-              </div>
             </motion.div>
           )}
         </AnimatePresence>
@@ -874,7 +851,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
       {regime === 'old' && (
         <div className="tax-limits-row">
           <div className="tax-limit-card">
-            <div className="tax-limit-header"><JargonTooltip term="Section 80C">Tax-Saving Investments (80C)</JargonTooltip> - How Much You've Used</div>
+            <div className="tax-limit-header"><JargonTooltip term="Eligible investment deductions">Eligible investment deductions</JargonTooltip> - How Much You've Used</div>
             <div className="tax-limit-bar-track">
               <div className="tax-limit-bar-fill" style={{ width: `${section80CLimit && remaining80C !== null ? ((section80CLimit - remaining80C) / section80CLimit) * 100 : 0}%` }} />
             </div>
@@ -884,7 +861,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
             </div>
           </div>
           <div className="tax-limit-card">
-            <div className="tax-limit-header"><JargonTooltip term="Section 80CCD(1B)">Pension (NPS) Deduction</JargonTooltip> - How Much You've Used</div>
+            <div className="tax-limit-header"><JargonTooltip term="Qualifying NPS contributions">Qualifying NPS contributions</JargonTooltip> - How Much You've Used</div>
             <div className="tax-limit-bar-track">
               <div className="tax-limit-bar-fill tax-limit-bar-fill--purple" style={{ width: `${section80CCDLimit && remaining80CCD !== null ? ((section80CCDLimit - remaining80CCD) / section80CCDLimit) * 100 : 0}%` }} />
             </div>

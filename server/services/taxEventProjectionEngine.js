@@ -14,10 +14,11 @@ import {
   getCapitalGainsHoldingPeriodMonths,
   getTaxPolicyMetadata,
 } from './taxEngine.js';
+import { buildTaxRuleMetadata } from './taxRuleMetadata.js';
 import { toMonthlyRate } from './instrumentConstants.js';
 
 export const MODEL_TAX_CLASSES = Object.freeze({
-  EEE: 'MODEL_TAX_CLASS_EEE',
+  CONDITIONAL_ACCOUNT_TREATMENT: 'MODEL_TAX_CLASS_CONDITIONAL_ACCOUNT_TREATMENT',
   ORDINARY_INTEREST: 'MODEL_TAX_CLASS_ORDINARY_INTEREST',
   EQUITY_112A: 'MODEL_TAX_CLASS_EQUITY_112A',
   OTHER_CAPITAL_GAINS: 'MODEL_TAX_CLASS_OTHER_CAPITAL_GAINS',
@@ -28,6 +29,7 @@ export const MODEL_TAX_CLASSES = Object.freeze({
 export const MODEL_POST_TAX_STATUSES = Object.freeze({
   CALCULATED: 'CALCULATED',
   REQUIRES_TAX_INPUTS: 'REQUIRES_TAX_INPUTS',
+  TAX_CLASSIFICATION_REQUIRES_ACQUISITION_FACTS: 'TAX_CLASSIFICATION_REQUIRES_ACQUISITION_FACTS',
   MODEL_TAX_CLASS_UNAVAILABLE: 'MODEL_TAX_CLASS_UNAVAILABLE',
   PROJECTION_MODEL_UNAVAILABLE: 'MODELLED_POST_TAX_PROJECTION_UNAVAILABLE',
 });
@@ -37,8 +39,8 @@ const SERVER_MODEL_TAX_CLASS_BY_INSTRUMENT = Object.freeze({
   SCSS: MODEL_TAX_CLASSES.ORDINARY_INTEREST,
   RBI_Bond: MODEL_TAX_CLASSES.ORDINARY_INTEREST,
   'G-Sec': MODEL_TAX_CLASSES.ORDINARY_INTEREST,
-  PPF: MODEL_TAX_CLASSES.EEE,
-  SSY: MODEL_TAX_CLASSES.EEE,
+  PPF: MODEL_TAX_CLASSES.CONDITIONAL_ACCOUNT_TREATMENT,
+  SSY: MODEL_TAX_CLASSES.CONDITIONAL_ACCOUNT_TREATMENT,
   ELSS: MODEL_TAX_CLASSES.EQUITY_112A,
   Equity_MF: MODEL_TAX_CLASSES.EQUITY_112A,
   Gold: MODEL_TAX_CLASSES.OTHER_CAPITAL_GAINS,
@@ -66,6 +68,18 @@ export function isKnownModelInstrumentType(instrumentType) {
 
 function round4(value) {
   return Number(value.toFixed(4));
+}
+
+function combineTaxRuleMetadata(policy, metadataEntries = []) {
+  if (!policy?.statuteMetadata) return null;
+  const entries = metadataEntries.filter(Boolean);
+  const identifiers = [...new Set(entries.flatMap(entry => entry.rulesApplied || []))];
+  const combined = buildTaxRuleMetadata({ statuteMetadata: policy.statuteMetadata, identifiers });
+  if (!combined) return null;
+  return {
+    ...combined,
+    legacyAliases: [...new Set(entries.flatMap(entry => entry.legacyAliases || []))],
+  };
 }
 
 function requireNumber(value, name, { min = 0, max = Infinity, integer = false } = {}) {
@@ -229,7 +243,10 @@ function calculateOrdinaryIncrementalTax({ grossGain, context }) {
   };
 }
 
-function unavailableResult({ instrumentType, modelTaxClass = null, status = MODEL_POST_TAX_STATUSES.PROJECTION_MODEL_UNAVAILABLE, reasons, fiscalYear = null }) {
+function unavailableResult({ instrumentType, modelTaxClass = null, status = MODEL_POST_TAX_STATUSES.PROJECTION_MODEL_UNAVAILABLE, reasons, fiscalYear = null, policy = null }) {
+  const taxRuleMetadata = policy
+    ? buildTaxRuleMetadata({ statuteMetadata: policy.statuteMetadata })
+    : null;
   return {
     status,
     instrumentType,
@@ -242,6 +259,10 @@ function unavailableResult({ instrumentType, modelTaxClass = null, status = MODE
     calculationClass: 'MODELLED_POST_TAX_PROJECTION',
     dataClass: 'MODEL_ASSUMPTION',
     fiscalYear,
+    policyVersion: policy?.policyVersion || null,
+    statuteMetadata: policy?.statuteMetadata || null,
+    sourceReferences: policy?.sourceReferences || [],
+    taxRuleMetadata,
     incrementalTax: null,
     cess: null,
     surcharge: null,
@@ -251,7 +272,7 @@ function unavailableResult({ instrumentType, modelTaxClass = null, status = MODE
   };
 }
 
-function finalizeOutcome({ instrumentType, modelTaxClass, nominalRate, grossGain, taxAmount, cess, surcharge, taxType, holdingPeriodBasis, assumptions = [], details = {}, notes = '' }) {
+function finalizeOutcome({ instrumentType, modelTaxClass, nominalRate, grossGain, taxAmount, cess, surcharge, taxType, holdingPeriodBasis, assumptions = [], details = {}, notes = '', policy = null, taxRuleMetadata = null }) {
   const safeGrossGain = Math.max(0, grossGain);
   const safeTax = Math.max(0, Math.min(safeGrossGain, taxAmount));
   const taxRate = safeGrossGain > 0 ? safeTax / safeGrossGain : 0;
@@ -274,6 +295,13 @@ function finalizeOutcome({ instrumentType, modelTaxClass, nominalRate, grossGain
     holdingPeriodBasis: holdingPeriodBasis || null,
     calculationClass: 'MODELLED_POST_TAX_PROJECTION',
     dataClass: 'MODEL_ASSUMPTION',
+    fiscalYear: policy?.fiscalYear || null,
+    policyVersion: policy?.policyVersion || null,
+    statuteMetadata: policy?.statuteMetadata || null,
+    sourceReferences: policy?.sourceReferences || [],
+    taxRuleMetadata: taxRuleMetadata || (policy
+      ? buildTaxRuleMetadata({ statuteMetadata: policy.statuteMetadata })
+      : null),
     assumptions,
     unavailableReasons: [],
     ...details,
@@ -294,21 +322,28 @@ export function calculateCanonicalPostTaxOutcome({ instrumentType, nominalRate, 
       fiscalYear,
     });
   }
+  const policy = getTaxPolicyMetadata(fiscalYear);
+  if (modelTaxClass === MODEL_TAX_CLASSES.CONDITIONAL_ACCOUNT_TREATMENT) {
+    return unavailableResult({
+      instrumentType,
+      modelTaxClass,
+      status: MODEL_POST_TAX_STATUSES.TAX_CLASSIFICATION_REQUIRES_ACQUISITION_FACTS,
+      reasons: ['PPF_SSY_EXCLUSION_ELIGIBILITY_NOT_ESTABLISHED', 'VERIFIED_ACCOUNT_AND_PAYMENT_FACTS_REQUIRED'],
+      fiscalYear,
+      policy,
+    });
+  }
   requireNumber(nominalRate, 'nominalRate', { min: 0, max: 1 });
   requireNumber(annualIncome, 'annualIncome');
   requireNumber(holdingYears, 'holdingYears', { min: 0.01, max: 100 });
   requireNumber(monthlySIP, 'monthlySIP');
   if (!Number.isInteger(userAge) || userAge < 18 || userAge > 120) throw new TypeError('userAge must be an integer from 18 to 120');
   if (!['salary', 'pension', 'family_pension', 'business', 'other'].includes(incomeSource)) throw new TypeError('incomeSource must be explicitly provided');
-  const policy = getTaxPolicyMetadata(fiscalYear);
   const context = { annualGrossIncome: annualIncome, regime, incomeSource, fiscalYear, userAge, deductions, holdingPeriodMonths: options.holdingPeriodMonths, acquisitionDate: options.acquisitionDate, redemptionDate: options.redemptionDate, section112AExemptionUsed: options.section112AExemptionUsed, section112AExemptionAppliedOverride: options.section112AExemptionAppliedOverride };
   const taxInputs = taxContext(context);
   const missing = missingContext(context, modelTaxClass, { ...options, holdingYears });
   if (missing.length > 0) {
-    return unavailableResult({ instrumentType, modelTaxClass, status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS, reasons: missing, fiscalYear });
-  }
-  if (modelTaxClass === MODEL_TAX_CLASSES.EEE) {
-    return finalizeOutcome({ instrumentType, modelTaxClass, nominalRate, grossGain: monthlySIP * 12 * nominalRate, taxAmount: 0, cess: 0, surcharge: 0, taxType: 'EEE — qualified tax-exempt treatment', assumptions: ['EEE_TREATMENT_FROM_SERVER_MODEL_CLASS'], notes: 'The server-owned model class treats this qualified instrument as exempt for the illustrated return. It is not a full-tenure maturity IRR.' });
+      return unavailableResult({ instrumentType, modelTaxClass, status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS, reasons: missing, fiscalYear, policy });
   }
   if (modelTaxClass === MODEL_TAX_CLASSES.ORDINARY_INTEREST) {
     const annualPrincipal = monthlySIP * 12;
@@ -321,6 +356,8 @@ export function calculateCanonicalPostTaxOutcome({ instrumentType, nominalRate, 
     return finalizeOutcome({
       instrumentType, modelTaxClass, nominalRate, grossGain, taxAmount: tax.taxAmount, cess: tax.cess, surcharge: tax.surcharge,
       taxType: 'Ordinary income — incremental tax under selected regime',
+      policy,
+      taxRuleMetadata: combineTaxRuleMetadata(policy, [tax.baseline.taxRuleMetadata, tax.withGain.taxRuleMetadata]),
       assumptions: ['INCREMENTAL_TAX_BASELINE_AND_WITH_PRODUCT_INCOME', 'TDS_NOT_MODELLED_AS_SECOND_FINAL_TAX'],
       details: {
         tdsApplicable,
@@ -335,13 +372,15 @@ export function calculateCanonicalPostTaxOutcome({ instrumentType, nominalRate, 
   if (modelTaxClass === MODEL_TAX_CLASSES.NPS_EXIT) {
     const annuityFraction = Number(options.annuityFraction);
     if (!Number.isFinite(annuityFraction) || annuityFraction < 0 || annuityFraction > 1 || !options.retirementTiming) {
-      return unavailableResult({ instrumentType, modelTaxClass, status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS, reasons: ['annuityFraction', 'retirementTiming'], fiscalYear });
+      return unavailableResult({ instrumentType, modelTaxClass, status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS, reasons: ['annuityFraction', 'retirementTiming'], fiscalYear, policy });
     }
     const grossGain = monthlySIP * 12 * nominalRate;
     const tax = calculateOrdinaryIncrementalTax({ grossGain: grossGain * annuityFraction, context });
     return finalizeOutcome({
       instrumentType, modelTaxClass, nominalRate, grossGain, taxAmount: tax.taxAmount, cess: tax.cess, surcharge: tax.surcharge,
       taxType: 'Modeled NPS exit scenario', holdingPeriodBasis: 'MODELLED_RETIREMENT_TIMING',
+      policy,
+      taxRuleMetadata: combineTaxRuleMetadata(policy, [tax.baseline.taxRuleMetadata, tax.withGain.taxRuleMetadata]),
       assumptions: ['MODELLED_NPS_EXIT_SCENARIO', 'ANNUITY_FRACTION_EXPLICIT', 'RETIREMENT_TIMING_EXPLICIT'],
       details: { annuityFraction, retirementTiming: options.retirementTiming, fiscalYear: policy.fiscalYear, policyVersion: policy.policyVersion },
       notes: 'This is a modeled exit scenario, not a statutory prediction of a future NPS corpus or annuity income.',
@@ -351,11 +390,11 @@ export function calculateCanonicalPostTaxOutcome({ instrumentType, nominalRate, 
     const channel = options.redemptionChannel;
     const validChannels = ['RBI_REDEMPTION', 'MATURITY_REDEMPTION', 'SECONDARY_MARKET_SALE'];
     if (!validChannels.includes(channel)) {
-      return unavailableResult({ instrumentType, modelTaxClass, status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS, reasons: ['redemptionChannel'], fiscalYear });
+      return unavailableResult({ instrumentType, modelTaxClass, status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS, reasons: ['redemptionChannel'], fiscalYear, policy });
     }
     const couponRate = Number(options.couponRate);
     if (!Number.isFinite(couponRate) || couponRate < 0 || couponRate > 1) {
-      return unavailableResult({ instrumentType, modelTaxClass, status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS, reasons: ['couponRate'], fiscalYear });
+      return unavailableResult({ instrumentType, modelTaxClass, status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS, reasons: ['couponRate'], fiscalYear, policy });
     }
     if (fiscalYear === 'FY2026-27' && channel === 'MATURITY_REDEMPTION'
         && (options.acquiredAtOriginalIssue !== true || options.heldContinuously !== true)) {
@@ -365,6 +404,7 @@ export function calculateCanonicalPostTaxOutcome({ instrumentType, nominalRate, 
         status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS,
         reasons: ['SGB_MATURITY_EXEMPTION_NOT_ESTABLISHED', 'acquiredAtOriginalIssue', 'heldContinuously'],
         fiscalYear,
+        policy,
       });
     }
     if (fiscalYear === 'FY2026-27' && channel === 'RBI_REDEMPTION') {
@@ -374,6 +414,7 @@ export function calculateCanonicalPostTaxOutcome({ instrumentType, nominalRate, 
         status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS,
         reasons: ['SGB_PREMATURE_REDEMPTION_TAX_CLASSIFICATION_REQUIRES_FACTS'],
         fiscalYear,
+        policy,
       });
     }
     const annualPrincipal = monthlySIP * 12;
@@ -384,7 +425,7 @@ export function calculateCanonicalPostTaxOutcome({ instrumentType, nominalRate, 
     let holdingBasis = 'EXPLICIT_REDEMPTION_CHANNEL';
     if (channel === 'SECONDARY_MARKET_SALE' && capitalGain > 0) {
       const holding = holdingClassification({ context, options, fiscalYear, assetType: 'listed', holdingYears });
-      if (holding.unavailable) return unavailableResult({ instrumentType, modelTaxClass, status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS, reasons: [holding.unavailable], fiscalYear });
+      if (holding.unavailable) return unavailableResult({ instrumentType, modelTaxClass, status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS, reasons: [holding.unavailable], fiscalYear, policy });
       holdingBasis = holding.holdingPeriodBasis;
       if (holding.isLongTerm) {
         capitalTax = computeCapitalGainsTaxBuckets({ longTermOtherGain: capitalGain, ...taxInputs });
@@ -397,6 +438,12 @@ export function calculateCanonicalPostTaxOutcome({ instrumentType, nominalRate, 
       instrumentType, modelTaxClass, nominalRate, grossGain: couponGain + capitalGain, taxAmount: totalTax,
       cess: couponTax.cess + (capitalTax.cess || 0), surcharge: couponTax.surcharge + (capitalTax.surcharge || 0),
       taxType: channel === 'SECONDARY_MARKET_SALE' ? 'Coupon plus explicit secondary-market capital-gains path' : 'Coupon taxable; redemption-channel capital-gains path explicit',
+      policy,
+      taxRuleMetadata: combineTaxRuleMetadata(policy, [
+        couponTax.baseline?.taxRuleMetadata,
+        couponTax.withGain?.taxRuleMetadata,
+        capitalTax.taxRuleMetadata,
+      ]),
       holdingPeriodBasis: holdingBasis,
       assumptions: ['SGB_COUPON_AND_CAPITAL_GAIN_PATHS_SEPARATE', `SGB_REDEMPTION_CHANNEL_${channel}`],
       details: { redemptionChannel: channel, couponRate, fiscalYear: policy.fiscalYear, policyVersion: policy.policyVersion },
@@ -408,7 +455,7 @@ export function calculateCanonicalPostTaxOutcome({ instrumentType, nominalRate, 
 
   const assetType = modelTaxClass === MODEL_TAX_CLASSES.EQUITY_112A ? 'listed' : 'other';
   const holding = holdingClassification({ context, options, fiscalYear, assetType, holdingYears });
-  if (holding.unavailable) return unavailableResult({ instrumentType, modelTaxClass, status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS, reasons: [holding.unavailable], fiscalYear });
+  if (holding.unavailable) return unavailableResult({ instrumentType, modelTaxClass, status: MODEL_POST_TAX_STATUSES.REQUIRES_TAX_INPUTS, reasons: [holding.unavailable], fiscalYear, policy });
   const lots = buildMonthlySipLots({ monthlySIP, annualRate: nominalRate, holdingYears, acquisitionDate: holding.acquisitionDate, redemptionDate: holding.redemptionDate });
   const shortTermGain = lots.filter(lot => {
     if (holding.holdingPeriodBasis === 'EXACT_TRANSACTION_DATES') {
@@ -428,10 +475,12 @@ export function calculateCanonicalPostTaxOutcome({ instrumentType, nominalRate, 
   } else {
     capitalTax = calculateOrdinaryIncrementalTax({ grossGain: shortTermGain, context });
   }
-  if (capitalTax.status !== 'CALCULATED') return unavailableResult({ instrumentType, modelTaxClass, status: MODEL_POST_TAX_STATUSES.PROJECTION_MODEL_UNAVAILABLE, reasons: capitalTax.unavailableReasons, fiscalYear });
+  if (capitalTax.status !== 'CALCULATED') return unavailableResult({ instrumentType, modelTaxClass, status: MODEL_POST_TAX_STATUSES.PROJECTION_MODEL_UNAVAILABLE, reasons: capitalTax.unavailableReasons, fiscalYear, policy });
   return finalizeOutcome({
     instrumentType, modelTaxClass, nominalRate, grossGain: lots.reduce((sum, lot) => sum + lot.gain, 0), taxAmount: capitalTax.taxAmount, cess: capitalTax.cess, surcharge: capitalTax.surcharge,
-    taxType: modelTaxClass === MODEL_TAX_CLASSES.EQUITY_112A ? 'FIFO capital-gain buckets (111A / 112A)' : 'FIFO capital-gain buckets (Section 112 / slab short-term path)',
+    taxType: modelTaxClass === MODEL_TAX_CLASSES.EQUITY_112A ? 'FIFO equity capital-gain buckets (short-term / long-term)' : 'FIFO other capital-gain buckets (long-term / ordinary short-term)',
+    policy,
+    taxRuleMetadata: capitalTax.taxRuleMetadata || null,
     holdingPeriodBasis: holding.holdingPeriodBasis,
     assumptions: ['MODELLED_MONTHLY_FIFO_LOTS', 'SPECIAL_RATE_BUCKETS_SEPARATE_FROM_ORDINARY_INCOME'],
     details: { shortTermGain, longTermGain, exemptionApplied: capitalTax.exemptionApplied, fiscalYear: policy.fiscalYear, policyVersion: policy.policyVersion, lots },
@@ -495,6 +544,27 @@ export function projectPostTaxCashFlows({ postTaxResult, instrument, context = {
   let taxTotal = null;
   let taxEventModel = null;
   const modelTaxClass = postTaxResult.modelTaxClass;
+  if (modelTaxClass === MODEL_TAX_CLASSES.CONDITIONAL_ACCOUNT_TREATMENT) {
+    return {
+      status: MODEL_POST_TAX_STATUSES.TAX_CLASSIFICATION_REQUIRES_ACQUISITION_FACTS,
+      totalInvested: Math.round(gross.totalInvested),
+      nominalFutureValue: Math.round(gross.balance),
+      postTaxFutureValue: null,
+      realFutureValue: null,
+      postTaxGain: null,
+      taxDragWealth: null,
+      taxDragCAGR: null,
+      nominalReturnPercent: round4(instrument.nominalRate * 100),
+      postTaxReturnPercent: null,
+      realReturnPercent: null,
+      effectiveTaxPercent: null,
+      postTaxCAGR: null,
+      taxEvents: [],
+      taxEventModel: 'UNAVAILABLE',
+      assumptions: ['ACCOUNT_TAX_QUALIFICATION_NOT_ESTABLISHED'],
+      unavailableReasons: ['PPF_SSY_EXCLUSION_ELIGIBILITY_NOT_ESTABLISHED', 'VERIFIED_ACCOUNT_AND_PAYMENT_FACTS_REQUIRED'],
+    };
+  }
   if (postTaxResult.status !== MODEL_POST_TAX_STATUSES.CALCULATED || exactDateError) {
     return {
       status: MODEL_POST_TAX_STATUSES.PROJECTION_MODEL_UNAVAILABLE,
@@ -520,11 +590,7 @@ export function projectPostTaxCashFlows({ postTaxResult, instrument, context = {
     };
   }
 
-  if (modelTaxClass === MODEL_TAX_CLASSES.EEE) {
-    postTaxFutureValue = gross.balance;
-    taxTotal = 0;
-    taxEventModel = 'NO_TAX_EVENT_FOR_QUALIFIED_EEE_CLASS';
-  } else if (modelTaxClass === MODEL_TAX_CLASSES.ORDINARY_INTEREST) {
+  if (modelTaxClass === MODEL_TAX_CLASSES.ORDINARY_INTEREST) {
     let balance = 0;
     let pendingInterest = 0;
     taxEvents = [];

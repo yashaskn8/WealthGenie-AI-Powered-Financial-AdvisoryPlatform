@@ -5,6 +5,7 @@ import { assessRecommendationFreshness } from '../services/recommendationFreshne
 import { assessGoalCalculationFreshness } from '../services/recommendationState.js';
 import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
 import { PROJECTION_ASSUMPTION_POLICY_HASH } from '../services/instrumentConstants.js';
+import { buildGoalCalculationInputFingerprint, GOAL_CALCULATION_POLICY_VERSION } from '../services/goalCalculationProvenance.js';
 
 const profile = {
   monthlyTakeHome: 100000,
@@ -105,17 +106,27 @@ test('strict freshness rejects a missing or mismatched allocation provenance', (
 test('goal freshness identifies allocation and source-state changes', () => {
   const current = state();
   const goal = {
+    _id: '64b000000000000000000006',
+    profileId: current.recommendation.profileId,
+    target_amount: 1000000,
+    target_date: new Date('2035-01-01T00:00:00.000Z'),
+    current_savings: 100000,
+    inflation_assumption: 0.05,
     sourceRecommendationId: current.recommendation._id,
     sourceAllocationRevision: 2,
+    sourceAllocationRevisionId: current.allocationRevision._id,
     sourceProfileInputHash: current.recommendation.profileInputHash,
     sourceModelVersion: current.recommendation.modelVersion,
     sourceRecommendationPolicyVersion: current.recommendation.recommendationPolicyVersion,
     sourceRegulatoryRuleVersion: current.recommendation.regulatoryRuleVersion,
     sourceReturnAssumptionVersion: current.allocationRevision.returnAssumptionVersion,
     sourceReturnAssumptionHash: current.allocationRevision.returnAssumptionHash,
+    return_assumption_source: current.allocationRevision.returnAssumptionSource,
     sourceRecommendationFingerprint: current.recommendationFingerprint,
     sourcePortfolioFingerprint: current.portfolioFingerprint,
+    sourceGoalCalculationPolicyVersion: GOAL_CALCULATION_POLICY_VERSION,
   };
+  goal.sourceGoalCalculationInputFingerprint = buildGoalCalculationInputFingerprint(goal);
   assert.equal(assessGoalCalculationFreshness(goal, current).fresh, true);
   const stale = assessGoalCalculationFreshness({ ...goal, sourceAllocationRevision: 1 }, current);
   assert.ok(stale.reasonCodes.includes('STALE_ALLOCATION'));

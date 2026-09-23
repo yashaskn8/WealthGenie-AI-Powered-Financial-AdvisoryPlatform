@@ -32,6 +32,24 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
     });
   });
 
+  test('POST /api/tax/post-tax-return does not infer PPF exclusion without account facts', async () => {
+    await withServer(app, async (baseUrl) => {
+      const { response, body } = await jsonRequest(`${baseUrl}/api/tax/post-tax-return`, {
+        method: 'POST',
+        body: JSON.stringify({
+          instrumentType: 'PPF', nominalRate: 0.071, annualIncome: 1_000_000,
+          holdingYears: 15, regime: 'new', incomeSource: 'salary', monthlySIP: 10_000,
+          userAge: 30, fiscalYear: 'FY2026-27',
+        }),
+      });
+      assert.equal(response.status, 200);
+      assert.equal(body.status, 'TAX_CLASSIFICATION_REQUIRES_ACQUISITION_FACTS');
+      assert.equal(body.postTaxReturn, null);
+      assert.equal(body.what_if_net_gain, null);
+      assert.ok(body.unavailableReasons.includes('PPF_SSY_EXCLUSION_ELIGIBILITY_NOT_ESTABLISHED'));
+    });
+  });
+
   test('POST /api/tax/post-tax-return/batch - Batch computation correctly computes multiple instruments with rebate', async () => {
     await withServer(app, async (baseUrl) => {
       const { response, body } = await jsonRequest(`${baseUrl}/api/tax/post-tax-return/batch`, {
@@ -58,8 +76,11 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
       assert.equal(body.results[0].postTaxReturn, 0.07);
       assert.equal(body.results[0].taxRate, 0);
 
-      // PPF: EEE, postTaxReturn = 0.071
-      assert.equal(body.results[1].postTaxReturn, 0.071);
+      // No account/payment facts are supplied, so no PPF exclusion is inferred.
+      assert.equal(body.results[1].status, 'TAX_CLASSIFICATION_REQUIRES_ACQUISITION_FACTS');
+      assert.equal(body.results[1].postTaxReturn, null);
+      assert.equal(body.results[1].postTaxFutureValue, null);
+      assert.ok(body.results[1].unavailableReasons.length > 0);
 
       // Equity_MF: LTCG with exemption
       assert.ok(body.results[2].postTaxReturn > 0);

@@ -234,6 +234,7 @@ function buildCorePersistencePayload({
       confidenceScores,
       mlFallback: Boolean(mlResult.fallback),
       modelVersion,
+      recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
       regulatoryRuleVersion,
       profileInputHash: inputHash,
       returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,

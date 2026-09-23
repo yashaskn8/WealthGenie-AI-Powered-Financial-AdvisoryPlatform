@@ -1,6 +1,13 @@
 export const PROJECTION_ASSUMPTION_VERSION: string;
 export const PROJECTION_ASSUMPTION_SOURCE: 'WEALTHGENIE_MODEL_POLICY';
 export const PROJECTION_ASSUMPTION_DATA_CLASS: 'MODEL_ASSUMPTION';
+export const PROJECTION_ASSUMPTION_POLICY_HASH: string;
+export const PROJECTION_ASSUMPTION_POLICY_MANIFEST: Readonly<{
+  version: string;
+  source: 'WEALTHGENIE_MODEL_POLICY';
+  dataClass: 'MODEL_ASSUMPTION';
+  expectedHash: string;
+}>;
 /**
  * Get nominal rate for an instrument key (as percentage, e.g. 12.5).
  * Returns null when the instrument is unknown.

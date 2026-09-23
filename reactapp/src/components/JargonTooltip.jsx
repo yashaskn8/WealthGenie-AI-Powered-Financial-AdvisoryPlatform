@@ -74,16 +74,24 @@ export const JARGON = {
     plain: 'Tax treatment that may apply before the legally defined long-term holding period. The applicable classification and rate depend on the explicit product facts and fiscal-year policy.',
   },
   'Section 80C': {
-    short: 'Income-tax deduction category',
-    plain: 'A deduction category whose eligibility and limit depend on the selected fiscal-year policy, tax regime, qualifying product, and the user\'s supplied circumstances.',
+    short: 'Legacy deduction input label',
+    plain: 'This is a legacy application input name. Current eligibility and limits are determined by the selected fiscal-year statute, tax regime, qualifying product, and verified user circumstances; this old section number is not current-law authority.',
   },
   'Section 80CCD(1B)': {
-    short: 'NPS deduction category',
-    plain: 'A deduction category for qualifying NPS contributions. The current limit and actual tax effect must come from the selected server fiscal-year policy and explicit user inputs.',
+    short: 'Legacy NPS input label',
+    plain: 'This is a legacy application input name. Current NPS eligibility and the actual tax effect come from the selected server fiscal-year policy and explicit contribution facts; this old section number is not current-law authority.',
+  },
+  'Eligible investment deductions': {
+    short: 'Fiscal-year-specific deduction inputs',
+    plain: 'Only qualifying payments established by the selected fiscal-year tax policy and your records should be included. The backend applies the appropriate current statute and limits.',
+  },
+  'Qualifying NPS contributions': {
+    short: 'Fiscal-year-specific NPS inputs',
+    plain: 'The tax effect depends on contribution type, regime, eligible salary/account facts, and the selected fiscal-year policy. The backend applies current limits.',
   },
   'EEE': {
     short: 'Exempt-Exempt-Exempt',
-    plain: 'A tax classification describing treatment at contribution, growth, and withdrawal stages. WealthGenie shows it only when product classification and current fiscal-year rules are established.',
+    plain: 'A shorthand for possible treatment at contribution, growth, and withdrawal stages—not a universal guarantee. Account qualification, contribution history, payment purpose, and current fiscal-year rules must be established before applying an exclusion.',
   },
   'Tax Benefit': {
     short: 'May affect taxable income',
@@ -135,7 +143,7 @@ export const JARGON = {
   // Fund Types
   'ELSS': {
     short: 'Equity Linked Savings Scheme',
-    plain: 'A type of mutual fund that invests in stocks AND gives you a tax deduction under Section 80C. It has the shortest lock-in (3 years) among all tax-saving options.',
+    plain: 'An equity mutual fund with a three-year lock-in. Any tax treatment depends on the selected fiscal-year rules, tax regime, product eligibility and your circumstances.',
   },
   'ETF': {
     short: 'Exchange-Traded Fund',
@@ -337,4 +345,3 @@ const JargonTooltip = ({ term, children }) => {
 };
 
 export default JargonTooltip;
-

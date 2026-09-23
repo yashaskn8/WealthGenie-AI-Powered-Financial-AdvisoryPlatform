@@ -26,14 +26,14 @@ const HelpTourScreen = () => {
     {
       term: 'LTCG',
       fullName: 'Long-Term Capital Gains Tax',
-      definition: 'Tax applied on profits from selling investments held longer than a specific duration (e.g. 1 year for equities).',
-      learnMore: 'For equity mutual funds and stocks in India, gains held for more than 1 year are taxed at 12.5% on profits exceeding ₹1.25 Lakhs per financial year. Under Budget 2024, this exemption was increased from ₹1 Lakh.'
+      definition: 'Tax treatment that may apply when an asset is sold after the holding period set by the applicable law.',
+      learnMore: 'Rates, thresholds, asset classification and holding periods depend on the selected fiscal-year law and the exact asset/acquisition facts. Use the backend tax view; this glossary does not state a current tax rate.'
     },
     {
       term: 'STCG',
       fullName: 'Short-Term Capital Gains Tax',
       definition: 'Tax applied on profits from selling investments held for a short duration (e.g. under 1 year for equities).',
-      learnMore: 'For equity assets, selling within 1 year triggers a flat 20% tax rate on all profits (STCG). This is designed to discourage short-term speculation.'
+      learnMore: 'The applicable asset classification, holding-period boundary and rate depend on the selected fiscal-year law and transaction facts. Use the backend tax view rather than a static glossary rate.'
     },
     {
       term: 'CAGR',
@@ -62,8 +62,8 @@ const HelpTourScreen = () => {
     {
       term: 'EEE',
       fullName: 'Exempt-Exempt-Exempt',
-      definition: 'A tax category where investment, interest earned, and maturity withdrawals are all completely tax-exempt.',
-      learnMore: 'PPF (Public Provident Fund) and SSY (Sukanya Samriddhi Yojana) fall under this category. It is the most tax-efficient structure available under Indian tax laws.'
+      definition: 'A shorthand sometimes used for qualifying contribution, growth and payment exclusions; it is not a universal guarantee.',
+      learnMore: 'PPF and Sukanya account exclusions require the account, contribution/payment and statutory conditions to be established. WealthGenie will not infer an exemption from a product name alone.'
     },
     {
       term: 'TDS',
@@ -122,8 +122,8 @@ const HelpTourScreen = () => {
     {
       term: 'Cess',
       fullName: 'Health & Education Cess',
-      definition: 'A flat 4% tax added on top of your income tax and surcharge liabilities.',
-      learnMore: 'Cess is a tax-on-tax earmarked for government welfare schemes. If your calculated income tax is ₹10,000, a 4% cess of ₹400 is added, making your total tax ₹10,400.'
+      definition: 'A levy calculated on tax and surcharge under the applicable fiscal-year policy.',
+      learnMore: 'The backend tax calculation applies the selected fiscal-year rate and reports the cess component separately. This glossary does not hardcode a rate.'
     },
     {
       term: 'Marginal Relief',

@@ -14,8 +14,9 @@ import {
   PROJECTION_ASSUMPTION_SOURCE,
   PROJECTION_ASSUMPTION_VERSION,
 } from './instrumentConstants.js';
-import { RECOMMENDATION_POLICY_VERSION } from './recommendationProfile.js';
 import { createAllocationRevision } from './recommendationState.js';
+import { buildRecommendationProfile, buildRecommendationProfileHash, RECOMMENDATION_POLICY_VERSION } from './recommendationProfile.js';
+import { getCurrentRegulatoryRuleVersion } from './taxEngine.js';
 
 let advisoryPersistenceReady = null;
 
@@ -93,6 +94,58 @@ export async function persistAdvisoryAtomically({
   let committedResponse = null;
   try {
     await session.withTransaction(async () => {
+      const currentProfile = profile || await FinancialProfile.findOne({
+        _id: recommendation.profileId,
+        userId: recommendation.userId,
+      }).session(session).lean();
+      if (!currentProfile) {
+        const error = new Error('The financial profile disappeared before recommendation commit.');
+        error.status = 409;
+        error.code = 'PROFILE_STATE_CHANGED';
+        throw error;
+      }
+      await testHooks.afterSourceProfileRead?.(session);
+      const profileInputHash = buildRecommendationProfileHash(
+        buildRecommendationProfile(currentProfile),
+        { modelVersion: recommendation.modelVersion },
+      );
+      if (profileInputHash !== recommendation.profileInputHash) {
+        const error = new Error('The financial profile changed while the recommendation was being computed.');
+        error.status = 409;
+        error.code = 'PROFILE_STATE_CHANGED';
+        throw error;
+      }
+      if (!profile) {
+        const profileVersion = currentProfile.version ?? 1;
+        const profileFence = currentProfile.financialStateFence ?? 0;
+        const profileCas = await FinancialProfile.updateOne({
+          _id: recommendation.profileId,
+          userId: recommendation.userId,
+          $and: [
+            { $or: [{ version: profileVersion }, { version: { $exists: false } }] },
+            { $or: [{ financialStateFence: profileFence }, { financialStateFence: { $exists: false } }] },
+          ],
+        }, { $inc: { financialStateFence: 1 } }, { session });
+        if (profileCas.matchedCount !== 1) {
+          const error = new Error('The financial profile changed before the recommendation could be committed.');
+          error.status = 409;
+          error.code = 'PROFILE_STATE_CHANGED';
+          throw error;
+        }
+      }
+      const currentRegulatoryRuleVersion = getCurrentRegulatoryRuleVersion();
+      if (!currentRegulatoryRuleVersion || recommendation.regulatoryRuleVersion !== currentRegulatoryRuleVersion) {
+        const error = new Error('The regulatory tax policy changed while the recommendation was being computed.');
+        error.status = 409;
+        error.code = 'REGULATORY_POLICY_CHANGED';
+        throw error;
+      }
+      if (recommendation.recommendationPolicyVersion !== RECOMMENDATION_POLICY_VERSION) {
+        const error = new Error('The recommendation policy changed while the recommendation was being computed.');
+        error.status = 409;
+        error.code = 'RECOMMENDATION_POLICY_CHANGED';
+        throw error;
+      }
       const existingState = await RecommendationState.findOne({
         userId: recommendation.userId,
         profileId: recommendation.profileId,

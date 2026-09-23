@@ -52,6 +52,10 @@ export function buildCurrentRecommendationResponse({
     ...historical,
     instruments,
     generation_instruments: generationInstruments,
+    generation_explanation: historical.explanation || null,
+    // The model explanation was generated for the original portfolio. Keep it
+    // explicitly historical after a user changes allocation weights.
+    explanation: Number(allocationRevision.revision) === 1 ? (historical.explanation || null) : null,
     profileId: String(profile._id),
     recommendationId: String(recommendation._id),
     recommendation_id: String(recommendation._id),

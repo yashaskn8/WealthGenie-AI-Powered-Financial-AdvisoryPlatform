@@ -17,7 +17,6 @@ import {
   buildTaxSlabBreakdown,
   analyzeTaxOptimization,
 } from '../services/taxEngine.js';
-import { CESS_RATE } from '../services/instrumentConstants.js';
 import { calculatePostTaxReturnSafe, calculatePostTaxProjection } from '../services/postTaxCalculator.js';
 
 const router = Router();
@@ -52,7 +51,6 @@ function _parseTaxDeductionsFromQuery(query) {
       : query.self_senior === 'true' || query.self_senior === true,
     hra: Number(query.hra) || 0,
     homeLoanInterest: Number(query.homeLoanInterest) || 0,
-    other: Number(query.other) || 0,
     age: query.age !== undefined ? Number(query.age) : undefined,
   };
 }
@@ -123,7 +121,7 @@ router.get('/compare', validateQuery(taxCompareSchema), asyncHandler(async (req,
       standard_deduction: newRegime.standardDeduction,
       marginal_relief_applied: newRegime.marginalReliefApplied || false,
       marginal_relief_amount: newRegime.marginalReliefAmount || 0,
-      cess: Math.round(newRegime.taxAmount * CESS_RATE / (1 + CESS_RATE)),
+      cess: newRegime.cess,
       nps80CCD2: newRegime.nps80CCD2 || 0,
       allowed80D: newRegime.allowed80D || 0,
       slab_breakdown: buildTaxSlabBreakdown(newRegime, fiscalYear),
@@ -137,7 +135,7 @@ router.get('/compare', validateQuery(taxCompareSchema), asyncHandler(async (req,
       old_regime_deductions: oldRegime.oldRegimeDeductions,
       marginal_relief_applied: oldRegime.marginalReliefApplied || false,
       marginal_relief_amount: oldRegime.marginalReliefAmount || 0,
-      cess: Math.round(oldRegime.taxAmount * CESS_RATE / (1 + CESS_RATE)),
+      cess: oldRegime.cess,
       nps80CCD2: oldRegime.nps80CCD2 || 0,
       allowed80D: oldRegime.allowed80D || 0,
       slab_breakdown: buildTaxSlabBreakdown(oldRegime, fiscalYear),
@@ -223,12 +221,12 @@ router.post('/post-tax-return', validate(postTaxReturnSchema), asyncHandler(asyn
       nominalRate, deductions, acquisitionDate, redemptionDate, redemptionChannel,
       acquiredAtOriginalIssue, heldContinuously,
     },
-    rulesApplied: [result.taxType],
     assumptions: [
+      ...(result.assumptions || []),
       'NOMINAL_RATE_IS_CALLER_SUPPLIED; ITS EVIDENCE CLASS MUST BE ESTABLISHED BY THE CALLER',
       'THIS_IS_A_MODELLED_INVESTOR_WHAT_IF_NOT_AN_ACTUAL_TRANSACTION_TAX_ESTIMATE',
     ],
-    unavailableReasons: [],
+    unavailableReasons: result.unavailableReasons || [],
   });
 }));
 

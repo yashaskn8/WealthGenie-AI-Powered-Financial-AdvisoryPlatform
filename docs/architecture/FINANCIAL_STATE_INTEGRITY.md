@@ -27,8 +27,8 @@ Profile updates do not synchronously recompute recommendations. The profile hash
 
 ## Tax statute provenance
 
-Tax policy metadata is period-specific. Historical FY2025-26 remains associated with the Income-tax Act, 1961. FY2026-27 is associated with the Income-tax Act, 2025, effective 1 April 2026, and carries official source references and rule identifiers. SGB maturity exemption is not inferred without original-issue and continuous-holding facts; secondary-market and premature-redemption paths fail closed when their tax classification is not established.
+Tax policy metadata is period-specific. Historical FY2025-26 remains associated with the Income-tax Act, 1961. FY2026-27 is associated with the Income-tax Act, 2025, effective 1 April 2026, and carries official source references. Current-law calculations expose statute-versioned semantic `taxRuleMetadata.currentRuleIds`; old section-derived identifiers are compatibility aliases only and do not claim a one-to-one mapping to new Act provisions. Unknown provision mappings remain unknown. SGB maturity exemption is not inferred without original-issue and continuous-holding facts; secondary-market and premature-redemption paths fail closed when their tax classification is not established.
 
 ## Assumptions
 
-Projection model inputs remain separate from provider facts. Each recommendation instrument carries the model assumption version and a deterministic policy-input hash derived from `instrumentConstants.js`. Changing a model input changes the hash and requires an explicit policy/version review.
+Projection model inputs remain separate from provider facts. Each recommendation instrument carries the model assumption version and a deterministic policy-input hash derived from `instrumentConstants.js`. The committed assumption manifest fixes the reviewed version and hash; changing an input fails closed until a developer explicitly updates the manifest and version decision.

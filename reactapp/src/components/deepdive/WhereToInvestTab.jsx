@@ -895,7 +895,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
 
           {requiredTaxInputs.includes('section112AExemptionUsed') && (
             <div className="wti-tax-input-group">
-              <label htmlFor="wti-112a-exemption">Section 112A exemption already used this year (₹)</label>
+              <label htmlFor="wti-112a-exemption">Annual equity long-term gains exclusion already used (₹)</label>
               <input
                 id="wti-112a-exemption"
                 type="number"
@@ -912,7 +912,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
           )}
 
           <div className="wti-tax-input-group">
-            <label htmlFor="wti-80c-used">Section 80C already used (₹)</label>
+            <label htmlFor="wti-80c-used">Eligible investment deductions already claimed (₹)</label>
             <input
               id="wti-80c-used"
               type="number"
@@ -926,7 +926,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
           </div>
 
           <div className="wti-tax-input-group">
-            <label htmlFor="wti-nps-80ccd1b-used">NPS 80CCD(1B) already used (₹)</label>
+            <label htmlFor="wti-nps-80ccd1b-used">Qualifying NPS contributions already counted (₹)</label>
             <input
               id="wti-nps-80ccd1b-used"
               type="number"
@@ -943,14 +943,14 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
             <summary style={{ cursor: 'pointer' }}>Advanced deductions (optional)</summary>
             <small>Leave blank when not claimed. Supporting facts are required for dependency-sensitive deductions.</small>
             {[
-              ['nps80CCD2', 'NPS 80CCD(2) (₹)', '100000000'],
-              ['basicSalary', 'Basic salary for 80CCD(2) (₹)', '1000000000'],
-              ['section80D_self', '80D self / family (₹)', '50000'],
-              ['section80D_parents', '80D parents (₹)', '50000'],
-              ['hra', 'HRA deduction (₹)', '100000000'],
+              ['nps80CCD2', 'Employer NPS contribution (₹)', '100000000'],
+              ['basicSalary', 'Basic salary for employer NPS limit (₹)', '1000000000'],
+              ['section80D_self', 'Eligible health-insurance payments for self / family (₹)', '50000'],
+              ['section80D_parents', 'Eligible health-insurance payments for parents (₹)', '50000'],
+              ['hra', 'Eligible rent-related deduction (₹)', '100000000'],
               ['homeLoanInterest', 'Home-loan interest (₹)', '200000'],
-              ['section80TTA', '80TTA interest (₹)', '10000'],
-              ['section80TTB', '80TTB interest (₹)', '50000'],
+              ['section80TTA', 'Eligible savings-interest deduction (₹)', '10000'],
+              ['section80TTB', 'Eligible senior-citizen savings-interest deduction (₹)', '50000'],
             ].map(([key, label, max]) => (
               <label key={key} htmlFor={`wti-${key}`}>
                 {label}
@@ -967,7 +967,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
               </label>
             ))}
             <label htmlFor="wti-govt-employee">
-              Government employee for 80CCD(2)?
+              Government employee for employer NPS limit?
               <select
                 id="wti-govt-employee"
                 className="wti-tax-input"

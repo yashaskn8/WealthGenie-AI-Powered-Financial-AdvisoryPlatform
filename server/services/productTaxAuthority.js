@@ -8,8 +8,8 @@
  */
 
 export const PRODUCT_TAX_CLASSES = Object.freeze({
-  PPF_EEE: 'PPF_EEE',
-  SSY_EEE: 'SSY_EEE',
+  PPF_EEE: 'PPF_ACCOUNT_EXCLUSION_CONDITIONAL',
+  SSY_EEE: 'SSY_ACCOUNT_EXCLUSION_CONDITIONAL',
   BANK_DEPOSIT_INTEREST: 'BANK_DEPOSIT_INTEREST',
   RBI_FRSB_INTEREST: 'RBI_FRSB_INTEREST',
   EQUITY_MF_112A: 'EQUITY_MF_SECTION_112A',
@@ -24,6 +24,7 @@ export const PRODUCT_TAX_STATUSES = Object.freeze({
   TAX_CLASSIFICATION_UNAVAILABLE: 'TAX_CLASSIFICATION_UNAVAILABLE',
   FISCAL_YEAR_UNSUPPORTED: 'FISCAL_YEAR_UNSUPPORTED',
   PRODUCT_FACTS_UNAVAILABLE: 'PRODUCT_FACTS_UNAVAILABLE',
+  TAX_CLASSIFICATION_REQUIRES_ACQUISITION_FACTS: 'TAX_CLASSIFICATION_REQUIRES_ACQUISITION_FACTS',
   UNAVAILABLE: 'UNAVAILABLE',
 });
 
@@ -35,15 +36,15 @@ export const POST_TAX_CALCULATION_CLASSES = Object.freeze({
 });
 
 const PPF_SOURCE = Object.freeze({
-  authority: 'India Post / Government of India',
-  title: 'POSB CBS Manual — PPF tax treatment',
-  url: 'https://www.indiapost.gov.in/VAS/DOP_PDFFiles/POSB_CBS_Manual_2021.pdf',
+  authority: 'Income Tax Department — Government of India',
+  title: 'Income-tax Act, 2025 Schedule II, Table Sl. No. 3 — conditional provident-fund exclusion',
+  url: 'https://incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf',
   role: 'PRODUCT_RULE',
 });
 const SSY_SOURCE = Object.freeze({
-  authority: 'India Post / Government of India',
-  title: 'Small Savings Scheme tax treatment',
-  url: 'https://www.indiapost.gov.in/VAS/DOP_PDFFiles/SB_Order_2021.pdf',
+  authority: 'Income Tax Department — Government of India',
+  title: 'Income-tax Act, 2025 Schedule II, Table Sl. No. 5 — qualifying Sukanya account payments',
+  url: 'https://incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf',
   role: 'PRODUCT_RULE',
 });
 const FRSB_SOURCE = Object.freeze({
@@ -60,8 +61,8 @@ const FD_SOURCE = Object.freeze({
 });
 const SGB_SOURCE = Object.freeze({
   authority: 'Income Tax Department — Government of India',
-  title: 'Budget 2026 FAQ — Sovereign Gold Bond maturity exemption conditions',
-  url: 'https://www.incometaxindia.gov.in/documents/d/guest/FAQs-Budget-2026.pdf',
+  title: 'Updated Budget 2026 FAQ — Sovereign Gold Bond maturity exemption conditions',
+  url: 'https://www.incometaxindia.gov.in/documents/20117/15766092/FAQs-Budget-2026%2BUpdated.pdf/daf54d14-aca9-c4ea-b786-598fd2f8d4c4',
   role: 'PRODUCT_RULE',
 });
 
@@ -70,13 +71,15 @@ const EXACT_PARENT_TAX_METADATA = Object.freeze({
     taxClass: PRODUCT_TAX_CLASSES.PPF_EEE,
     displayName: 'Public Provident Fund',
     sourceReferences: Object.freeze([PPF_SOURCE]),
-    rulesApplied: Object.freeze(['SECTION_10_11_EEE_TREATMENT']),
+    rulesApplied: Object.freeze(['PPF_ACCOUNT_EXCLUSION_CONDITIONAL']),
+    factsRequired: Object.freeze(['verifiedAccountEligibility', 'contributionHistory', 'withdrawalOrMaturityFacts']),
   }),
   sukanya: Object.freeze({
     taxClass: PRODUCT_TAX_CLASSES.SSY_EEE,
     displayName: 'Sukanya Samriddhi Account',
     sourceReferences: Object.freeze([SSY_SOURCE]),
-    rulesApplied: Object.freeze(['SECTION_10_11A_EEE_TREATMENT']),
+    rulesApplied: Object.freeze(['SSY_ACCOUNT_EXCLUSION_CONDITIONAL']),
+    factsRequired: Object.freeze(['verifiedAccountEligibility', 'eligibleBeneficiary', 'paymentFacts']),
   }),
   fd: Object.freeze({
     taxClass: PRODUCT_TAX_CLASSES.BANK_DEPOSIT_INTEREST,
@@ -119,6 +122,7 @@ function copyMetadata(metadata) {
     ...metadata,
     sourceReferences: (metadata.sourceReferences || []).map(source => ({ ...source })),
     rulesApplied: [...(metadata.rulesApplied || [])],
+    factsRequired: [...(metadata.factsRequired || [])],
   };
 }
 
@@ -136,6 +140,7 @@ export function getProductTaxMetadata(product = {}, parentInstrumentId = product
         ? explicit.sourceReferences.map(source => ({ ...source }))
         : [],
       rulesApplied: Array.isArray(explicit.rulesApplied) ? [...explicit.rulesApplied] : [],
+      factsRequired: Array.isArray(explicit.factsRequired) ? [...explicit.factsRequired] : [],
       effectiveDate: explicit.effectiveDate || null,
       facts: explicit.facts ? { ...explicit.facts } : {},
     };
@@ -164,7 +169,9 @@ export function getProductTaxMetadata(product = {}, parentInstrumentId = product
 
 export function getRequiredTaxInputs(taxClass) {
   if ([PRODUCT_TAX_CLASSES.PPF_EEE, PRODUCT_TAX_CLASSES.SSY_EEE].includes(taxClass)) {
-    return [];
+    return taxClass === PRODUCT_TAX_CLASSES.PPF_EEE
+      ? ['verifiedAccountEligibility', 'contributionHistory', 'withdrawalOrMaturityFacts']
+      : ['verifiedAccountEligibility', 'eligibleBeneficiary', 'paymentFacts'];
   }
   if ([
     PRODUCT_TAX_CLASSES.BANK_DEPOSIT_INTEREST,

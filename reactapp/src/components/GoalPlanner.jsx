@@ -6,6 +6,7 @@ import api from '../services/api';
 import GoalForm from './GoalForm';
 import GoalDetailPane from './GoalDetailPane';
 import { submitGoal } from '../utils/goalSubmission';
+import { isFinancialCalculationFresh } from '../utils/financialFreshness';
 
 const STATUS_CONFIG = {
   on_track:  { color: '#10b981', bg: 'rgba(16, 185, 129, 0.14)', label: 'ON TRACK',  icon: CheckCircle, glow: 'rgba(16, 185, 129, 0.4)' },
@@ -43,7 +44,8 @@ const GoalPlanner = ({ profile }) => {
       setGoals(res.goals || []);
       setSimulatedSips(Object.fromEntries((res.goals || []).map(goal => [
         goal._id || goal.goalId,
-        Number.isFinite(Number(goal.simulated_monthly_contribution))
+        isFinancialCalculationFresh(goal.calculation_freshness)
+          && Number.isFinite(Number(goal.simulated_monthly_contribution))
           ? Number(goal.simulated_monthly_contribution)
           : null,
       ])));
@@ -66,8 +68,8 @@ const GoalPlanner = ({ profile }) => {
       const pa = PRIORITY_ORDER[a.priority] ?? Number.MAX_SAFE_INTEGER;
       const pb = PRIORITY_ORDER[b.priority] ?? Number.MAX_SAFE_INTEGER;
       if (pa !== pb) return pa - pb;
-      const probabilityA = a.calculation_freshness?.fresh === false ? NaN : Number(a.probability_of_success);
-      const probabilityB = b.calculation_freshness?.fresh === false ? NaN : Number(b.probability_of_success);
+      const probabilityA = isFinancialCalculationFresh(a.calculation_freshness) ? Number(a.probability_of_success) : NaN;
+      const probabilityB = isFinancialCalculationFresh(b.calculation_freshness) ? Number(b.probability_of_success) : NaN;
       if (!Number.isFinite(probabilityA)) return Number.isFinite(probabilityB) ? 1 : 0;
       if (!Number.isFinite(probabilityB)) return -1;
       return probabilityA - probabilityB;
@@ -75,16 +77,16 @@ const GoalPlanner = ({ profile }) => {
   }, [goals]);
 
   const getLiveProbability = (goal) => {
-    if (goal?.calculation_freshness?.fresh === false) return null;
+    if (!isFinancialCalculationFresh(goal?.calculation_freshness)) return null;
     const id = goal._id || goal.goalId;
-      const value = goal.calculation_freshness?.fresh === false
-        ? NaN
-        : Number(goalSimulations[id]?.probability_of_success ?? goal.probability_of_success);
+      const value = isFinancialCalculationFresh(goal.calculation_freshness)
+        ? Number(goalSimulations[id]?.probability_of_success ?? goal.probability_of_success)
+        : NaN;
     return Number.isFinite(value) && value >= 0 && value <= 1 ? value : null;
   };
 
   const getSimulatedChartData = (goal) => {
-    if (goal?.calculation_freshness?.fresh === false) return [];
+    if (!isFinancialCalculationFresh(goal?.calculation_freshness)) return [];
     const id = goal._id || goal.goalId;
     return goalSimulations[id]?.chartData ?? goal.chartData ?? [];
   };
@@ -142,7 +144,8 @@ const GoalPlanner = ({ profile }) => {
         const gid = res.goal._id || res.goal.goalId;
         setSimulatedSips(prev => ({
           ...prev,
-          [gid]: Number.isFinite(Number(res.goal.simulated_monthly_contribution))
+          [gid]: isFinancialCalculationFresh(res.goal.calculation_freshness)
+            && Number.isFinite(Number(res.goal.simulated_monthly_contribution))
             ? Number(res.goal.simulated_monthly_contribution)
             : null,
         }));
@@ -212,8 +215,8 @@ const GoalPlanner = ({ profile }) => {
 
   // Summary statistics
   const targetValues = goals.map(goal => Number(goal.target_amount));
-  const sipValues = goals.map(goal => goal.calculation_freshness?.fresh === false ? NaN : Number(goal.recommended_sip));
-  const probabilityValues = goals.map(goal => goal.calculation_freshness?.fresh === false ? NaN : Number(goal.probability_of_success));
+  const sipValues = goals.map(goal => isFinancialCalculationFresh(goal.calculation_freshness) ? Number(goal.recommended_sip) : NaN);
+  const probabilityValues = goals.map(goal => isFinancialCalculationFresh(goal.calculation_freshness) ? Number(goal.probability_of_success) : NaN);
   const totalTarget = targetValues.every(value => Number.isFinite(value) && value >= 0)
     ? targetValues.reduce((sum, value) => sum + value, 0)
     : null;
@@ -495,7 +498,7 @@ const GoalPlanner = ({ profile }) => {
 
           <AnimatePresence>
             {sortedGoals.map((goal, index) => {
-              const calculationFresh = goal.calculation_freshness?.fresh !== false;
+              const calculationFresh = isFinancialCalculationFresh(goal.calculation_freshness);
               const cfg = calculationFresh ? (STATUS_CONFIG[goal.status] || UNKNOWN_STATUS_CONFIG) : UNKNOWN_STATUS_CONFIG;
               const StatusIcon = cfg.icon;
               const isSelected = selectedGoal?._id === goal._id || selectedGoal?.goalId === goal.goalId;
@@ -513,7 +516,7 @@ const GoalPlanner = ({ profile }) => {
               const savingsProgress = hasFundingData
                 ? Math.min(100, Math.round((fundedSavings / targetAmount) * 100))
                 : null;
-              const yearsLeft = Number.isFinite(Number(goal.years_remaining)) ? Number(goal.years_remaining) : null;
+              const yearsLeft = calculationFresh && Number.isFinite(Number(goal.years_remaining)) ? Number(goal.years_remaining) : null;
 
               return (
                 <motion.div

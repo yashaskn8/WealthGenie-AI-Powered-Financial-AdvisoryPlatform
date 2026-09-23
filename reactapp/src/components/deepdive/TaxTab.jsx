@@ -31,7 +31,7 @@ const TaxTab = ({ inv, calcAmount, calcYears, userProfile }) => {
       <div className="ddm-pc-grid" style={{ marginBottom: 32 }}>
         <div className="tax-card-premium" style={{ borderTop: `1px solid ${taxBenefitKnown ? (taxInfo.taxBenefit ? 'rgba(34, 197, 94, 0.6)' : 'rgba(244, 63, 94, 0.6)') : 'rgba(148, 163, 184, 0.45)'}` }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-            <span className="metric-label" style={{ color: '#94a3b8', fontSize: '0.85rem', letterSpacing: '1.5px', fontWeight: 700 }}><JargonTooltip term="Section 80C">SECTION 80C ELIGIBILITY</JargonTooltip></span>
+            <span className="metric-label" style={{ color: '#94a3b8', fontSize: '0.85rem', letterSpacing: '1.5px', fontWeight: 700 }}><JargonTooltip term="Eligible investment deductions">TAX DEDUCTION ELIGIBILITY</JargonTooltip></span>
             <Shield size={20} color={taxBenefitKnown ? (taxInfo.taxBenefit ? '#22c55e' : '#f43f5e') : '#94a3b8'} opacity={0.6} />
           </div>
           <div style={{ margin: '16px 0', flexGrow: 1 }}>
@@ -53,7 +53,7 @@ const TaxTab = ({ inv, calcAmount, calcYears, userProfile }) => {
             {!taxInterestKnown ? <span style={{ color: '#94a3b8' }}>UNAVAILABLE</span> : taxInfo.taxFreeInterest ? <span style={{ color: '#38bdf8', textShadow: '0 0 24px rgba(56,189,248,0.5)' }}><JargonTooltip term="EEE">Tax-Free (EEE)</JargonTooltip></span> : <span style={{ color: '#f8fafc' }}>Fully Taxable</span>}
           </div>
           <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 20, marginTop: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ color: '#64748b', fontSize: '0.9rem', fontWeight: 600 }}>Applicable Section</span>
+            <span style={{ color: '#64748b', fontSize: '0.9rem', fontWeight: 600 }}>Current rule reference</span>
             <strong style={{ color: '#cbd5e1', fontSize: '1.1rem', fontFamily: 'JetBrains Mono, monospace', letterSpacing: '0.5px' }}>{taxInfo.section}</strong>
           </div>
         </div>

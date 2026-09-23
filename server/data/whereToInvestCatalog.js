@@ -11,7 +11,7 @@ const WHERE_TO_INVEST = {
   "ppf": {
     "title": "Where to Access Public Provident Fund (PPF)",
     "riskLevel": 1,
-    "note": "Government-backed EEE tax-free scheme. Zero default risk with sovereign guarantee. Best tax efficiency for all income levels. Guaranteed by Government of India / RBI authority.",
+    "note": "Government-backed long-term savings scheme. Tax treatment depends on account eligibility, the selected fiscal-year rules and withdrawal facts.",
     "howToStart": "Open via net banking if you already have a savings account, or visit any bank branch / post office with Aadhaar + PAN.",
     "products": [
       {
@@ -123,7 +123,7 @@ const WHERE_TO_INVEST = {
   "sukanya": {
     "title": "Where to Access Sukanya Samriddhi Yojana (SSY)",
     "riskLevel": 1,
-    "note": "EEE tax-free government scheme for girl child education and marriage. 8.2% p.a. — highest guaranteed tax-free return available. Guaranteed by Government of India / RBI authority.",
+    "note": "Government-backed savings scheme for eligible girl-child accounts. Interest terms can change under official notifications; tax treatment depends on account facts and current fiscal-year rules.",
     "howToStart": "Visit any authorized bank or post office with girl child's birth certificate, parent's Aadhaar + PAN.",
     "products": [
       {
@@ -285,7 +285,7 @@ const WHERE_TO_INVEST = {
   "nsc": {
     "title": "Where to Access National Savings Certificate (NSC)",
     "riskLevel": 1,
-    "note": "Government-backed 5-year fixed savings instrument. Promoted by Post Office and eligible for 80C deduction. Guaranteed by Government of India / RBI authority.",
+    "note": "Government-backed 5-year fixed savings instrument. Any deduction eligibility depends on the selected fiscal-year rules, tax regime and account facts. Guaranteed by Government of India / RBI authority.",
     "howToStart": "Open an account at any authorized commercial bank or post office using Aadhaar and PAN verification.",
     "products": [
       {
@@ -602,11 +602,11 @@ const WHERE_TO_INVEST = {
         "name": "Bank Fixed Deposit (5 Year Tax Saver)",
         "provider": "Bank Fixed Deposit",
         "rate": "~6.75% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "Bank Fixed Deposit (Auto-Sweep Facility)",
@@ -659,11 +659,11 @@ const WHERE_TO_INVEST = {
         "name": "SBI Fixed Deposit (5 Year Tax Saver)",
         "provider": "SBI Fixed Deposit",
         "rate": "~6.9% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "SBI Fixed Deposit (Auto-Sweep Facility)",
@@ -716,11 +716,11 @@ const WHERE_TO_INVEST = {
         "name": "HDFC Bank FD (5 Year Tax Saver)",
         "provider": "HDFC Bank FD",
         "rate": "~7.2% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹5000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "HDFC Bank FD (Auto-Sweep Facility)",
@@ -773,11 +773,11 @@ const WHERE_TO_INVEST = {
         "name": "ICICI Bank FD (5 Year Tax Saver)",
         "provider": "ICICI Bank FD",
         "rate": "~7.1% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹5000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "ICICI Bank FD (Auto-Sweep Facility)",
@@ -830,11 +830,11 @@ const WHERE_TO_INVEST = {
         "name": "Axis Bank FD (5 Year Tax Saver)",
         "provider": "Axis Bank FD",
         "rate": "~7.2% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹5000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "Axis Bank FD (Auto-Sweep Facility)",
@@ -887,11 +887,11 @@ const WHERE_TO_INVEST = {
         "name": "Kotak Mahindra FD (5 Year Tax Saver)",
         "provider": "Kotak Mahindra FD",
         "rate": "~7.33% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹5000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "Kotak Mahindra FD (Auto-Sweep Facility)",
@@ -944,11 +944,11 @@ const WHERE_TO_INVEST = {
         "name": "IndusInd Bank FD (5 Year Tax Saver)",
         "provider": "IndusInd Bank FD",
         "rate": "~8% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹10000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "IndusInd Bank FD (Auto-Sweep Facility)",
@@ -1001,11 +1001,11 @@ const WHERE_TO_INVEST = {
         "name": "IDFC First Bank FD (5 Year Tax Saver)",
         "provider": "IDFC First Bank FD",
         "rate": "~7.75% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹10000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "IDFC First Bank FD (Auto-Sweep Facility)",
@@ -1058,11 +1058,11 @@ const WHERE_TO_INVEST = {
         "name": "AU Small Finance Bank FD (5 Year Tax Saver)",
         "provider": "AU Small Finance Bank FD",
         "rate": "~8% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "AU Small Finance Bank FD (Auto-Sweep Facility)",
@@ -1115,11 +1115,11 @@ const WHERE_TO_INVEST = {
         "name": "Ujjivan SFB FD (5 Year Tax Saver)",
         "provider": "Ujjivan SFB FD",
         "rate": "~8.25% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "Ujjivan SFB FD (Auto-Sweep Facility)",
@@ -1172,11 +1172,11 @@ const WHERE_TO_INVEST = {
         "name": "Equitas SFB FD (5 Year Tax Saver)",
         "provider": "Equitas SFB FD",
         "rate": "~8% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "Equitas SFB FD (Auto-Sweep Facility)",
@@ -1229,11 +1229,11 @@ const WHERE_TO_INVEST = {
         "name": "Canara Bank FD (5 Year Tax Saver)",
         "provider": "Canara Bank FD",
         "rate": "~6.8% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "Canara Bank FD (Auto-Sweep Facility)",
@@ -1286,11 +1286,11 @@ const WHERE_TO_INVEST = {
         "name": "PNB Fixed Deposit (5 Year Tax Saver)",
         "provider": "PNB Fixed Deposit",
         "rate": "~6.9% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "PNB Fixed Deposit (Auto-Sweep Facility)",
@@ -1343,11 +1343,11 @@ const WHERE_TO_INVEST = {
         "name": "Bank of Baroda FD (5 Year Tax Saver)",
         "provider": "Bank of Baroda FD",
         "rate": "~6.9% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "Bank of Baroda FD (Auto-Sweep Facility)",
@@ -1400,11 +1400,11 @@ const WHERE_TO_INVEST = {
         "name": "Post Office Recurring Deposit (5 Year Tax Saver)",
         "provider": "Post Office Recurring Deposit",
         "rate": "~6.7% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹100",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "Post Office Recurring Deposit (Auto-Sweep Facility)",
@@ -2120,7 +2120,7 @@ const WHERE_TO_INVEST = {
   "index_mf": {
     "title": "Best Nifty 50 Index Fund Schemes in India",
     "riskLevel": 3,
-    "note": "Passive Nifty 50 fund with lowest cost in the equity category. Ideal for first-time equity investors. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Passive Nifty 50 fund with lowest cost in the equity category. Ideal for first-time equity investors. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -2170,7 +2170,7 @@ const WHERE_TO_INVEST = {
   "elss": {
     "title": "Best ELSS Mutual Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Equity tax-saving fund with 80C deduction. Shortest lock-in among all 80C options. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Equity-linked savings fund; deduction eligibility depends on the selected fiscal-year rules, regime and investor facts. Has a 3-year lock-in. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -2220,7 +2220,7 @@ const WHERE_TO_INVEST = {
   "midcap_mf": {
     "title": "Best Mid-Cap Mutual Fund Schemes in India",
     "riskLevel": 4,
-    "note": "High-growth equity exposure via mid-cap companies. ~22% 5Y CAGR (May 2026). 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "High-growth equity exposure via mid-cap companies. ~22% 5Y CAGR (May 2026). Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "subCategories": {
       "growth_momentum": ["HDFC Mid-Cap Opportunities Fund", "Nippon India Growth Fund"],
@@ -2275,7 +2275,7 @@ const WHERE_TO_INVEST = {
   "smallcap_mf": {
     "title": "Best Small-Cap Mutual Fund Schemes in India",
     "riskLevel": 5,
-    "note": "Highest potential equity return with proportionally high risk. ~23% 5Y CAGR (May 2026). 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Highest potential equity return with proportionally high risk. ~23% 5Y CAGR (May 2026). Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "subCategories": {
       "aggressive_alpha": ["Nippon India Small Cap Fund", "Quant Small Cap Fund"],
@@ -2330,7 +2330,7 @@ const WHERE_TO_INVEST = {
   "hybrid_mf": {
     "title": "Best Balanced Advantage Fund Schemes in India",
     "riskLevel": 3,
-    "note": "Dynamic asset allocation between equity and debt. Cushions drawdowns while participating in equity upside. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Dynamic asset allocation between equity and debt. Cushions drawdowns while participating in equity upside. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -2380,7 +2380,7 @@ const WHERE_TO_INVEST = {
   "large_cap_mf": {
     "title": "Best Large Cap Equity Fund Schemes in India",
     "riskLevel": 3,
-    "note": "Active mutual fund focusing on top-tier blue-chip Indian companies. Offers stable equity compounding. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Active mutual fund focusing on top-tier blue-chip Indian companies. Offers stable equity compounding. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -2430,7 +2430,7 @@ const WHERE_TO_INVEST = {
   "large_mid_mf": {
     "title": "Best Large & Mid Cap Equity Fund Schemes in India",
     "riskLevel": 4,
-    "note": "A balanced blend of stable large-caps and high-growth mid-cap companies. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "A balanced blend of stable large-caps and high-growth mid-cap companies. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -2480,7 +2480,7 @@ const WHERE_TO_INVEST = {
   "flexi_cap_mf": {
     "title": "Best Flexi Cap Mutual Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Flexible equity fund that adjusts holdings across large, mid, and small-cap segments based on valuations. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Flexible equity fund that adjusts holdings across large, mid, and small-cap segments based on valuations. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -2530,7 +2530,7 @@ const WHERE_TO_INVEST = {
   "multi_cap_mf": {
     "title": "Best Multi Cap Equity Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Maintains disciplined, mandatory diversification across large, mid, and small-cap spaces. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Maintains disciplined, mandatory diversification across large, mid, and small-cap spaces. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -2580,7 +2580,7 @@ const WHERE_TO_INVEST = {
   "focused_mf": {
     "title": "Best Focused Equity Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Concentrated equity strategy backing up to 30 high-conviction stocks. High risk-reward profile. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Concentrated equity strategy backing up to 30 high-conviction stocks. High risk-reward profile. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -2630,7 +2630,7 @@ const WHERE_TO_INVEST = {
   "value_mf": {
     "title": "Best Value Mutual Fund Schemes in India",
     "riskLevel": 3,
-    "note": "Equity fund adhering to value investing philosophy, targeting cheap, out-of-favor companies. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Equity fund adhering to value investing philosophy, targeting cheap, out-of-favor companies. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -2680,7 +2680,7 @@ const WHERE_TO_INVEST = {
   "contra_mf": {
     "title": "Best Contra Equity Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Contrarian fund taking bets against the current market sentiment, buying assets currently in distress. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Contrarian fund taking bets against the current market sentiment, buying assets currently in distress. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -2730,7 +2730,7 @@ const WHERE_TO_INVEST = {
   "dividend_yield_mf": {
     "title": "Best Dividend Yield Mutual Fund Schemes in India",
     "riskLevel": 3,
-    "note": "Targets cash-rich companies paying consistent dividends. Features lower volatility than growth funds. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Targets cash-rich companies paying consistent dividends. Features lower volatility than growth funds. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -2780,7 +2780,7 @@ const WHERE_TO_INVEST = {
   "agg_hybrid_mf": {
     "title": "Best Aggressive Hybrid Fund Schemes in India",
     "riskLevel": 3,
-    "note": "Combines an aggressive equity base with stable fixed-income debt padding. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Combines an aggressive equity base with stable fixed-income debt padding. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -2830,7 +2830,7 @@ const WHERE_TO_INVEST = {
   "equity_savings_mf": {
     "title": "Best Equity Savings Hybrid Fund Schemes in India",
     "riskLevel": 2,
-    "note": "Uses equity, derivatives (arbitrage), and debt to yield stable returns with low downside. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Uses equity, derivatives (arbitrage), and debt to yield stable returns with low downside. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -2880,7 +2880,7 @@ const WHERE_TO_INVEST = {
   "mfg_sector_mf": {
     "title": "Best Manufacturing Sector Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Capitalizes on India's industrial manufacturing expansion theme. Highly cyclical. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Capitalizes on India's industrial manufacturing expansion theme. Highly cyclical. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -2930,7 +2930,7 @@ const WHERE_TO_INVEST = {
   "infra_sector_mf": {
     "title": "Best Infrastructure Sector Fund Schemes in India",
     "riskLevel": 5,
-    "note": "Focuses on capital goods, construction, energy, and logistics infrastructure. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Focuses on capital goods, construction, energy, and logistics infrastructure. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -2980,7 +2980,7 @@ const WHERE_TO_INVEST = {
   "pharma_sector_mf": {
     "title": "Best Pharma Sector Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Invests in pharmaceutical, biotech, and healthcare segments. Defensive during market slides. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Invests in pharmaceutical, biotech, and healthcare segments. Defensive during market slides. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -3030,7 +3030,7 @@ const WHERE_TO_INVEST = {
   "banking_sector_mf": {
     "title": "Best Banking Sector Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Highly correlated to domestic economic growth and credit cycles in banking. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Highly correlated to domestic economic growth and credit cycles in banking. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -3080,7 +3080,7 @@ const WHERE_TO_INVEST = {
   "it_sector_mf": {
     "title": "Best IT Sector Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Invests in software services, consulting, and tech firms. High global currency correlation. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Invests in software services, consulting, and tech firms. High global currency correlation. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -3130,7 +3130,7 @@ const WHERE_TO_INVEST = {
   "consumption_mf": {
     "title": "Best Consumption Sector Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Capitalizes on consumer discretionary and FMCG growth sectors. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Capitalizes on consumer discretionary and FMCG growth sectors. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -3180,7 +3180,7 @@ const WHERE_TO_INVEST = {
   "esg_mf": {
     "title": "Best ESG Thematic Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Screens out companies with low ESG credentials (fossil fuels, tobacco, etc.). 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Screens out companies with low ESG credentials (fossil fuels, tobacco, etc.). Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -3230,7 +3230,7 @@ const WHERE_TO_INVEST = {
   "us_equity_mf": {
     "title": "Best US Equity International Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Feeder fund investing in US stock markets. Offsets INR depreciation risk. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Feeder fund investing in US stock markets. Offsets INR depreciation risk. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -3280,7 +3280,7 @@ const WHERE_TO_INVEST = {
   "global_equity_mf": {
     "title": "Best Global Equity International Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Invests in worldwide equity indices outside India to de-risk geographic concentration. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Invests in worldwide equity indices outside India to de-risk geographic concentration. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -3930,7 +3930,7 @@ const WHERE_TO_INVEST = {
   "gold_etf": {
     "title": "Best Platforms & Products for Gold ETF",
     "riskLevel": 3,
-    "note": "Liquid gold exposure via demat account. No lock-in. Gains taxed as LTCG at 12.5%.",
+    "note": "Liquid gold exposure via demat account. No lock-in. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Open a demat + trading account on Zerodha, Groww, or Angel One. Buy units during market hours like stocks.",
     "products": [
       {
@@ -4480,7 +4480,7 @@ const WHERE_TO_INVEST = {
   "tax_free_bonds": {
     "title": "Best Platforms & Products for PFC/REC Tax-Free Bonds",
     "riskLevel": 1,
-    "note": "PSU-backed bonds. Capital gains and interest payouts are completely tax-exempt.",
+    "note": "PSU-backed bonds. Coupon and disposal tax treatment depend on issue terms, transaction facts and current fiscal-year law.",
     "howToStart": "Open an account at any authorized commercial bank or post office using Aadhaar and PAN verification.",
     "products": [
       {
@@ -4730,7 +4730,7 @@ const WHERE_TO_INVEST = {
   "nps": {
     "title": "Where to Access National Pension System (NPS)",
     "riskLevel": 3,
-    "note": "Market-linked pension with equity+debt blending. Extra ₹50K 80CCD(1B) deduction on top of 80C. 60% lump sum tax-free at 60. Guaranteed by Government of India / RBI authority.",
+    "note": "Market-linked pension with equity+debt blending. NPS contribution and withdrawal treatment depends on the selected fiscal year, tax regime, contribution type and exit facts. Guaranteed by Government of India / RBI authority.",
     "howToStart": "Register on enps.nsdl.com with Aadhaar + PAN. Choose a Pension Fund Manager and asset allocation.",
     "products": [
       {
@@ -5461,7 +5461,7 @@ const WHERE_TO_INVEST = {
   "parag_parikh_flexi": {
     "title": "Best Parag Parikh Flexi Cap Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Premium diversified fund investing in Indian blue-chips and international global giants like Alphabet/Microsoft. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Premium diversified fund investing in Indian blue-chips and international global giants like Alphabet/Microsoft. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -5511,7 +5511,7 @@ const WHERE_TO_INVEST = {
   "sbi_bluechip": {
     "title": "Best SBI Bluechip Mutual Fund Schemes in India",
     "riskLevel": 3,
-    "note": "Active large-cap mutual fund managed by India's largest AMC. Highly reliable returns. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Active large-cap mutual fund managed by India's largest AMC. Highly reliable returns. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -5561,7 +5561,7 @@ const WHERE_TO_INVEST = {
   "hdfc_midcap": {
     "title": "Best HDFC Mid-Cap Opportunities Fund Schemes in India",
     "riskLevel": 4,
-    "note": "India's largest mid-cap equity mutual fund, providing superior alpha over the long run. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "India's largest mid-cap equity mutual fund, providing superior alpha over the long run. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -5611,7 +5611,7 @@ const WHERE_TO_INVEST = {
   "mirae_elss": {
     "title": "Best Mirae Asset ELSS Tax Saver Schemes in India",
     "riskLevel": 4,
-    "note": "Popular tax-saving equity fund delivering solid category-beating historical returns. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Popular tax-saving equity fund delivering solid category-beating historical returns. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -5698,11 +5698,11 @@ const WHERE_TO_INVEST = {
         "name": "Bajaj Finance Fixed Deposit (5 Year Tax Saver)",
         "provider": "Bajaj Finance Fixed Deposit",
         "rate": "~7.5% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "Bajaj Finance Fixed Deposit (Auto-Sweep Facility)",
@@ -5755,11 +5755,11 @@ const WHERE_TO_INVEST = {
         "name": "Shriram Finance Fixed Deposit (5 Year Tax Saver)",
         "provider": "Shriram Finance Fixed Deposit",
         "rate": "~7.8% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "Shriram Finance Fixed Deposit (Auto-Sweep Facility)",
@@ -5812,11 +5812,11 @@ const WHERE_TO_INVEST = {
         "name": "LIC Housing Finance FD (5 Year Tax Saver)",
         "provider": "LIC Housing Finance FD",
         "rate": "~7.4% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "LIC Housing Finance FD (Auto-Sweep Facility)",
@@ -5869,11 +5869,11 @@ const WHERE_TO_INVEST = {
         "name": "PNB Housing Finance FD (5 Year Tax Saver)",
         "provider": "PNB Housing Finance FD",
         "rate": "~7.5% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "PNB Housing Finance FD (Auto-Sweep Facility)",
@@ -5926,11 +5926,11 @@ const WHERE_TO_INVEST = {
         "name": "Mahindra Finance Fixed Deposit (5 Year Tax Saver)",
         "provider": "Mahindra Finance Fixed Deposit",
         "rate": "~7.5% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "Mahindra Finance Fixed Deposit (Auto-Sweep Facility)",
@@ -5983,11 +5983,11 @@ const WHERE_TO_INVEST = {
         "name": "Jana Small Finance Bank FD (5 Year Tax Saver)",
         "provider": "Jana Small Finance Bank FD",
         "rate": "~7.9% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "Jana Small Finance Bank FD (Auto-Sweep Facility)",
@@ -6040,11 +6040,11 @@ const WHERE_TO_INVEST = {
         "name": "Suryoday Small Finance Bank FD (5 Year Tax Saver)",
         "provider": "Suryoday Small Finance Bank FD",
         "rate": "~8.2% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "Suryoday Small Finance Bank FD (Auto-Sweep Facility)",
@@ -6097,11 +6097,11 @@ const WHERE_TO_INVEST = {
         "name": "ESAF Small Finance Bank FD (5 Year Tax Saver)",
         "provider": "ESAF Small Finance Bank FD",
         "rate": "~7.85% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "ESAF Small Finance Bank FD (Auto-Sweep Facility)",
@@ -6154,11 +6154,11 @@ const WHERE_TO_INVEST = {
         "name": "Utkarsh Small Finance Bank FD (5 Year Tax Saver)",
         "provider": "Utkarsh Small Finance Bank FD",
         "rate": "~8.1% p.a.",
-        "highlight": "Qualifies for Section 80C tax deduction up to ₹1.5 lakh with 5-year lock-in.",
+        "highlight": "Tax treatment depends on your eligibility, tax regime and fiscal year; check the current rules.",
         "platform": "NetBanking / Branch",
         "minInvestment": "₹1000",
         "tenure": "5 Years",
-        "badge": "Tax Saver 80C"
+        "badge": "Tax Saver — verify eligibility"
       },
       {
         "name": "Utkarsh Small Finance Bank FD (Auto-Sweep Facility)",
@@ -6280,7 +6280,7 @@ const WHERE_TO_INVEST = {
   "defence_sector_mf": {
     "title": "Best Defence Sector Mutual Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Thematic equity fund investing in Indian defence equipment manufacturers, shipbuilders, and aerospace companies. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Thematic equity fund investing in Indian defence equipment manufacturers, shipbuilders, and aerospace companies. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -6330,7 +6330,7 @@ const WHERE_TO_INVEST = {
   "multi_asset_allocation_mf": {
     "title": "Best Multi-Asset Allocation Fund Schemes in India",
     "riskLevel": 3,
-    "note": "Hybrid mutual fund mandated to invest across at least 3 asset classes (Equity, Debt, Gold/REITs) with at least 10% allocation to each. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Hybrid mutual fund mandated to invest across at least 3 asset classes (Equity, Debt, Gold/REITs) with at least 10% allocation to each. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -6430,7 +6430,7 @@ const WHERE_TO_INVEST = {
   "children_solution_fund": {
     "title": "Best Children's Solution-Oriented Fund Schemes in India",
     "riskLevel": 3,
-    "note": "Goal-specific solution fund for child education & marriage with mandatory 5-year lock-in or until child turns 18. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Goal-specific solution fund for child education & marriage with mandatory 5-year lock-in or until child turns 18. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -6480,7 +6480,7 @@ const WHERE_TO_INVEST = {
   "retirement_solution_fund": {
     "title": "Best Retirement Solution-Oriented Mutual Fund Schemes in India",
     "riskLevel": 3,
-    "note": "Dedicated retirement corpus building mutual fund featuring a mandatory 5-year lock-in or until retirement age (55). 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Dedicated retirement corpus building mutual fund featuring a mandatory 5-year lock-in or until retirement age (55). Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -6530,7 +6530,7 @@ const WHERE_TO_INVEST = {
   "psu_sector_mf": {
     "title": "Best PSU Equity Sector Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Thematic fund investing in Public Sector Undertakings (PSUs) across power, defence, banking, and infrastructure. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Thematic fund investing in Public Sector Undertakings (PSUs) across power, defence, banking, and infrastructure. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -6580,7 +6580,7 @@ const WHERE_TO_INVEST = {
   "auto_sector_mf": {
     "title": "Best Auto & EV Sector Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Thematic mutual fund investing in automobile manufacturers, EV makers, battery tech, and auto component suppliers. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Thematic mutual fund investing in automobile manufacturers, EV makers, battery tech, and auto component suppliers. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -6630,7 +6630,7 @@ const WHERE_TO_INVEST = {
   "fmcg_sector_mf": {
     "title": "Best FMCG & Consumer Staples Sector Fund Schemes in India",
     "riskLevel": 3,
-    "note": "Defensive equity sector fund investing in fast-moving consumer goods (HUL, ITC, Nestlé, Britannia). 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Defensive equity sector fund investing in fast-moving consumer goods (HUL, ITC, Nestlé, Britannia). Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -7236,7 +7236,7 @@ const WHERE_TO_INVEST = {
   "value_factor_mf": {
     "title": "Best Nifty 500 Value 50 Index Fund Schemes in India",
     "riskLevel": 3,
-    "note": "Factor-based equity index fund picking top 50 undervalued stocks based on Earnings Yield (P/E), Book Value (P/B), and Dividend Yield. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Factor-based equity index fund picking top 50 undervalued stocks based on Earnings Yield (P/E), Book Value (P/B), and Dividend Yield. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -7286,7 +7286,7 @@ const WHERE_TO_INVEST = {
   "motilal_nasdaq100_fof": {
     "title": "Best Motilal Oswal Nasdaq 100 FoF Schemes in India",
     "riskLevel": 4,
-    "note": "INR feeder mutual fund investing into US Nasdaq 100 index units without needing an overseas demat account. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "INR feeder mutual fund investing into US Nasdaq 100 index units without needing an overseas demat account. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -7336,7 +7336,7 @@ const WHERE_TO_INVEST = {
   "motilal_sp500_index": {
     "title": "Best Motilal Oswal S&P 500 Index Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Passive INR index fund tracking all 500 leading companies in the US S&P 500 index. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Passive INR index fund tracking all 500 leading companies in the US S&P 500 index. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -7436,7 +7436,7 @@ const WHERE_TO_INVEST = {
   "icici_us_bluechip_fund": {
     "title": "Best ICICI Prudential US Bluechip Equity Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Actively managed domestic feeder fund investing in high-quality US mega-cap bluechip corporations. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Actively managed domestic feeder fund investing in high-quality US mega-cap bluechip corporations. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -7486,7 +7486,7 @@ const WHERE_TO_INVEST = {
   "franklin_us_opportunities": {
     "title": "Best Franklin India Feeder - US Opportunities Fund Schemes in India",
     "riskLevel": 4,
-    "note": "INR feeder fund investing into Franklin U.S. Opportunities Fund (US-domiciled growth fund). 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "INR feeder fund investing into Franklin U.S. Opportunities Fund (US-domiciled growth fund). Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -7536,7 +7536,7 @@ const WHERE_TO_INVEST = {
   "edelweiss_us_tech_fof": {
     "title": "Best Edelweiss US Technology Equity FoF Schemes in India",
     "riskLevel": 4,
-    "note": "INR feeder fund investing in JPMorgan US Technology Fund, accessing US software, semiconductor, and AI leaders. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "INR feeder fund investing in JPMorgan US Technology Fund, accessing US software, semiconductor, and AI leaders. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -7586,7 +7586,7 @@ const WHERE_TO_INVEST = {
   "kotak_nasdaq100_fof": {
     "title": "Best Kotak Nasdaq 100 FoF Schemes in India",
     "riskLevel": 4,
-    "note": "Domestic Fund of Funds from Kotak AMC investing into overseas Nasdaq-100 ETFs. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Domestic Fund of Funds from Kotak AMC investing into overseas Nasdaq-100 ETFs. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -7636,7 +7636,7 @@ const WHERE_TO_INVEST = {
   "mirae_nyse_fang_etf_fof": {
     "title": "Best Mirae Asset NYSE FANG+ ETF FoF Schemes in India",
     "riskLevel": 4,
-    "note": "Concentrated domestic FoF investing in the NYSE FANG+ index — holding 10 high-impact US tech mega-caps (Apple, Microsoft, Alphabet, Amazon, Nvidia, Meta, Tesla, Netflix, Broadcom, Snow). 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Concentrated domestic FoF investing in the NYSE FANG+ index — holding 10 high-impact US tech mega-caps (Apple, Microsoft, Alphabet, Amazon, Nvidia, Meta, Tesla, Netflix, Broadcom, Snow). Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -7686,7 +7686,7 @@ const WHERE_TO_INVEST = {
   "edelweiss_greater_china_fof": {
     "title": "Best Edelweiss Greater China Equity FoF Schemes in India",
     "riskLevel": 4,
-    "note": "Domestic offshore FoF investing in JPMorgan Greater China Fund, providing exposure to China, Hong Kong, and Taiwan tech/consumer giants (Tencent, Alibaba, TSMC). 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Domestic offshore FoF investing in JPMorgan Greater China Fund, providing exposure to China, Hong Kong, and Taiwan tech/consumer giants (Tencent, Alibaba, TSMC). Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {
@@ -7736,7 +7736,7 @@ const WHERE_TO_INVEST = {
   "dsp_us_flexible_equity": {
     "title": "Best DSP US Flexible Equity Fund Schemes in India",
     "riskLevel": 4,
-    "note": "Domestic FoF feeding into BlackRock Global Funds - US Flexible Equity Fund, actively allocating across US large & mid-cap stocks. 12.5% LTCG tax above ₹1.25L; 20% STCG.",
+    "note": "Domestic FoF feeding into BlackRock Global Funds - US Flexible Equity Fund, actively allocating across US large & mid-cap stocks. Capital-gains treatment depends on current fiscal-year law, verified product classification and holding-period facts.",
     "howToStart": "Invest in zero-commission Direct plans via Groww, Zerodha Coin, or Kuvera.",
     "products": [
       {

@@ -104,6 +104,61 @@ const recommendationSchema = new mongoose.Schema({
   generatedAt: { type: Date, default: Date.now },
 }, { strict: 'throw' });
 
+const IMMUTABLE_GENERATION_FIELDS = new Set([
+  'instruments',
+  'modelVersion',
+  'regulatoryRuleVersion',
+  'profileInputHash',
+  'recommendationPolicyVersion',
+  'returnAssumptionHash',
+  'recommendationGeneration',
+  'responseSnapshot',
+  'currentAllocationSource',
+  'generatedAt',
+]);
+
+function isImmutableGenerationPath(path) {
+  const normalized = String(path || '').replace(/^\$[^.]+\./, '');
+  return [...IMMUTABLE_GENERATION_FIELDS].some(field => normalized === field || normalized.startsWith(`${field}.`));
+}
+
+recommendationSchema.pre('save', function rejectGenerationMutation() {
+  if (this.isNew) return;
+  const changed = this.modifiedPaths().find(isImmutableGenerationPath);
+  if (changed) {
+    const error = new Error(`Recommendation generation field "${changed}" is immutable; create a new recommendation generation.`);
+    error.code = 'RECOMMENDATION_GENERATION_IMMUTABLE';
+    throw error;
+  }
+});
+
+for (const operation of ['updateOne', 'updateMany', 'findOneAndUpdate', 'replaceOne', 'findOneAndReplace']) {
+  recommendationSchema.pre(operation, function rejectGenerationQueryMutation() {
+    const update = this.getUpdate();
+    if (!update) return;
+    if (Array.isArray(update)) {
+      const error = new Error('Recommendation generation fields cannot be changed through update pipelines.');
+      error.code = 'RECOMMENDATION_GENERATION_IMMUTABLE';
+      throw error;
+    }
+    const paths = [];
+    for (const [operator, values] of Object.entries(update)) {
+      if (operator.startsWith('$') && values && typeof values === 'object' && !Array.isArray(values)) {
+        paths.push(...Object.keys(values));
+        if (operator === '$rename') paths.push(...Object.values(values));
+      } else if (!operator.startsWith('$')) {
+        paths.push(operator);
+      }
+    }
+    const changed = paths.find(isImmutableGenerationPath);
+    if (changed) {
+      const error = new Error(`Recommendation generation field "${changed}" is immutable; create a new recommendation generation.`);
+      error.code = 'RECOMMENDATION_GENERATION_IMMUTABLE';
+      throw error;
+    }
+  });
+}
+
 recommendationSchema.index({ userId: 1, generatedAt: -1 });
 recommendationSchema.index({ profileId: 1 });
 const candidateIndex = optionalUniqueIndex('profileCompletionCandidateId', 'unique_profile_completion_candidate');

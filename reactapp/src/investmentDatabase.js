@@ -19,6 +19,21 @@ const UNAVAILABLE_TAX_REFERENCE = Object.freeze({
   label: 'Reference tax tag',
   desc: 'Unavailable here. Use the Tax view with explicit inputs and current versioned rules.',
 });
+const UNAVAILABLE_STATIC_TAX_DETAIL = 'Legacy catalog tax tags are not current tax authority. Use the backend tax view with explicit fiscal-year and product facts.';
+const TAX_CLAIM_TEXT = /\b(?:tax(?:ation|able|free|es|ed)?|eee|ltcg|stcg|section\s*(?:80|87|111|112|115|50)\w*)\b/i;
+
+function sanitizeStaticTaxClaims(value, key = '') {
+  if (key === 'taxation') return UNAVAILABLE_TAX_REFERENCE;
+  if (typeof value === 'string') return TAX_CLAIM_TEXT.test(value) ? UNAVAILABLE_STATIC_TAX_DETAIL : value;
+  if (Array.isArray(value)) return value.map(item => sanitizeStaticTaxClaims(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [
+      childKey,
+      sanitizeStaticTaxClaims(childValue, childKey),
+    ]));
+  }
+  return value;
+}
 export const TAX_INFO = Object.freeze({
   eee: UNAVAILABLE_TAX_REFERENCE,
   slab: UNAVAILABLE_TAX_REFERENCE,
@@ -72,6 +87,13 @@ masterCatalog.instruments.forEach(inst => {
 
 // Map masterCatalog instruments to the old flat structure for backward compatibility
 export const investmentDatabase = masterCatalog.instruments.map(inst => {
+  const safeStaticData = sanitizeStaticTaxClaims(inst.staticData);
+  const safeDynamicData = {
+    ...inst.dynamicData,
+    // Legacy catalog aliases/scores are not fiscal-year-specific tax outcomes.
+    taxType: null,
+    taxEfficiencyScore: null,
+  };
   return {
     id: inst.id,
     slug: inst.slug,
@@ -85,17 +107,17 @@ export const investmentDatabase = masterCatalog.instruments.map(inst => {
     metadata: inst.metadata,
     
     // Static fields flattened
-    description: inst.staticData.description,
-    desc: inst.staticData.description, // desc mapped to description
-    pros: inst.staticData.pros,
-    cons: inst.staticData.cons,
-    faq: inst.staticData.faq,
-    taxation: inst.staticData.taxation,
-    suitability: inst.staticData.suitability,
-    trustBadge: inst.staticData.trustBadge,
-    alternatives: inst.staticData.alternatives,
-    explainer: inst.staticData.explainer,
-    cardSubtitle: inst.staticData.cardSubtitle,
+    description: safeStaticData.description,
+    desc: safeStaticData.description, // desc mapped to description
+    pros: safeStaticData.pros,
+    cons: safeStaticData.cons,
+    faq: safeStaticData.faq,
+    taxation: safeStaticData.taxation,
+    suitability: safeStaticData.suitability,
+    trustBadge: safeStaticData.trustBadge,
+    alternatives: safeStaticData.alternatives,
+    explainer: safeStaticData.explainer,
+    cardSubtitle: safeStaticData.cardSubtitle,
     
     // Dynamic fields flattened
     expectedReturn: inst.dynamicData.expectedReturn.avg,
@@ -115,8 +137,8 @@ export const investmentDatabase = masterCatalog.instruments.map(inst => {
     volatility: inst.dynamicData.risk.volatility,
     liquidityScore: inst.dynamicData.liquidity.score,
     lockIn: inst.dynamicData.liquidity.lockIn,
-    taxType: inst.dynamicData.taxType,
-    taxEfficiencyScore: inst.dynamicData.taxEfficiencyScore,
+    taxType: null,
+    taxEfficiencyScore: null,
     expenseRatio: inst.dynamicData.expenseRatio,
     minMonthlyInvestment: inst.dynamicData.minMonthlyInvestment,
     maxAnnualInvestment: inst.dynamicData.maxAnnualInvestment,
@@ -124,7 +146,7 @@ export const investmentDatabase = masterCatalog.instruments.map(inst => {
     goalTags: inst.dynamicData.goalTags,
     
     // Keep nested references for new code
-    staticData: inst.staticData,
-    dynamicData: inst.dynamicData
+    staticData: safeStaticData,
+    dynamicData: safeDynamicData
   };
 });

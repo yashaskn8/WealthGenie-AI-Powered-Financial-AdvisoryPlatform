@@ -8,8 +8,8 @@ import {
 } from '../services/productPostTaxCalculator.js';
 
 test('classifyProductTaxType identifies correct tax categories', () => {
-  assert.equal(classifyProductTaxType({}, 'ppf'), 'PPF_EEE');
-  assert.equal(classifyProductTaxType({}, 'sukanya'), 'SSY_EEE');
+  assert.equal(classifyProductTaxType({}, 'ppf'), 'PPF_ACCOUNT_EXCLUSION_CONDITIONAL');
+  assert.equal(classifyProductTaxType({}, 'sukanya'), 'SSY_ACCOUNT_EXCLUSION_CONDITIONAL');
   assert.equal(classifyProductTaxType({}, 'rbi_bonds'), 'RBI_FRSB_INTEREST');
   assert.equal(classifyProductTaxType({}, 'fd'), 'BANK_DEPOSIT_INTEREST');
   assert.equal(classifyProductTaxType({}, 'sbi_fd'), 'BANK_DEPOSIT_INTEREST');
@@ -20,26 +20,24 @@ test('classifyProductTaxType identifies correct tax categories', () => {
   assert.equal(classifyProductTaxType({ name: 'Public Provident Fund' }, 'unknown'), 'TAX_CLASSIFICATION_UNAVAILABLE');
 });
 
-test('PPF & SSY EEE tax-exemption yields 0 incremental tax and postTaxRatePct = officialRate', () => {
-  const ppfProduct = {
-    id: 'ppf:fact',
-    name: 'Public Provident Fund',
-    parentInstrumentId: 'ppf',
-    officialRate: { value: 7.1 },
-  };
-  const outcome = calculateProductPostTaxOutcome({
-    product: ppfProduct,
-    profile: { age: 30 },
-    taxCalculationContext: null, // Should work even without tax context because EEE is 100% tax free
-  });
+test('PPF and SSY tax outcomes fail closed unless account and payment facts are established', () => {
+  for (const [parentInstrumentId, requiredInputs] of [
+    ['ppf', ['verifiedAccountEligibility', 'contributionHistory', 'withdrawalOrMaturityFacts']],
+    ['sukanya', ['verifiedAccountEligibility', 'eligibleBeneficiary', 'paymentFacts']],
+  ]) {
+    const outcome = calculateProductPostTaxOutcome({
+      product: { id: `${parentInstrumentId}:fact`, name: parentInstrumentId, parentInstrumentId, officialRate: { value: 7.1 } },
+      profile: { age: 30 },
+      taxCalculationContext: null,
+    });
 
-  assert.equal(outcome.status, 'CALCULATED');
-  assert.equal(outcome.incrementalTax, 0);
-  assert.equal(outcome.postTaxRatePct, 7.1);
-  assert.equal(outcome.grossGain, 710);
-  assert.equal(outcome.netGain, 710);
-  assert.equal(outcome.taxClassification, 'PPF_EEE');
-  assert.equal(outcome.isHistoricalEstimate, false);
+    assert.equal(outcome.status, 'TAX_CLASSIFICATION_REQUIRES_ACQUISITION_FACTS');
+    assert.equal(outcome.incrementalTax, null);
+    assert.equal(outcome.postTaxRatePct, null);
+    assert.equal(outcome.netGain, null);
+    assert.deepEqual(outcome.requiredTaxInputs, requiredInputs);
+    assert.match(outcome.disclosure, /No tax-free result/);
+  }
 });
 
 test('Taxable product without explicit tax context returns REQUIRES_TAX_INPUTS without crashing or showing fake 0%', () => {
@@ -190,8 +188,9 @@ test('exact-date WTI tax classification keeps the anniversary short-term without
 
   assert.equal(outcome.status, 'CALCULATED');
   assert.equal(outcome.holdingPeriodBasis, 'EXACT_TRANSACTION_DATES');
-  assert.ok(outcome.rulesApplied.includes('SECTION_111A_STCG_SPECIAL_RATE'));
-  assert.ok(!outcome.rulesApplied.includes('SECTION_112A_LTCG_SPECIAL_RATE'));
+  assert.ok(outcome.rulesApplied.includes('INCOME_TAX_ACT_2025_EQUITY_STCG_SPECIAL_RATE_POLICY'));
+  assert.ok(!outcome.rulesApplied.includes('INCOME_TAX_ACT_2025_EQUITY_LTCG_SPECIAL_RATE_POLICY'));
+  assert.ok(outcome.taxRuleMetadata.legacyAliases.includes('SECTION_111A_STCG_SPECIAL_RATE'));
 });
 
 test('generateBeginnerSuitability produces deterministic plain-English reasons, risk tiers, and liquidity copy', () => {

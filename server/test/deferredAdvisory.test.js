@@ -23,15 +23,13 @@ import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
 import crypto from 'node:crypto';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
-import recommendRoutes from '../routes/recommend.js';
+import recommendRoutes, { recommendationPayloadFromSnapshot } from '../routes/recommend.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import AuditRecord from '../models/AuditRecord.js';
 import { ProviderManager } from '../services/providerAbstraction.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
-import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
-import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
 
 const JWT_SECRET = 'deferred-advisory-test-secret-key-32ch';
 process.env.JWT_SECRET = JWT_SECRET;
@@ -82,8 +80,6 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     ...canonicalProfile({ monthlyTakeHome: 120000, monthlySavings: 35000, age: 32 }),
     recommendationProfileVersion: 'financial-profile-1.0.0',
   });
-  const validMlV1ProfileHash = buildRecommendationProfileHash(profile.toObject(), { modelVersion: 'ml_v1' });
-
   let recData = null;
   let serverTimingHeader = null;
 
@@ -194,19 +190,19 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
       top_reason: 'Nested completion explanation reaches deferred advisory generation',
       feature_contributions: [{ feature: 'emergencyFundMonths', contribution: 0.8 }],
     };
-    const storedRecommendation = await Recommendation.findById(recData.recommendationId).lean();
-    await Recommendation.updateOne(
-      { _id: recData.recommendationId },
-      {
-        $set: {
-          responseSnapshot: {
-            profile: { profileId: String(profile._id) },
-            recommendation: { ...storedRecommendation.responseSnapshot, explanation: knownExplanation },
-            completion: { candidateHit: false, recomputed: true },
-          },
-        },
-      },
+    assert.deepEqual(
+      recommendationPayloadFromSnapshot({ recommendation: { explanation: knownExplanation }, completion: { recomputed: true } }),
+      { explanation: knownExplanation },
+      'Nested generation-response extraction must not require mutating the immutable stored snapshot',
     );
+    const storedRecommendation = await Recommendation.findById(recData.recommendationId).lean();
+    const generationResponse = recommendationPayloadFromSnapshot(storedRecommendation.responseSnapshot);
+    const expectedExplanation = generationResponse?.explanation
+      ? {
+        topReason: generationResponse.explanation.top_reason,
+        featureContributions: generationResponse.explanation.feature_contributions || [],
+      }
+      : null;
 
     const originalGenerate = ProviderManager.nvidia.generate;
     const originalPrimaryProvider = process.env.LLM_PRIMARY_PROVIDER;
@@ -245,10 +241,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     }
 
     assert.equal(res.status, 200);
-    assert.deepEqual(receivedExplanation, {
-      topReason: knownExplanation.top_reason,
-      featureContributions: knownExplanation.feature_contributions,
-    });
+    assert.deepEqual(receivedExplanation, expectedExplanation);
     advisoryData = await res.json();
     assert.equal(advisoryData.recommendationId, recData.recommendationId);
     assert.ok(typeof advisoryData.advisory_text === 'string' && advisoryData.advisory_text.length > 0, 'Must return advisory text');

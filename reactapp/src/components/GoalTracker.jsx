@@ -5,6 +5,7 @@ import { formatINR } from '../utils/indianNumberFormat';
 import api from '../services/api';
 import './GoalTracker.css';
 import { getGoalTypeByLabel, hexToRgb } from '../config/goalCatalog';
+import { isAdvisoryFresh, isFinancialCalculationFresh } from '../utils/financialFreshness';
 
 const ICON_MAP = {
   Umbrella,
@@ -75,7 +76,7 @@ const GoalCard = ({
 }) => {
   // Target facts are editable; every computed value is read from the stored backend goal.
   const isDbGoal = !!goalObj;
-  const isCalculationFresh = goalObj?.calculation_freshness?.fresh !== false;
+  const isCalculationFresh = isFinancialCalculationFresh(goalObj?.calculation_freshness);
   const initialTarget = isDbGoal ? goalObj.target_amount : defaults.target;
   const initialSaved = isDbGoal ? goalObj.current_savings : defaults.currentSaved;
 
@@ -358,7 +359,7 @@ const GoalCard = ({
 
       {/* Actionable Insight */}
       <div className="goal-action-container">
-        {isDbGoal && goalObj.gemini_advice ? (
+        {isDbGoal && goalObj.gemini_advice && isAdvisoryFresh(goalObj.advisory_freshness) ? (
           <motion.div className="goal-action-card">
             <div className="action-card-highlight" style={{ background: gapPositive ? '#eab308' : '#10b981' }}></div>
             <Sparkles size={16} color={gapPositive ? '#eab308' : '#10b981'} style={{ flexShrink: 0, marginTop: 2, zIndex: 1 }} />
@@ -467,7 +468,7 @@ const GoalTracker = ({ profile, onNavigate }) => {
     const allocs = {};
 
     mappedGoals.forEach(g => {
-      const value = g.obj?.calculation_freshness?.fresh === false ? NaN : Number(g.obj?.recommended_sip);
+      const value = isFinancialCalculationFresh(g.obj?.calculation_freshness) ? Number(g.obj?.recommended_sip) : NaN;
       allocs[g.name] = Number.isFinite(value) && value >= 0 ? value : null;
     });
     return allocs;
@@ -489,16 +490,16 @@ const GoalTracker = ({ profile, onNavigate }) => {
   }, [dbGoals]);
 
   const totalProjected = useMemo(() => {
-    const values = mappedGoals.map(g => g.obj?.calculation_freshness?.fresh === false
-      ? NaN
-      : Number(g.obj?.monte_carlo_summary?.p50));
+    const values = mappedGoals.map(g => isFinancialCalculationFresh(g.obj?.calculation_freshness)
+      ? Number(g.obj?.monte_carlo_summary?.p50)
+      : NaN);
     return values.every(value => Number.isFinite(value) && value >= 0)
       ? values.reduce((sum, value) => sum + value, 0)
       : null;
   }, [mappedGoals]);
 
   const totalMonthlySIP = useMemo(() => {
-    const values = dbGoals.map(g => g.calculation_freshness?.fresh === false ? NaN : Number(g.recommended_sip));
+    const values = dbGoals.map(g => isFinancialCalculationFresh(g.calculation_freshness) ? Number(g.recommended_sip) : NaN);
     return values.every(value => Number.isFinite(value) && value >= 0)
       ? values.reduce((sum, value) => sum + value, 0)
       : null;
@@ -506,7 +507,7 @@ const GoalTracker = ({ profile, onNavigate }) => {
 
   // MC projections target inflation-adjusted amounts, so use those for health calculation
   const totalInflationAdjustedTarget = useMemo(() => {
-    const values = dbGoals.map(g => g.calculation_freshness?.fresh === false ? NaN : Number(g.inflation_adjusted_target));
+    const values = dbGoals.map(g => isFinancialCalculationFresh(g.calculation_freshness) ? Number(g.inflation_adjusted_target) : NaN);
     return values.every(value => Number.isFinite(value) && value > 0)
       ? values.reduce((sum, value) => sum + value, 0)
       : null;

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import mongoose from 'mongoose';
+import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import AuditRecord from '../models/AuditRecord.js';
 import AuditChainHead from '../models/AuditChainHead.js';
@@ -9,12 +10,21 @@ import { claimAdvisoryIdempotency } from '../middleware/idempotency.js';
 import { persistAdvisoryAtomically } from '../services/advisoryPersistence.js';
 import { verifyAuditChain } from '../services/auditChain.js';
 import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
+import {
+  buildRecommendationProfile,
+  buildRecommendationProfileHash,
+  FINANCIAL_PROFILE_SCHEMA_VERSION,
+  RECOMMENDATION_POLICY_VERSION,
+} from '../services/recommendationProfile.js';
+import { canonicalProfile } from './helpers/canonicalProfile.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 
 const userId = new mongoose.Types.ObjectId();
 const profileId = new mongoose.Types.ObjectId();
 
 async function createAdvisory(index) {
+  const profile = await FinancialProfile.findOne({ _id: profileId, userId }).lean();
+  assert.ok(profile, 'Audit-chain fixture must use a persisted canonical financial profile.');
   const claim = await claimAdvisoryIdempotency({
     key: `audit-chain-${String(index).padStart(3, '0')}`,
     userId,
@@ -44,8 +54,9 @@ async function createAdvisory(index) {
       confidenceScores: { Equity_MF: 0.8 },
       mlFallback: false,
       modelVersion: `model-${index}`,
+      recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
       regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
-      profileInputHash: 'b'.repeat(64),
+      profileInputHash: buildRecommendationProfileHash(buildRecommendationProfile(profile), { modelVersion: `model-${index}` }),
     },
     auditRecord: {
       _id: auditId,
@@ -59,7 +70,7 @@ async function createAdvisory(index) {
       input_hash: `legacy-input-hash-${index}`,
       inputs: {
         financial_profile_schema_version: 'financial-profile-1.0.0',
-        recommendation_policy_version: 'suitability-freeze-1.0.0',
+        recommendation_policy_version: RECOMMENDATION_POLICY_VERSION,
         model_version: `model-${index}`,
         age: 30 + index,
         monthly_take_home: 100000,
@@ -89,12 +100,19 @@ async function clearAuditState() {
 
 test.before(async () => {
   await setupTestDatabase({ requireReplicaSet: true });
+  await FinancialProfile.create({
+    _id: profileId,
+    userId,
+    ...canonicalProfile(),
+    recommendationProfileVersion: FINANCIAL_PROFILE_SCHEMA_VERSION,
+  });
 });
 
 test.beforeEach(clearAuditState);
 
 test.after(async () => {
   await clearAuditState().catch(() => {});
+  await FinancialProfile.deleteOne({ _id: profileId, userId }).catch(() => {});
   await teardownTestDatabase();
 });
 
