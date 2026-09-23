@@ -13,6 +13,14 @@ describe('DataFreshnessBar Component', () => {
   });
 
   it('renders nothing when dataSources is null', () => {
+    // Avoid leaving the API client's retry timer running into the next test.
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      headers: { get: () => null },
+      json: async () => ({ message: 'Market data unavailable' }),
+    });
+
     const { container } = render(<DataFreshnessBar instruments={['Equity_MF']} />);
     expect(container.firstChild).toBeNull();
   });
@@ -36,7 +44,11 @@ describe('DataFreshnessBar Component', () => {
       }),
     });
 
-    render(<DataFreshnessBar instruments={['Equity_MF']} />);
+    render(
+      <React.StrictMode>
+        <DataFreshnessBar instruments={['Equity_MF']} />
+      </React.StrictMode>,
+    );
     expect(await screen.findByText('AMFI: PARTIAL')).toBeTruthy();
     expect(await screen.findByText('NSE: AVAILABLE')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Refresh Sources' })).toBeNull();

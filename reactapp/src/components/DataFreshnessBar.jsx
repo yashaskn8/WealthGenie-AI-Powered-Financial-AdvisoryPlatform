@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { CheckCircle, AlertTriangle, Clock } from 'lucide-react';
 import { getMarketRates } from '../services/api';
 
@@ -8,10 +8,15 @@ import { getMarketRates } from '../services/api';
  */
 const DataFreshnessBar = () => {
   const [dataSources, setDataSources] = useState(null);
+  const marketRatesRequest = useRef(null);
 
   useEffect(() => {
     let active = true;
-    getMarketRates()
+    // React StrictMode replays mount effects in development. Reuse the same
+    // in-flight read so the replay does not issue a duplicate API request.
+    if (!marketRatesRequest.current) marketRatesRequest.current = getMarketRates();
+
+    marketRatesRequest.current
       .then(data => {
         if (active) setDataSources(data);
       })
