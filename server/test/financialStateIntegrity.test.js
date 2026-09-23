@@ -8,6 +8,7 @@ import { PROJECTION_ASSUMPTION_POLICY_HASH } from '../services/instrumentConstan
 import { buildGoalCalculationInputFingerprint, GOAL_CALCULATION_POLICY_VERSION } from '../services/goalCalculationProvenance.js';
 
 const profile = {
+  version: 1,
   monthlyTakeHome: 100000,
   monthlySavings: 30000,
   age: 32,
@@ -40,6 +41,7 @@ function state() {
   const recommendation = {
     _id: '64b000000000000000000002', userId: '64b000000000000000000003', profileId: '64b000000000000000000004',
     modelVersion: 'model-1.0.0', regulatoryRuleVersion: 'tax-policy-FY2026-27-v2',
+    profileVersion: 1,
     recommendationPolicyVersion: 'suitability-freeze-1.1.0',
     profileInputHash: buildRecommendationProfileHash(profile, { modelVersion: 'model-1.0.0' }),
   };
@@ -47,6 +49,7 @@ function state() {
     _id: '64b000000000000000000005', recommendationId: recommendation._id,
     profileId: recommendation.profileId, userId: recommendation.userId, revision: 2,
     source: 'USER_REBALANCED', instruments, profileInputHash: recommendation.profileInputHash,
+    profileVersion: 1,
     returnAssumptionVersion: 'wealthgenie-projection-assumptions-1.0.0',
     returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
     returnAssumptionSource: 'WEALTHGENIE_MODEL_POLICY',

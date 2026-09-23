@@ -1,4 +1,5 @@
 import { test, expect, type Page, type Request, type Response } from '@playwright/test';
+import { expectCurrentFinancialBinding } from './financial-state-assertions';
 
 declare const process: { env: { VITE_API_URL?: string } };
 
@@ -138,6 +139,10 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     }
 
     const advisory = completionBody.recommendation;
+    expectCurrentFinancialBinding(advisory, {
+      profileId: profile.profileId,
+      profileVersion: Number(profile.version),
+    });
     expect(String(advisory.recommendationId)).toMatch(/^[0-9a-f]{24}$/i);
     expect(String(advisory.audit_id)).toMatch(/^[0-9a-f]{24}$/i);
     expect(advisory.instruments.length).toBeGreaterThan(0);
@@ -172,6 +177,10 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     expect(refreshedRecommendation.status()).toBe(200);
     const refreshedAdvisory = await refreshedRecommendation.json();
     expect(String(refreshedAdvisory.recommendationId)).toMatch(/^[0-9a-f]{24}$/i);
+    expectCurrentFinancialBinding(refreshedAdvisory, {
+      profileId: profile.profileId,
+      profileVersion: Number(updatedProfile.version),
+    });
 
     const csrfCookie = (await context.cookies()).find(cookie => cookie.name === 'wg_csrf');
     expect(csrfCookie?.value).toBeTruthy();
@@ -334,7 +343,12 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     await page.reload();
     const restored = await sessionRestorePromise;
     expect(restored.status()).toBe(200);
-    expect((await recommendationRestorePromise).status()).toBe(200);
+    const restoredRecommendation = await recommendationRestorePromise;
+    expect(restoredRecommendation.status()).toBe(200);
+    expectCurrentFinancialBinding(await restoredRecommendation.json(), {
+      profileId: profile.profileId,
+      profileVersion: Number(updatedProfile.version),
+    });
     await expect(page.locator('aside.sidebar')).toBeVisible({ timeout: 45_000 });
     expect(restoreRecommendationPosts).toEqual([]);
     page.off('request', restoreRequestListener);
@@ -357,7 +371,12 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     const loginRecommendationRestorePromise = page.waitForResponse(apiResponse('GET', '/api/recommend/current'), { timeout: 45_000 });
     await page.locator('#login-form button[type="submit"]').click();
     expect((await loginPromise).status()).toBe(200);
-    expect((await loginRecommendationRestorePromise).status()).toBe(200);
+    const loginRestoredRecommendation = await loginRecommendationRestorePromise;
+    expect(loginRestoredRecommendation.status()).toBe(200);
+    expectCurrentFinancialBinding(await loginRestoredRecommendation.json(), {
+      profileId: profile.profileId,
+      profileVersion: Number(updatedProfile.version),
+    });
     await expect(page.locator('aside.sidebar')).toBeVisible({ timeout: 45_000 });
     expect(loginRecommendationPosts).toEqual([]);
     page.off('request', loginRequestListener);

@@ -14,6 +14,8 @@ export const RECOMMENDATION_FRESHNESS_REASON_CODES = Object.freeze({
   MODEL_VERSION_MISSING: 'MODEL_VERSION_MISSING',
   PROFILE_HASH_MISSING: 'PROFILE_HASH_MISSING',
   PROFILE_CHANGED: 'PROFILE_CHANGED',
+  PROFILE_VERSION_MISSING: 'PROFILE_VERSION_MISSING',
+  PROFILE_VERSION_CHANGED: 'PROFILE_VERSION_CHANGED',
   REGULATORY_VERSION_UNAVAILABLE: 'REGULATORY_VERSION_UNAVAILABLE',
   REGULATORY_POLICY_CHANGED: 'REGULATORY_POLICY_CHANGED',
   RECOMMENDATION_POLICY_MISSING: 'RECOMMENDATION_POLICY_MISSING',
@@ -22,6 +24,7 @@ export const RECOMMENDATION_FRESHNESS_REASON_CODES = Object.freeze({
   ALLOCATION_REVISION_INVALID: 'ALLOCATION_REVISION_INVALID',
   ALLOCATION_RECOMMENDATION_MISMATCH: 'ALLOCATION_RECOMMENDATION_MISMATCH',
   ALLOCATION_PROFILE_CHANGED: 'ALLOCATION_PROFILE_CHANGED',
+  ALLOCATION_PROFILE_VERSION_MISSING: 'ALLOCATION_PROFILE_VERSION_MISSING',
   ALLOCATION_USER_MISMATCH: 'ALLOCATION_USER_MISMATCH',
   ALLOCATION_SOURCE_MISSING: 'ALLOCATION_SOURCE_MISSING',
   ASSUMPTION_VERSION_MISSING: 'ASSUMPTION_VERSION_MISSING',
@@ -59,6 +62,8 @@ export function assessRecommendationFreshness({
   const recommendationPresent = Boolean(recommendation);
   const modelVersion = asString(recommendation?.modelVersion);
   const observedProfileHash = asString(recommendation?.profileInputHash);
+  const expectedProfileVersion = profile?.version == null ? null : Number(profile.version);
+  const observedProfileVersion = Number(recommendation?.profileVersion);
   const currentRegulatoryVersion = asString(currentRegulatoryRuleVersion);
   const observedRegulatoryVersion = asString(recommendationRegulatoryRuleVersion);
   const observedRecommendationPolicyVersion = asString(
@@ -69,9 +74,19 @@ export function assessRecommendationFreshness({
   let expectedProfileHash = null;
 
   if (!profilePresent) reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.PROFILE_MISSING);
+  if (profilePresent && requireAllocationState
+      && (!Number.isSafeInteger(expectedProfileVersion) || expectedProfileVersion < 1)) {
+    reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.PROFILE_VERSION_MISSING);
+  }
   if (!recommendationPresent) reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.RECOMMENDATION_MISSING);
   if (recommendationPresent && !modelVersion) reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.MODEL_VERSION_MISSING);
   if (recommendationPresent && !observedProfileHash) reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.PROFILE_HASH_MISSING);
+  if (recommendationPresent && (!Number.isSafeInteger(observedProfileVersion) || observedProfileVersion < 1)) {
+    reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.PROFILE_VERSION_MISSING);
+  } else if (profilePresent && Number.isSafeInteger(expectedProfileVersion) && expectedProfileVersion > 0
+      && observedProfileVersion !== expectedProfileVersion) {
+    reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.PROFILE_VERSION_CHANGED);
+  }
 
   if (recommendationPresent && !observedRecommendationPolicyVersion && requirePolicyVersion) {
     reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.RECOMMENDATION_POLICY_MISSING);
@@ -107,6 +122,13 @@ export function assessRecommendationFreshness({
     if (String(revision.userId ?? '') !== String(recommendation?.userId ?? '')) reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.ALLOCATION_USER_MISMATCH);
     if (!asString(revision.source)) reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.ALLOCATION_SOURCE_MISSING);
     if (observedProfileHash && revision.profileInputHash && revision.profileInputHash !== observedProfileHash) reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.ALLOCATION_PROFILE_CHANGED);
+    const revisionProfileVersion = Number(revision.profileVersion);
+    if (!Number.isSafeInteger(revisionProfileVersion) || revisionProfileVersion < 1) {
+      reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.ALLOCATION_PROFILE_VERSION_MISSING);
+    } else if (Number.isSafeInteger(expectedProfileVersion) && expectedProfileVersion > 0
+        && revisionProfileVersion !== expectedProfileVersion) {
+      reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.PROFILE_VERSION_CHANGED);
+    }
     if (!Array.isArray(revision.instruments) || revision.instruments.length === 0) reasonCodes.push(RECOMMENDATION_FRESHNESS_REASON_CODES.ALLOCATION_REVISION_INVALID);
   }
 
@@ -135,6 +157,8 @@ export function assessRecommendationFreshness({
     modelVersion,
     observedProfileHash,
     expectedProfileHash,
+    observedProfileVersion: Number.isSafeInteger(observedProfileVersion) ? observedProfileVersion : null,
+    expectedProfileVersion: profilePresent && Number.isSafeInteger(expectedProfileVersion) ? expectedProfileVersion : null,
     observedRegulatoryVersion,
     currentRegulatoryVersion,
     policyVersion,

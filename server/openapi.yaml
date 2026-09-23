@@ -137,7 +137,7 @@ paths:
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       x-csrf-protection: cookie-session
       requestBody: { $ref: '#/components/requestBodies/RecommendationWeights' }
-      responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' } }
+      responses: { '200': { $ref: '#/components/responses/Recommendation' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' } }
   /api/recommend/{recommendationId}/advisory:
     post:
       operationId: generateDeferredAdvisory
@@ -865,14 +865,99 @@ components:
       additionalProperties: false
     RecommendationResponse:
       type: object
-      required: [recommendationId, audit_id, audit_hash, instruments, model_version, recommendation_policy_version, financial_profile_schema_version, return_basis, final_risk_tier]
-      properties: { recommendationId: { type: string }, audit_id: { type: string }, audit_hash: { type: string }, instruments: { type: array, items: { type: object, additionalProperties: true } }, generation_instruments: { type: array, items: { type: object, additionalProperties: true } }, allocation_revision: { type: integer, minimum: 1 }, allocation_revision_id: { type: [string, 'null'] }, portfolio_fingerprint: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }, calculation_freshness: { type: object, additionalProperties: true }, state_provenance: { type: object, additionalProperties: true }, confidence_scores: { type: object, additionalProperties: true }, market_adjustment: { $ref: '#/components/schemas/MarketAdjustmentMetadata' }, current_allocation_source: { type: string, enum: [ORIGINAL_RECOMMENDATION, MARKET_CONTEXT_ADJUSTED, USER_REBALANCED] }, model_version: { type: string }, ml_fallback: { type: boolean }, optional_profile_fields_unknown: { type: array, items: { type: string } }, ml_input_fields_unknown: { type: array, items: { type: string } }, recommendation_policy_version: { type: string }, financial_profile_schema_version: { type: string }, return_basis: { type: string, const: PRE_TAX_NOMINAL }, final_risk_tier: { type: string }, excluded_due_to_eligibility: { type: array, items: { type: object, additionalProperties: true } } }
+      required: [recommendationId, recommendation_id, profileId, profile_version, profile_input_hash, recommendation_fingerprint, response_state, allocation_revision, allocation_revision_id, previous_allocation_revision, previous_allocation_revision_id, portfolio_fingerprint, calculation_freshness, state_provenance, current_allocation_source, audit_id, audit_hash, instruments, model_version, recommendation_policy_version, regulatory_rule_version, return_assumption_version, return_assumption_hash, return_assumption_source, financial_profile_schema_version, return_basis, final_risk_tier]
+      properties:
+        recommendationId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+        recommendation_id: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+        profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+        profile_version: { type: integer, minimum: 1 }
+        profile_input_hash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        recommendation_fingerprint: { type: string, pattern: '^[a-f0-9]{64}$' }
+        response_state: { type: string, const: CURRENT }
+        audit_id: { type: string }
+        audit_hash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        instruments: { type: array, minItems: 1, items: { type: object, additionalProperties: true } }
+        generation_instruments: { type: array, items: { type: object, additionalProperties: true } }
+        allocation_revision: { type: integer, minimum: 1 }
+        allocation_revision_id: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+        previous_allocation_revision: { type: [integer, 'null'], minimum: 1 }
+        previous_allocation_revision_id: { type: [string, 'null'], pattern: '^[0-9a-fA-F]{24}$' }
+        portfolio_fingerprint: { type: string, pattern: '^[a-f0-9]{64}$' }
+        calculation_freshness: { $ref: '#/components/schemas/FinancialStateFreshness' }
+        state_provenance: { $ref: '#/components/schemas/FinancialStateProvenance' }
+        confidence_scores: { type: object, additionalProperties: true }
+        market_adjustment: { $ref: '#/components/schemas/MarketAdjustmentMetadata' }
+        current_allocation_source: { type: string, enum: [ORIGINAL_RECOMMENDATION, MARKET_CONTEXT_ADJUSTED, USER_REBALANCED] }
+        model_version: { type: string }
+        ml_fallback: { type: boolean }
+        optional_profile_fields_unknown: { type: array, items: { type: string } }
+        ml_input_fields_unknown: { type: array, items: { type: string } }
+        recommendation_policy_version: { type: string }
+        regulatory_rule_version: { type: string }
+        return_assumption_version: { type: string }
+        return_assumption_hash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        financial_profile_schema_version: { type: string }
+        return_basis: { type: string, const: PRE_TAX_NOMINAL }
+        final_risk_tier: { type: string }
+        excluded_due_to_eligibility: { type: array, items: { type: object, additionalProperties: true } }
+      additionalProperties: true
+    FinancialStateFreshness:
+      type: object
+      required: [fresh, reasonCodes, profilePresent, recommendationPresent, modelVersion, expectedProfileHash, observedProfileHash, expectedProfileVersion, observedProfileVersion, allocationRevision, currentAllocationSource, observedRegulatoryVersion, currentRegulatoryVersion, policyVersion, observedRecommendationPolicyVersion, assumptionVersion, assumptionHash, assumptionSource]
+      properties:
+        fresh: { type: boolean, const: true }
+        reasonCodes: { type: array, maxItems: 0, items: { type: string } }
+        profilePresent: { type: boolean, const: true }
+        recommendationPresent: { type: boolean, const: true }
+        modelVersion: { type: string }
+        expectedProfileHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        observedProfileHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        expectedProfileVersion: { type: integer, minimum: 1 }
+        observedProfileVersion: { type: integer, minimum: 1 }
+        allocationRevision: { type: integer, minimum: 1 }
+        currentAllocationSource: { type: string, enum: [ORIGINAL_RECOMMENDATION, MARKET_CONTEXT_ADJUSTED, USER_REBALANCED] }
+        observedRegulatoryVersion: { type: string }
+        currentRegulatoryVersion: { type: string }
+        policyVersion: { type: string }
+        observedRecommendationPolicyVersion: { type: string }
+        assumptionVersion: { type: string }
+        assumptionHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        assumptionSource: { type: string }
+      additionalProperties: true
+    FinancialStateProvenance:
+      type: object
+      required: [status, stateId, recommendationId, allocationSource, allocationRevision, allocationRevisionId, previousAllocationRevision, previousAllocationRevisionId, profileVersion, profileInputHash, portfolioFingerprint, recommendationFingerprint, recommendationPolicyVersion, regulatoryRuleVersion, returnAssumptionVersion, returnAssumptionHash, returnAssumptionSource]
+      properties:
+        status: { type: string, const: PERSISTED_REVISION }
+        stateId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+        recommendationId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+        allocationSource: { type: string, enum: [ORIGINAL_RECOMMENDATION, MARKET_CONTEXT_ADJUSTED, USER_REBALANCED] }
+        allocationRevision: { type: integer, minimum: 1 }
+        allocationRevisionId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+        previousAllocationRevision: { type: [integer, 'null'], minimum: 1 }
+        previousAllocationRevisionId: { type: [string, 'null'], pattern: '^[0-9a-fA-F]{24}$' }
+        profileVersion: { type: integer, minimum: 1 }
+        profileInputHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        portfolioFingerprint: { type: string, pattern: '^[a-f0-9]{64}$' }
+        recommendationFingerprint: { type: string, pattern: '^[a-f0-9]{64}$' }
+        recommendationPolicyVersion: { type: string }
+        regulatoryRuleVersion: { type: string }
+        returnAssumptionVersion: { type: string }
+        returnAssumptionHash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        returnAssumptionSource: { type: string }
       additionalProperties: true
     DeferredAdvisoryResponse:
       type: object
-      required: [recommendationId, allocation_revision, allocation_revision_id, portfolio_fingerprint, advisory_text, advisory_explanation]
+      required: [recommendationId, profileId, profile_version, profile_input_hash, recommendation_fingerprint, recommendation_policy_version, regulatory_rule_version, return_assumption_hash, allocation_revision, allocation_revision_id, portfolio_fingerprint, advisory_text, advisory_explanation]
       properties:
         recommendationId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+        profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+        profile_version: { type: integer, minimum: 1 }
+        profile_input_hash: { type: string, pattern: '^[a-f0-9]{64}$' }
+        recommendation_fingerprint: { type: string, pattern: '^[a-f0-9]{64}$' }
+        recommendation_policy_version: { type: string }
+        regulatory_rule_version: { type: string }
+        return_assumption_hash: { type: string, pattern: '^[a-f0-9]{64}$' }
         allocation_revision: { type: integer, minimum: 1 }
         allocation_revision_id: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
         portfolio_fingerprint: { type: string, pattern: '^[a-f0-9]{64}$' }

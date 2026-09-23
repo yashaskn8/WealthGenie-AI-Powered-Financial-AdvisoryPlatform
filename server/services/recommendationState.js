@@ -128,6 +128,12 @@ function verifyPersistedStateGraph({
       || allocationRevision.profileInputHash !== recommendation.profileInputHash) {
     return integrityFailure('PROFILE_HASH_MISMATCH', 'The financial state profile hash binding is invalid.');
   }
+  const boundProfileVersion = Number(recommendation.profileVersion);
+  if (!Number.isSafeInteger(boundProfileVersion) || boundProfileVersion < 1
+      || Number(state.profileVersion) !== boundProfileVersion
+      || Number(allocationRevision.profileVersion) !== boundProfileVersion) {
+    return integrityFailure('PROFILE_VERSION_MISMATCH', 'The recommendation, pointer, and allocation revision profile versions disagree.');
+  }
   if (Number(state.generationRevision) !== Number(recommendation.recommendationGeneration)) {
     return integrityFailure('MODEL_VERSION_MISMATCH', 'The financial state generation binding is invalid.');
   }
@@ -279,6 +285,7 @@ export async function resolveCurrentRecommendationState({
     || !statePointer.currentAllocationRevisionId
     || !statePointer.generationRevision
     || !statePointer.profileInputHash
+    || !statePointer.profileVersion
     || !statePointer.portfolioFingerprint
     || !statePointer.returnAssumptionVersion
     || !statePointer.returnAssumptionHash
@@ -446,6 +453,28 @@ export async function resolveCurrentRecommendationState({
     instruments: currentAllocation?.instruments || [],
     currentAllocationSource: currentAllocation?.source || recommendation.currentAllocationSource,
   };
+  if (provenance.status === 'PERSISTED_REVISION') {
+    provenance = {
+      ...provenance,
+      recommendationId: String(recommendation._id),
+      allocationSource: currentAllocation?.source || null,
+      allocationRevision: allocationRevision?.revision ?? null,
+      allocationRevisionId: allocationRevision?._id ? String(allocationRevision._id) : null,
+      profileVersion: currentProfile?.version ?? 1,
+      profileInputHash: recommendation.profileInputHash,
+      portfolioFingerprint: currentAllocation?.portfolioFingerprint || null,
+      recommendationFingerprint: currentAllocation?.recommendationFingerprint || null,
+      recommendationPolicyVersion: recommendation.recommendationPolicyVersion || RECOMMENDATION_POLICY_VERSION,
+      regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
+      returnAssumptionVersion: currentAllocation?.returnAssumptionVersion || null,
+      returnAssumptionHash: currentAllocation?.returnAssumptionHash || null,
+      returnAssumptionSource: currentAllocation?.returnAssumptionSource || null,
+      previousAllocationRevision: currentAllocation?.previousRevision ?? null,
+      previousAllocationRevisionId: currentAllocation?.previousAllocationRevisionId
+        ? String(currentAllocation.previousAllocationRevisionId)
+        : null,
+    };
+  }
   const result = {
     profile: currentProfile,
     profileVersion: currentProfile?.version !== null && currentProfile?.version !== undefined
@@ -484,6 +513,7 @@ export async function resolveCurrentRecommendationState({
       'ALLOCATION_REVISION_POINTER_STALE',
       'ALLOCATION_FINGERPRINT_MISMATCH',
       'RECOMMENDATION_FINGERPRINT_MISMATCH',
+      'PROFILE_VERSION_MISMATCH',
       'ALLOCATION_AUDIT_BINDING_MISSING',
       'ALLOCATION_AUDIT_BINDING_MISMATCH',
       'ALLOCATION_AUDIT_HASH_MISMATCH',
@@ -492,6 +522,7 @@ export async function resolveCurrentRecommendationState({
     ]);
     const primaryCode = freshness.reasonCodes.find(code => integrityCodes.has(code));
     const profileStateChanged = freshness.reasonCodes.includes(RECOMMENDATION_FRESHNESS_REASON_CODES.PROFILE_CHANGED)
+      || freshness.reasonCodes.includes(RECOMMENDATION_FRESHNESS_REASON_CODES.PROFILE_VERSION_CHANGED)
       || freshness.reasonCodes.includes('PROFILE_CHANGED');
     const error = errorWithCode(
       primaryCode ? 'Authoritative recommendation state integrity verification failed.' : 'Authoritative recommendation state is stale or unavailable.',
@@ -555,6 +586,9 @@ async function ensurePersistedCurrentState({ session, recommendation }) {
   if (!state) throw errorWithCode('The canonical financial state pointer is missing.', 'FINANCIAL_STATE_MISSING', 503);
   if (!sameId(state.currentRecommendationId, recommendation._id)) {
     throw errorWithCode('The requested recommendation has been superseded.', 'RECOMMENDATION_SUPERSEDED');
+  }
+  if (!state.profileVersion || Number(state.profileVersion) !== Number(recommendation.profileVersion)) {
+    throw errorWithCode('The canonical profile version binding is invalid.', 'PROFILE_VERSION_MISMATCH', 503);
   }
   if (!state.currentAllocationRevisionId || !state.currentAllocationRevision) {
     throw errorWithCode('The canonical allocation revision pointer is invalid.', 'FINANCIAL_STATE_POINTER_INVALID', 503);
@@ -621,8 +655,9 @@ export async function createManualAllocationRevision({
       if (process.env.NODE_ENV === 'test') {
         await testHooks.afterStateRead?.({ state, revision: current, profile: profileDocument, recommendation });
       }
+      const profileVersion = profileDocument.version ?? 1;
       const profileCas = await FinancialProfile.updateOne(
-        { _id: profileId, userId, version: profileDocument.version },
+        { _id: profileId, userId, version: profileVersion },
         { $inc: { financialStateFence: 1 } },
         { session },
       );
@@ -638,6 +673,11 @@ export async function createManualAllocationRevision({
       }
       if (Number(expectedRevision) !== Number(current.revision)) throw errorWithCode('Allocation revision conflict. Refresh before retrying.', 'ALLOCATION_REVISION_CONFLICT');
       const profile = buildRecommendationProfile(profileDocument);
+      if (Number(recommendation.profileVersion) !== Number(profileVersion)
+          || Number(state.profileVersion) !== Number(profileVersion)
+          || Number(current.profileVersion) !== Number(profileVersion)) {
+        throw errorWithCode('The recommendation is bound to another profile version.', 'PROFILE_STATE_CHANGED');
+      }
       const currentPolicy = getCurrentRegulatoryRuleVersion();
       const expectedHash = buildRecommendationProfileHash(profile, { modelVersion: recommendation.modelVersion });
       if (expectedHash !== recommendation.profileInputHash) throw errorWithCode('Recommendation was generated from an older profile state.', 'RECOMMENDATION_STALE');
@@ -720,10 +760,11 @@ export async function createManualAllocationRevision({
         },
       });
       if (process.env.NODE_ENV === 'test') await testHooks.afterRevisionCreate?.({ session, revision });
-      const advanced = await RecommendationState.updateOne({ _id: state._id, currentRecommendationId: recommendationId, currentAllocationRevision: current.revision, profileInputHash: recommendation.profileInputHash }, {
+      const advanced = await RecommendationState.updateOne({ _id: state._id, currentRecommendationId: recommendationId, currentAllocationRevision: current.revision, profileInputHash: recommendation.profileInputHash, profileVersion }, {
         $set: {
           currentAllocationRevision: nextRevision,
           currentAllocationRevisionId: revision._id,
+          profileVersion,
           portfolioFingerprint: fingerprint,
           returnAssumptionVersion: revision.returnAssumptionVersion,
           returnAssumptionHash: revision.returnAssumptionHash,

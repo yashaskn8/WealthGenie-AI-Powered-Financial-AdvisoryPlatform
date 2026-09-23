@@ -64,7 +64,8 @@ router.post('/stress-test', verifyJWT, validateStrict(stressScenarioSchema), asy
     state = await requireFreshRecommendationState({ userId: req.user.userId, profileId, profile });
   } catch (error) {
     throw createError(error.status || 409, error.message, 'Refresh your recommendation before running a stress test.', {
-      code: error.code || 'RECOMMENDATION_STALE', reasonCodes: error.reasonCodes, freshness: error.freshness,
+      code: error.code || 'RECOMMENDATION_STALE',
+      details: { reasonCodes: error.reasonCodes, freshness: error.freshness },
     });
   }
 

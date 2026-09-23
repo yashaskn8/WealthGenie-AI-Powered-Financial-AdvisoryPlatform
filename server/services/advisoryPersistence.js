@@ -17,11 +17,25 @@ import {
 import { createAllocationRevision } from './recommendationState.js';
 import { buildRecommendationProfile, buildRecommendationProfileHash, RECOMMENDATION_POLICY_VERSION } from './recommendationProfile.js';
 import { getCurrentRegulatoryRuleVersion } from './taxEngine.js';
+import { buildCanonicalAdvisoryResponse } from './advisoryResponse.js';
 
 let advisoryPersistenceReady = null;
 
 function instrumentsAssumptionHash(instruments = []) {
   return instruments.find(item => item?.returnAssumptionHash)?.returnAssumptionHash || null;
+}
+
+function historicalResponseSnapshot(response) {
+  const historical = value => ({
+    ...(value || {}),
+    response_state: 'HISTORICAL_GENERATION',
+    calculation_freshness: { fresh: false, reasonCodes: ['HISTORICAL_GENERATION'] },
+    state_provenance: { status: 'HISTORICAL_GENERATION' },
+  });
+  if (response?.recommendation && response?.completion) {
+    return { ...response, recommendation: historical(response.recommendation) };
+  }
+  return historical(response);
 }
 
 async function ensureAdvisoryPersistenceReady() {
@@ -92,6 +106,7 @@ export async function persistAdvisoryAtomically({
   await ensureAdvisoryPersistenceReady();
   const session = await mongoose.startSession();
   let committedResponse = null;
+  let committedRecommendationId = null;
   try {
     await session.withTransaction(async () => {
       const currentProfile = profile || await FinancialProfile.findOne({
@@ -109,6 +124,15 @@ export async function persistAdvisoryAtomically({
         buildRecommendationProfile(currentProfile),
         { modelVersion: recommendation.modelVersion },
       );
+      const expectedProfileVersion = Number(recommendation.profileVersion);
+      const currentProfileVersion = Number(currentProfile.version ?? 1);
+      if (!Number.isSafeInteger(expectedProfileVersion) || expectedProfileVersion < 1
+          || expectedProfileVersion !== currentProfileVersion) {
+        const error = new Error('The profile version changed while the recommendation was being computed.');
+        error.status = 409;
+        error.code = 'PROFILE_STATE_CHANGED';
+        throw error;
+      }
       if (profileInputHash !== recommendation.profileInputHash) {
         const error = new Error('The financial profile changed while the recommendation was being computed.');
         error.status = 409;
@@ -155,6 +179,7 @@ export async function persistAdvisoryAtomically({
       const portfolioFingerprint = buildPortfolioFingerprint(instruments);
       const persistedRecommendation = {
         ...recommendation,
+        profileVersion: expectedProfileVersion,
         recommendationGeneration: generationRevision,
         recommendationPolicyVersion: recommendation.recommendationPolicyVersion || RECOMMENDATION_POLICY_VERSION,
         returnAssumptionHash: recommendation.returnAssumptionHash
@@ -202,6 +227,7 @@ export async function persistAdvisoryAtomically({
         current_allocation_source: persistedRecommendation.currentAllocationSource || 'ORIGINAL_RECOMMENDATION',
         portfolio_fingerprint: portfolioFingerprint,
       };
+      committedRecommendationId = persistedRecommendation._id;
 
       if (profile) {
         await FinancialProfile.create([profile], { session });
@@ -211,7 +237,7 @@ export async function persistAdvisoryAtomically({
         ...persistedRecommendation,
         idempotencyOperationId: idempotencyClaim.operationId,
         idempotencyRequestHash: idempotencyClaim.requestHash,
-        responseSnapshot: committedResponse,
+        responseSnapshot: historicalResponseSnapshot(committedResponse),
       })], { session });
 
       await createAllocationRevision({
@@ -226,13 +252,13 @@ export async function persistAdvisoryAtomically({
           source: persistedRecommendation.currentAllocationSource || 'ORIGINAL_RECOMMENDATION',
           instruments,
           profileInputHash: persistedRecommendation.profileInputHash,
+          profileVersion: expectedProfileVersion,
           modelVersion: persistedRecommendation.modelVersion,
           recommendationPolicyVersion: persistedRecommendation.recommendationPolicyVersion,
           regulatoryRuleVersion: persistedRecommendation.regulatoryRuleVersion,
           returnAssumptionVersion: instruments.find(item => item.returnAssumptionVersion)?.returnAssumptionVersion || PROJECTION_ASSUMPTION_VERSION,
           returnAssumptionHash,
           returnAssumptionSource: instruments.find(item => item.returnSource)?.returnSource || PROJECTION_ASSUMPTION_SOURCE,
-          profileVersion: currentProfile.version ?? 1,
           portfolioFingerprint,
           recommendationFingerprint,
         },
@@ -245,6 +271,7 @@ export async function persistAdvisoryAtomically({
           currentRecommendationId: persistedRecommendation._id,
           currentAllocationRevision: 1,
           currentAllocationRevisionId: initialRevisionId,
+          profileVersion: expectedProfileVersion,
           generationRevision,
           profileInputHash: persistedRecommendation.profileInputHash,
           portfolioFingerprint,
@@ -279,7 +306,7 @@ export async function persistAdvisoryAtomically({
           response: {
             status: 200,
             headers: { 'content-type': 'application/json; charset=utf-8' },
-            body: committedResponse,
+            body: historicalResponseSnapshot(committedResponse),
           },
         },
       }, { session });
@@ -292,7 +319,12 @@ export async function persistAdvisoryAtomically({
       writeConcern: { w: 'majority' },
     });
 
-    return committedResponse;
+    return await buildCanonicalAdvisoryResponse({
+      userId: recommendation.userId,
+      profileId: recommendation.profileId,
+      responseTemplate: committedResponse,
+      expectedRecommendationId: committedRecommendationId,
+    });
   } catch (error) {
     throw transactionRequirementError(error);
   } finally {

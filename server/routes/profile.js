@@ -10,7 +10,6 @@ import {
 } from '../validation/financialSchemas.js';
 import {
   buildRecommendationProfile,
-  toProfileApiResponse,
   toProfilePersistence,
 } from '../services/recommendationProfile.js';
 import { assessSuitabilityRisk } from '../services/riskProfiler.js';
@@ -39,6 +38,7 @@ import {
 } from '../services/profileCompletion.js';
 import { claimAdvisoryIdempotency, releaseAdvisoryIdempotency } from '../middleware/idempotency.js';
 import { createEndpointRateLimiter, ipKeyGenerator } from '../middleware/rateLimiter.js';
+import { formatProfileResponse } from '../services/profileResponse.js';
 
 const router = Router();
 const PROFILE_RATE_LIMIT = 10;
@@ -83,20 +83,7 @@ async function checkProfileRateLimit(userId) {
   }
 }
 
-export function formatProfileResponse(profile) {
-  const p = profile?.toObject ? profile.toObject() : profile;
-  const canonical = buildRecommendationProfile(p);
-  const suitability = assessSuitabilityRisk(canonical);
-  return {
-    ...toProfileApiResponse(p),
-    version: p.version ?? 1,
-    risk_capacity_score: suitability.capacityScore,
-    risk_capacity_level: suitability.capacityLevel,
-    final_suitability_risk: suitability.finalRisk,
-    final_suitability_level: suitability.finalLevel,
-    suitability_reason_codes: suitability.reasonCodes,
-  };
-}
+export { formatProfileResponse };
 
 router.post(
   '/precompute',
@@ -109,6 +96,7 @@ router.post(
       const canonical = buildRecommendationProfile(req.body);
       const core = await computeCoreRecommendation({
         canonicalProfile: canonical,
+        profileVersion: 1,
         userId: req.user.userId,
         correlationId: req.correlationId,
         traceId: req.traceId || req.correlationId,
@@ -224,6 +212,7 @@ router.post(
       if (!candidateHit) {
         core = await computeCoreRecommendation({
           canonicalProfile: canonical,
+          profileVersion: 1,
           userId: req.user.userId,
           profileId,
           correlationId: req.correlationId,
@@ -325,7 +314,8 @@ router.get('/:profileId/health-score', verifyJWT, asyncHandler(async (req, res) 
   } catch (error) {
     if (error.code !== 'RECOMMENDATION_REQUIRED') {
       throw createError(error.status || 409, error.message, 'Regenerate recommendations before calculating financial health.', {
-        code: error.code || 'RECOMMENDATION_STALE', reasonCodes: error.reasonCodes, freshness: error.freshness,
+        code: error.code || 'RECOMMENDATION_STALE',
+        details: { reasonCodes: error.reasonCodes, freshness: error.freshness },
       });
     }
   }

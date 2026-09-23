@@ -367,6 +367,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
               allocationRevisionId: String(state.allocationRevision._id),
               portfolioFingerprint: state.portfolioFingerprint,
               profileInputHash: state.recommendation.profileInputHash,
+              recommendationFingerprint: state.recommendationFingerprint,
               recommendationPolicyVersion: state.recommendation.recommendationPolicyVersion,
               regulatoryRuleVersion: state.recommendation.regulatoryRuleVersion,
               returnAssumptionHash: state.allocationRevision.returnAssumptionHash,

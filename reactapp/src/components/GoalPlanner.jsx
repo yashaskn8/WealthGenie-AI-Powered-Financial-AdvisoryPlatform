@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef, useLayoutEffect } from 'react';
 import { Target, Plus, Trash2, AlertTriangle, CheckCircle, TrendingUp, ArrowUpRight, Clock, ShieldCheck, Sparkles, Activity, Layers } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import SebiDisclaimer from './SebiDisclaimer';
@@ -8,6 +8,7 @@ import GoalDetailPane from './GoalDetailPane';
 import { submitGoal } from '../utils/goalSubmission';
 import { isFinancialCalculationFresh } from '../utils/financialFreshness';
 import { isPresentFiniteNumber } from '../utils/financialValues';
+import { hasCompleteFinancialStateBinding } from '../utils/financialStateBinding';
 
 const STATUS_CONFIG = {
   on_track:  { color: '#10b981', bg: 'rgba(16, 185, 129, 0.14)', label: 'ON TRACK',  icon: CheckCircle, glow: 'rgba(16, 185, 129, 0.4)' },
@@ -21,6 +22,96 @@ const UNKNOWN_STATUS_CONFIG = {
 };
 
 const PRIORITY_ORDER = { Critical: 0, High: 1, Medium: 2, Low: 3 };
+const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
+const DERIVED_GOAL_FIELDS = Object.freeze([
+  'inflation_adjusted_target', 'recommended_sip', 'simulated_monthly_contribution',
+  'recommended_instrument', 'probability_of_success', 'gap_amount', 'status',
+  'monte_carlo_summary', 'chart_data', 'chartData', 'years_remaining', 'mc_computed_at',
+  'return_basis', 'return_data_class', 'return_assumption_version',
+  'return_assumption_source', 'inflation_assumption',
+]);
+
+function profileBinding(profile) {
+  const profileId = profile?.profileId || profile?.profile_id || profile?._id || null;
+  const version = Number(profile?.version);
+  return {
+    profileId: profileId ? String(profileId) : null,
+    version: Number.isInteger(version) && version > 0 ? version : null,
+  };
+}
+
+function isGoalFreshForState(goal, profile, financialState) {
+  const binding = profileBinding(profile);
+  const source = goal?.source_provenance;
+  if (!hasCompleteFinancialStateBinding(financialState, {
+    profileId: binding.profileId,
+    profileVersion: binding.version,
+  })) return false;
+  return Boolean(binding.profileId && binding.version
+    && String(goal?.profileId || '') === binding.profileId
+    && Number(source?.profileVersion) === binding.version
+    && SHA256_PATTERN.test(String(source?.profileInputHash || ''))
+    && (!profile?.profile_input_hash || source.profileInputHash === profile.profile_input_hash)
+    && source.recommendationId === financialState.recommendationId
+    && Number(source.allocationRevision) === Number(financialState.allocation_revision)
+    && source.allocationRevisionId === financialState.allocation_revision_id
+    && source.profileInputHash === financialState.profile_input_hash
+    && source.portfolioFingerprint === financialState.portfolio_fingerprint
+    && source.recommendationFingerprint === financialState.recommendation_fingerprint
+    && source.modelVersion === financialState.calculation_freshness.modelVersion
+    && source.recommendationPolicyVersion === financialState.recommendation_policy_version
+    && source.regulatoryRuleVersion === financialState.regulatory_rule_version
+    && source.returnAssumptionVersion === financialState.return_assumption_version
+    && source.returnAssumptionHash === financialState.return_assumption_hash
+    && isFinancialCalculationFresh(goal?.calculation_freshness));
+}
+
+function presentGoalForState(goal, profile, financialState) {
+  if (isGoalFreshForState(goal, profile, financialState)) return goal;
+  const binding = profileBinding(profile);
+  const source = goal?.source_provenance;
+  const reason = !hasCompleteFinancialStateBinding(financialState, {
+    profileId: binding.profileId,
+    profileVersion: binding.version,
+  })
+    ? 'FINANCIAL_STATE_UNAVAILABLE'
+    : !binding.profileId || !binding.version
+    || !source?.profileVersion || !source?.profileInputHash
+    ? 'SOURCE_PROVENANCE_MISSING'
+    : String(goal?.profileId || '') !== binding.profileId
+      ? 'SOURCE_PROFILE_MISMATCH'
+      : Number(source.profileVersion) !== binding.version
+        || (profile?.profile_input_hash && source.profileInputHash !== profile.profile_input_hash)
+        ? 'STALE_PROFILE'
+        : source.recommendationId !== financialState.recommendationId
+          ? 'STALE_RECOMMENDATION'
+          : Number(source.allocationRevision) !== Number(financialState.allocation_revision)
+            || source.allocationRevisionId !== financialState.allocation_revision_id
+            || source.portfolioFingerprint !== financialState.portfolio_fingerprint
+            ? 'STALE_ALLOCATION'
+            : source.recommendationPolicyVersion !== financialState.recommendation_policy_version
+              || source.regulatoryRuleVersion !== financialState.regulatory_rule_version
+              ? 'STALE_POLICY'
+              : source.returnAssumptionVersion !== financialState.return_assumption_version
+                || source.returnAssumptionHash !== financialState.return_assumption_hash
+                ? 'STALE_ASSUMPTION'
+                : null;
+  const calculationFreshness = goal?.calculation_freshness || {};
+  const reasonCodes = [...new Set([
+    ...(Array.isArray(calculationFreshness.reasonCodes) ? calculationFreshness.reasonCodes : []),
+    ...(reason ? [reason] : ['SOURCE_STATE_UNVERIFIED']),
+  ])];
+  const presented = {
+    ...goal,
+    calculation_freshness: { fresh: false, reasonCodes },
+    advisory_freshness: { fresh: false, reasonCodes },
+    advice_stale: true,
+    gemini_advice: null,
+    advisoryMetadata: null,
+  };
+  for (const field of DERIVED_GOAL_FIELDS) presented[field] = field === 'chart_data' || field === 'chartData' ? [] : null;
+  return presented;
+}
 
 const formatINR = (value) => {
   if (value === null || value === undefined || value === '' || !Number.isFinite(Number(value))) return '—';
@@ -30,7 +121,32 @@ const formatINR = (value) => {
   return `₹${Math.round(value).toLocaleString('en-IN')}`;
 };
 
-const GoalPlanner = ({ profile }) => {
+const GoalPlanner = ({ profile, financialState: suppliedFinancialState = null }) => {
+  const { profileId: currentProfileId, version: currentProfileVersion } = profileBinding(profile);
+  const financialState = hasCompleteFinancialStateBinding(suppliedFinancialState, {
+    profileId: currentProfileId,
+    profileVersion: currentProfileVersion,
+  }) ? suppliedFinancialState : null;
+  const financialStateKey = financialState ? JSON.stringify([
+    financialState.profileId, financialState.profile_version,
+    financialState.recommendationId, financialState.allocation_revision,
+    financialState.allocation_revision_id, financialState.profile_input_hash,
+    financialState.portfolio_fingerprint, financialState.recommendation_fingerprint,
+    financialState.recommendation_policy_version, financialState.regulatory_rule_version,
+    financialState.return_assumption_version, financialState.return_assumption_hash,
+    financialState.return_assumption_source, financialState.current_allocation_source,
+    financialState.calculation_freshness.modelVersion, financialState.state_provenance.stateId,
+  ]) : 'UNAVAILABLE';
+  const financialStateRef = useRef(financialState);
+  financialStateRef.current = financialState;
+  const profileKey = JSON.stringify([currentProfileId, currentProfileVersion, profile?.profile_input_hash || null, financialStateKey]);
+  const financialProfileBinding = useMemo(() => ({
+    profileId: currentProfileId,
+    version: currentProfileVersion,
+    profile_input_hash: profile?.profile_input_hash,
+  }), [currentProfileId, currentProfileVersion, profile?.profile_input_hash]);
+  const profileKeyRef = useRef(profileKey);
+  const profileEpochRef = useRef(0);
   const [goals, setGoals] = useState([]);
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -40,20 +156,53 @@ const GoalPlanner = ({ profile }) => {
   const [simulationLoading, setSimulationLoading] = useState(false);
   const [simulationError, setSimulationError] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
+  const [deletingProfileKey, setDeletingProfileKey] = useState(null);
   const goalsFetchGeneration = useRef(0);
 
+  useLayoutEffect(() => {
+    if (profileKeyRef.current !== profileKey) {
+      profileKeyRef.current = profileKey;
+      profileEpochRef.current += 1;
+    }
+  }, [profileKey]);
+
+  const beginProfileOperation = useCallback(() => ({
+    profileKey,
+    epoch: profileEpochRef.current,
+  }), [profileKey]);
+
+  const isProfileOperationCurrent = useCallback((operation) => Boolean(operation
+    && operation.profileKey === profileKey
+    && operation.profileKey === profileKeyRef.current
+    && operation.epoch === profileEpochRef.current), [profileKey]);
+
+  const presentedGoals = useMemo(() => goals
+    .filter(goal => currentProfileId && String(goal?.profileId || '') === currentProfileId)
+    .map(goal => presentGoalForState(goal, financialProfileBinding, financialState)), [currentProfileId, financialProfileBinding, financialState, goals]);
+  const currentGoals = presentedGoals;
+  const displayedSelectedGoalId = selectedGoal?._id || selectedGoal?.goalId;
+  const displayedSelectedGoal = presentedGoals.find(goal => String(goal._id || goal.goalId) === String(displayedSelectedGoalId)) || null;
+
   const fetchGoals = useCallback(async () => {
+    const operation = beginProfileOperation();
+    if (!currentProfileId) {
+      setGoals([]);
+      setSelectedGoal(null);
+      setSimulatedSips({});
+      return;
+    }
     const generation = ++goalsFetchGeneration.current;
     try {
       const res = await api.getGoals();
-      if (generation !== goalsFetchGeneration.current) return;
-      const nextGoals = Array.isArray(res?.goals) ? res.goals : [];
+      if (generation !== goalsFetchGeneration.current || !isProfileOperationCurrent(operation)) return;
+      const nextGoals = (Array.isArray(res?.goals) ? res.goals : [])
+        .filter(goal => String(goal?.profileId || '') === currentProfileId);
       setGoals(nextGoals);
       setGoalSimulations({});
       setSimulationError(null);
       setSimulatedSips(Object.fromEntries(nextGoals.map(goal => [
         goal._id || goal.goalId,
-        isFinancialCalculationFresh(goal.calculation_freshness)
+        isGoalFreshForState(goal, financialProfileBinding, financialStateRef.current)
           && isPresentFiniteNumber(goal.simulated_monthly_contribution)
           ? Number(goal.simulated_monthly_contribution)
           : null,
@@ -66,7 +215,7 @@ const GoalPlanner = ({ profile }) => {
       });
     } catch (err) {
       console.error('Failed to fetch goals:', err);
-      if (generation !== goalsFetchGeneration.current) return;
+      if (generation !== goalsFetchGeneration.current || !isProfileOperationCurrent(operation)) return;
       // A failed refresh cannot leave an earlier profile/allocation's
       // personalized calculations visible as if they were still current.
       setGoals([]);
@@ -74,34 +223,43 @@ const GoalPlanner = ({ profile }) => {
       setSimulatedSips({});
       setGoalSimulations({});
     }
-  }, []);
+  }, [beginProfileOperation, currentProfileId, financialProfileBinding, isProfileOperationCurrent]);
 
   useEffect(() => {
+    goalsFetchGeneration.current += 1;
     setGoals([]);
     setSelectedGoal(null);
     setSimulatedSips({});
     setGoalSimulations({});
     setSimulationError(null);
+    setSimulationLoading(false);
+    setShowForm(false);
+    setLoading(false);
+    setDeletingId(null);
+    setDeletingProfileKey(null);
     void fetchGoals();
-    return () => { goalsFetchGeneration.current += 1; };
-  }, [fetchGoals, profile]);
+    return () => {
+      goalsFetchGeneration.current += 1;
+      profileEpochRef.current += 1;
+    };
+  }, [fetchGoals, profileKey]);
 
   // Sort goals: Critical first, then by probability (lowest first = most urgent)
   const sortedGoals = useMemo(() => {
-    return [...goals].sort((a, b) => {
+    return [...currentGoals].sort((a, b) => {
       const pa = PRIORITY_ORDER[a.priority] ?? Number.MAX_SAFE_INTEGER;
       const pb = PRIORITY_ORDER[b.priority] ?? Number.MAX_SAFE_INTEGER;
       if (pa !== pb) return pa - pb;
-      const probabilityA = isFinancialCalculationFresh(a.calculation_freshness) && isPresentFiniteNumber(a.probability_of_success) ? Number(a.probability_of_success) : NaN;
-      const probabilityB = isFinancialCalculationFresh(b.calculation_freshness) && isPresentFiniteNumber(b.probability_of_success) ? Number(b.probability_of_success) : NaN;
+      const probabilityA = isGoalFreshForState(a, financialProfileBinding, financialState) && isPresentFiniteNumber(a.probability_of_success) ? Number(a.probability_of_success) : NaN;
+      const probabilityB = isGoalFreshForState(b, financialProfileBinding, financialState) && isPresentFiniteNumber(b.probability_of_success) ? Number(b.probability_of_success) : NaN;
       if (!Number.isFinite(probabilityA)) return Number.isFinite(probabilityB) ? 1 : 0;
       if (!Number.isFinite(probabilityB)) return -1;
       return probabilityA - probabilityB;
     });
-  }, [goals]);
+  }, [currentGoals, financialProfileBinding, financialState]);
 
   const getLiveProbability = (goal) => {
-    if (!isFinancialCalculationFresh(goal?.calculation_freshness)) return null;
+    if (!isGoalFreshForState(goal, financialProfileBinding, financialState)) return null;
     const id = goal._id || goal.goalId;
     const candidate = goalSimulations[id]?.probability_of_success ?? goal.probability_of_success;
     const value = isPresentFiniteNumber(candidate) ? Number(candidate) : NaN;
@@ -109,16 +267,18 @@ const GoalPlanner = ({ profile }) => {
   };
 
   const getSimulatedChartData = (goal) => {
-    if (!isFinancialCalculationFresh(goal?.calculation_freshness)) return [];
+    if (!isGoalFreshForState(goal, financialProfileBinding, financialState)) return [];
     const id = goal._id || goal.goalId;
     return goalSimulations[id]?.chartData ?? goal.chartData ?? [];
   };
 
-  const selectedGoalId = selectedGoal?._id || selectedGoal?.goalId;
+  const selectedGoalId = displayedSelectedGoal?._id || displayedSelectedGoal?.goalId;
   const selectedSip = selectedGoalId ? simulatedSips[selectedGoalId] : null;
   useEffect(() => {
-    if (!selectedGoalId || !Number.isFinite(selectedSip) || selectedSip <= 0) return undefined;
-    const persistedContribution = Number(selectedGoal.simulated_monthly_contribution);
+    if (!selectedGoalId || !displayedSelectedGoal || !isGoalFreshForState(displayedSelectedGoal, financialProfileBinding, financialStateRef.current)
+        || !Number.isFinite(selectedSip) || selectedSip <= 0) return undefined;
+    const operation = beginProfileOperation();
+    const persistedContribution = Number(displayedSelectedGoal.simulated_monthly_contribution);
     if (!Number.isFinite(persistedContribution)) return undefined;
     if (selectedSip === persistedContribution) {
       setGoalSimulations(prev => {
@@ -137,13 +297,13 @@ const GoalPlanner = ({ profile }) => {
       setSimulationError(null);
       api.simulateGoal(selectedGoalId, selectedSip, { signal: controller.signal })
         .then(result => {
-          if (!cancelled) setGoalSimulations(prev => ({ ...prev, [selectedGoalId]: result }));
+          if (!cancelled && isProfileOperationCurrent(operation)) setGoalSimulations(prev => ({ ...prev, [selectedGoalId]: result }));
         })
         .catch(error => {
-          if (!cancelled && error.code !== 'REQUEST_ABORTED') setSimulationError(error.message);
+          if (!cancelled && isProfileOperationCurrent(operation) && error.code !== 'REQUEST_ABORTED') setSimulationError(error.message);
         })
         .finally(() => {
-          if (!cancelled) setSimulationLoading(false);
+          if (!cancelled && isProfileOperationCurrent(operation)) setSimulationLoading(false);
         });
     }, 350);
     return () => {
@@ -151,9 +311,10 @@ const GoalPlanner = ({ profile }) => {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [selectedGoal, selectedGoalId, selectedSip]);
+  }, [beginProfileOperation, displayedSelectedGoal, financialProfileBinding, isProfileOperationCurrent, profileKey, selectedGoalId, selectedSip]);
 
   const handleSubmitGoal = async (goalData) => {
+    const operation = beginProfileOperation();
     setLoading(true);
     try {
       const res = await submitGoal(api, {
@@ -161,13 +322,15 @@ const GoalPlanner = ({ profile }) => {
         profileId: profile?.profileId || profile?._id,
       });
 
+      if (!isProfileOperationCurrent(operation)) return;
       if (res.success && res.goal) {
+        if (String(res.goal.profileId || '') !== currentProfileId) return;
         setGoals(prev => [...prev, res.goal]);
         setSelectedGoal(res.goal);
         const gid = res.goal._id || res.goal.goalId;
         setSimulatedSips(prev => ({
           ...prev,
-          [gid]: isFinancialCalculationFresh(res.goal.calculation_freshness)
+          [gid]: isGoalFreshForState(res.goal, financialProfileBinding, financialState)
             && isPresentFiniteNumber(res.goal.simulated_monthly_contribution)
             ? Number(res.goal.simulated_monthly_contribution)
             : null,
@@ -177,43 +340,54 @@ const GoalPlanner = ({ profile }) => {
         alert('Failed to save goal: ' + res.error);
       }
     } catch (err) {
+      if (!isProfileOperationCurrent(operation)) return;
       alert('Failed to save goal: ' + (err.message || 'Unknown error'));
     } finally {
-      setLoading(false);
+      if (isProfileOperationCurrent(operation)) setLoading(false);
     }
   };
 
   const handleDelete = async (goalId) => {
     setDeletingId(goalId);
+    setDeletingProfileKey(profileKey);
   };
 
   const confirmDelete = async () => {
-    if (!deletingId) return;
+    if (!deletingId || deletingProfileKey !== profileKey) return;
+    const operation = beginProfileOperation();
     try {
       await api.deleteGoal(deletingId);
+      if (!isProfileOperationCurrent(operation)) return;
       const nextGoals = goals.filter(g => (g._id !== deletingId && g.goalId !== deletingId));
       setGoals(nextGoals);
       if (selectedGoal && (selectedGoal._id === deletingId || selectedGoal.goalId === deletingId)) {
         setSelectedGoal(nextGoals[0] || null);
       }
     } catch (err) {
+      if (!isProfileOperationCurrent(operation)) return;
       alert('Failed to delete goal: ' + err.message);
     } finally {
-      setDeletingId(null);
+      if (isProfileOperationCurrent(operation)) {
+        setDeletingId(null);
+        setDeletingProfileKey(null);
+      }
     }
   };
 
   const handlePriorityChange = async (newPriority) => {
-    const gid = selectedGoal?._id || selectedGoal?.goalId;
+    const operation = beginProfileOperation();
+    const gid = displayedSelectedGoal?._id || displayedSelectedGoal?.goalId;
     if (!gid) return;
     try {
       const res = await api.updateGoal(gid, { priority: newPriority });
+      if (!isProfileOperationCurrent(operation)) return;
       if (res.goal) {
+        if (String(res.goal.profileId || '') !== currentProfileId) return;
         setGoals(prev => prev.map(g => (g._id === gid || g.goalId === gid) ? res.goal : g));
         setSelectedGoal(res.goal);
         setSimulatedSips(prev => ({
           ...prev,
-          [gid]: isFinancialCalculationFresh(res.goal.calculation_freshness)
+          [gid]: isGoalFreshForState(res.goal, financialProfileBinding, financialState)
             && isPresentFiniteNumber(res.goal.simulated_monthly_contribution)
             ? Number(res.goal.simulated_monthly_contribution)
             : null,
@@ -222,19 +396,23 @@ const GoalPlanner = ({ profile }) => {
         setSimulationError(null);
       }
     } catch (err) {
+      if (!isProfileOperationCurrent(operation)) return;
       alert('Failed to update priority: ' + err.message);
     }
   };
 
   const handleSaveGoalUpdates = async (updates) => {
-    const gid = selectedGoal?._id || selectedGoal?.goalId;
+    const operation = beginProfileOperation();
+    const gid = displayedSelectedGoal?._id || displayedSelectedGoal?.goalId;
     if (!gid) return;
     try {
       const res = await api.updateGoal(gid, {
         target_amount: updates.targetAmount,
         current_savings: updates.currentSavings
       });
+      if (!isProfileOperationCurrent(operation)) return;
       if (res.goal) {
+        if (String(res.goal.profileId || '') !== currentProfileId) return;
         setGoals(previous => previous.map(goal => (
           (goal._id === gid || goal.goalId === gid) ? res.goal : goal
         )));
@@ -242,11 +420,13 @@ const GoalPlanner = ({ profile }) => {
         setGoalSimulations({});
         setSimulationError(null);
         const freshList = await api.getGoals();
-        const nextGoals = Array.isArray(freshList?.goals) ? freshList.goals : [];
+        if (!isProfileOperationCurrent(operation)) return;
+        const nextGoals = (Array.isArray(freshList?.goals) ? freshList.goals : [])
+          .filter(goal => String(goal?.profileId || '') === currentProfileId);
         setGoals(nextGoals);
         setSimulatedSips(Object.fromEntries(nextGoals.map(goal => [
           goal._id || goal.goalId,
-          isFinancialCalculationFresh(goal.calculation_freshness)
+          isGoalFreshForState(goal, financialProfileBinding, financialState)
             && isPresentFiniteNumber(goal.simulated_monthly_contribution)
             ? Number(goal.simulated_monthly_contribution)
             : null,
@@ -256,6 +436,7 @@ const GoalPlanner = ({ profile }) => {
           || null);
       }
     } catch (err) {
+      if (!isProfileOperationCurrent(operation)) return;
       alert('Failed to update goal settings: ' + err.message);
       setGoals([]);
       setSelectedGoal(null);
@@ -265,16 +446,16 @@ const GoalPlanner = ({ profile }) => {
   };
 
   // Summary statistics
-  const targetValues = goals.map(goal => isPresentFiniteNumber(goal.target_amount) ? Number(goal.target_amount) : NaN);
-  const sipValues = goals.map(goal => isFinancialCalculationFresh(goal.calculation_freshness) && isPresentFiniteNumber(goal.recommended_sip) ? Number(goal.recommended_sip) : NaN);
-  const probabilityValues = goals.map(goal => isFinancialCalculationFresh(goal.calculation_freshness) && isPresentFiniteNumber(goal.probability_of_success) ? Number(goal.probability_of_success) : NaN);
+  const targetValues = currentGoals.map(goal => isPresentFiniteNumber(goal.target_amount) ? Number(goal.target_amount) : NaN);
+  const sipValues = currentGoals.map(goal => isGoalFreshForState(goal, financialProfileBinding, financialState) && isPresentFiniteNumber(goal.recommended_sip) ? Number(goal.recommended_sip) : NaN);
+  const probabilityValues = currentGoals.map(goal => isGoalFreshForState(goal, financialProfileBinding, financialState) && isPresentFiniteNumber(goal.probability_of_success) ? Number(goal.probability_of_success) : NaN);
   const totalTarget = targetValues.every(value => Number.isFinite(value) && value >= 0)
     ? targetValues.reduce((sum, value) => sum + value, 0)
     : null;
   const totalSip = sipValues.every(value => Number.isFinite(value) && value >= 0)
     ? sipValues.reduce((sum, value) => sum + value, 0)
     : null;
-  const avgProb = goals.length > 0 && probabilityValues.every(value => Number.isFinite(value) && value >= 0 && value <= 1)
+  const avgProb = currentGoals.length > 0 && probabilityValues.every(value => Number.isFinite(value) && value >= 0 && value <= 1)
     ? probabilityValues.reduce((sum, value) => sum + value, 0) / probabilityValues.length
     : null;
 
@@ -354,7 +535,7 @@ const GoalPlanner = ({ profile }) => {
       </div>
 
       {/* Cyber Summary HUD Metrics */}
-      {goals.length > 0 && (
+      {currentGoals.length > 0 && (
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
@@ -482,7 +663,7 @@ const GoalPlanner = ({ profile }) => {
       </AnimatePresence>
 
       {/* Two-panel Responsive Grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: showForm || selectedGoal ? '1fr 1.2fr' : '1fr', gap: 28, transition: 'all 0.4s cubic-bezier(0.16, 1, 0.3, 1)' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: showForm || displayedSelectedGoal ? '1fr 1.2fr' : '1fr', gap: 28, transition: 'all 0.4s cubic-bezier(0.16, 1, 0.3, 1)' }}>
         {/* Left Panel — Goal List */}
         <div>
           <AnimatePresence>
@@ -496,7 +677,7 @@ const GoalPlanner = ({ profile }) => {
           </AnimatePresence>
 
           {/* Goal Cards */}
-          {goals.length === 0 && !showForm && (
+          {currentGoals.length === 0 && !showForm && (
             <motion.div 
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
@@ -536,10 +717,10 @@ const GoalPlanner = ({ profile }) => {
           )}
 
           {/* Section Header */}
-          {goals.length > 0 && (
+          {currentGoals.length > 0 && (
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, padding: '0 4px' }}>
               <span style={{ fontSize: '0.72rem', color: '#64748b', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '1.2px', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <Layers size={13} color="#38bdf8" /> ACTIVE TARGETS ({goals.length})
+                <Layers size={13} color="#38bdf8" /> ACTIVE TARGETS ({currentGoals.length})
               </span>
               <span style={{ fontSize: '0.68rem', color: '#475569', fontWeight: 600 }}>
                 AUTO-SORTED BY PRIORITY
@@ -549,10 +730,10 @@ const GoalPlanner = ({ profile }) => {
 
           <AnimatePresence>
             {sortedGoals.map((goal, index) => {
-              const calculationFresh = isFinancialCalculationFresh(goal.calculation_freshness);
+              const calculationFresh = isGoalFreshForState(goal, financialProfileBinding, financialState);
               const cfg = calculationFresh ? (STATUS_CONFIG[goal.status] || UNKNOWN_STATUS_CONFIG) : UNKNOWN_STATUS_CONFIG;
               const StatusIcon = cfg.icon;
-              const isSelected = selectedGoal?._id === goal._id || selectedGoal?.goalId === goal.goalId;
+              const isSelected = displayedSelectedGoal?._id === goal._id || displayedSelectedGoal?.goalId === goal.goalId;
               const prob = getLiveProbability(goal);
               const hasProbability = Number.isFinite(prob);
               const probPct = hasProbability ? Math.round(prob * 100) : null;
@@ -710,16 +891,16 @@ const GoalPlanner = ({ profile }) => {
         </div>
 
         {/* Right Panel — Goal Details & Monte Carlo Engine */}
-        {selectedGoal && (
+        {displayedSelectedGoal && (
           <GoalDetailPane 
-            selectedGoal={selectedGoal}
+            selectedGoal={displayedSelectedGoal}
             simulatedSips={simulatedSips}
-            onChangeSimulatedSip={(val) => setSimulatedSips(prev => ({ ...prev, [selectedGoal._id || selectedGoal.goalId]: val }))}
+            onChangeSimulatedSip={(val) => setSimulatedSips(prev => ({ ...prev, [displayedSelectedGoal._id || displayedSelectedGoal.goalId]: val }))}
             onPriorityChange={handlePriorityChange}
             onSaveGoalUpdates={handleSaveGoalUpdates}
             getLiveProbability={getLiveProbability}
             getSimulatedChartData={getSimulatedChartData}
-            calculationFreshness={selectedGoal.calculation_freshness}
+            calculationFreshness={displayedSelectedGoal.calculation_freshness}
             monthlySavingsCapacity={Number(profile?.monthly_savings)}
             simulationLoading={simulationLoading}
             simulationError={simulationError}

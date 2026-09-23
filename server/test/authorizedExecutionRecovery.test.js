@@ -69,6 +69,17 @@ test('authorized execution recovery reconstructs a missing receipt without repea
     ...recommendation,
     responseSnapshot: { recommendation: { _id: recommendationId }, audit_hash: null },
   };
+  const canonicalCurrentResponse = {
+    response_state: 'CURRENT',
+    recommendationId,
+    profileId,
+    profile_version: profile.version,
+    allocation_revision: 1,
+    allocation_revision_id: '64b000000000000000000020',
+    portfolio_fingerprint: 'a'.repeat(64),
+    calculation_freshness: { fresh: true, reasonCodes: [] },
+    state_provenance: { status: 'PERSISTED_REVISION' },
+  };
   let createdReceipt = null;
   const models = {
     mandateModel: {
@@ -87,6 +98,7 @@ test('authorized execution recovery reconstructs a missing receipt without repea
     runModel: { findOne: async () => null },
     eventModel: { create: async event => event },
     keyProvider: keys,
+    buildCanonicalAdvisoryResponse: async () => canonicalCurrentResponse,
   };
 
   const result = await createAuthorizedActionExecutor({ dependencies: models, runtimeConfig: { env: { NODE_ENV: 'test' } } }).execute({
@@ -96,7 +108,8 @@ test('authorized execution recovery reconstructs a missing receipt without repea
   });
 
   assert.ok(createdReceipt);
-  assert.equal(result.response, committedRecommendation.responseSnapshot);
+  assert.equal(result.response, canonicalCurrentResponse);
+  assert.notEqual(result.response, committedRecommendation.responseSnapshot);
   assert.equal(result.receipt.receiptId, createdReceipt.receiptId);
   assert.equal(attempt.status, 'COMPLETED');
   assert.equal(mandate.status, 'EXECUTED');

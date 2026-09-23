@@ -3,6 +3,7 @@ import IdempotencyKey from '../models/IdempotencyKey.js';
 import Recommendation from '../models/Recommendation.js';
 import { canonicalSha256 } from '../utils/canonicalJson.js';
 import { sendError } from './errorHandler.js';
+import { buildCanonicalAdvisoryResponse } from '../services/advisoryResponse.js';
 
 // ARCHITECTURE: No in-memory Map. All idempotency state lives in shared infra.
 // Primary: Redis (fast, atomic SET NX). Fallback: MongoDB IdempotencyKey collection.
@@ -15,7 +16,7 @@ import { sendError } from './errorHandler.js';
  *
  * STATELESS: All state is stored in shared Redis or MongoDB. No per-process fallback.
  */
-export const idempotency = (ttlSeconds = 300) => {
+export const idempotency = (ttlSeconds = 300, { resolveReplay = null } = {}) => {
   return async (req, res, next) => {
     const key = req.headers['idempotency-key'];
     if (!key) {
@@ -28,10 +29,10 @@ export const idempotency = (ttlSeconds = 300) => {
 
     try {
       if (redisAvailable) {
-        return handleRedisIdempotency(req, res, next, cacheKey, ttlSeconds);
+        return await handleRedisIdempotency(req, res, next, cacheKey, ttlSeconds, resolveReplay);
       }
       // Fallback: MongoDB-backed idempotency
-      return handleMongoIdempotency(req, res, next, cacheKey, ttlSeconds);
+      return await handleMongoIdempotency(req, res, next, cacheKey, ttlSeconds, resolveReplay);
     } catch (err) {
       console.warn('[Idempotency] Middleware failed (proceeding without safety):', err.message);
       next();
@@ -75,12 +76,17 @@ function advisoryRequestHash({ userId, profileId, payload }) {
   });
 }
 
-function completedResponseFromRecommendation(recommendation) {
+async function completedResponseFromRecommendation(recommendation) {
   if (!recommendation?.responseSnapshot) return null;
   return {
     status: 200,
     headers: { 'content-type': 'application/json; charset=utf-8' },
-    body: recommendation.responseSnapshot,
+    body: await buildCanonicalAdvisoryResponse({
+      userId: recommendation.userId,
+      profileId: recommendation.profileId,
+      responseTemplate: recommendation.responseSnapshot,
+      replayed: true,
+    }),
   };
 }
 
@@ -94,7 +100,7 @@ async function findCompletedAdvisory(operationId, requestHash) {
       'IDEMPOTENCY_PAYLOAD_CONFLICT',
     );
   }
-  const response = completedResponseFromRecommendation(recommendation);
+  const response = await completedResponseFromRecommendation(recommendation);
   if (!response) {
     throw idempotencyError(500, 'Completed advisory is missing its response snapshot.', 'IDEMPOTENCY_STATE_CORRUPT');
   }
@@ -103,6 +109,7 @@ async function findCompletedAdvisory(operationId, requestHash) {
 
 async function waitForAdvisory(operationId, requestHash, waitMs) {
   const deadline = Date.now() + waitMs;
+  let committedWithoutReconciliation = false;
   while (Date.now() < deadline) {
     const completed = await findCompletedAdvisory(operationId, requestHash);
     if (completed) return completed;
@@ -116,8 +123,28 @@ async function waitForAdvisory(operationId, requestHash, waitMs) {
         'IDEMPOTENCY_PAYLOAD_CONFLICT',
       );
     }
-    if (state.status === 'DONE' && state.response) return state.response;
+    if (state.status === 'DONE') {
+      committedWithoutReconciliation = true;
+      const body = state.response?.body;
+      const recommendationId = body?.recommendation?.recommendationId
+        || body?.recommendationId
+        || body?.recommendation_id;
+      if (recommendationId) {
+        const committed = await Recommendation.findOne({
+          _id: recommendationId,
+          idempotencyOperationId: operationId,
+          idempotencyRequestHash: requestHash,
+        }).lean();
+        if (committed) {
+          const response = await completedResponseFromRecommendation(committed);
+          if (response) return response;
+        }
+      }
+    }
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+  }
+  if (committedWithoutReconciliation) {
+    throw idempotencyError(503, 'Committed advisory could not be reconciled to current financial state.', 'IDEMPOTENCY_STATE_CORRUPT');
   }
   throw idempotencyError(
     409,
@@ -181,7 +208,26 @@ export async function releaseAdvisoryIdempotency(claim) {
 /**
  * Redis-backed idempotency using atomic SET NX.
  */
-async function handleRedisIdempotency(req, res, next, cacheKey, ttlSeconds) {
+async function sendCachedResponse(req, res, next, cached, resolveReplay) {
+  let replay = cached;
+  if (typeof resolveReplay === 'function') {
+    try {
+      replay = { ...cached, body: await resolveReplay(req, cached.body) };
+    } catch (error) {
+      next(error);
+      return false;
+    }
+  }
+  res.status(replay.status);
+  if (replay.headers) {
+    for (const [header, value] of Object.entries(replay.headers)) res.setHeader(header, value);
+  }
+  res.setHeader('X-Cache-Lookup', 'HIT - Idempotent');
+  res.send(replay.body);
+  return true;
+}
+
+async function handleRedisIdempotency(req, res, next, cacheKey, ttlSeconds, resolveReplay) {
   // Attempt atomic lock: SET key "LOCK" NX EX 10
   const acquired = await setCacheNX(cacheKey, 'LOCK', 10);
 
@@ -198,15 +244,7 @@ async function handleRedisIdempotency(req, res, next, cacheKey, ttlSeconds) {
       );
     }
 
-    // Return original cached response
-    res.status(cached.status);
-    if (cached.headers) {
-      for (const [hk, hv] of Object.entries(cached.headers)) {
-        res.setHeader(hk, hv);
-      }
-    }
-    res.setHeader('X-Cache-Lookup', 'HIT - Idempotent');
-    return res.send(cached.body);
+    return sendCachedResponse(req, res, next, cached, resolveReplay);
   }
 
   // Lock acquired — intercept res.send to save response
@@ -232,7 +270,7 @@ async function handleRedisIdempotency(req, res, next, cacheKey, ttlSeconds) {
  * MongoDB-backed idempotency fallback using findOneAndUpdate with upsert.
  * Uses the IdempotencyKey model with a TTL index for automatic cleanup.
  */
-async function handleMongoIdempotency(req, res, next, cacheKey, ttlSeconds) {
+async function handleMongoIdempotency(req, res, next, cacheKey, ttlSeconds, resolveReplay) {
   try {
     // Attempt atomic lock via insert — MongoDB E11000 duplicate key error = already exists
     await IdempotencyKey.create({ _id: cacheKey, status: 'LOCK', response: null });
@@ -277,16 +315,7 @@ async function handleMongoIdempotency(req, res, next, cacheKey, ttlSeconds) {
         );
       }
 
-      // Return cached response
-      const cached = doc.response;
-      res.status(cached.status);
-      if (cached.headers) {
-        for (const [hk, hv] of Object.entries(cached.headers)) {
-          res.setHeader(hk, hv);
-        }
-      }
-      res.setHeader('X-Cache-Lookup', 'HIT - Idempotent');
-      return res.send(cached.body);
+      return sendCachedResponse(req, res, next, doc.response, resolveReplay);
     }
 
     console.warn('[Idempotency] MongoDB fallback failed (proceeding without safety):', err.message);

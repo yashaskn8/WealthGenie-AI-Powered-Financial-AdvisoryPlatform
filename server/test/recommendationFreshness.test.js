@@ -24,6 +24,7 @@ function recommendation(overrides = {}) {
   return {
     _id: '64b000000000000000000002',
     modelVersion,
+    profileVersion: overrides.profileVersion ?? 1,
     profileInputHash: overrides.profileInputHash
       || buildRecommendationProfileHash(profile, { modelVersion }),
     regulatoryRuleVersion: overrides.regulatoryRuleVersion || 'FY2025-26',
@@ -73,7 +74,17 @@ test('missing model and profile metadata fail closed', () => {
     recommendation: { regulatoryRuleVersion: 'FY2025-26' },
     currentRegulatoryRuleVersion: 'FY2025-26',
   });
-  assert.deepEqual(result.reasonCodes.sort(), ['MODEL_VERSION_MISSING', 'PROFILE_HASH_MISSING']);
+  assert.deepEqual(result.reasonCodes.sort(), ['MODEL_VERSION_MISSING', 'PROFILE_HASH_MISSING', 'PROFILE_VERSION_MISSING']);
+});
+
+test('a profile edit that preserves canonical values still invalidates an older profile version', () => {
+  const result = assessRecommendationFreshness({
+    profile: { ...profile, version: 2 },
+    recommendation: recommendation({ profileVersion: 1 }),
+    currentRegulatoryRuleVersion: 'FY2025-26',
+  });
+  assert.equal(result.fresh, false);
+  assert.ok(result.reasonCodes.includes('PROFILE_VERSION_CHANGED'));
 });
 
 test('missing current regulatory version is unavailable, not fresh', () => {

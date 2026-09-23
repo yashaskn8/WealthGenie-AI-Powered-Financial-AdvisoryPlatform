@@ -31,6 +31,7 @@ const recommendation = {
   profileId,
   userId,
   modelVersion: 'model-1.0.0',
+  profileVersion: 2,
   profileInputHash: buildRecommendationProfileHash(profile, { modelVersion: 'model-1.0.0' }),
   regulatoryRuleVersion: 'FY2025-26',
   generatedAt: new Date('2026-09-01T00:00:00.000Z'),

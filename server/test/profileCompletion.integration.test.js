@@ -8,6 +8,8 @@ import profileRoutes from '../routes/profile.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
+import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
+import RecommendationState from '../models/RecommendationState.js';
 import AuditRecord from '../models/AuditRecord.js';
 import { connectRedis, redisClient } from '../config/redis.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
@@ -82,6 +84,28 @@ test('precompute -> complete persists one profile, recommendation, and audit and
     const completed = await completeResponse.json();
     assert.equal(completed.completion.candidateHit, true);
     assert.equal(completed.completion.recomputed, false);
+    assert.equal(completed.recommendation.response_state, 'CURRENT');
+    assert.equal(completed.recommendation.profileId, completed.profile.profileId);
+    assert.equal(completed.recommendation.profile_version, completed.profile.version);
+    assert.match(completed.recommendation.profile_input_hash, /^[a-f0-9]{64}$/i);
+    assert.match(completed.recommendation.recommendation_fingerprint, /^[a-f0-9]{64}$/i);
+    assert.equal(completed.recommendation.calculation_freshness.fresh, true);
+    assert.deepEqual(completed.recommendation.calculation_freshness.reasonCodes, []);
+    assert.equal(completed.recommendation.state_provenance.status, 'PERSISTED_REVISION');
+    assert.equal(completed.recommendation.state_provenance.profileVersion, completed.profile.version);
+    assert.equal(completed.recommendation.state_provenance.recommendationId, completed.recommendation.recommendationId);
+    assert.equal(completed.recommendation.state_provenance.allocationRevisionId, completed.recommendation.allocation_revision_id);
+    assert.match(completed.recommendation.allocation_revision_id, /^[a-f\d]{24}$/i);
+    const revisionOne = await RecommendationAllocationRevision.findById(completed.recommendation.allocation_revision_id).lean();
+    const currentState = await RecommendationState.findOne({
+      userId,
+      profileId: completed.profile.profileId,
+    }).lean();
+    assert.equal(String(revisionOne.recommendationId), completed.recommendation.recommendationId);
+    assert.equal(revisionOne.revision, 1);
+    assert.equal(revisionOne.portfolioFingerprint, completed.recommendation.portfolio_fingerprint);
+    assert.equal(String(currentState.currentRecommendationId), completed.recommendation.recommendationId);
+    assert.equal(String(currentState.currentAllocationRevisionId), completed.recommendation.allocation_revision_id);
     const candidateHitTiming = completeResponse.headers.get('server-timing');
     assert.match(candidateHitTiming || '', /ml;dur=0\.00/);
     assert.match(candidateHitTiming || '', /pipeline;dur=0\.00/);
@@ -105,6 +129,10 @@ test('precompute -> complete persists one profile, recommendation, and audit and
     const replay = await replayResponse.json();
     assert.equal(replay.profile.profileId, completed.profile.profileId);
     assert.equal(replay.recommendation.recommendationId, completed.recommendation.recommendationId);
+    assert.equal(replay.recommendation.response_state, 'CURRENT');
+    assert.equal(replay.recommendation.profile_version, completed.profile.version);
+    assert.equal(replay.recommendation.allocation_revision, completed.recommendation.allocation_revision);
+    assert.equal(replay.recommendation.recommendation_fingerprint, completed.recommendation.recommendation_fingerprint);
     assert.deepEqual(await Promise.all([
       FinancialProfile.countDocuments({ userId }),
       Recommendation.countDocuments({ userId }),

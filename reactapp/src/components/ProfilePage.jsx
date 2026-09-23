@@ -2,6 +2,7 @@ import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react'
 import profileImg from '../assets/gen_4k_nobull.png';
 import * as api from '../services/api';
 import { financialProfileKey, normalizeFinancialProfile, validateFinancialProfile } from '../utils/financialProfile';
+import { matchesProfileState } from '../utils/financialStateBinding';
 import '../App.css';
 
 const PRECOMPUTE_DEBOUNCE_MS = 500;
@@ -191,7 +192,9 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
       setVersion(nextVersion);
       const profileWithUser = normalizeFinancialProfile({ ...committedProfile, profileId: committedProfileId, version: nextVersion });
       handleProfileUpdate(profileWithUser, { preserveRecommendation: true });
-      setInitialRecommendation(committedRecommendation);
+      setInitialRecommendation(matchesProfileState(committedRecommendation, profileWithUser)
+        ? committedRecommendation
+        : null);
       candidateIdRef.current = null;
       candidateFingerprintRef.current = null;
       completionIdempotencyKeyRef.current = null;

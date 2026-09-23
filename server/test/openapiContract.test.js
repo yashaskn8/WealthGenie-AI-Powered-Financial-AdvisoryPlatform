@@ -157,3 +157,41 @@ test('deferred advisory success contract requires exact allocation provenance', 
   assert.ok(['recommendationId', 'allocation_revision', 'allocation_revision_id', 'portfolio_fingerprint']
     .every(field => explanation.required.includes(field)));
 });
+
+test('all authoritative recommendation mutations and reads require the canonical current-state schema', () => {
+  const operations = new Map(contractOperations().map((entry) => [operationKey(entry), entry.operation]));
+  const canonicalFields = [
+    'recommendationId',
+    'allocation_revision',
+    'allocation_revision_id',
+    'portfolio_fingerprint',
+    'calculation_freshness',
+    'state_provenance',
+  ];
+  for (const key of [
+    'POST /api/recommend',
+    'GET /api/recommend/current',
+    'POST /api/recommend/weights',
+  ]) {
+    const responseRef = operations.get(key)?.responses?.['200']?.$ref;
+    assert.ok(responseRef, `${key} must document its successful response`);
+    const response = resolveLocalRef(responseRef);
+    const schemaRef = response.content?.['application/json']?.schema?.$ref;
+    assert.ok(schemaRef, `${key} must reference a response schema`);
+    const schema = resolveLocalRef(schemaRef);
+    assert.ok(canonicalFields.every(field => schema.required.includes(field)), `${key} must require the complete binding`);
+    assert.equal(schema.properties.response_state.const, 'CURRENT');
+  }
+});
+
+test('profile completion nests the same strict authoritative recommendation schema', () => {
+  const response = resolveLocalRef(contract.paths['/api/profile/complete'].post.responses['200'].$ref);
+  const schema = resolveLocalRef(response.content['application/json'].schema.$ref);
+  const nestedRef = schema.properties.recommendation.$ref;
+  assert.equal(nestedRef, '#/components/schemas/RecommendationResponse');
+  const recommendation = resolveLocalRef(nestedRef);
+  assert.ok([
+    'recommendationId', 'allocation_revision', 'allocation_revision_id',
+    'portfolio_fingerprint', 'calculation_freshness', 'state_provenance',
+  ].every(field => recommendation.required.includes(field)));
+});

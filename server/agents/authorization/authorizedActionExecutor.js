@@ -7,6 +7,7 @@ import Recommendation from '../../models/Recommendation.js';
 import { buildRecommendationProfile } from '../../services/recommendationProfile.js';
 import { computeCoreRecommendation, assertCoreResultFinalSafety } from '../../services/coreRecommendation.js';
 import { persistAdvisoryAtomically } from '../../services/advisoryPersistence.js';
+import { buildCanonicalAdvisoryResponse } from '../../services/advisoryResponse.js';
 import { claimAdvisoryIdempotency, releaseAdvisoryIdempotency } from '../../middleware/idempotency.js';
 import { createAuthorizationKeyProvider } from './keyProvider.js';
 import { assertVerifiableMandate, buildSnapshotFingerprint } from './mandateService.js';
@@ -25,10 +26,16 @@ function advisoryOperationId(userId, mandateId) {
   return `advisory:${canonicalSha256({ operation: 'recommendation.create', userId: String(userId), key: `mandate:${mandateId}` })}`;
 }
 
-async function committedAdvisory(models, userId, mandateId) {
+async function committedAdvisory(models, userId, mandateId, responseBuilder = buildCanonicalAdvisoryResponse) {
   const recommendation = await resolve(models.recommendationModel.findOne({ idempotencyOperationId: advisoryOperationId(userId, mandateId) }));
   if (!recommendation?.responseSnapshot) return null;
-  return { recommendation, response: recommendation.responseSnapshot };
+  const response = await responseBuilder({
+    userId,
+    profileId: recommendation.profileId,
+    responseTemplate: recommendation.responseSnapshot,
+    replayed: true,
+  });
+  return { recommendation, response };
 }
 
 async function reconcileCommittedExecution({ models, stored, attempt, committed, keyProvider, userId }) {
@@ -139,6 +146,7 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
   const models = { mandateModel: UserIntentMandate, receiptModel: ExecutionReceipt, attemptModel: AuthorizedExecutionAttempt, profileModel: FinancialProfile, recommendationModel: Recommendation, ...dependencies };
   const env = runtimeConfig.env || process.env;
   const keyProvider = dependencies.keyProvider || createAuthorizationKeyProvider({ env, required: env.NODE_ENV === 'production' });
+  const responseBuilder = dependencies.buildCanonicalAdvisoryResponse || buildCanonicalAdvisoryResponse;
 
   return {
     async execute({ mandateId, userId, correlationId = null, recovery = false }) {
@@ -169,7 +177,7 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
           const receipt = await loadReceipt(models, reconciled.receiptId, mandateId, userId);
           if (receipt && verifyExecutionReceipt(receipt, keyProvider)) return { receipt, response: null };
         }
-        const committed = await committedAdvisory(models, userId, mandateId);
+        const committed = await committedAdvisory(models, userId, mandateId, responseBuilder);
         if (committed) return reconcileCommittedExecution({ models, stored, attempt: existingAttempt, committed, keyProvider, userId });
         throw mandateError('AUTHORIZED_EXECUTION_RECONCILIATION_REQUIRED', 'The execution committed without a recoverable result reference.');
       }
@@ -240,7 +248,7 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
       });
       try {
         const canonicalProfile = buildRecommendationProfile(profile);
-        const alreadyCommitted = await committedAdvisory(models, userId, mandateId);
+        const alreadyCommitted = await committedAdvisory(models, userId, mandateId, responseBuilder);
         let core = null;
         let persisted;
         if (alreadyCommitted) {
@@ -249,6 +257,7 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
         } else {
           core = await computeCoreRecommendation({
             canonicalProfile,
+            profileVersion: profile.version ?? 1,
             userId,
             profileId: stored.profileId,
             correlationId: correlationId || stored.correlationId,

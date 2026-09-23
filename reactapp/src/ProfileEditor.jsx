@@ -7,7 +7,7 @@ import { normalizeFinancialProfile, validateFinancialProfile } from './utils/fin
 const GOALS_OPTIONS = ['Retirement', 'Wealth Growth', 'Tax Saving', 'Emergency Fund'];
 
 
-const ProfileEditor = ({ userProfile, onProfileUpdate }) => {
+const ProfileEditor = ({ userProfile, onProfileUpdate, onProfileChangeStart, onProfileChangeFailure }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [showSaved, setShowSaved] = useState(false);
@@ -57,7 +57,10 @@ const ProfileEditor = ({ userProfile, onProfileUpdate }) => {
     }
 
     setIsSaving(true);
+    let profileChangeStarted = false;
     try {
+      onProfileChangeStart?.();
+      profileChangeStarted = true;
       const profileId = userProfile?._id || userProfile?.profileId || draft.profileId || draft._id;
       let response;
       const payload = { ...validation.profile, version: draft.version };
@@ -76,6 +79,13 @@ const ProfileEditor = ({ userProfile, onProfileUpdate }) => {
       setShowSaved(true);
       setTimeout(() => setShowSaved(false), 2500);
     } catch (err) {
+      if (profileChangeStarted && onProfileChangeFailure) {
+        try {
+          await onProfileChangeFailure();
+        } catch {
+          // The dashboard callback already leaves personalized state unavailable.
+        }
+      }
       alert("Error updating profile: " + err.message);
     } finally {
       setIsSaving(false);

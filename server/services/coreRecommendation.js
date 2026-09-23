@@ -205,6 +205,7 @@ function makeRecommendationIds() {
 
 function buildCorePersistencePayload({
   profile,
+  profileVersion,
   userId,
   profileId,
   correlationId,
@@ -237,6 +238,7 @@ function buildCorePersistencePayload({
       recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
       regulatoryRuleVersion,
       profileInputHash: inputHash,
+      profileVersion,
       returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
       marketAdjustment,
       currentAllocationSource: marketAdjustment.currentAllocationSource,
@@ -285,6 +287,7 @@ function buildCorePersistencePayload({
  */
 export async function computeCoreRecommendation({
   canonicalProfile,
+  profileVersion = null,
   userId,
   profileId = null,
   correlationId = null,
@@ -408,6 +411,7 @@ export async function computeCoreRecommendation({
   };
   const persistence = buildCorePersistencePayload({
     profile,
+    profileVersion,
     userId,
     profileId: effectiveProfileId,
     correlationId: correlationId || traceId || crypto.randomUUID(),

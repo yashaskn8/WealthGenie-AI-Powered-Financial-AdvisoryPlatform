@@ -90,6 +90,7 @@ async function createFixture({ userId = userA, stale = false, regulatoryRuleVers
     mlFallback: true,
     modelVersion,
     regulatoryRuleVersion,
+    profileVersion: storedProfile.version ?? 1,
     profileInputHash: stale ? 'b'.repeat(64) : profileInputHash,
     recommendationGeneration: 1,
     recommendationPolicyVersion: 'suitability-freeze-1.1.0',
@@ -125,6 +126,7 @@ async function createCanonicalState(recommendation) {
     source: 'ORIGINAL_RECOMMENDATION',
     instruments,
     profileInputHash: recommendation.profileInputHash,
+    profileVersion: recommendation.profileVersion,
     modelVersion: recommendation.modelVersion,
     recommendationPolicyVersion: recommendation.recommendationPolicyVersion,
     regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
@@ -142,6 +144,7 @@ async function createCanonicalState(recommendation) {
     currentAllocationRevisionId: revision._id,
     generationRevision: recommendation.recommendationGeneration,
     profileInputHash: recommendation.profileInputHash,
+    profileVersion: recommendation.profileVersion,
     portfolioFingerprint,
     returnAssumptionVersion: revision.returnAssumptionVersion,
     returnAssumptionHash: revision.returnAssumptionHash,
@@ -198,6 +201,7 @@ async function createAdvisoryLifecycleFixture() {
     mlFallback: true,
     modelVersion,
     regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
+    profileVersion: storedProfile.version ?? 1,
     profileInputHash,
     recommendationGeneration: 1,
     recommendationPolicyVersion: 'suitability-freeze-1.1.0',
@@ -226,6 +230,7 @@ async function createAdvisoryLifecycleFixture() {
       recommendationPolicyVersion: recommendation.recommendationPolicyVersion,
       regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
       returnAssumptionHash: recommendation.returnAssumptionHash,
+      recommendationFingerprint: state.revision.recommendationFingerprint,
       profileVersion: storedProfile.version,
       generatedAt: new Date('2026-09-21T00:00:00.000Z'),
     },
@@ -332,6 +337,7 @@ async function persistNextRecommendation(profile, suffix) {
       mlFallback: true,
       modelVersion,
       regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
+      profileVersion: profile.version ?? 1,
       recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
       profileInputHash: inputHash,
     },
@@ -523,6 +529,38 @@ test('rejects a recommendation whose profile hash is stale', async () => {
 
   assert.equal(response.status, 409);
   assert.equal(body.code, 'STALE_RECOMMENDATION');
+});
+
+test('profile version alone invalidates current restore and rebalance even when canonical facts are unchanged', async () => {
+  const profile = await createFixture();
+  const before = await request(profile._id);
+  assert.equal(before.status, 200);
+  const current = await before.json();
+  const revisionCount = await RecommendationAllocationRevision.countDocuments({
+    userId: userA,
+    profileId: profile._id,
+  });
+
+  // Model an edit that increments the authoritative profile version but leaves
+  // every canonical recommendation input byte-for-byte unchanged.
+  await FinancialProfile.updateOne({ _id: profile._id, userId: userA }, { $inc: { version: 1 } });
+
+  const restored = await request(profile._id);
+  const restoredBody = await restored.json();
+  assert.equal(restored.status, 409);
+  assert.equal(restoredBody.code, 'STALE_RECOMMENDATION');
+  assert.ok(restoredBody.details.reasonCodes.includes('PROFILE_VERSION_CHANGED'));
+
+  const weights = Object.fromEntries(current.instruments.map(instrument => [instrument.id, instrument.allocationWeight]));
+  const rebalance = await submitWeights({
+    profileId: String(profile._id),
+    recommendationId: current.recommendationId,
+    expectedAllocationRevision: current.allocation_revision,
+    expectedPortfolioFingerprint: current.portfolio_fingerprint,
+    weights,
+  });
+  assert.equal(rebalance.status, 409);
+  assert.equal(await RecommendationAllocationRevision.countDocuments({ userId: userA, profileId: profile._id }), revisionCount);
 });
 
 test('concurrent manual rebalances create exactly one immutable next allocation revision', async () => {

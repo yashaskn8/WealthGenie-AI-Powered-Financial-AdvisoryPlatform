@@ -23,6 +23,7 @@ const ids = {
 const profile = {
   _id: ids.profile,
   userId: ids.user,
+  version: 1,
   monthlyTakeHome: 100000,
   monthlySavings: 30000,
   age: 32,
@@ -67,10 +68,14 @@ function fixture() {
     recommendationGeneration: 1,
     recommendationPolicyVersion: 'suitability-freeze-1.1.0',
     regulatoryRuleVersion: 'tax-policy-FY2026-27-v2',
+    profileVersion: 1,
     profileInputHash: buildRecommendationProfileHash(profile, { modelVersion: 'test-model-1' }),
     returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
     responseSnapshot: {
+      audit_id: '64b000000000000000000008',
+      audit_hash: 'a'.repeat(64),
       instruments: generationInstruments,
+      market_adjustment: { applied: true, currentAllocationSource: 'MARKET_CONTEXT_ADJUSTED' },
     },
   };
   const portfolioFingerprint = buildPortfolioFingerprint(instruments);
@@ -94,6 +99,7 @@ function fixture() {
     source: 'ORIGINAL_RECOMMENDATION',
     instruments,
     profileInputHash: recommendation.profileInputHash,
+    profileVersion: 1,
     modelVersion: recommendation.modelVersion,
     recommendationPolicyVersion: recommendation.recommendationPolicyVersion,
     regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
@@ -112,6 +118,7 @@ function fixture() {
     currentAllocationRevisionId: ids.revision,
     generationRevision: 1,
     profileInputHash: recommendation.profileInputHash,
+    profileVersion: 1,
     portfolioFingerprint,
     returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
     returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
@@ -129,12 +136,12 @@ function fixture() {
 
 test('current response cannot resurrect generation-snapshot allocation fields', () => {
   const { recommendation, revision, state } = fixture();
+  const binding = responseBinding(recommendation, revision, state);
   const response = buildCurrentRecommendationResponse({
     profile,
     recommendation,
     allocationRevision: revision,
-    freshness: { fresh: true, reasonCodes: [] },
-    provenance: { status: 'PERSISTED_REVISION' },
+    ...binding,
     portfolioFingerprint: revision.portfolioFingerprint,
   });
   assert.equal(response.instruments[0].allocationWeight, 1);
@@ -152,19 +159,83 @@ test('a rebalance never presents the generation-time explanation as current', ()
     _id: '64b000000000000000000006',
     revision: 2,
     previousRevision: 1,
+    previousAllocationRevisionId: revision._id,
     source: 'USER_REBALANCED',
   };
+  const currentState = { ...fixture().state, currentAllocationRevision: 2, currentAllocationRevisionId: currentRevision._id };
+  const binding = responseBinding(recommendation, currentRevision, currentState);
   const response = buildCurrentRecommendationResponse({
     profile,
     recommendation,
     allocationRevision: currentRevision,
-    freshness: { fresh: true, reasonCodes: [] },
-    provenance: { status: 'PERSISTED_REVISION' },
+    ...binding,
     portfolioFingerprint: currentRevision.portfolioFingerprint,
   });
   assert.equal(response.explanation, null);
   assert.deepEqual(response.generation_explanation, { summary: 'Explains original portfolio' });
+  assert.equal(response.market_adjustment, null);
+  assert.deepEqual(response.generation_market_adjustment, {
+    applied: true,
+    currentAllocationSource: 'MARKET_CONTEXT_ADJUSTED',
+  });
 });
+
+function responseBinding(recommendation, revision, state) {
+  const recommendationFingerprint = buildRecommendationFingerprint({
+    recommendationId: recommendation._id,
+    profileInputHash: recommendation.profileInputHash,
+    modelVersion: recommendation.modelVersion,
+    recommendationPolicyVersion: recommendation.recommendationPolicyVersion,
+    regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
+    returnAssumptionVersion: revision.returnAssumptionVersion,
+    returnAssumptionHash: revision.returnAssumptionHash,
+    allocationRevision: revision.revision,
+    instruments: revision.instruments,
+  });
+  return {
+    freshness: {
+      fresh: true,
+      reasonCodes: [],
+      profilePresent: true,
+      recommendationPresent: true,
+      modelVersion: recommendation.modelVersion,
+      expectedProfileHash: recommendation.profileInputHash,
+      observedProfileHash: recommendation.profileInputHash,
+      expectedProfileVersion: 1,
+      observedProfileVersion: 1,
+      observedRegulatoryVersion: recommendation.regulatoryRuleVersion,
+      currentRegulatoryVersion: recommendation.regulatoryRuleVersion,
+      policyVersion: recommendation.recommendationPolicyVersion,
+      observedRecommendationPolicyVersion: recommendation.recommendationPolicyVersion,
+      allocationRevision: revision.revision,
+      currentAllocationSource: revision.source,
+      assumptionVersion: revision.returnAssumptionVersion,
+      assumptionHash: revision.returnAssumptionHash,
+      assumptionSource: revision.returnAssumptionSource,
+    },
+    provenance: {
+      status: 'PERSISTED_REVISION',
+      stateId: state._id,
+      recommendationId: recommendation._id,
+      allocationSource: revision.source,
+      allocationRevision: revision.revision,
+      allocationRevisionId: revision._id,
+      profileVersion: 1,
+      profileInputHash: recommendation.profileInputHash,
+      portfolioFingerprint: revision.portfolioFingerprint,
+      recommendationFingerprint,
+      recommendationPolicyVersion: recommendation.recommendationPolicyVersion,
+      regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
+      returnAssumptionVersion: revision.returnAssumptionVersion,
+      returnAssumptionHash: revision.returnAssumptionHash,
+      returnAssumptionSource: revision.returnAssumptionSource,
+      previousAllocationRevision: revision.previousRevision ?? null,
+      previousAllocationRevisionId: revision.previousAllocationRevisionId ?? null,
+    },
+    portfolioFingerprint: revision.portfolioFingerprint,
+    recommendationFingerprint,
+  };
+}
 
 test('valid canonical pointer resolves only the pointed revision', async () => {
   const { dependencies } = fixture();

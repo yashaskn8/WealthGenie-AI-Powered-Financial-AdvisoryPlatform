@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, lazy, Suspense } from 'react';
+import { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import './App.css';
 import RecommendationDashboard from './RecommendationDashboard';
@@ -12,6 +12,12 @@ import { investmentDatabase } from './investmentDatabase';
 import { financialProfileKey } from './utils/financialProfile';
 import { assertBackendRecommendationInstrument } from './utils/recommendationPresentation';
 import { isFinancialCalculationFresh } from './utils/financialFreshness';
+import {
+  hasCompleteFinancialStateBinding,
+  isExactAllocationSuccessor,
+  matchesProfileState,
+  sameFinancialState,
+} from './utils/financialStateBinding';
 import { fromSearchParams, toSearchParams, resolveNavigation, NAV_PAGES } from './utils/navigationMap';
 
 // ── Lazy-loaded page components (code-split for faster initial load) ──
@@ -93,6 +99,7 @@ export async function fetchDeferredAdvisoryWithBoundedRetry(
 
 // eslint-disable-next-line react-refresh/only-export-components
 export function advisoryMatchesCurrentFinancialState(current, advisory) {
+  if (!hasCompleteFinancialStateBinding(current)) return false;
   const currentRecommendationId = current?.recommendationId;
   const advisoryRecommendationId = advisory?.recommendationId;
   const currentRevision = Number(current?.allocation_revision);
@@ -117,7 +124,14 @@ export function advisoryMatchesCurrentFinancialState(current, advisory) {
     && typeof currentFingerprint === 'string'
     && currentFingerprint.length > 0
     && typeof advisoryFingerprint === 'string'
-    && advisoryFingerprint === currentFingerprint;
+    && advisoryFingerprint === currentFingerprint
+    && advisory.profileId === current.profileId
+    && Number(advisory.profile_version) === Number(current.profile_version)
+    && advisory.profile_input_hash === current.profile_input_hash
+    && advisory.recommendation_fingerprint === current.recommendation_fingerprint
+    && advisory.recommendation_policy_version === current.recommendation_policy_version
+    && advisory.regulatory_rule_version === current.regulatory_rule_version
+    && advisory.return_assumption_hash === current.return_assumption_hash;
 }
 
 /* ===== DASHBOARD SHELL - Sidebar + Pages + Chatbot ===== */
@@ -151,35 +165,75 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
   const [backendFallback, setBackendFallback] = useState(null);
   const [isRecommendationLoading, setIsRecommendationLoading] = useState(true);
   const [isAdvisoryLoading, setIsAdvisoryLoading] = useState(false);
+  const [profileReloadGeneration, setProfileReloadGeneration] = useState(0);
+  const operationRef = useRef(0);
+  const controllerRef = useRef(null);
+  const backendRecsRef = useRef(backendRecs);
 
   // Stable serialized key - changes ONLY when profile data changes, not on every render
   const profileKey = useMemo(() => financialProfileKey(userProfile), [userProfile]);
   const profileId = userProfile.profileId;
+  const profileVersion = Number(userProfile.version ?? 1);
+  const activeProfileRef = useRef({ profileId, profileVersion, profileKey });
+  activeProfileRef.current = { profileId, profileVersion, profileKey };
+
+  const writeBackendRecs = (nextOrUpdater) => {
+    const next = typeof nextOrUpdater === 'function' ? nextOrUpdater(backendRecsRef.current) : nextOrUpdater;
+    backendRecsRef.current = next;
+    setBackendRecs(next);
+    return next;
+  };
+
+  const invalidateOperations = () => {
+    operationRef.current += 1;
+    controllerRef.current?.abort();
+    controllerRef.current = null;
+    return operationRef.current;
+  };
+
+  const beginOperation = () => {
+    invalidateOperations();
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    const token = {
+      id: operationRef.current,
+      controller,
+      profileId: activeProfileRef.current.profileId,
+      profileVersion: activeProfileRef.current.profileVersion,
+      profileKey: activeProfileRef.current.profileKey,
+    };
+    return token;
+  };
+
+  const operationIsCurrent = (token) => Boolean(token
+    && operationRef.current === token.id
+    && !token.controller.signal.aborted
+    && activeProfileRef.current.profileId === token.profileId
+    && activeProfileRef.current.profileVersion === token.profileVersion
+    && activeProfileRef.current.profileKey === token.profileKey);
 
   useEffect(() => {
-    const controller = new AbortController();
-    let cancelled = false;
+    const token = beginOperation();
+    const { controller } = token;
     const fetchBackendData = async () => {
       try {
         setIsRecommendationLoading(true);
         setIsAdvisoryLoading(false);
-        setBackendRecs(null); // Clear stale data immediately
+        writeBackendRecs(null); // Clear stale data immediately
         setBackendFallback(null);
-        const activeProfileId = profileId;
+        const activeProfileId = token.profileId;
         if (!activeProfileId) {
           throw new Error('Backend profile creation did not return a profileId.');
         }
-        const recResponse = initialRecommendation?.profileId === activeProfileId
+        const recResponse = matchesProfileState(initialRecommendation, userProfile)
           ? initialRecommendation
-          : await api.getRecommendations(activeProfileId, { signal: controller.signal });
-        if (cancelled) return;
-        if (!isFinancialCalculationFresh(recResponse?.calculation_freshness)) {
-          throw new Error('The server did not confirm that this recommendation matches the current financial state.');
+          : await api.getCurrentRecommendation(activeProfileId, { signal: controller.signal });
+        if (!operationIsCurrent(token)) return;
+        if (!matchesProfileState(recResponse, userProfile)
+            || !isFinancialCalculationFresh(recResponse?.calculation_freshness)) {
+          throw new Error('The server did not confirm the complete current financial-state binding for this profile.');
         }
-        setBackendRecs({
-          ...recResponse,
-          profileId: activeProfileId,
-        });
+        writeBackendRecs(recResponse);
         setBackendFallback(null);
         setIsRecommendationLoading(false);
 
@@ -193,8 +247,8 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
               {
                 signal: controller.signal,
                 onConflict: () => {
-                  if (!cancelled) {
-                    setBackendRecs(prev => {
+                  if (operationIsCurrent(token)) {
+                    writeBackendRecs(prev => {
                       if (!advisoryMatchesCurrentFinancialState(prev, recResponse)) return prev;
                       return {
                         ...prev,
@@ -208,8 +262,8 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
                 },
               }
             );
-            if (!cancelled && advResponse) {
-              setBackendRecs(prev => {
+            if (operationIsCurrent(token) && advResponse) {
+              writeBackendRecs(prev => {
                 if (!advisoryMatchesCurrentFinancialState(prev, advResponse)) return prev;
                 return {
                   ...prev,
@@ -221,11 +275,11 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
               });
             }
           } catch (advErr) {
-            if (!cancelled && advErr?.code !== 'REQUEST_ABORTED' && advErr?.name !== 'AbortError') {
+            if (operationIsCurrent(token) && advErr?.code !== 'REQUEST_ABORTED' && advErr?.name !== 'AbortError') {
               if (advErr?.status === 409) {
                 // 409 Conflict: Another request is generating the advisory.
                 // Keep advisory state as GENERATING, never mark FAILED on 409.
-                setBackendRecs(prev => {
+                writeBackendRecs(prev => {
                   if (!advisoryMatchesCurrentFinancialState(prev, recResponse)) return prev;
                   return {
                     ...prev,
@@ -237,7 +291,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
                 });
               } else {
                 console.warn('Deferred advisory generation failed:', advErr);
-                setBackendRecs(prev => {
+                writeBackendRecs(prev => {
                   if (!advisoryMatchesCurrentFinancialState(prev, recResponse)) return prev;
                   return {
                     ...prev,
@@ -251,13 +305,13 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
               }
             }
           } finally {
-            if (!cancelled) setIsAdvisoryLoading(false);
+            if (operationIsCurrent(token)) setIsAdvisoryLoading(false);
           }
         }
       } catch (err) {
-        if (err?.code === 'REQUEST_ABORTED' || cancelled) return;
+        if (err?.code === 'REQUEST_ABORTED' || !operationIsCurrent(token)) return;
         console.error("Failed to fetch backend recommendations:", err);
-        setBackendRecs(null);
+        writeBackendRecs(null);
         setBackendFallback({
           message: 'Authoritative recommendations are temporarily unavailable',
           detail: err?.message || null,
@@ -267,10 +321,13 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
     };
     fetchBackendData();
     return () => {
-      cancelled = true;
+      if (operationRef.current === token.id) operationRef.current += 1;
       controller.abort();
+      if (controllerRef.current === controller) controllerRef.current = null;
     };
-  }, [profileId, profileKey, initialRecommendation]);
+  // userProfile's identity is represented by profileId, version and its stable key.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profileId, profileVersion, profileKey, initialRecommendation, profileReloadGeneration]);
 
   const handleLogout = async () => {
     try {
@@ -283,6 +340,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
 
   // Backend response is the only source of personalized recommendation truth.
   const currentRecommendationState = isFinancialCalculationFresh(backendRecs?.calculation_freshness)
+      && matchesProfileState(backendRecs, userProfile)
     ? backendRecs
     : null;
 
@@ -361,13 +419,17 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
   };
 
   const handleRebalanceSave = async (updated) => {
+    const predecessor = backendRecsRef.current;
+    const token = beginOperation();
     try {
-      if (!currentRecommendationState) {
+      if (!currentRecommendationState
+          || !sameFinancialState(predecessor, currentRecommendationState)
+          || !matchesProfileState(predecessor, userProfile)) {
         throw new Error('The current recommendation is unavailable until its financial-state freshness is verified.');
       }
-      const profileId = currentRecommendationState.profileId || userProfile.profileId;
+      const activeProfileId = token.profileId;
 
-      if (!profileId) {
+      if (!activeProfileId) {
         throw new Error("Could not build user profile for database update.");
       }
 
@@ -376,44 +438,47 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
         weights[item.id] = Number(item.allocationWeight);
       });
 
-      const response = await api.updateRecommendationWeights(profileId, weights, {
-        recommendationId: currentRecommendationState.recommendationId,
-        expectedAllocationRevision: currentRecommendationState.allocation_revision,
-        expectedPortfolioFingerprint: currentRecommendationState.portfolio_fingerprint,
+      const response = await api.updateRecommendationWeights(activeProfileId, weights, {
+        recommendationId: predecessor.recommendationId,
+        expectedAllocationRevision: predecessor.allocation_revision,
+        expectedPortfolioFingerprint: predecessor.portfolio_fingerprint,
       });
-      
-      setBackendRecs(prev => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          instruments: response.instruments,
-          advisory_text: response.advisory_text ?? null,
-          advisory_explanation: response.advisory_explanation || { status: 'STALE' },
-          explanation: response.explanation ?? null,
-          generation_explanation: response.generation_explanation ?? prev.generation_explanation ?? null,
-          portfolio_return_assumption: response.portfolio_return_assumption,
-          return_data_class: response.return_data_class,
-          return_assumption_version: response.return_assumption_version,
-          return_assumption_source: response.return_assumption_source,
-          observed_market_fact: response.observed_market_fact,
-          provider_forecast: response.provider_forecast,
-           asset_class_allocation: response.asset_class_allocation,
-           dashboard_projection: response.dashboard_projection,
-           current_allocation_source: response.current_allocation_source,
-           generation_market_adjustment: response.generation_market_adjustment,
-           market_adjustment: response.market_adjustment,
-           recommendationId: response.recommendation_id ?? null,
-           allocation_revision: response.allocation_revision,
-           allocation_revision_id: response.allocation_revision_id,
-           portfolio_fingerprint: response.portfolio_fingerprint,
-           // Freshness is proof, not mergeable metadata. A partial response
-           // must invalidate prior proof instead of inheriting it.
-           calculation_freshness: response.calculation_freshness ?? null,
-        };
-      });
+
+      if (!operationIsCurrent(token)) return;
+      let current = response;
+      if (!isExactAllocationSuccessor(predecessor, current)
+          || !sameFinancialState(backendRecsRef.current, predecessor)) {
+        // A committed mutation response is accepted only as the exact CAS successor.
+        // Otherwise reconcile from the canonical server pointer; never merge fields.
+        current = await api.getCurrentRecommendation(activeProfileId, { signal: token.controller.signal });
+      }
+      if (!operationIsCurrent(token) || !matchesProfileState(current, userProfile)) return;
+      if (current.recommendationId !== predecessor.recommendationId
+          || Number(current.allocation_revision) <= Number(predecessor.allocation_revision)) {
+        throw new Error('The canonical portfolio state did not advance from the expected allocation revision.');
+      }
+      writeBackendRecs(current);
 
       alert('Rebalanced portfolio saved! Projections and dashboard updated in real-time.');
     } catch (err) {
+      if (!operationIsCurrent(token)) return;
+      try {
+        const canonical = await api.getCurrentRecommendation(token.profileId, { signal: token.controller.signal });
+        if (operationIsCurrent(token) && matchesProfileState(canonical, userProfile)) {
+          writeBackendRecs(canonical);
+        } else if (operationIsCurrent(token)) {
+          writeBackendRecs(null);
+        }
+      } catch {
+        if (operationIsCurrent(token)) {
+          writeBackendRecs(null);
+          setBackendFallback({
+            message: 'The portfolio change could not be reconciled. Refresh the current recommendation before using personalized results.',
+            detail: err?.message || null,
+          });
+        }
+      }
+      if (!operationIsCurrent(token)) return;
       if (err?.status === 409 || ['ALLOCATION_STATE_CHANGED', 'ALLOCATION_REVISION_CONFLICT', 'RECOMMENDATION_SUPERSEDED'].includes(err?.code)) {
         alert('Your portfolio changed since this page was loaded. Refresh before saving this rebalance.');
       } else {
@@ -424,21 +489,28 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
 
   const handleAuthoritativeRecompute = async () => {
     if (!profileId) return;
+    const token = beginOperation();
     setIsRecommendationLoading(true);
+    setIsAdvisoryLoading(false);
+    writeBackendRecs(null);
     setBackendFallback(null);
     try {
-      const recResponse = await api.getRecommendations(profileId, { retries: 0 });
-      if (!isFinancialCalculationFresh(recResponse?.calculation_freshness)) {
-        throw new Error('The server did not confirm that this recommendation matches the current financial state.');
+      const recResponse = await api.getRecommendations(profileId, { retries: 0, signal: token.controller.signal });
+      if (!operationIsCurrent(token)) return;
+      if (!matchesProfileState(recResponse, userProfile)
+          || !isFinancialCalculationFresh(recResponse?.calculation_freshness)) {
+        throw new Error('The server did not confirm the complete current financial-state binding for this profile.');
       }
-      setBackendRecs({ ...recResponse, profileId });
+      writeBackendRecs(recResponse);
       setIsRecommendationLoading(false);
       if (recResponse?.recommendationId && (recResponse.advisory_explanation?.status === 'PENDING' || !recResponse.advisory_text)) {
         setIsAdvisoryLoading(true);
         try {
           const advisory = await fetchDeferredAdvisoryWithBoundedRetry(api.fetchAdvisory, recResponse.recommendationId, {
+            signal: token.controller.signal,
             onConflict: () => {
-              setBackendRecs(prev => {
+              if (!operationIsCurrent(token)) return;
+              writeBackendRecs(prev => {
                 if (!advisoryMatchesCurrentFinancialState(prev, recResponse)) return prev;
                 return {
                   ...prev,
@@ -450,14 +522,15 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
               });
             },
           });
-          if (advisory) {
-            setBackendRecs(prev => advisoryMatchesCurrentFinancialState(prev, advisory)
+          if (advisory && operationIsCurrent(token)) {
+            writeBackendRecs(prev => advisoryMatchesCurrentFinancialState(prev, advisory)
               ? { ...prev, advisory_text: advisory.advisory_text ?? null, advisory_explanation: advisory.advisory_explanation || { status: 'GENERATING' } }
               : prev);
           }
         } catch (advisoryError) {
-          if (advisoryError?.code !== 'REQUEST_ABORTED' && advisoryError?.name !== 'AbortError') {
-            setBackendRecs(prev => {
+          if (operationIsCurrent(token)
+              && advisoryError?.code !== 'REQUEST_ABORTED' && advisoryError?.name !== 'AbortError') {
+            writeBackendRecs(prev => {
               if (!advisoryMatchesCurrentFinancialState(prev, recResponse)) return prev;
               return {
                 ...prev,
@@ -470,14 +543,49 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
             });
           }
         } finally {
-          setIsAdvisoryLoading(false);
+          if (operationIsCurrent(token)) setIsAdvisoryLoading(false);
         }
       }
     } catch (err) {
-      setBackendRecs(null);
+      if (!operationIsCurrent(token) || err?.code === 'REQUEST_ABORTED' || err?.name === 'AbortError') return;
+      writeBackendRecs(null);
       setBackendFallback({ message: 'Authoritative recommendations are temporarily unavailable', detail: err?.message || null });
       setIsRecommendationLoading(false);
       setIsAdvisoryLoading(false);
+    }
+  };
+
+  const handleProfileChangeStart = () => {
+    invalidateOperations();
+    writeBackendRecs(null);
+    setIsRecommendationLoading(false);
+    setIsAdvisoryLoading(false);
+    setBackendFallback({ message: 'Your financial profile is changing. Recommendations are temporarily unavailable.' });
+  };
+
+  const handleProfileChangeFailure = async () => {
+    const token = beginOperation();
+    writeBackendRecs(null);
+    setIsRecommendationLoading(true);
+    setBackendFallback(null);
+    try {
+      const restoredProfile = await api.getCurrentProfile({ retries: 0, signal: token.controller.signal });
+      if (!operationIsCurrent(token)) return;
+      if (!restoredProfile?.profileId && !restoredProfile?._id) throw new Error('The saved profile could not be verified.');
+      onProfileUpdate(restoredProfile);
+      setProfileReloadGeneration(value => value + 1);
+      setBackendFallback({
+        message: 'Profile saved state restored. Verifying the recommendation against its current version.',
+      });
+    } catch (error) {
+      if (!operationIsCurrent(token)) return;
+      writeBackendRecs(null);
+      setBackendFallback({
+        message: 'Your profile was not confirmed after the save error. Recalculate before using personalized results.',
+        detail: error?.message || null,
+      });
+    } finally {
+      if (operationIsCurrent(token)) setIsRecommendationLoading(false);
     }
   };
 
@@ -495,7 +603,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
               explanation={currentRecommendationState?.explanation || null}
               fallbackNotice={backendFallback}
               onDismissFallbackNotice={() => setBackendFallback(null)}
-              onRecalculate={() => navigateTo(NAV_PAGES.ACCOUNT)}
+              onRecalculate={() => void handleAuthoritativeRecompute()}
               onLearnMore={handleLearnMore}
               onExploreAll={() => setShowComparisonTable(true)}
               onRebalance={() => navigateTo('rebalancer')}
@@ -547,6 +655,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
               activeTab={activeTab}
               onTabChange={(newTab) => navigateTo({ page: NAV_PAGES.PROGRESS, tab: newTab })}
               profile={userProfile}
+              financialState={currentRecommendationState}
               recommendations={recommendations}
               onNavigate={navigateTo}
               onSaveRebalance={handleRebalanceSave}
@@ -572,6 +681,8 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
             <ProfileEditor
               userProfile={userProfile}
               onProfileUpdate={onProfileUpdate}
+              onProfileChangeStart={handleProfileChangeStart}
+              onProfileChangeFailure={handleProfileChangeFailure}
             />
           </ErrorBoundary>
         );

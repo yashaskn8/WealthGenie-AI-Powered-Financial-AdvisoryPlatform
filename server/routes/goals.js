@@ -211,6 +211,7 @@ async function holdGoalSourceState(session, { userId, profileId, state }) {
     currentAllocationRevisionId: state.allocationRevision._id,
     generationRevision: state.recommendation.recommendationGeneration,
     profileInputHash: state.recommendation.profileInputHash,
+    profileVersion: state.profileVersion,
     portfolioFingerprint: state.portfolioFingerprint,
     returnAssumptionVersion: state.allocationRevision.returnAssumptionVersion,
     returnAssumptionHash: state.allocationRevision.returnAssumptionHash,
@@ -252,6 +253,30 @@ async function saveGoalWithSourceState(goal, { userId, profileId, sourceState } 
   return goal;
 }
 
+async function resolveGoalCreateReplay(req, cachedBody) {
+  let cached = cachedBody;
+  if (Buffer.isBuffer(cached)) cached = cached.toString('utf8');
+  if (typeof cached === 'string') {
+    try { cached = JSON.parse(cached); } catch {
+      throw createError(503, 'Cached goal response cannot be reconciled.', 'Refresh your goals before continuing.', { code: 'IDEMPOTENCY_STATE_CORRUPT' });
+    }
+  }
+  const goalId = cached?.goal?._id || cached?.goal?.goalId;
+  if (!isValidObjectId(goalId)) {
+    throw createError(503, 'Cached goal identity is unavailable.', 'Refresh your goals before continuing.', { code: 'IDEMPOTENCY_STATE_CORRUPT' });
+  }
+  const goal = await Goal.findOne({ _id: goalId, userId: req.user.userId }).lean();
+  if (!goal) {
+    throw createError(409, 'The original goal is no longer available.', 'Refresh your goals before continuing.', { code: 'IDEMPOTENCY_RESOURCE_UNAVAILABLE' });
+  }
+  const state = await resolveCurrentRecommendationState({
+    userId: req.user.userId,
+    profileId: goal.profileId,
+    requireFresh: false,
+  });
+  return { goal: buildCurrentGoalResponse(goal, { state: state.recommendation ? state : null }) };
+}
+
 async function calculateGoalPlan({ profile, profileId, userId, targetAmount, targetDate, currentSavings }) {
   const yearsRemaining = computeYearsRemaining(targetDate);
   const metrics = await _getBlendedPortfolioMetrics(userId, profileId, profile);
@@ -287,7 +312,7 @@ async function calculateGoalPlan({ profile, profileId, userId, targetAmount, tar
   };
 }
 
-router.post('/create', verifyJWT, idempotency(), validateStrict(customGoalSchema), asyncHandler(async (req, res) => {
+router.post('/create', verifyJWT, idempotency(300, { resolveReplay: resolveGoalCreateReplay }), validateStrict(customGoalSchema), asyncHandler(async (req, res) => {
   const { goal_name, target_amount, target_date, current_savings, profileId, priority } = req.body;
   const stored = await findOwnedProfile(profileId, req.user.userId);
   if (!stored) throw createError(404, 'Profile not found or access denied', 'Build a financial profile first.');

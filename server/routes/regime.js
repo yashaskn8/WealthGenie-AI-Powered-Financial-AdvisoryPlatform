@@ -37,11 +37,12 @@ router.post('/adjust', verifyJWT, validate(regimeAdjustSchema), asyncHandler(asy
   try {
     state = await requireFreshRecommendationState({ userId: req.user.userId, profileId, profile });
   } catch (error) {
-    const publicCode = error.reasonCodes?.includes('PROFILE_CHANGED')
+    const publicCode = error.reasonCodes?.some(reason => ['PROFILE_CHANGED', 'PROFILE_VERSION_CHANGED'].includes(reason))
       ? 'STALE_RECOMMENDATION_PROFILE'
       : (error.code || 'RECOMMENDATION_STALE');
     throw createError(error.status || 409, error.message, 'Regenerate recommendations before previewing a market-context adjustment.', {
-      code: publicCode, reasonCodes: error.reasonCodes, freshness: error.freshness,
+      code: publicCode,
+      details: { reasonCodes: error.reasonCodes, freshness: error.freshness },
     });
   }
   const marketContext = await getLiveMarketContext();

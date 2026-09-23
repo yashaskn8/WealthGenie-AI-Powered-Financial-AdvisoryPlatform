@@ -18,6 +18,11 @@ import {
 } from '../services/recommendationProfile.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
+import {
+  PROJECTION_ASSUMPTION_POLICY_HASH,
+  PROJECTION_ASSUMPTION_SOURCE,
+  PROJECTION_ASSUMPTION_VERSION,
+} from '../services/instrumentConstants.js';
 
 const userId = new mongoose.Types.ObjectId();
 const profileId = new mongoose.Types.ObjectId();
@@ -43,6 +48,9 @@ async function createAdvisory(index) {
         id: `fund-${index}`, name: `Fund ${index}`, type: 'Equity_MF', assetClass: 'Equity',
         nominalReturn: 12, effectiveYield: 12, postTaxReturn: null,
         returnBasis: 'PRE_TAX_NOMINAL', expenseRatio: 0.005,
+        returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+        returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
+        returnSource: PROJECTION_ASSUMPTION_SOURCE,
         riskLevel: 'Medium', riskScore: 3, lockIn: 0, tags: ['Wealth Growth'],
         score: 80, scoreFactors: {
           expectedReturn: 60, riskFit: 100, liquidity: 80, goalFit: 100,
@@ -56,6 +64,7 @@ async function createAdvisory(index) {
       modelVersion: `model-${index}`,
       recommendationPolicyVersion: RECOMMENDATION_POLICY_VERSION,
       regulatoryRuleVersion: getCurrentRegulatoryRuleVersion(),
+      profileVersion: profile.version ?? 1,
       profileInputHash: buildRecommendationProfileHash(buildRecommendationProfile(profile), { modelVersion: `model-${index}` }),
     },
     auditRecord: {

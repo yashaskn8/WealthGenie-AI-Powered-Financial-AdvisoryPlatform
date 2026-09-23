@@ -23,6 +23,7 @@ const ProgressHub = ({
   activeTab = 'goals',
   onTabChange,
   profile,
+  financialState,
   recommendations,
   onNavigate,
   onSaveRebalance,
@@ -128,7 +129,7 @@ const ProgressHub = ({
             data-testid="panel-plan-goal"
           >
             <ErrorBoundary>
-              <GoalPlanner profile={profile} />
+              <GoalPlanner profile={profile} financialState={financialState} />
             </ErrorBoundary>
           </div>
         )}

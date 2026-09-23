@@ -8,6 +8,7 @@ const recommendationStateSchema = new mongoose.Schema({
   currentAllocationRevisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'RecommendationAllocationRevision', required: true },
   generationRevision: { type: Number, required: true, min: 1 },
   profileInputHash: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
+  profileVersion: { type: Number, required: true, min: 1, validate: Number.isInteger },
   portfolioFingerprint: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
   returnAssumptionVersion: { type: String, required: true },
   returnAssumptionHash: { type: String, required: true, match: /^[a-f0-9]{64}$/ },

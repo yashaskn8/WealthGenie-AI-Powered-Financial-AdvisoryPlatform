@@ -29,7 +29,7 @@ const allocationRevisionSchema = new mongoose.Schema({
   returnAssumptionVersion: { type: String, required: true },
   returnAssumptionHash: { type: String, match: /^[a-f0-9]{64}$/, default: null },
   returnAssumptionSource: { type: String, required: true },
-  profileVersion: { type: Number, default: null, min: 1 },
+  profileVersion: { type: Number, required: true, min: 1, validate: Number.isInteger },
   portfolioFingerprint: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
   recommendationFingerprint: { type: String, match: /^[a-f0-9]{64}$/, default: null },
   auditRecordId: { type: mongoose.Schema.Types.ObjectId, ref: 'AuditRecord', default: null },

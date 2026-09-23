@@ -30,6 +30,7 @@ import { verifyAuditChain } from '../services/auditChain.js';
 import { triggerPlanHealthCheck } from '../services/planHealthMonitor.js';
 import { requireFreshRecommendationState, createManualAllocationRevision } from '../services/recommendationState.js';
 import { buildCurrentRecommendationResponse } from '../services/recommendationResponse.js';
+import { assessAdvisoryStateBinding } from '../services/advisoryBinding.js';
 import { reachFinancialStateTestHook } from '../services/financialStateTestHooks.js';
 import {
   computeCoreRecommendation,
@@ -39,11 +40,6 @@ import {
 export { buildRecommendationCacheKey, canonicalAuditInputs } from '../services/coreRecommendation.js';
 
 const router = Router();
-
-function plainMarketAdjustment(value) {
-  if (!value) return null;
-  return typeof value.toObject === 'function' ? value.toObject({ flattenMaps: true }) : value;
-}
 
 export function recommendationPayloadFromSnapshot(snapshot) {
   if (snapshot?.recommendation && snapshot?.completion) return snapshot.recommendation;
@@ -66,28 +62,6 @@ function advisoryExplanationFromMetadata(metadata) {
   };
 }
 
-function advisoryBindingStatus(metadata, state) {
-  const required = [
-    'recommendationId', 'profileId', 'allocationRevision', 'allocationRevisionId',
-    'portfolioFingerprint', 'profileInputHash', 'recommendationPolicyVersion',
-    'regulatoryRuleVersion', 'returnAssumptionHash', 'profileVersion', 'generatedAt',
-  ];
-  if (!metadata || required.some(field => metadata[field] === null || metadata[field] === undefined || metadata[field] === '')) {
-    return { fresh: false, reason: 'ADVISORY_PROVENANCE_MISSING' };
-  }
-  const matches = String(metadata.recommendationId) === String(state.recommendation._id)
-    && String(metadata.profileId) === String(state.recommendation.profileId)
-    && Number(metadata.allocationRevision) === Number(state.allocationRevision.revision)
-    && String(metadata.allocationRevisionId) === String(state.allocationRevision._id)
-    && metadata.portfolioFingerprint === state.portfolioFingerprint
-    && metadata.profileInputHash === state.recommendation.profileInputHash
-    && metadata.recommendationPolicyVersion === state.recommendation.recommendationPolicyVersion
-    && metadata.regulatoryRuleVersion === state.recommendation.regulatoryRuleVersion
-    && metadata.returnAssumptionHash === state.allocationRevision.returnAssumptionHash
-    && Number(metadata.profileVersion) === Number(state.profileVersion);
-  return matches ? { fresh: true, reason: null } : { fresh: false, reason: 'ADVISORY_SOURCE_STATE_CHANGED' };
-}
-
 function buildAdvisoryResponse({ recommendationId, state, advisoryText, advisoryExplanation }) {
   const allocationRevision = state?.allocationRevision?.revision;
   const allocationRevisionId = state?.allocationRevision?._id;
@@ -104,6 +78,13 @@ function buildAdvisoryResponse({ recommendationId, state, advisoryText, advisory
 
   const binding = {
     recommendationId: String(recommendationId),
+    profileId: String(state.profile?._id || state.recommendation?.profileId || ''),
+    profile_version: Number(state.profileVersion),
+    profile_input_hash: state.recommendation?.profileInputHash || null,
+    recommendation_fingerprint: state.recommendationFingerprint || null,
+    recommendation_policy_version: state.recommendation?.recommendationPolicyVersion || null,
+    regulatory_rule_version: state.recommendation?.regulatoryRuleVersion || null,
+    return_assumption_hash: state.allocationRevision?.returnAssumptionHash || null,
     allocation_revision: Number(allocationRevision),
     allocation_revision_id: String(allocationRevisionId),
     portfolio_fingerprint: portfolioFingerprint,
@@ -230,6 +211,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
   try {
     const core = await computeCoreRecommendation({
       canonicalProfile: profile,
+      profileVersion: stored.version ?? 1,
       userId: req.user.userId,
       profileId: stored._id,
       correlationId: req.correlationId,
@@ -297,23 +279,34 @@ router.get('/current', verifyJWT, asyncHandler(async (req, res) => {
     if (error.code === 'RECOMMENDATION_STALE') {
       throw createError(error.status || 409, error.message, 'Regenerate recommendations before opening the dashboard.', {
         code: error.reasonCodes?.includes('REGULATORY_VERSION_UNAVAILABLE') ? 'REGULATORY_POLICY_UNAVAILABLE' : 'STALE_RECOMMENDATION',
-        reasonCodes: error.reasonCodes,
-        freshness: error.freshness,
-        provenance: error.provenance,
+        details: {
+          reasonCodes: error.reasonCodes,
+          freshness: error.freshness,
+          provenance: error.provenance,
+        },
       });
     }
-    if (['FINANCIAL_STATE_MISSING', 'FINANCIAL_STATE_POINTER_INVALID', 'ALLOCATION_REVISION_ID_MISMATCH', 'ALLOCATION_FINGERPRINT_MISMATCH'].includes(error.code)) {
+    if ([
+      'FINANCIAL_STATE_MISSING', 'FINANCIAL_STATE_POINTER_INVALID', 'CURRENT_RECOMMENDATION_MISMATCH',
+      'ALLOCATION_REVISION_MISSING', 'ALLOCATION_REVISION_ID_MISMATCH', 'ALLOCATION_REVISION_NUMBER_MISMATCH',
+      'ALLOCATION_REVISION_POINTER_STALE', 'PROFILE_HASH_MISMATCH', 'PROFILE_VERSION_MISMATCH',
+      'MODEL_VERSION_MISMATCH', 'RECOMMENDATION_POLICY_MISMATCH', 'REGULATORY_POLICY_MISMATCH',
+      'ASSUMPTION_HASH_MISMATCH', 'ALLOCATION_FINGERPRINT_MISMATCH', 'RECOMMENDATION_FINGERPRINT_MISMATCH',
+      'ALLOCATION_AUDIT_BINDING_MISSING', 'ALLOCATION_AUDIT_BINDING_MISMATCH', 'ALLOCATION_AUDIT_HASH_MISMATCH',
+      'ALLOCATION_PREVIOUS_REVISION_FINGERPRINT_MISMATCH', 'RECOMMENDATION_SUPERSEDED',
+    ].includes(error.code)) {
       throw createError(503, error.message, 'Authoritative financial state is temporarily unavailable.', {
         code: error.code,
-        reasonCodes: error.reasonCodes,
-        provenance: error.provenance,
+        details: { reasonCodes: error.reasonCodes, provenance: error.provenance },
       });
     }
     throw error;
   }
   const { recommendation, allocationRevision, freshness, provenance, portfolioFingerprint } = state;
-  const advisoryBinding = advisoryBindingStatus(recommendation.advisoryMetadata, state);
-  const currentAdvisoryExplanation = advisoryBinding.fresh
+  const advisoryBinding = assessAdvisoryStateBinding(recommendation.advisoryMetadata, state);
+  const currentAdvisoryExplanation = recommendation.advisoryMetadata?.status === 'PENDING'
+    ? { status: 'PENDING' }
+    : advisoryBinding.fresh
     ? advisoryExplanationFromMetadata(recommendation.advisoryMetadata)
     : { status: 'STALE', unavailable_facts: [advisoryBinding.reason] };
   const currentResponse = buildCurrentRecommendationResponse({
@@ -323,6 +316,7 @@ router.get('/current', verifyJWT, asyncHandler(async (req, res) => {
     freshness,
     provenance,
     portfolioFingerprint,
+    recommendationFingerprint: state.recommendationFingerprint,
     advisoryExplanation: currentAdvisoryExplanation,
     advisoryText: advisoryBinding.fresh ? recommendation.advisoryText : null,
   });
@@ -353,13 +347,12 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
   } catch (error) {
     throw createError(error.status || 409, error.message, 'Regenerate recommendations before generating advisory text.', {
       code: error.code || 'RECOMMENDATION_STALE',
-      reasonCodes: error.reasonCodes,
-      freshness: error.freshness,
+      details: { reasonCodes: error.reasonCodes, freshness: error.freshness },
     });
   }
   const currentAllocationRevision = recommendationState.allocationRevision?.revision || 1;
   const currentPortfolioFingerprint = recommendationState.portfolioFingerprint;
-  const advisoryBinding = advisoryBindingStatus(recommendation.advisoryMetadata, recommendationState);
+  const advisoryBinding = assessAdvisoryStateBinding(recommendation.advisoryMetadata, recommendationState);
 
   const isReady = advisoryBinding.fresh && (recommendation.advisoryMetadata?.status === 'READY'
     || recommendation.advisoryMetadata?.status === 'GROUNDED_EXPLANATION_AVAILABLE'
@@ -415,6 +408,7 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
             { 'advisoryMetadata.recommendationPolicyVersion': { $exists: false } },
             { 'advisoryMetadata.regulatoryRuleVersion': { $exists: false } },
             { 'advisoryMetadata.returnAssumptionHash': { $exists: false } },
+            { 'advisoryMetadata.recommendationFingerprint': { $exists: false } },
             { 'advisoryMetadata.profileVersion': { $exists: false } },
           ],
         },
@@ -434,6 +428,7 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
         'advisoryMetadata.recommendationPolicyVersion': recommendation.recommendationPolicyVersion || RECOMMENDATION_POLICY_VERSION,
         'advisoryMetadata.regulatoryRuleVersion': recommendation.regulatoryRuleVersion,
         'advisoryMetadata.returnAssumptionHash': recommendationState.allocationRevision.returnAssumptionHash,
+        'advisoryMetadata.recommendationFingerprint': recommendationState.recommendationFingerprint,
         'advisoryMetadata.profileVersion': recommendationState.profileVersion,
       },
     },
@@ -448,7 +443,7 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
       || (Boolean(current?.advisoryText) && !['PENDING', 'GENERATING', 'FAILED'].includes(current?.advisoryMetadata?.status));
 
     if (currentIsReady) {
-      const currentBinding = advisoryBindingStatus(current.advisoryMetadata, recommendationState);
+      const currentBinding = assessAdvisoryStateBinding(current.advisoryMetadata, recommendationState);
       if (!currentBinding.fresh) {
         throw createError(409, 'Advisory text describes an older allocation revision.', 'Refresh the advisory after reviewing the current portfolio.', {
           code: currentBinding.reason || 'ADVISORY_STALE',
@@ -499,7 +494,9 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
     });
     const suitability = assessSuitabilityRisk(profile);
     const recommendationSnapshot = recommendationPayloadFromSnapshot(recommendation.responseSnapshot);
-    const shapExplanation = recommendationSnapshot?.explanation || null;
+    const shapExplanation = Number(currentState.allocationRevision.revision) === 1
+      ? recommendationSnapshot?.explanation || null
+      : null;
 
     const advisory = await generateAdvisory({
       profile: buildLlmFinancialContext(profile, suitability),
@@ -535,6 +532,7 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
       recommendationPolicyVersion: recommendation.recommendationPolicyVersion || RECOMMENDATION_POLICY_VERSION,
       regulatoryRuleVersion: recommendation.regulatoryRuleVersion,
       returnAssumptionHash: currentState.allocationRevision.returnAssumptionHash,
+      recommendationFingerprint: currentState.recommendationFingerprint,
       profileVersion: currentState.profileVersion,
       claimToken,
     };
@@ -623,8 +621,7 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
   } catch (error) {
     throw createError(error.status || 409, error.message, 'Regenerate recommendations before changing weights.', {
       code: error.code || 'RECOMMENDATION_STALE',
-      reasonCodes: error.reasonCodes,
-      freshness: error.freshness,
+      details: { reasonCodes: error.reasonCodes, freshness: error.freshness },
     });
   }
   const recommendation = state.recommendation;
@@ -659,8 +656,6 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
   if (Math.abs(updatedInstruments.reduce((sum, item) => sum + item.allocationWeight, 0) - 1) > 0.001) {
     throw createError(400, 'Allocation weights must total 100%.', 'Invalid allocation weights.');
   }
-  const supersededAt = new Date();
-  const generationMarketAdjustment = plainMarketAdjustment(recommendation.marketAdjustment);
   let revisionResult;
   try {
     revisionResult = await createManualAllocationRevision({
@@ -699,13 +694,24 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
       allocationRevision: revisionResult.revision.revision,
     });
   });
+  const committedState = await requireFreshRecommendationState({
+    userId: req.user.userId,
+    profileId: stored._id,
+  });
+  if (String(committedState.recommendation._id) !== String(recommendation._id)
+      || String(committedState.allocationRevision._id) !== String(revisionResult.revision._id)) {
+    throw createError(409, 'The allocation changed before the response could be reconciled.', 'Refresh the current portfolio before continuing.', {
+      code: 'ALLOCATION_STATE_CHANGED',
+    });
+  }
   const currentResponse = buildCurrentRecommendationResponse({
-    profile,
-    recommendation,
-    allocationRevision: revisionResult.revision,
-    freshness: { ...state.freshness, allocationRevision: revisionResult.revision.revision },
-    provenance: { ...state.provenance, status: 'PERSISTED_REVISION' },
-    portfolioFingerprint: revisionResult.revision.portfolioFingerprint,
+    profile: committedState.profile,
+    recommendation: committedState.recommendation,
+    allocationRevision: committedState.allocationRevision,
+    freshness: committedState.freshness,
+    provenance: committedState.provenance,
+    portfolioFingerprint: committedState.portfolioFingerprint,
+    recommendationFingerprint: committedState.recommendationFingerprint,
     advisoryExplanation: { status: 'STALE', unavailable_facts: ['ADVISORY_SOURCE_STATE_CHANGED'] },
     advisoryText: null,
   });
@@ -713,14 +719,6 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
     ...currentResponse,
     status: 'success',
     message: 'Recommendation weights updated.',
-    generation_market_adjustment: generationMarketAdjustment,
-    market_adjustment: generationMarketAdjustment
-      ? {
-        ...generationMarketAdjustment,
-        currentAllocationSource: 'USER_REBALANCED',
-        supersededByManualRebalanceAt: supersededAt.toISOString(),
-      }
-      : null,
   });
 }));
 

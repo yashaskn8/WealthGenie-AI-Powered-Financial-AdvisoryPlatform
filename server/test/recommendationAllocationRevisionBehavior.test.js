@@ -19,6 +19,7 @@ function revisionData(revision = 1) {
     source: revision === 1 ? 'ORIGINAL_RECOMMENDATION' : 'USER_REBALANCED',
     instruments: [{ id: 'fixture-fund', allocationWeight: 1, nominalReturn: 8, riskScore: 2 }],
     profileInputHash: 'b'.repeat(64),
+    profileVersion: 1,
     modelVersion: 'immutable-test-model',
     recommendationPolicyVersion: 'immutable-test-policy',
     regulatoryRuleVersion: 'immutable-test-regulatory',

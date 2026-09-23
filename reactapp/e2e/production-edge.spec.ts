@@ -1,4 +1,5 @@
 import { test, expect, type BrowserContext, type Page } from '@playwright/test';
+import { expectCurrentFinancialBinding } from './financial-state-assertions';
 
 function csrfHeaders(context: BrowserContext, origin: string) {
   return context.cookies().then(cookies => {
@@ -63,14 +64,23 @@ test('production Nginx edge preserves browser auth and API lifecycle', async ({ 
   const completionBody = await completion.json();
   const profileId = completionBody.profile?.profileId;
   expect(profileId).toMatch(/^[0-9a-f]{24}$/i);
+  expectCurrentFinancialBinding(completionBody.recommendation, {
+    profileId,
+    profileVersion: Number(completionBody.profile.version),
+  });
 
   const currentRecommendation = await page.request.get(`/api/recommend/current?profileId=${profileId}`);
   expect(currentRecommendation.status()).toBe(200);
+  expectCurrentFinancialBinding(await currentRecommendation.json(), {
+    profileId,
+    profileVersion: Number(completionBody.profile.version),
+  });
 
   await page.reload();
   await expect(page.getByTestId('nav-profile')).toBeVisible();
 
   const logout = await page.request.post('/api/auth/logout', {
+    data: {},
     headers: await csrfHeaders(context, origin),
   });
   expect(logout.status()).toBe(200);
