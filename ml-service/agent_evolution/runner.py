@@ -14,6 +14,25 @@ def run_gepa(*, optimizer, student, trainset, valset, metric):
     return optimizer.optimize(student, trainset, valset, metric)
 
 
+def _configure_gepa_cache(dspy) -> None:
+    """Keep GEPA response caching in memory only; disk cache uses pickle."""
+    configure_cache = getattr(dspy, 'configure_cache', None)
+    if not callable(configure_cache):
+        error = RuntimeError('DSPy does not expose the required safe cache configuration API')
+        error.code = 'GEPA_CACHE_CONFIGURATION_UNAVAILABLE'
+        raise error
+    try:
+        configure_cache(
+            enable_disk_cache=False,
+            enable_memory_cache=True,
+            restrict_pickle=True,
+        )
+    except Exception as exc:
+        error = RuntimeError('DSPy GEPA cache could not be restricted to safe in-memory storage')
+        error.code = 'GEPA_CACHE_CONFIGURATION_FAILED'
+        raise error from exc
+
+
 class FixtureGepaProposalProvider:
     """Deterministic contract provider used by tests and offline CI only."""
 
@@ -46,8 +65,9 @@ def _load_live_dspy(document: dict[str, Any]):
         error = RuntimeError('Live GEPA requires task/reflection model identifiers and AGENT_EVOLUTION_MODEL_API_KEY or DSPY_LM_API_KEY.')
         error.code = 'LIVE_GEPA_CREDENTIAL_REQUIRED'
         raise error
-    task_lm = dspy.LM(task_model, api_key=api_key)
-    reflection_lm = dspy.LM(reflection_model, api_key=api_key)
+    _configure_gepa_cache(dspy)
+    task_lm = dspy.LM(task_model, api_key=api_key, cache=False)
+    reflection_lm = dspy.LM(reflection_model, api_key=api_key, cache=False)
     dspy.configure(lm=task_lm)
     return dspy, reflection_lm
 

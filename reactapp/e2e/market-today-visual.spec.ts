@@ -1,4 +1,10 @@
 import { test, expect } from '@playwright/test';
+import {
+  currentFinancialState,
+  installUnexpectedApiGuard,
+  mockTaxPolicyCatalog,
+  mockUnavailableSimulation,
+} from './fixtures/currentFinancialState.js';
 
 const ARTIFACT_DIR = 'test-results';
 
@@ -68,8 +74,39 @@ const MARKET_CONTEXT_MOCK = {
   },
 };
 
+let unexpectedApiRequests: string[] = [];
+const VISUAL_INSTRUMENTS = [{
+  id: 'ppf',
+  name: 'Public Provident Fund (PPF)',
+  type: 'PPF',
+  assetClass: 'Sovereign',
+  riskLevel: 'Low',
+  allocationWeight: 1,
+  allocation_pct: 100,
+  nominalReturn: 7.1,
+  effectiveYield: 7.1,
+  riskScore: 1,
+  lockIn: 15,
+  expenseRatio: 0,
+  score: 85,
+  tags: ['Government', 'Sovereign'],
+  returnBasis: 'PRE_TAX_NOMINAL',
+  postTaxReturn: null,
+  scoreFactors: { goalFit: 90, liquidity: 30 },
+}];
+const VISUAL_CURRENT_STATE = currentFinancialState({
+  profileId: '64b000000000000000000001',
+  profileVersion: 1,
+  recommendationId: '64b0000000000000000000b1',
+  instruments: VISUAL_INSTRUMENTS,
+  monthlyAllocations: { ppf: 30000 },
+});
+
 test.describe('Market Today Card Visual & Responsive Review', () => {
   test.beforeEach(async ({ page }) => {
+    unexpectedApiRequests = await installUnexpectedApiGuard(page);
+    await mockTaxPolicyCatalog(page);
+    await mockUnavailableSimulation(page, 'projection/compare');
     page.on('console', msg => console.log('BROWSER CONSOLE:', msg.text()));
     page.on('pageerror', err => console.log('BROWSER PAGEERROR:', err.message));
 
@@ -80,16 +117,6 @@ test.describe('Market Today Card Visual & Responsive Review', () => {
       } catch {
         // ignore
       }
-    });
-
-    // ── 0b. Catch-all fallback registered FIRST so specific routes registered AFTERWARDS take priority (Playwright LIFO) ──
-    await page.route('**/api/**', async route => {
-      console.log(`[CATCH-ALL API] ${route.request().method()} ${route.request().url()}`);
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({}),
-      });
     });
 
     // ── 1. Auth session: GET /api/auth/session ──
@@ -126,44 +153,13 @@ test.describe('Market Today Card Visual & Responsive Review', () => {
       });
     });
 
-    // ── 3. Recommendations: POST /api/recommend ──
-    // Must satisfy assertBackendRecommendationInstrument & assertKnownBackendInstrumentTypes:
-    // id: 'ppf', type: 'PPF', assetClass, effectiveYield === nominalReturn,
-    // returnBasis: 'PRE_TAX_NOMINAL', postTaxReturn: null, expenseRatio: 0
-    await page.route('**/api/recommend', async route => {
+    // The dashboard restores the current canonical state; these visual-only
+    // tests do not exercise a recommendation-generation POST.
+    await page.route('**/api/recommend/current**', async route => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({
-          recommendationId: 'rec_test_001',
-          instruments: [
-            {
-              id: 'ppf',
-              name: 'Public Provident Fund (PPF)',
-              type: 'PPF',
-              assetClass: 'Sovereign',
-              riskLevel: 'Low',
-              allocationWeight: 1.0,
-              allocation_pct: 100,
-              nominalReturn: 7.1,
-              effectiveYield: 7.1,
-              riskScore: 1,
-              lockIn: 15,
-              expenseRatio: 0,
-              score: 85,
-              tags: ['Government', 'Sovereign'],
-              returnBasis: 'PRE_TAX_NOMINAL',
-              postTaxReturn: null,
-              scoreFactors: { goalFit: 90, liquidity: 30 },
-            },
-          ],
-          dashboard_projection: {
-            instrument_monthly_allocations: { ppf: 30000 },
-          },
-          explanation: 'Balanced beginner growth portfolio.',
-          advisory_text: 'Your portfolio is well-suited for your profile.',
-          advisory_explanation: { status: 'READY' },
-        }),
+        body: JSON.stringify(VISUAL_CURRENT_STATE),
       });
     });
 
@@ -173,6 +169,7 @@ test.describe('Market Today Card Visual & Responsive Review', () => {
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
+          ...VISUAL_CURRENT_STATE,
           advisory_text: 'Your portfolio is well-suited for your profile.',
           advisory_explanation: { status: 'READY' },
         }),
@@ -277,6 +274,10 @@ test.describe('Market Today Card Visual & Responsive Review', () => {
         }),
       });
     });
+  });
+
+  test.afterEach(() => {
+    expect(unexpectedApiRequests).toEqual([]);
   });
 
   test('visual appearance, compactness, and expand/collapse at desktop 1440px', async ({ page }) => {

@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from main import app
 from llm.config import LLMConfig
 from llm.providers.api_provider import APILLMProvider
+from llm.providers.checkpoint_safety import validate_checkpoint_shard_indexes
 from llm.providers.huggingface_provider import HuggingFaceLLMProvider
 from llm.providers.local_loader import LocalLLMLoader
 from llm.providers.mock_provider import MockLLMProvider
@@ -122,6 +123,137 @@ def test_huggingface_provider_disables_remote_code_execution(monkeypatch, tmp_pa
     assert calls["model"]["use_safetensors"] is True
     assert calls["model"]["dtype"] is not None
     assert "torch_dtype" not in calls["model"]
+
+
+def test_checkpoint_index_rejects_paths_outside_model_directory(tmp_path):
+    import json
+
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"layer.weight": "../outside.safetensors"}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="escapes the checkpoint directory"):
+        validate_checkpoint_shard_indexes(checkpoint)
+
+
+def test_checkpoint_index_rejects_absolute_shard_paths(tmp_path):
+    import json
+
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    index = checkpoint / "model.safetensors.index.json"
+    index.write_text(json.dumps({"weight_map": {"layer.weight": str(tmp_path / "outside.safetensors")}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="absolute shard path"):
+        validate_checkpoint_shard_indexes(checkpoint)
+
+
+def test_checkpoint_index_rejects_symlinked_parent_paths(tmp_path):
+    import json
+
+    checkpoint = tmp_path / "checkpoint"
+    outside = tmp_path / "outside"
+    checkpoint.mkdir()
+    outside.mkdir()
+    (outside / "weights.safetensors").write_bytes(b"test")
+    try:
+        (checkpoint / "linked-dir").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+    index = checkpoint / "model.safetensors.index.json"
+    index.write_text(json.dumps({"weight_map": {"layer.weight": "linked-dir/weights.safetensors"}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="symlinked directory"):
+        validate_checkpoint_shard_indexes(checkpoint)
+
+
+def test_checkpoint_index_rejects_index_symlinks_outside_checkpoint(tmp_path):
+    import json
+
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    external_index = tmp_path / "external.index.json"
+    external_index.write_text(json.dumps({"weight_map": {"layer.weight": "weights.safetensors"}}), encoding="utf-8")
+    try:
+        (checkpoint / "model.safetensors.index.json").symlink_to(external_index)
+    except OSError as exc:
+        pytest.skip(f"file symlinks are unavailable: {exc}")
+
+    with pytest.raises(ValueError, match="does not target the Hugging Face repository blob store"):
+        validate_checkpoint_shard_indexes(checkpoint)
+
+
+def test_checkpoint_index_allows_trusted_huggingface_blob_symlinks(tmp_path):
+    import json
+
+    repository = tmp_path / "models--wealthgenie--fixture"
+    checkpoint = repository / "snapshots" / "fixture-revision"
+    blob_directory = repository / "blobs"
+    checkpoint.mkdir(parents=True)
+    blob_directory.mkdir()
+    (blob_directory / "index-blob").write_text(
+        json.dumps({"weight_map": {"layer.weight": "weights.safetensors"}}),
+        encoding="utf-8",
+    )
+    (blob_directory / "weights-blob").write_bytes(b"fixture")
+    try:
+        (checkpoint / "model.safetensors.index.json").symlink_to(blob_directory / "index-blob")
+        (checkpoint / "weights.safetensors").symlink_to(blob_directory / "weights-blob")
+    except OSError as exc:
+        pytest.skip(f"file symlinks are unavailable: {exc}")
+
+    validate_checkpoint_shard_indexes(checkpoint)
+
+
+def test_checkpoint_index_rejects_non_regular_shards(tmp_path):
+    import json
+    import os
+
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO creation is unavailable on this platform")
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    os.mkfifo(checkpoint / "blocked-shard")
+    (checkpoint / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"layer.weight": "blocked-shard"}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="not a regular file"):
+        validate_checkpoint_shard_indexes(checkpoint)
+
+
+def test_huggingface_provider_rejects_unsafe_index_before_model_loading(monkeypatch, tmp_path):
+    import json
+    import sys
+    import types
+
+    calls = []
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"layer.weight": "../../outside.safetensors"}}),
+        encoding="utf-8",
+    )
+    fake_transformers = types.ModuleType("transformers")
+    fake_transformers.AutoTokenizer = types.SimpleNamespace(
+        from_pretrained=lambda *_args, **_kwargs: calls.append("tokenizer"),
+    )
+    fake_transformers.AutoModelForCausalLM = types.SimpleNamespace(
+        from_pretrained=lambda *_args, **_kwargs: calls.append("model"),
+    )
+    fake_hub = types.ModuleType("huggingface_hub")
+    fake_hub.snapshot_download = lambda **_kwargs: str(tmp_path)
+    fake_torch = types.ModuleType("torch")
+    fake_torch.float32 = "float32"
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    provider = HuggingFaceLLMProvider(model_id=str(tmp_path), device="cpu", load_weights=True)
+
+    assert not provider.is_healthy()
+    assert calls == []
 
 
 def test_local_llm_loader():

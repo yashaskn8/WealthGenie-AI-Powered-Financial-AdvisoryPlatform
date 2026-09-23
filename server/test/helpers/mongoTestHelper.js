@@ -137,6 +137,12 @@ async function tryMongoMemoryServer() {
  * @returns {Promise<{ uri: string, mechanism: string, stop: Function }>}
  */
 export async function setupTestDatabase({ requireReplicaSet = false } = {}) {
+  if (process.env.MONGO_TEST_PARTITION === 'NO_MONGO') {
+    const error = new Error('A MongoDB-backed test ran inside the enforced no-Mongo test partition.');
+    error.code = 'MONGO_TEST_PARTITION_VIOLATION';
+    throw error;
+  }
+
   // If already connected and provisioned in this process, reuse
   if (mongoose.connection.readyState === 1 && activeUri) {
     if (requireReplicaSet) await assertReplicaSet();

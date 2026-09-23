@@ -38,6 +38,10 @@ const LandingPage = lazy(() => import('./LandingPage'));
 // eslint-disable-next-line react-refresh/only-export-components
 export const ADVISORY_RETRY_DELAYS_MS = [1000, 1500];
 
+function profileOperationIdentity({ profileId, profileVersion, profileKey }) {
+  return JSON.stringify([profileId || null, Number(profileVersion ?? 1), profileKey || '']);
+}
+
 // eslint-disable-next-line react-refresh/only-export-components
 export function wait(ms, signal) {
   return new Promise((resolve, reject) => {
@@ -166,6 +170,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
   const [isRecommendationLoading, setIsRecommendationLoading] = useState(true);
   const [isAdvisoryLoading, setIsAdvisoryLoading] = useState(false);
   const [profileReloadGeneration, setProfileReloadGeneration] = useState(0);
+  const skipProfileRestoreRef = useRef(null);
   const operationRef = useRef(0);
   const controllerRef = useRef(null);
   const backendRecsRef = useRef(backendRecs);
@@ -213,6 +218,11 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
     && activeProfileRef.current.profileKey === token.profileKey);
 
   useEffect(() => {
+    const effectIdentity = profileOperationIdentity(activeProfileRef.current);
+    if (skipProfileRestoreRef.current === effectIdentity) {
+      skipProfileRestoreRef.current = null;
+      return undefined;
+    }
     const token = beginOperation();
     const { controller } = token;
     const fetchBackendData = async () => {
@@ -487,17 +497,25 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
     }
   };
 
-  const handleAuthoritativeRecompute = async () => {
-    if (!profileId) return;
+  const handleAuthoritativeRecompute = async (profile = userProfile) => {
+    const targetProfileId = profile?.profileId || profile?._id;
+    if (!targetProfileId) return;
+    const targetProfileVersion = Number(profile.version ?? 1);
+    const targetProfileKey = financialProfileKey(profile);
+    activeProfileRef.current = {
+      profileId: targetProfileId,
+      profileVersion: targetProfileVersion,
+      profileKey: targetProfileKey,
+    };
     const token = beginOperation();
     setIsRecommendationLoading(true);
     setIsAdvisoryLoading(false);
     writeBackendRecs(null);
     setBackendFallback(null);
     try {
-      const recResponse = await api.getRecommendations(profileId, { retries: 0, signal: token.controller.signal });
+      const recResponse = await api.getRecommendations(targetProfileId, { retries: 0, signal: token.controller.signal });
       if (!operationIsCurrent(token)) return;
-      if (!matchesProfileState(recResponse, userProfile)
+      if (!matchesProfileState(recResponse, profile)
           || !isFinancialCalculationFresh(recResponse?.calculation_freshness)) {
         throw new Error('The server did not confirm the complete current financial-state binding for this profile.');
       }
@@ -553,6 +571,22 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
       setIsRecommendationLoading(false);
       setIsAdvisoryLoading(false);
     }
+  };
+
+  const handleCommittedProfileUpdate = (updatedProfile) => {
+    const updatedProfileId = updatedProfile?.profileId || updatedProfile?._id;
+    if (!updatedProfileId) {
+      onProfileUpdate(updatedProfile);
+      return;
+    }
+    const profileKey = financialProfileKey(updatedProfile);
+    skipProfileRestoreRef.current = profileOperationIdentity({
+      profileId: updatedProfileId,
+      profileVersion: updatedProfile.version,
+      profileKey,
+    });
+    onProfileUpdate(updatedProfile);
+    void handleAuthoritativeRecompute(updatedProfile);
   };
 
   const handleProfileChangeStart = () => {
@@ -680,7 +714,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
           <ErrorBoundary>
             <ProfileEditor
               userProfile={userProfile}
-              onProfileUpdate={onProfileUpdate}
+              onProfileUpdate={handleCommittedProfileUpdate}
               onProfileChangeStart={handleProfileChangeStart}
               onProfileChangeFailure={handleProfileChangeFailure}
             />

@@ -1,4 +1,10 @@
 import { test, expect } from '@playwright/test';
+import {
+  currentFinancialState,
+  installUnexpectedApiGuard,
+  mockTaxPolicyCatalog,
+  mockUnavailableSimulation,
+} from './fixtures/currentFinancialState.js';
 
 const MARKET_CONTEXT_MOCK = {
   status: 'MARKET_CONTEXT_AVAILABLE',
@@ -53,8 +59,68 @@ const MARKET_CONTEXT_MOCK = {
   },
 };
 
+let unexpectedApiRequests: string[] = [];
+const NAV_INSTRUMENTS = [
+  {
+    id: 'ppf',
+    name: 'Public Provident Fund (PPF)',
+    type: 'PPF',
+    assetClass: 'Sovereign',
+    riskLevel: 'Low',
+    allocationWeight: 0.6,
+    allocation_pct: 60,
+    nominalReturn: 7.1,
+    effectiveYield: 7.1,
+    riskScore: 1,
+    lockIn: 15,
+    expenseRatio: 0,
+    score: 88,
+    tags: ['Government', 'Sovereign'],
+    returnBasis: 'PRE_TAX_NOMINAL',
+    postTaxReturn: null,
+    scoreFactors: { goalFit: 90, liquidity: 30 },
+  },
+  {
+    id: 'index_mf',
+    name: 'Nifty 50 Index Fund',
+    type: 'Index_MF',
+    assetClass: 'Equity',
+    riskLevel: 'Medium',
+    allocationWeight: 0.4,
+    allocation_pct: 40,
+    nominalReturn: 12,
+    effectiveYield: 12,
+    riskScore: 3,
+    lockIn: 0,
+    expenseRatio: 0.002,
+    score: 82,
+    tags: ['Large Cap', 'Equity'],
+    returnBasis: 'PRE_TAX_NOMINAL',
+    postTaxReturn: null,
+    scoreFactors: { goalFit: 85, liquidity: 90 },
+  },
+];
+const NAV_CURRENT_STATE = currentFinancialState({
+  profileId: '64b000000000000000000002',
+  profileVersion: 1,
+  recommendationId: '64b0000000000000000000b2',
+  instruments: NAV_INSTRUMENTS,
+  monthlyAllocations: { ppf: 15000, index_mf: 10000 },
+});
+
 test.describe('Beginner-First Navigation Architecture E2E Journey', () => {
   test.beforeEach(async ({ page }) => {
+    unexpectedApiRequests = await installUnexpectedApiGuard(page);
+    await mockTaxPolicyCatalog(page);
+    await page.route('**/api/goals', async route => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ goals: [] }),
+      });
+    });
+    await mockUnavailableSimulation(page, 'projection/custom-portfolio');
+    await mockUnavailableSimulation(page, 'montecarlo/portfolio');
     // 0. Disable onboarding modal so it does not intercept clicks
     await page.addInitScript(() => {
       try {
@@ -62,15 +128,6 @@ test.describe('Beginner-First Navigation Architecture E2E Journey', () => {
       } catch {
         // ignore
       }
-    });
-
-    // 0b. Catch-all registered FIRST (LIFO matching in Playwright)
-    await page.route('**/api/**', async route => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({}),
-      });
     });
 
     // 1. Auth session
@@ -107,60 +164,13 @@ test.describe('Beginner-First Navigation Architecture E2E Journey', () => {
       });
     });
 
-    // 3. Recommendations
-    await page.route('**/api/recommend', async route => {
+    // Dashboard restore uses GET current; this navigation suite does not
+    // perform a recommendation generation.
+    await page.route('**/api/recommend/current**', async route => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({
-          recommendationId: 'rec_nav_001',
-          instruments: [
-            {
-              id: 'ppf',
-              name: 'Public Provident Fund (PPF)',
-              type: 'PPF',
-              assetClass: 'Sovereign',
-              riskLevel: 'Low',
-              allocationWeight: 0.6,
-              allocation_pct: 60,
-              nominalReturn: 7.1,
-              effectiveYield: 7.1,
-              riskScore: 1,
-              lockIn: 15,
-              expenseRatio: 0,
-              score: 88,
-              tags: ['Government', 'Sovereign'],
-              returnBasis: 'PRE_TAX_NOMINAL',
-              postTaxReturn: null,
-              scoreFactors: { goalFit: 90, liquidity: 30 },
-            },
-            {
-              id: 'index_mf',
-              name: 'Nifty 50 Index Fund',
-              type: 'Index_MF',
-              assetClass: 'Equity',
-              riskLevel: 'Medium',
-              allocationWeight: 0.4,
-              allocation_pct: 40,
-              nominalReturn: 12.0,
-              effectiveYield: 12.0,
-              riskScore: 3,
-              lockIn: 0,
-              expenseRatio: 0.002,
-              score: 82,
-              tags: ['Large Cap', 'Equity'],
-              returnBasis: 'PRE_TAX_NOMINAL',
-              postTaxReturn: null,
-              scoreFactors: { goalFit: 85, liquidity: 90 },
-            },
-          ],
-          dashboard_projection: {
-            instrument_monthly_allocations: { ppf: 15000, index_mf: 10000 },
-          },
-          explanation: 'Balanced beginner growth portfolio.',
-          advisory_text: 'Your portfolio is ready.',
-          advisory_explanation: { status: 'READY' },
-        }),
+        body: JSON.stringify(NAV_CURRENT_STATE),
       });
     });
 
@@ -242,6 +252,10 @@ test.describe('Beginner-First Navigation Architecture E2E Journey', () => {
         }),
       });
     });
+  });
+
+  test.afterEach(() => {
+    expect(unexpectedApiRequests).toEqual([]);
   });
 
   test('full beginner journey: Home → Where to Invest → Taxes → Progress → Advanced with browser history', async ({ page }) => {

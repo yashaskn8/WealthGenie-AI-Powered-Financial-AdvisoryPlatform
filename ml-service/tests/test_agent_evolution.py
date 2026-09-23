@@ -5,7 +5,7 @@ import pytest
 
 from agent_evolution.feedback import build_feedback
 from agent_evolution.gepa_optimizer import DspyGepaOptimizer, GEPA_VERSION
-from agent_evolution.runner import FixtureGepaProposalProvider
+from agent_evolution.runner import FixtureGepaProposalProvider, _configure_gepa_cache, _load_live_dspy
 from agent_evolution.schemas import EvolutionBudget, validate_gepa_input, validate_optimizer_dataset, validate_proposal_output
 from agent_evolution.security import assert_evolution_surface, assert_prompt_candidate_safe
 
@@ -69,6 +69,75 @@ def test_dspy_gepa_adapter_invokes_the_real_gepa_entrypoint(monkeypatch):
     assert calls['constructor']['candidate_selection_strategy'] == 'pareto'
     assert calls['compile'][1:] == (['train'], ['validation'])
     assert compiled.named_predictors()[0][1].signature.instructions.startswith('optimized')
+
+
+def test_live_dspy_disables_disk_cache_before_constructing_models(monkeypatch):
+    calls = []
+
+    def configure_cache(**kwargs):
+        calls.append(('cache', kwargs))
+
+    def make_lm(model, **kwargs):
+        calls.append(('lm', model, kwargs))
+        return {'model': model, **kwargs}
+
+    fake_dspy = SimpleNamespace(
+        configure_cache=configure_cache,
+        LM=make_lm,
+        configure=lambda **kwargs: calls.append(('configure', kwargs)),
+    )
+    monkeypatch.setitem(sys.modules, 'dspy', fake_dspy)
+    monkeypatch.setenv('AGENT_EVOLUTION_TASK_MODEL', 'task-model')
+    monkeypatch.setenv('AGENT_EVOLUTION_REFLECTION_MODEL', 'reflection-model')
+    monkeypatch.setenv('AGENT_EVOLUTION_MODEL_API_KEY', 'test-only-key')
+
+    loaded_dspy, reflection_lm = _load_live_dspy({'optimizer': {}})
+
+    assert loaded_dspy is fake_dspy
+    assert calls[0] == ('cache', {
+        'enable_disk_cache': False,
+        'enable_memory_cache': True,
+        'restrict_pickle': True,
+    })
+    assert calls[1] == ('lm', 'task-model', {'api_key': 'test-only-key', 'cache': False})
+    assert calls[2] == ('lm', 'reflection-model', {'api_key': 'test-only-key', 'cache': False})
+    assert calls[3][0] == 'configure'
+    assert reflection_lm == {'model': 'reflection-model', 'api_key': 'test-only-key', 'cache': False}
+
+
+def test_installed_dspy_cache_is_memory_only(monkeypatch, tmp_path):
+    dspy = pytest.importorskip('dspy')
+    disk_cache_dir = tmp_path / 'dspy-cache-must-not-exist'
+    configure_cache = dspy.configure_cache
+
+    def configure_with_test_directory(**kwargs):
+        return configure_cache(**kwargs, disk_cache_dir=str(disk_cache_dir))
+
+    monkeypatch.setattr(dspy, 'configure_cache', configure_with_test_directory)
+    _configure_gepa_cache(dspy)
+
+    assert dspy.cache.enable_disk_cache is False
+    assert dspy.cache.enable_memory_cache is True
+    assert dspy.cache.disk_cache == {}
+    request = {'model': 'fixture', 'prompt': 'safe test-only query'}
+    dspy.cache.put(request, {'answer': 'memory only'})
+    assert dspy.cache.get(request) == {'answer': 'memory only'}
+    assert not disk_cache_dir.exists()
+
+
+def test_dspy_cache_configuration_fails_closed_when_safe_api_is_unavailable():
+    with pytest.raises(RuntimeError) as error:
+        _configure_gepa_cache(SimpleNamespace())
+    assert error.value.code == 'GEPA_CACHE_CONFIGURATION_UNAVAILABLE'
+
+
+def test_dspy_cache_configuration_fails_closed_when_restrictions_cannot_be_applied():
+    def rejected_configuration(**_kwargs):
+        raise TypeError('unsupported cache option')
+
+    with pytest.raises(RuntimeError) as error:
+        _configure_gepa_cache(SimpleNamespace(configure_cache=rejected_configuration))
+    assert error.value.code == 'GEPA_CACHE_CONFIGURATION_FAILED'
 
 
 def test_gepa_bridge_schema_is_holdout_and_surface_safe():

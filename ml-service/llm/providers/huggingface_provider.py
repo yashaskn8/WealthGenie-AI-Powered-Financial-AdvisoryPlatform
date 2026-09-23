@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Generator, Optional, Any
 
 from llm.providers.base import BaseLLMProvider
+from llm.providers.checkpoint_safety import validate_checkpoint_shard_indexes
 from llm.schema import (
     LLMGenerateRequest,
     LLMGenerateResponse,
@@ -94,6 +95,9 @@ class HuggingFaceLLMProvider(BaseLLMProvider):
 
             # Passing the resolved directory (rather than a repository ID) avoids
             # tokenizer metadata network calls after a snapshot is already cached.
+            # Transformers may delegate sharded checkpoint loading to Accelerate;
+            # validate index-supplied paths before either tokenizer or model loads.
+            validate_checkpoint_shard_indexes(resolved_model_path)
             self.tokenizer = AutoTokenizer.from_pretrained(
                 resolved_model_path,
                 local_files_only=True,

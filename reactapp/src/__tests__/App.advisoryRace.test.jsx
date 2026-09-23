@@ -30,13 +30,22 @@ vi.mock('../context/AuthContext', () => ({
 }));
 
 vi.mock('../components/ProfilePage', async () => {
-  const { cloneElement } = await import('react');
+  const ReactModule = await import('react');
+  function MockProfilePage({ children }) {
+    const [profile, setProfile] = ReactModule.useState(appMocks.profile);
+    const [recommendation, setRecommendation] = ReactModule.useState(appMocks.initialRecommendation);
+    ReactModule.useEffect(() => setProfile(appMocks.profile), [appMocks.profile]);
+    return ReactModule.cloneElement(children, {
+      userProfile: profile,
+      onProfileUpdate: updated => {
+        setProfile(updated);
+        setRecommendation(null);
+      },
+      initialRecommendation: recommendation,
+    });
+  }
   return {
-    default: ({ children }) => cloneElement(children, {
-      userProfile: appMocks.profile,
-      onProfileUpdate: vi.fn(),
-      initialRecommendation: appMocks.initialRecommendation,
-    }),
+    default: MockProfilePage,
   };
 });
 
@@ -59,21 +68,52 @@ vi.mock('../components/ProgressHub', async () => {
   };
 });
 
-vi.mock('../components/Sidebar', () => ({ default: () => null }));
+vi.mock('../components/Sidebar', async () => {
+  const ReactModule = await import('react');
+  return {
+    default: ({ onNavigate }) => ReactModule.createElement('nav', null,
+      ReactModule.createElement('button', { type: 'button', onClick: () => onNavigate('home') }, 'Test home'),
+      ReactModule.createElement('button', { type: 'button', onClick: () => onNavigate('account') }, 'Test account')),
+  };
+});
 vi.mock('../components/GenieChat', () => ({ default: () => null }));
 vi.mock('../components/ErrorBoundary', () => ({ default: ({ children }) => children }));
 vi.mock('../RecommendationDashboard', async () => {
   const ReactModule = await import('react');
   return {
-    default: ({ recommendationMeta, onNavigate }) => ReactModule.createElement(
+    default: ({ recommendationMeta, onNavigate, fallbackNotice, onRecalculate, userProfile }) => ReactModule.createElement(
       'section',
       null,
       ReactModule.createElement('output', { 'data-testid': 'allocation-revision' }, String(recommendationMeta?.allocation_revision ?? 'missing')),
       ReactModule.createElement('output', { 'data-testid': 'portfolio-fingerprint' }, recommendationMeta?.portfolio_fingerprint ?? 'missing'),
+      ReactModule.createElement('output', { 'data-testid': 'dashboard-profile-version' }, String(userProfile?.version ?? 'missing')),
+      ReactModule.createElement('output', { 'data-testid': 'recommendation-fallback' }, fallbackNotice?.message ?? ''),
       ReactModule.createElement('output', { 'data-testid': 'advisory-status' }, recommendationMeta?.advisory_explanation?.status ?? 'missing'),
       ReactModule.createElement('output', { 'data-testid': 'advisory-text' }, recommendationMeta?.advisory_text ?? ''),
+      ReactModule.createElement('button', { type: 'button', onClick: () => void onRecalculate() }, 'Retry recompute'),
       ReactModule.createElement('button', { type: 'button', onClick: () => onNavigate('progress') }, 'Open progress'),
       ReactModule.createElement('button', { type: 'button', onClick: () => onNavigate('plan') }, 'Open plan'),
+    ),
+  };
+});
+vi.mock('../ProfileEditor', async () => {
+  const ReactModule = await import('react');
+  return {
+    default: ({ userProfile, onProfileUpdate, onProfileChangeStart }) => ReactModule.createElement(
+      'section',
+      null,
+      ReactModule.createElement('output', { 'data-testid': 'editor-profile-version' }, String(userProfile?.version ?? 'missing')),
+      ReactModule.createElement('button', {
+        type: 'button',
+        onClick: () => {
+          onProfileChangeStart?.();
+          onProfileUpdate({
+            ...userProfile,
+            version: Number(userProfile.version) + 1,
+            monthly_savings: Number(userProfile.monthly_savings) + 1000,
+          });
+        },
+      }, 'Save next profile version'),
     ),
   };
 });
@@ -486,5 +526,130 @@ describe('deferred advisory allocation binding', () => {
     expect(screen.getByTestId('advisory-text')).toHaveTextContent('Version 2 advisory');
     expect(screen.getByTestId('advisory-status')).toHaveTextContent('READY');
     view.unmount();
+  });
+});
+
+describe('profile edits trigger one authoritative recommendation recompute', () => {
+  beforeEach(() => {
+    appMocks.profile = {
+      profileId,
+      version: 1,
+      age: 34,
+      monthly_take_home: 100000,
+      monthly_savings: 25000,
+      investment_goals: ['Wealth Growth'],
+      investment_horizon_years: 10,
+      risk_tolerance: 'Moderate',
+    };
+    appMocks.initialRecommendation = {
+      ...revision4,
+      instruments: [],
+      advisory_text: 'Version 1 advisory',
+      advisory_explanation: { status: 'READY' },
+    };
+    appMocks.fetchAdvisory.mockReset();
+    appMocks.fetchAdvisory.mockResolvedValue({});
+    appMocks.getCurrentRecommendation.mockReset();
+    appMocks.getCurrentRecommendation.mockResolvedValue(revision4);
+    appMocks.getRecommendations.mockReset();
+    appMocks.updateRecommendationWeights.mockReset();
+    window.history.replaceState({}, '', '/profile?page=account');
+    vi.stubGlobal('alert', vi.fn());
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it('clears v1 immediately, recomputes v2 once, and ignores a late v2 after v3 is saved', async () => {
+    const pending = [];
+    appMocks.getRecommendations.mockImplementation((id, options) => new Promise(resolve => {
+      pending.push({ id, signal: options.signal, resolve });
+    }));
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Save next profile version' }));
+    await waitFor(() => expect(pending).toHaveLength(1));
+    expect(pending[0].id).toBe(profileId);
+    expect(appMocks.getRecommendations).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Test home' }));
+    expect(screen.getByTestId('dashboard-profile-version')).toHaveTextContent('2');
+    expect(screen.getByTestId('allocation-revision')).toHaveTextContent('missing');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Test account' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Save next profile version' }));
+    await waitFor(() => expect(pending).toHaveLength(2));
+    expect(pending[0].signal.aborted).toBe(true);
+    expect(appMocks.getRecommendations).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Test home' }));
+    await act(async () => pending[0].resolve({
+      ...currentState(1, {
+        stateId: '64b000000000000000000031',
+        allocationRevisionId: '64b000000000000000000032',
+        recommendationId: '64b000000000000000000033',
+        profileVersion: 2,
+        profileInputHash: nextProfileInputHash,
+      }),
+      instruments: [],
+      advisory_text: 'Late v2 advisory',
+      advisory_explanation: { status: 'READY' },
+    }));
+    expect(screen.getByTestId('dashboard-profile-version')).toHaveTextContent('3');
+    expect(screen.getByTestId('allocation-revision')).toHaveTextContent('missing');
+
+    await act(async () => pending[1].resolve({
+      ...currentState(1, {
+        stateId: '64b000000000000000000034',
+        allocationRevisionId: '64b000000000000000000035',
+        recommendationId: '64b000000000000000000036',
+        profileVersion: 3,
+        profileInputHash: '8'.repeat(64),
+      }),
+      instruments: [],
+      advisory_text: 'Current v3 advisory',
+      advisory_explanation: { status: 'READY' },
+    }));
+    await waitFor(() => {
+      expect(screen.getByTestId('allocation-revision')).toHaveTextContent('1');
+      expect(screen.getByTestId('dashboard-profile-version')).toHaveTextContent('3');
+      expect(screen.getByTestId('advisory-text')).toHaveTextContent('Current v3 advisory');
+    });
+    expect(appMocks.getCurrentRecommendation).not.toHaveBeenCalled();
+    expect(appMocks.getRecommendations).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps recommendations unavailable after recompute failure and supports an explicit retry', async () => {
+    const v2 = {
+      ...currentState(1, {
+        stateId: '64b000000000000000000041',
+        allocationRevisionId: '64b000000000000000000042',
+        recommendationId: '64b000000000000000000043',
+        profileVersion: 2,
+        profileInputHash: nextProfileInputHash,
+      }),
+      instruments: [],
+      advisory_text: 'Version 2 advisory',
+      advisory_explanation: { status: 'READY' },
+    };
+    appMocks.getRecommendations
+      .mockRejectedValueOnce(new Error('temporary recommendation outage'))
+      .mockResolvedValueOnce(v2);
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Save next profile version' }));
+    await waitFor(() => expect(appMocks.getRecommendations).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Test home' }));
+    await waitFor(() => expect(screen.getByTestId('recommendation-fallback')).toHaveTextContent('Authoritative recommendations are temporarily unavailable'));
+    expect(screen.getByTestId('dashboard-profile-version')).toHaveTextContent('2');
+    expect(screen.getByTestId('allocation-revision')).toHaveTextContent('missing');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry recompute' }));
+    await waitFor(() => {
+      expect(appMocks.getRecommendations).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId('allocation-revision')).toHaveTextContent('1');
+    });
+    expect(screen.getByTestId('dashboard-profile-version')).toHaveTextContent('2');
   });
 });

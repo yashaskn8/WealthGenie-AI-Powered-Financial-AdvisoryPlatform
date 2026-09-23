@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 import '@testing-library/jest-dom/vitest';
 import React from 'react';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ProfileEditor from '../ProfileEditor.jsx';
 import * as api from '../services/api.js';
@@ -50,5 +50,38 @@ describe('ProfileEditor financial-state invalidation', () => {
 
     await waitFor(() => expect(onProfileChangeFailure).toHaveBeenCalledOnce());
     expect(events).toEqual(['invalidate', 'request', 'recover']);
+  });
+
+  it('notifies the dashboard with the committed server profile only after a successful update', async () => {
+    let resolveUpdate;
+    vi.spyOn(api, 'updateProfile').mockImplementation(() => new Promise(resolve => {
+      resolveUpdate = resolve;
+    }));
+    const onProfileUpdate = vi.fn();
+    const onProfileChangeStart = vi.fn();
+    vi.stubGlobal('alert', vi.fn());
+
+    render(
+      <ProfileEditor
+        userProfile={profile}
+        onProfileUpdate={onProfileUpdate}
+        onProfileChangeStart={onProfileChangeStart}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('profile-edit'));
+    fireEvent.change(screen.getByTestId('profile-input-monthly_savings'), { target: { value: '27000' } });
+    fireEvent.click(screen.getByTestId('profile-save'));
+
+    await waitFor(() => expect(api.updateProfile).toHaveBeenCalledOnce());
+    expect(onProfileChangeStart).toHaveBeenCalledOnce();
+    expect(onProfileUpdate).not.toHaveBeenCalled();
+
+    await act(async () => resolveUpdate({ ...profile, monthly_savings: 27000, version: 5 }));
+    await waitFor(() => expect(onProfileUpdate).toHaveBeenCalledOnce());
+    expect(onProfileUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      profileId: profile.profileId,
+      version: 5,
+      monthly_savings: 27000,
+    }));
   });
 });

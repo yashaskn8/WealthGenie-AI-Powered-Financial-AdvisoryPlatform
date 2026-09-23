@@ -1,0 +1,19 @@
+[
+  "test/advisoryPersistence.test.js",
+  "test/auditChain.test.js",
+  "test/auditTrail.test.js",
+  "test/authCookieSession.test.js",
+  "test/authorization.test.js",
+  "test/chaos.test.js",
+  "test/concurrency.test.js",
+  "test/deferredAdvisory.test.js",
+  "test/goalUpdateRecompute.test.js",
+  "test/helpers/mongoTestHelper.test.js",
+  "test/idempotencyHttp.test.js",
+  "test/observability.integration.test.js",
+  "test/profileCompletion.integration.test.js",
+  "test/rbacRole.test.js",
+  "test/recommendationAllocationRevisionBehavior.test.js",
+  "test/recommendRestore.test.js",
+  "test/security.test.js"
+]
