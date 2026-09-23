@@ -444,7 +444,7 @@ const AllocationPlanner = ({ profile, recommendations = [], recommendationMeta, 
           <div className="ap-overview-grid">
             <div className="ap-chart-panel">
               <div className="ap-chart-heading"><div><Layers size={16} aria-hidden="true" /><span>Allocation mix</span></div><span className="ap-muted-label">Monthly plan</span></div>
-              <div className="ap-chart-wrap" role="region" aria-label="Investment allocation breakdown" aria-describedby="allocation-chart-description">
+              <div className="ap-chart-wrap" role="region" aria-label="Investment allocation breakdown donut chart" aria-describedby="allocation-chart-description">
                 <p id="allocation-chart-description" className="ap-sr-only">The chart shows the percentage and monthly amount assigned to each investment in the same order as the recommendation.</p>
                 <div className="ap-donut-aura" aria-hidden="true" />
                 <ResponsiveContainer width="100%" height={350} initialDimension={{ width: 1, height: 1 }}>

@@ -60,6 +60,7 @@ describe('AllocationPlanner', () => {
     render(<AllocationPlanner profile={profile} recommendations={recommendations} recommendationMeta={recommendationMeta} />);
 
     expect(screen.getByRole('heading', { name: /Where to invest your money/i })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Investment allocation breakdown donut chart' })).toBeInTheDocument();
     expect(screen.getAllByText('₹30,000').length).toBeGreaterThan(0);
     expect(screen.getByText('10 years')).toBeInTheDocument();
     expect(screen.getByText('Wealth Growth')).toBeInTheDocument();
