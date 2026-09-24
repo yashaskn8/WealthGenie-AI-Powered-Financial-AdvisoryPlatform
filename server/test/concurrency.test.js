@@ -20,6 +20,7 @@ import { errorHandler } from '../middleware/errorHandler.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { canonicalProfile, canonicalProfilePayload } from './helpers/canonicalProfile.js';
+import { assertRuntimeResponseMatchesContract } from './helpers/openapiRuntimeContract.js';
 
 process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
 process.env.NODE_ENV = 'test';
@@ -102,8 +103,29 @@ test('OCC: PUT /api/profile/:id with stale version returns 409 Conflict', async 
     );
 
     assert.equal(createRes.status, 201, `Profile create failed: ${JSON.stringify(createBody)}`);
+    assertRuntimeResponseMatchesContract({
+      method: 'POST', path: '/api/profile/build', status: createRes.status,
+      contentType: createRes.headers.get('content-type'), body: createBody,
+    });
     const profileId = createBody.profileId;
     assert.ok(profileId, 'profileId must be returned');
+
+    const currentProfile = await jsonFetch(`${baseUrl}/api/profile/current`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(currentProfile.response.status, 200);
+    assertRuntimeResponseMatchesContract({
+      method: 'GET', path: '/api/profile/current', status: currentProfile.response.status,
+      contentType: currentProfile.response.headers.get('content-type'), body: currentProfile.body,
+    });
+    const healthScore = await jsonFetch(`${baseUrl}/api/profile/${profileId}/health-score`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(healthScore.response.status, 200);
+    assertRuntimeResponseMatchesContract({
+      method: 'GET', path: '/api/profile/{profileId}/health-score', status: healthScore.response.status,
+      contentType: healthScore.response.headers.get('content-type'), body: healthScore.body,
+    });
 
     // 2. First update — should succeed (version 1 → 2)
     const { response: update1Res, body: update1Body } = await jsonFetch(
@@ -116,6 +138,10 @@ test('OCC: PUT /api/profile/:id with stale version returns 409 Conflict', async 
     );
 
     assert.equal(update1Res.status, 200, `First update failed: ${JSON.stringify(update1Body)}`);
+    assertRuntimeResponseMatchesContract({
+      method: 'PUT', path: '/api/profile/{profileId}', status: update1Res.status,
+      contentType: update1Res.headers.get('content-type'), body: update1Body,
+    });
     const updatedProfile = await FinancialProfile.findById(profileId).lean();
     assert.equal(updatedProfile.version, createBody.version + 1);
     assert.equal(updatedProfile.financialStateFence, 1, 'profile update must perform a real transactional fence write');
@@ -131,6 +157,10 @@ test('OCC: PUT /api/profile/:id with stale version returns 409 Conflict', async 
     );
 
     assert.equal(update2Res.status, 409, `Expected 409 Conflict but got ${update2Res.status}: ${JSON.stringify(update2Body)}`);
+    assertRuntimeResponseMatchesContract({
+      method: 'PUT', path: '/api/profile/{profileId}', status: update2Res.status,
+      contentType: update2Res.headers.get('content-type'), body: update2Body,
+    });
     assert.match(update2Body.message, /version conflict/i);
 
     // 4. Verify the DB still has the value from update 1 (90000), not update 2 (100000)

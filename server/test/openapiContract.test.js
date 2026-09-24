@@ -8,15 +8,30 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import authRoutes from '../routes/auth.js';
+import profileRoutes from '../routes/profile.js';
 import taxRoutes from '../routes/tax.js';
 import instrumentRoutes from '../routes/instruments.js';
 import chatRoutes from '../routes/chatRoutes.js';
 import recommendRoutes from '../routes/recommend.js';
+import goalsRoutes from '../routes/goals.js';
 import marketRoutes from '../routes/market.js';
 import agentRoutes from '../routes/agentRoutes.js';
+import projectionRoutes from '../routes/projection.js';
+import montecarloRoutes from '../routes/montecarlo.js';
+import portfolioRoutes from '../routes/portfolio.js';
+import regimeRoutes from '../routes/regime.js';
 import { errorHandler, sendError } from '../middleware/errorHandler.js';
 import Instrument from '../models/Instrument.js';
+import FinancialProfile from '../models/FinancialProfile.js';
+import Recommendation from '../models/Recommendation.js';
+import RecommendationState from '../models/RecommendationState.js';
+import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import { withServer, rawRequest } from '../test-utils/httpTestUtils.js';
+import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
+import { buildRecommendationProfile, toProfilePersistence } from '../services/recommendationProfile.js';
+import { assessSuitabilityRisk } from '../services/riskProfiler.js';
+import { runOpenApiHttpCase } from './helpers/openapiRuntimeContract.js';
 
 const serverRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const appSource = fs.readFileSync(path.join(serverRoot, 'app.js'), 'utf8');
@@ -119,29 +134,187 @@ function assertResponseMatchesSchemaRef(schemaRef, body, context) {
 function buildContractTestApp() {
   const app = express();
   app.use(express.json());
+  app.use('/api/auth', authRoutes);
+  app.use('/api/profile', profileRoutes);
   app.use('/api/tax', taxRoutes);
   app.use('/api/instruments', instrumentRoutes);
   app.use('/api/chat', chatRoutes);
   app.use('/api/recommend', recommendRoutes);
   app.use('/api/market', marketRoutes);
   app.use('/api/agent', agentRoutes);
+  app.use('/api/projection', projectionRoutes);
+  app.use('/api/montecarlo', montecarloRoutes);
+  app.use('/api/portfolio', portfolioRoutes);
+  app.use('/api/goals', goalsRoutes);
+  app.use('/api/regime', regimeRoutes);
   app.use((req, res) => sendError(req, res, 404, 'Route not found.', 'ROUTE_NOT_FOUND'));
   app.use(errorHandler);
   return app;
 }
 
+// These are actual requests against mounted Express routers. Keep case identity
+// separate from the URL so templated OpenAPI paths remain explicit in reviews.
+export const LIVE_CONTRACT_CASES = Object.freeze([
+  { operation: 'GET /api/tax/compare', method: 'GET', path: '/api/tax/compare', url: '/api/tax/compare?income=1200000&incomeSource=salary&fiscalYear=FY2026-27&age=30', expectedStatus: 200 },
+  { operation: 'GET /api/tax/compute', method: 'GET', path: '/api/tax/compute', url: '/api/tax/compute?income=1200000&incomeSource=salary&fiscalYear=FY2026-27&age=30&regime=new', expectedStatus: 200 },
+  { operation: 'GET /api/tax/policies', method: 'GET', path: '/api/tax/policies', url: '/api/tax/policies', expectedStatus: 200 },
+  { operation: 'GET /api/instruments', method: 'GET', path: '/api/instruments', url: '/api/instruments?page=1&limit=10', expectedStatus: 200 },
+  { operation: 'GET /api/market/params', method: 'GET', path: '/api/market/params', url: '/api/market/params', expectedStatus: 200 },
+  { operation: 'POST /api/projection/compare', method: 'POST', path: '/api/projection/compare', url: '/api/projection/compare', expectedStatus: 200, body: { monthlyInvestment: 5000, annualReturnRate: 0.08, benchmarkRate: 0.06, inflationRate: 0.05, years: 5 } },
+  { operation: 'POST /api/projection/allocation-split', method: 'POST', path: '/api/projection/allocation-split', url: '/api/projection/allocation-split', expectedStatus: 200, body: { monthlyInvestment: 5000, equityPct: 50 } },
+  { operation: 'POST /api/projection/step-up', method: 'POST', path: '/api/projection/step-up', url: '/api/projection/step-up', expectedStatus: 200, body: { monthlyInvestment: 5000, annualReturnRate: 0.08, years: 5, annualStepUpRate: 0.05 } },
+  { operation: 'POST /api/projection/xirr', method: 'POST', path: '/api/projection/xirr', url: '/api/projection/xirr', expectedStatus: 200, body: { monthlySIP: 5000, months: 24, currentValue: 130000 } },
+  { operation: 'POST /api/projection', method: 'POST', path: '/api/projection', url: '/api/projection', expectedStatus: 200, body: { profileId: '65b000000000000000000002', instruments: ['FD'], monthly_investment: 5000, years: [1, 3] } },
+  { operation: 'POST /api/projection/custom-portfolio', method: 'POST', path: '/api/projection/custom-portfolio', url: '/api/projection/custom-portfolio', expectedStatus: 200, body: { profileId: '65b000000000000000000002', allocations: { FD: 1 }, years: 3 } },
+  { operation: 'POST /api/portfolio/optimise', method: 'POST', path: '/api/portfolio/optimise', url: '/api/portfolio/optimise', expectedStatus: 200, body: { profileId: '65b000000000000000000002', assets: ['FD', 'Debt_MF'], strategy: 'min_variance' } },
+  { operation: 'POST /api/portfolio/rebalance', method: 'POST', path: '/api/portfolio/rebalance', url: '/api/portfolio/rebalance', expectedStatus: 200, body: { profileId: '65b000000000000000000002', current_allocation: { FD: 50, Debt_MF: 50 }, target_allocation: { FD: 50, Debt_MF: 50 }, threshold: 5, partial_ratio: 0.5, holding_months: 12 } },
+  { operation: 'POST /api/montecarlo/montecarlo', method: 'POST', path: '/api/montecarlo/montecarlo', url: '/api/montecarlo/montecarlo', expectedStatus: 200, body: { profileId: '65b000000000000000000002', instrument: 'FD', monthly_investment: 5000, years: 2 } },
+  { operation: 'POST /api/montecarlo/portfolio', method: 'POST', path: '/api/montecarlo/portfolio', url: '/api/montecarlo/portfolio', expectedStatus: 200, body: { profileId: '65b000000000000000000002', allocations: { FD: 1 }, years: 2 } },
+  { operation: 'GET /api/tax/compare', method: 'GET', path: '/api/tax/compare', url: '/api/tax/compare?income=bad&incomeSource=salary&fiscalYear=FY2026-27&age=30', expectedStatus: 400 },
+  { operation: 'GET /api/tax/compare', method: 'GET', path: '/api/tax/compare', url: '/api/tax/compare?income=1200000&incomeSource=salary&fiscalYear=FY2099-00&age=30', expectedStatus: 422 },
+  { operation: 'GET /api/chat/history', method: 'GET', path: '/api/chat/history', url: '/api/chat/history', expectedStatus: 401 },
+  { operation: 'GET /api/instruments', method: 'GET', path: '/api/instruments', url: '/api/instruments?notAFilter=x', expectedStatus: 400 },
+  { operation: 'GET /api/recommend/audit', method: 'GET', path: '/api/recommend/audit', url: '/api/recommend/audit?profileId=garbage', expectedStatus: 400, authenticated: true },
+  { operation: 'GET /api/chat/history', method: 'GET', path: '/api/chat/history', url: '/api/chat/history?limit=20garbage', expectedStatus: 400, authenticated: true },
+  { operation: 'GET /api/agent/plan-health', method: 'GET', path: '/api/agent/plan-health', url: '/api/agent/plan-health?profileId=garbage', expectedStatus: 400, authenticated: true },
+  { operation: 'GET /api/market/mutual-funds/nav', method: 'GET', path: '/api/market/mutual-funds/nav', url: '/api/market/mutual-funds/nav?schemeCodes=1001&extra=unexpected', expectedStatus: 400 },
+]);
+
+// Critical success responses validated by neighboring real-HTTP suites. The
+// source and route anchors are checked below so a proof cannot silently point
+// at a deleted/renamed suite or a test that stopped using the OpenAPI validator.
+const LIVE_SUCCESS_PROOFS = Object.freeze({
+  'POST /api/auth/register': { file: 'authCookieSession.test.js', anchor: '/api/auth/register' },
+  'POST /api/auth/login': { file: 'authCookieSession.test.js', anchor: '/api/auth/login' },
+  'GET /api/auth/session': { file: 'authCookieSession.test.js', anchor: '/api/auth/session' },
+  'POST /api/auth/logout': { file: 'authCookieSession.test.js', anchor: '/api/auth/logout' },
+  'POST /api/profile/build': { file: 'concurrency.test.js', anchor: '/api/profile/build' },
+  'POST /api/profile/complete': { file: 'profileCompletion.integration.test.js', anchor: '/api/profile/complete' },
+  'GET /api/profile/current': { file: 'concurrency.test.js', anchor: '/api/profile/current' },
+  'PUT /api/profile/{profileId}': { file: 'concurrency.test.js', anchor: '/api/profile/{profileId}' },
+  'POST /api/recommend': { file: 'deferredAdvisory.test.js', anchor: '/api/recommend' },
+  'GET /api/recommend/current': { file: 'recommendRestore.test.js', anchor: '/api/recommend/current' },
+  'POST /api/recommend/weights': { file: 'recommendRestore.test.js', anchor: '/api/recommend/weights' },
+  'POST /api/recommend/{recommendationId}/advisory': { file: 'deferredAdvisory.test.js', anchor: '/api/recommend/{recommendationId}/advisory' },
+  'GET /api/recommend/audit': { file: 'auditTrail.test.js', anchor: '/api/recommend/audit' },
+  'GET /api/recommend/audit/verify': { file: 'auditTrail.test.js', anchor: '/api/recommend/audit/verify' },
+  'POST /api/goals/create': { file: 'goalUpdateRecompute.test.js', anchor: '/api/goals/create' },
+  'GET /api/goals': { file: 'goalsReadOnly.test.js', anchor: '/api/goals' },
+  'PATCH /api/goals/{goalId}': { file: 'goalUpdateRecompute.test.js', anchor: '/api/goals/{goalId}' },
+  'DELETE /api/goals/{goalId}': { file: 'recommendRestore.test.js', anchor: '/api/goals/{goalId}' },
+  'PATCH /api/goals/{goalId}/refresh-advice': { file: 'recommendRestore.test.js', anchor: '/api/goals/{goalId}/refresh-advice' },
+  'POST /api/goals/{goalId}/simulate': { file: 'goalUpdateRecompute.test.js', anchor: '/api/goals/{goalId}/simulate' },
+  'POST /api/portfolio/optimise': { file: 'openapiContract.test.js', anchor: 'POST /api/portfolio/optimise' },
+  'POST /api/portfolio/rebalance': { file: 'openapiContract.test.js', anchor: 'POST /api/portfolio/rebalance' },
+  'POST /api/projection': { file: 'openapiContract.test.js', anchor: 'POST /api/projection' },
+  'POST /api/projection/stress-test': { file: 'recommendRestore.test.js', anchor: '/api/projection/stress-test' },
+  'POST /api/projection/custom-portfolio': { file: 'openapiContract.test.js', anchor: 'POST /api/projection/custom-portfolio' },
+  'POST /api/projection/allocation-split': { file: 'openapiContract.test.js', anchor: 'POST /api/projection/allocation-split' },
+  'POST /api/projection/step-up': { file: 'openapiContract.test.js', anchor: 'POST /api/projection/step-up' },
+  'POST /api/projection/compare': { file: 'openapiContract.test.js', anchor: 'POST /api/projection/compare' },
+  'POST /api/projection/xirr': { file: 'openapiContract.test.js', anchor: 'POST /api/projection/xirr' },
+  'POST /api/montecarlo/montecarlo': { file: 'openapiContract.test.js', anchor: 'POST /api/montecarlo/montecarlo' },
+  'POST /api/montecarlo/portfolio': { file: 'openapiContract.test.js', anchor: 'POST /api/montecarlo/portfolio' },
+  'POST /api/chat/message': { file: 'chatSessionStore.integration.test.js', anchor: '/api/chat/message' },
+  'GET /api/chat/history': { file: 'chatRoutes.test.js', anchor: '/api/chat/history' },
+  'DELETE /api/chat/session/{sessionId}': { file: 'chatRoutes.test.js', anchor: '/api/chat/session/{sessionId}' },
+  'GET /api/instruments': { file: 'openapiContract.test.js', anchor: 'GET /api/instruments' },
+  'POST /api/instruments/rank-wti': { file: 'security.test.js', anchor: '/api/instruments/rank-wti' },
+  'GET /api/tax/compare': { file: 'openapiContract.test.js', anchor: 'GET /api/tax/compare' },
+  'GET /api/tax/compute': { file: 'openapiContract.test.js', anchor: 'GET /api/tax/compute' },
+  'GET /api/tax/policies': { file: 'openapiContract.test.js', anchor: 'GET /api/tax/policies' },
+  'POST /api/tax/post-tax-return': { file: 'taxPostTaxReturnRoute.test.js', anchor: '/api/tax/post-tax-return' },
+  'POST /api/tax/post-tax-return/batch': { file: 'taxPostTaxReturnRoute.test.js', anchor: '/api/tax/post-tax-return/batch' },
+  'GET /api/market/params': { file: 'openapiContract.test.js', anchor: 'GET /api/market/params' },
+});
+
+// Every non-covered operation is an explicit, endpoint-specific exclusion.
+// Do not replace these with a wildcard/external-dependency bucket.
+const LIVE_CONTRACT_EXCLUSIONS = Object.freeze([
+  { operation: 'GET /api/market/benchmarks', category: 'external-provider', owner: 'market-data', reason: 'Response is built from live NSE benchmark observations.', justification: 'The route currently has no fixture injection seam; source-provider parsers and freshness are qualified separately, and deterministic public market coverage is supplied by /api/market/params.' },
+  { operation: 'GET /api/market/fixed-deposits/sbi', category: 'external-provider', owner: 'market-data', reason: 'Response depends on the currently published SBI retail deposit table.', justification: 'No route-level provider fixture seam exists; provider qualification tests own source freshness and malformed-document behavior.' },
+  { operation: 'GET /api/market/government-schemes', category: 'external-provider', owner: 'market-data', reason: 'Response depends on current official government small-savings publications.', justification: 'No route-level provider fixture seam exists; provider qualification tests validate source parsing and authority.' },
+  { operation: 'GET /api/market/rates', category: 'external-provider', owner: 'market-data', reason: 'Response aggregates live external financial providers.', justification: 'Its response changes with provider availability and publication time; provider-specific suites validate normalized contracts, while /api/market/params is the deterministic public success case.' },
+  { operation: 'GET /api/regime/current', category: 'external-provider', owner: 'market-context', reason: 'Current regime derives from live benchmark observations and observation freshness.', justification: 'A stable route-level fixture seam is not present; deterministic policy boundary and provider suites validate the constituent behavior.' },
+  { operation: 'GET /api/health', category: 'health', owner: 'platform-health', reason: 'Operational dependency status is intentionally not the canonical user API envelope.', justification: 'Health output varies with process lifecycle and configured dependency readiness.' },
+  { operation: 'GET /health', category: 'health', owner: 'platform-health', reason: 'Liveness output is an infrastructure protocol, not the canonical user API envelope.', justification: 'The timestamp and process uptime are runtime-derived; endpoint behavior is covered by app architecture tests.' },
+  { operation: 'GET /health/deep', category: 'health', owner: 'platform-health', reason: 'Deep readiness reports live database, Redis, worker, and provider state.', justification: 'Its status is environment-dependent and is separately exercised by observability integration tests.' },
+  { operation: 'GET /health/live', category: 'health', owner: 'platform-health', reason: 'Liveness output is an infrastructure protocol, not the canonical user API envelope.', justification: 'The timestamp and process uptime are runtime-derived; endpoint behavior is covered by app architecture tests.' },
+  { operation: 'GET /health/ready', category: 'health', owner: 'platform-health', reason: 'Readiness output is an infrastructure protocol, not the canonical user API envelope.', justification: 'Readiness depends on live dependency/index/lifecycle state and is covered by readiness tests.' },
+  { operation: 'GET /healthz', category: 'health', owner: 'platform-health', reason: 'Legacy liveness alias is an infrastructure protocol, not the canonical user API envelope.', justification: 'Its output is process-derived and is explicitly exercised in app architecture tests.' },
+  { operation: 'GET /ready', category: 'health', owner: 'platform-health', reason: 'Redirect alias for readiness is an infrastructure protocol, not the canonical user API envelope.', justification: 'The target readiness status is environment-dependent and is covered by readiness tests.' },
+  { operation: 'GET /live', category: 'health', owner: 'platform-health', reason: 'Redirect alias for liveness is an infrastructure protocol, not the canonical user API envelope.', justification: 'The target liveness output is process-derived and is covered by app architecture tests.' },
+  { operation: 'GET /readyz', category: 'health', owner: 'platform-health', reason: 'Legacy readiness alias is an infrastructure protocol, not the canonical user API envelope.', justification: 'Its target readiness status is environment-dependent and is covered by readiness tests.' },
+]);
+
+const REQUIRED_LIVE_SUCCESS_OPERATIONS = Object.freeze(Object.keys(LIVE_SUCCESS_PROOFS));
+
 function requestSchema(operation) {
   let body = operation.requestBody;
   if (body?.$ref) body = resolveLocalRef(body.$ref);
-  let schema = body?.content?.['application/json']?.schema;
-  if (schema?.$ref) schema = resolveLocalRef(schema.$ref);
-  return schema;
+  const schema = body?.content?.['application/json']?.schema;
+  const collectRequired = (current, visited = new Set()) => {
+    if (!current) return [];
+    if (current.$ref) {
+      assert.equal(visited.has(current.$ref), false, `Recursive request schema reference: ${current.$ref}`);
+      const nextVisited = new Set(visited);
+      nextVisited.add(current.$ref);
+      return collectRequired(resolveLocalRef(current.$ref), nextVisited);
+    }
+    return [
+      ...(current.required || []),
+      ...(current.allOf || []).flatMap(child => collectRequired(child, visited)),
+    ];
+  };
+  return schema && { ...schema, required: [...new Set(collectRequired(schema))] };
 }
 
 const sourceOperations = publicMounts.flatMap(([filename, prefix]) => {
   const moduleSource = fs.readFileSync(path.join(serverRoot, 'routes', filename), 'utf8');
   return extractRoutes(moduleSource, 'router', prefix);
 }).concat(extractRoutes(appSource, 'app'));
+
+test('live contract coverage manifest accounts for public routes and required success families', () => {
+  const inventory = new Set(sourceOperations.map(operationKey));
+  const liveCaseKeys = new Set(LIVE_CONTRACT_CASES.map(item => operationKey({
+    method: item.method,
+    path: item.path,
+  })));
+  const protectedKeys = new Set(sourceOperations.filter(route => route.authenticated).map(operationKey));
+  const exclusions = new Map(LIVE_CONTRACT_EXCLUSIONS.map(item => [item.operation, item]));
+  const successProofKeys = new Set(Object.keys(LIVE_SUCCESS_PROOFS));
+
+  assert.equal(exclusions.size, LIVE_CONTRACT_EXCLUSIONS.length, 'exclusion operations must be unique');
+  for (const [key, proof] of Object.entries(LIVE_SUCCESS_PROOFS)) {
+    assert.ok(inventory.has(key), `Success proof does not match a public route: ${key}`);
+    assert.ok(contract.paths[key.split(' ')[1]]?.[key.split(' ')[0].toLowerCase()], `Success proof is undocumented: ${key}`);
+    const proofSource = fs.readFileSync(path.join(serverRoot, 'test', proof.file), 'utf8');
+    assert.ok(proofSource.includes(proof.anchor), `${key} proof no longer refers to its route in ${proof.file}`);
+    assert.match(proofSource, /assertFetchResponseMatchesOpenApi|assertRuntimeResponseMatchesContract|runOpenApiHttpCase/,
+      `${key} proof must use the shared runtime OpenAPI validator in ${proof.file}`);
+    if (proof.file === 'openapiContract.test.js') {
+      assert.ok(liveCaseKeys.has(key), `${key} must have an executable LIVE_CONTRACT_CASES entry`);
+    }
+  }
+
+  for (const operation of LIVE_CONTRACT_EXCLUSIONS) {
+    assert.ok(inventory.has(operation.operation), `Exclusion is not a current public route: ${operation.operation}`);
+    assert.ok(['health', 'external-provider'].includes(operation.category), `${operation.operation} has a disallowed exclusion category`);
+    for (const field of ['owner', 'reason', 'justification']) {
+      assert.equal(typeof operation[field], 'string');
+      assert.ok(operation[field].trim().length >= (field === 'owner' ? 3 : 20), `${operation.operation} requires a specific ${field}`);
+    }
+    assert.equal(successProofKeys.has(operation.operation), false, `${operation.operation} cannot be both excluded and success-covered`);
+  }
+
+  const covered = new Set([...liveCaseKeys, ...protectedKeys, ...successProofKeys, ...exclusions.keys()]);
+  assert.deepEqual([...covered].sort(), [...inventory].sort(),
+    'Every public operation needs a live case, authenticated error case, success proof, or explicit endpoint-specific exclusion.');
+
+  for (const key of REQUIRED_LIVE_SUCCESS_OPERATIONS) {
+    assert.ok(successProofKeys.has(key) || liveCaseKeys.has(key), `Critical operation lacks live success schema validation: ${key}`);
+  }
+});
 
 test('canonical OpenAPI exactly matches intended public Express methods and paths', () => {
   for (const [filename, prefix] of publicMounts.filter(([name]) => name !== 'health.js')) {
@@ -170,6 +343,38 @@ test('OpenAPI authentication and cookie-session CSRF metadata match Express rout
     if (route.path.startsWith('/api/') && ['post', 'put', 'patch', 'delete'].includes(route.method)) {
       assert.equal(operation['x-csrf-protection'], 'cookie-session', `${operationKey(route)} must document cookie-session CSRF behavior`);
     }
+  }
+});
+
+test('every authenticated public operation emits a documented live unauthenticated error envelope', async () => {
+  const oldSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = 'openapi-unauthenticated-contract-secret-at-least-32';
+  const protectedOperations = sourceOperations.filter(route => route.authenticated);
+  assert.ok(protectedOperations.length > 0, 'route inventory must include protected public operations');
+
+  try {
+    await withServer(buildContractTestApp(), async baseUrl => {
+      for (const route of protectedOperations) {
+        const routePath = route.path.replace(/\{[^}]+\}/g, '65b000000000000000000099');
+        const response = await fetch(`${baseUrl}${routePath}`, {
+          method: route.method.toUpperCase(),
+          headers: ['get', 'delete'].includes(route.method) ? {} : { 'Content-Type': 'application/json' },
+          ...(['get', 'delete'].includes(route.method) ? {} : { body: JSON.stringify({}) }),
+        });
+        const body = await response.json();
+        assert.ok(response.status >= 400, `${operationKey(route)} unexpectedly succeeded without authentication`);
+        assertRuntimeResponseMatchesContract({
+          method: route.method,
+          path: route.path,
+          status: response.status,
+          contentType: response.headers.get('content-type'),
+          body,
+        });
+      }
+    });
+  } finally {
+    if (oldSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = oldSecret;
   }
 });
 
@@ -225,6 +430,23 @@ test('OpenAPI runtime contracts exercise real HTTP success and canonical error r
   const oldNodeEnv = process.env.NODE_ENV;
   const oldFind = Instrument.find;
   const oldCountDocuments = Instrument.countDocuments;
+  const oldProfileFindOne = FinancialProfile.findOne;
+  const oldRecommendationFindOne = Recommendation.findOne;
+  const oldStateFindOne = RecommendationState.findOne;
+  const oldRevisionFindOne = RecommendationAllocationRevision.findOne;
+  const userId = '65b000000000000000000001';
+  const profileId = '65b000000000000000000002';
+  const recommendationProfile = buildRecommendationProfile(canonicalProfilePayload());
+  const profileFixture = {
+    _id: profileId,
+    userId,
+    version: 1,
+    ...toProfilePersistence(recommendationProfile, assessSuitabilityRisk(recommendationProfile)),
+  };
+  const emptyQuery = value => ({
+    sort() { return this; },
+    lean: async () => value,
+  });
   process.env.JWT_SECRET = 'openapi-runtime-contract-test-secret-at-least-32';
   process.env.NODE_ENV = 'test';
   Instrument.find = () => ({
@@ -237,54 +459,25 @@ test('OpenAPI runtime contracts exercise real HTTP success and canonical error r
     }],
   });
   Instrument.countDocuments = async () => 1;
+  FinancialProfile.findOne = () => emptyQuery(profileFixture);
+  Recommendation.findOne = () => emptyQuery(null);
+  RecommendationState.findOne = () => emptyQuery(null);
+  RecommendationAllocationRevision.findOne = () => emptyQuery(null);
 
   try {
     await withServer(buildContractTestApp(), async baseUrl => {
-      const userId = '65b000000000000000000001';
       const authToken = jwt.sign({ userId, jti: 'openapi-contract-jti' }, process.env.JWT_SECRET, { expiresIn: '5m' });
       const authorization = { Authorization: `Bearer ${authToken}` };
-      const cases = [
-        {
-          method: 'GET', path: '/api/tax/compare', url: '/api/tax/compare?income=1200000&incomeSource=salary&fiscalYear=FY2026-27&age=30', status: 200,
-        },
-        { method: 'GET', path: '/api/instruments', url: '/api/instruments?page=1&limit=10', status: 200 },
-        { method: 'GET', path: '/api/tax/compare', url: '/api/tax/compare?income=bad&incomeSource=salary&fiscalYear=FY2026-27&age=30', status: 400 },
-        { method: 'GET', path: '/api/tax/compare', url: '/api/tax/compare?income=1200000&incomeSource=salary&fiscalYear=FY2099-00&age=30', status: 422 },
-        { method: 'GET', path: '/api/chat/history', url: '/api/chat/history', status: 401 },
-        { method: 'GET', path: '/api/instruments', url: '/api/instruments?notAFilter=x', status: 400 },
-      ];
-      for (const item of cases) {
-        const response = await rawRequest(`${baseUrl}${item.url}`, { method: item.method });
-        assert.equal(response.status, item.status, `${item.method} ${item.url}`);
-        assertRuntimeResponseMatchesContract({
+      for (const item of LIVE_CONTRACT_CASES) {
+        const headers = {
+          ...(item.authenticated || item.method !== 'GET' ? authorization : {}),
+        };
+        await runOpenApiHttpCase({
+          baseUrl,
           ...item,
-          contentType: response.headers.get('content-type'),
-          body: await response.json(),
+          headers,
         });
       }
-
-      const authenticatedQueryCases = [
-        { method: 'GET', path: '/api/recommend/audit', url: '/api/recommend/audit?profileId=garbage' },
-        { method: 'GET', path: '/api/chat/history', url: '/api/chat/history?limit=20garbage' },
-        { method: 'GET', path: '/api/agent/plan-health', url: '/api/agent/plan-health?profileId=garbage' },
-      ];
-      for (const item of authenticatedQueryCases) {
-        const response = await rawRequest(`${baseUrl}${item.url}`, { method: item.method, headers: authorization });
-        assert.equal(response.status, 400, `${item.method} ${item.url}`);
-        assertRuntimeResponseMatchesContract({
-          ...item,
-          status: response.status,
-          contentType: response.headers.get('content-type'),
-          body: await response.json(),
-        });
-      }
-
-      const unknownMarketQuery = await rawRequest(`${baseUrl}/api/market/mutual-funds/nav?schemeCodes=1001&extra=unexpected`);
-      assert.equal(unknownMarketQuery.status, 400);
-      assertRuntimeResponseMatchesContract({
-        method: 'GET', path: '/api/market/mutual-funds/nav', status: unknownMarketQuery.status,
-        contentType: unknownMarketQuery.headers.get('content-type'), body: await unknownMarketQuery.json(),
-      });
 
       const missingRoute = await rawRequest(`${baseUrl}/api/not-a-public-route`);
       assert.equal(missingRoute.status, 404);
@@ -316,6 +509,10 @@ test('OpenAPI runtime contracts exercise real HTTP success and canonical error r
   } finally {
     Instrument.find = oldFind;
     Instrument.countDocuments = oldCountDocuments;
+    FinancialProfile.findOne = oldProfileFindOne;
+    Recommendation.findOne = oldRecommendationFindOne;
+    RecommendationState.findOne = oldStateFindOne;
+    RecommendationAllocationRevision.findOne = oldRevisionFindOne;
     if (oldSecret === undefined) delete process.env.JWT_SECRET;
     else process.env.JWT_SECRET = oldSecret;
     if (oldNodeEnv === undefined) delete process.env.NODE_ENV;
@@ -382,7 +579,13 @@ test('committed superseded operations document their result separately from curr
   assert.equal(completionResponse.properties.operation_result.$ref, '#/components/schemas/CommittedOperationResult');
 
   const operationResult = resolveLocalRef('#/components/schemas/CommittedOperationResult');
-  assert.deepEqual(operationResult.required, ['committed', 'generated_recommendation_id', 'superseded_before_response']);
-  assert.equal(operationResult.properties.committed.const, true);
-  assert.equal(operationResult.properties.superseded_before_response.const, true);
+  assert.equal(operationResult.oneOf.length, 2);
+  const recommendationResult = operationResult.oneOf.find(schema => schema.required.includes('generated_recommendation_id')
+    && !schema.required.includes('generated_allocation_revision'));
+  const allocationResult = operationResult.oneOf.find(schema => schema.required.includes('generated_allocation_revision'));
+  assert.deepEqual(recommendationResult.required, ['committed', 'generated_recommendation_id', 'superseded_before_response']);
+  assert.equal(recommendationResult.properties.committed.const, true);
+  assert.equal(recommendationResult.properties.superseded_before_response.const, true);
+  assert.deepEqual(allocationResult.required, ['committed', 'generated_recommendation_id', 'generated_allocation_revision', 'generated_allocation_revision_id', 'superseded_before_response']);
+  assert.equal(allocationResult.properties.superseded_before_response.type, 'boolean');
 });

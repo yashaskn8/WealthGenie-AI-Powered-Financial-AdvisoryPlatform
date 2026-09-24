@@ -3,11 +3,10 @@ import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import AuditRecord from '../models/AuditRecord.js';
 import IdempotencyKey from '../models/IdempotencyKey.js';
-import AuditChainHead from '../models/AuditChainHead.js';
 import RecommendationState from '../models/RecommendationState.js';
-import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import { prepareAuditChainEntry, advanceAuditChainHead } from './auditChain.js';
-import { omitUnsetOptionalUniqueFields, optionalUniqueIndex } from '../config/mongoCompatibility.js';
+import { omitUnsetOptionalUniqueFields } from '../config/mongoCompatibility.js';
+import { verifyPersistenceIndexes } from './persistenceIndexReadiness.js';
 import { buildPortfolioFingerprint, buildRecommendationFingerprint } from './recommendationFingerprint.js';
 import {
   PROJECTION_ASSUMPTION_POLICY_HASH,
@@ -21,8 +20,6 @@ import {
   buildPostCommitAdvisoryResponse,
   committedResponseReconciliationError,
 } from './advisoryResponse.js';
-
-let advisoryPersistenceReady = null;
 
 function instrumentsAssumptionHash(instruments = []) {
   return instruments.find(item => item?.returnAssumptionHash)?.returnAssumptionHash || null;
@@ -42,55 +39,11 @@ function historicalResponseSnapshot(response) {
 }
 
 async function ensureAdvisoryPersistenceReady() {
-  if (!advisoryPersistenceReady) {
-    advisoryPersistenceReady = (async () => {
-      // Earlier versions attached a five-minute TTL to generic idempotency
-      // records. Such expiry would reopen committed create operations to
-      // duplicate execution, so remove only that obsolete TTL index before
-      // initializing the durable operation collection.
-      try {
-        const indexes = await IdempotencyKey.collection.indexes();
-        for (const index of indexes) {
-          if (index.expireAfterSeconds !== undefined
-              && index.key?.createdAt === 1
-              && Object.keys(index.key).length === 1) {
-            await IdempotencyKey.collection.dropIndex(index.name);
-          }
-        }
-      } catch (error) {
-        if (error.code !== 26 && error.codeName !== 'NamespaceNotFound') throw error;
-      }
-      await Promise.all([
-        FinancialProfile.init(),
-        Recommendation.init(),
-        AuditRecord.init(),
-        AuditChainHead.init(),
-        IdempotencyKey.init(),
-        RecommendationState.init(),
-        RecommendationAllocationRevision.init(),
-      ]);
-      // Production disables general auto-index creation. This one uniqueness
-      // constraint is part of the advisory correctness boundary, not tuning.
-      for (const [collection, index] of [
-        [Recommendation.collection, optionalUniqueIndex('idempotencyOperationId', 'unique_advisory_idempotency_operation')],
-        [Recommendation.collection, optionalUniqueIndex('profileCompletionCandidateId', 'unique_profile_completion_candidate')],
-        [AuditRecord.collection, optionalUniqueIndex('chain_sequence', 'unique_user_audit_chain_sequence')],
-      ]) {
-        const key = collection === AuditRecord.collection
-          ? { userId: 1, ...index.key }
-          : index.key;
-        await collection.createIndex(key, index.options);
-      }
-    })().catch(error => {
-      advisoryPersistenceReady = null;
-      throw error;
-    });
-  }
-  return advisoryPersistenceReady;
+  return verifyPersistenceIndexes();
 }
 
-// Called during application startup after MongoDB is connected so the first
-// authoritative request does not pay schema/index initialization latency.
+// Called during application startup after MongoDB is connected. This verifies
+// migration state without creating, dropping, or changing indexes.
 export async function warmAdvisoryPersistence() {
   await ensureAdvisoryPersistenceReady();
 }

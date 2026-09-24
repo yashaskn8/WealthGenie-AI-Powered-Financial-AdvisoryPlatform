@@ -71,8 +71,8 @@ const marketAdjustmentSchema = new mongoose.Schema({
 }, { _id: false, strict: false });
 
 const recommendationSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  profileId: { type: mongoose.Schema.Types.ObjectId, ref: 'FinancialProfile', required: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, immutable: true },
+  profileId: { type: mongoose.Schema.Types.ObjectId, ref: 'FinancialProfile', required: true, immutable: true },
   instruments: [instrumentDetailSchema],
   advisoryText: { type: String },
   advisoryMetadata: { type: mongoose.Schema.Types.Mixed, default: null },
@@ -91,9 +91,9 @@ const recommendationSchema = new mongoose.Schema({
   recommendationGeneration: { type: Number, min: 1, default: 1, required: true },
   // Optional unique fields are omitted when absent so the indexes remain
   // compatible with MongoDB and Amazon DocumentDB.
-  profileCompletionCandidateId: { type: String },
-  idempotencyOperationId: { type: String },
-  idempotencyRequestHash: { type: String, default: null },
+  profileCompletionCandidateId: { type: String, immutable: true },
+  idempotencyOperationId: { type: String, immutable: true },
+  idempotencyRequestHash: { type: String, default: null, immutable: true },
   responseSnapshot: { type: mongoose.Schema.Types.Mixed, default: null },
   marketAdjustment: { type: marketAdjustmentSchema, default: null },
   currentAllocationSource: {
@@ -117,6 +117,11 @@ const IMMUTABLE_GENERATION_FIELDS = new Set([
   'responseSnapshot',
   'currentAllocationSource',
   'generatedAt',
+  'userId',
+  'profileId',
+  'idempotencyOperationId',
+  'idempotencyRequestHash',
+  'profileCompletionCandidateId',
 ]);
 
 function isImmutableGenerationPath(path) {

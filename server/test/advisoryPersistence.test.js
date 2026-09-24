@@ -118,7 +118,7 @@ test.beforeEach(async () => {
     // harness clears its fixture rows through the raw collection instead.
     RecommendationAllocationRevision.collection.deleteMany({ userId }),
     RecommendationState.deleteMany({ userId }),
-    AuditRecord.deleteMany({ userId }),
+    AuditRecord.collection.deleteMany({ userId }),
     AuditChainHead.deleteMany({ _id: userId }),
     IdempotencyKey.deleteMany({ userId }),
   ]);
@@ -136,7 +136,7 @@ test.after(async () => {
     Recommendation.deleteMany({ userId }),
     RecommendationAllocationRevision.collection.deleteMany({ userId }),
     RecommendationState.deleteMany({ userId }),
-    AuditRecord.deleteMany({ userId }),
+    AuditRecord.collection.deleteMany({ userId }),
     AuditChainHead.deleteMany({ _id: userId }),
     IdempotencyKey.deleteMany({ userId }),
   ]).catch(() => {});

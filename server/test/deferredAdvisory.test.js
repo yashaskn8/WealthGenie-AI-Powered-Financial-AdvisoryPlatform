@@ -29,6 +29,7 @@ import Recommendation from '../models/Recommendation.js';
 import AuditRecord from '../models/AuditRecord.js';
 import { ProviderManager } from '../services/providerAbstraction.js';
 import { errorHandler } from '../middleware/errorHandler.js';
+import { assertFetchResponseMatchesOpenApi } from './helpers/openapiRuntimeContract.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
 import { installFinancialStateTestHook } from '../services/financialStateTestHooks.js';
 
@@ -107,6 +108,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     assert.match(serverTimingHeader, /total;dur=/);
 
     recData = await res.json();
+    await assertFetchResponseMatchesOpenApi(res, 'POST', '/api/recommend', { body: recData });
     assert.ok(recData.recommendationId, 'Must return recommendationId');
     assert.ok(recData.audit_id, 'Must return audit_id');
     assert.equal(recData.advisory_text, null, 'advisory_text must be null in core sync response');
@@ -163,6 +165,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
       },
     });
     assert.equal(res.status, 400);
+    await assertFetchResponseMatchesOpenApi(res, 'POST', '/api/recommend/{recommendationId}/advisory');
   });
 
   await t.test('5. Deferred advisory endpoint enforces authentication (401)', async () => {
@@ -171,6 +174,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
       headers: { 'Content-Type': 'application/json' },
     });
     assert.equal(res.status, 401);
+    await assertFetchResponseMatchesOpenApi(res, 'POST', '/api/recommend/{recommendationId}/advisory');
   });
 
   await t.test('6. Deferred advisory endpoint enforces ownership (403 for other user)', async () => {
@@ -182,6 +186,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
       },
     });
     assert.equal(res.status, 403);
+    await assertFetchResponseMatchesOpenApi(res, 'POST', '/api/recommend/{recommendationId}/advisory');
   });
 
   await t.test('7. Deferred advisory endpoint returns 404 for non-existent recommendation', async () => {
@@ -194,6 +199,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
       },
     });
     assert.equal(res.status, 404);
+    await assertFetchResponseMatchesOpenApi(res, 'POST', '/api/recommend/{recommendationId}/advisory');
   });
 
   let advisoryData = null;
@@ -253,6 +259,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     }
 
     assert.equal(res.status, 200);
+    await assertFetchResponseMatchesOpenApi(res, 'POST', '/api/recommend/{recommendationId}/advisory');
     assert.deepEqual(receivedExplanation, expectedExplanation);
     advisoryData = await res.json();
     assert.equal(advisoryData.recommendationId, recData.recommendationId);
@@ -298,6 +305,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     const elapsed = performance.now() - start;
 
     assert.equal(res.status, 200);
+    await assertFetchResponseMatchesOpenApi(res, 'POST', '/api/recommend/{recommendationId}/advisory');
     const cachedAdvisory = await res.json();
     assert.equal(cachedAdvisory.advisory_text, advisoryData.advisory_text);
     assertAdvisoryBinding(cachedAdvisory, sourceState);
@@ -320,6 +328,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     });
 
     assert.equal(res.status, 409);
+    await assertFetchResponseMatchesOpenApi(res, 'POST', '/api/recommend/{recommendationId}/advisory');
     const body = await res.json();
     assert.equal(body.code, 'ADVISORY_GENERATION_IN_PROGRESS');
     assert.equal(body.details.status, 'GENERATING');

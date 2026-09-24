@@ -15,6 +15,7 @@ import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import { correlationIdMiddleware } from '../middleware/correlation.js';
 import { withServer, jsonRequest } from '../test-utils/httpTestUtils.js';
+import { assertRuntimeResponseMatchesContract } from './helpers/openapiRuntimeContract.js';
 
 process.env.JWT_SECRET = 'audit-trail-test-secret';
 process.env.NODE_ENV = 'test';
@@ -54,7 +55,7 @@ describe('AuditRecord - Complete Advisory Audit Trail Verification', () => {
   after(async () => {
     await FinancialProfile.deleteMany({ userId: { $in: [testUserId, otherUserId] } });
     await Recommendation.deleteMany({ userId: { $in: [testUserId, otherUserId] } });
-    await AuditRecord.deleteMany({ userId: { $in: [testUserId, otherUserId] } });
+    await AuditRecord.collection.deleteMany({ userId: { $in: [testUserId, otherUserId] } });
     await teardownTestDatabase();
   });
 
@@ -71,6 +72,10 @@ describe('AuditRecord - Complete Advisory Audit Trail Verification', () => {
       });
 
       assert.equal(response.status, 200, `Expected 200, got ${response.status}: ${JSON.stringify(body)}`);
+      assertRuntimeResponseMatchesContract({
+        method: 'POST', path: '/api/recommend', status: response.status,
+        contentType: response.headers.get('content-type'), body,
+      });
       assert.ok(body.recommendationId, 'Expected recommendationId');
       assert.ok(body.audit_id, 'Expected audit_id in response');
       assert.ok(body.audit_hash, 'Expected audit_hash in response');
@@ -117,6 +122,10 @@ describe('AuditRecord - Complete Advisory Audit Trail Verification', () => {
       });
 
       assert.equal(response.status, 200);
+      assertRuntimeResponseMatchesContract({
+        method: 'GET', path: '/api/recommend/audit', status: response.status,
+        contentType: response.headers.get('content-type'), body,
+      });
       assert.equal(body.status, 'success');
       assert.ok(body.total >= 1, 'Total records should be >= 1');
       assert.ok(body.records.length >= 1, 'Records array should not be empty');
@@ -132,6 +141,10 @@ describe('AuditRecord - Complete Advisory Audit Trail Verification', () => {
         headers: { Authorization: `Bearer ${testToken}` },
       });
       assert.equal(response.status, 200);
+      assertRuntimeResponseMatchesContract({
+        method: 'GET', path: '/api/recommend/audit/verify', status: response.status,
+        contentType: response.headers.get('content-type'), body,
+      });
       assert.equal(body.valid, true, JSON.stringify(body.errors));
       assert.ok(body.checkedRecords >= 1);
     });
@@ -149,6 +162,10 @@ describe('AuditRecord - Complete Advisory Audit Trail Verification', () => {
         headers: { Authorization: `Bearer ${testToken}` },
       });
       assert.equal(okRes.status, 200);
+      assertRuntimeResponseMatchesContract({
+        method: 'GET', path: '/api/recommend/audit/{id}', status: okRes.status,
+        contentType: okRes.headers.get('content-type'), body: okBody,
+      });
       assert.equal(okBody.record._id.toString(), auditDoc._id.toString());
 
       // Unauthorized other user request
@@ -157,6 +174,11 @@ describe('AuditRecord - Complete Advisory Audit Trail Verification', () => {
         headers: { Authorization: `Bearer ${otherToken}` },
       });
       assert.equal(denyRes.status, 403, 'Should deny access to non-owner non-admin');
+      const denyBody = await denyRes.json();
+      assertRuntimeResponseMatchesContract({
+        method: 'GET', path: '/api/recommend/audit/{id}', status: denyRes.status,
+        contentType: denyRes.headers.get('content-type'), body: denyBody,
+      });
     });
   });
 

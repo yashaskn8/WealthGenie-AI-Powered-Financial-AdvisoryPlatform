@@ -1,8 +1,9 @@
 import mongoose from 'mongoose';
+import { protectImmutableIdentity } from './immutableIdentity.js';
 
 const recommendationStateSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  profileId: { type: mongoose.Schema.Types.ObjectId, ref: 'FinancialProfile', required: true, index: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true, immutable: true },
+  profileId: { type: mongoose.Schema.Types.ObjectId, ref: 'FinancialProfile', required: true, index: true, immutable: true },
   currentRecommendationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Recommendation', required: true },
   currentAllocationRevision: { type: Number, required: true, min: 1 },
   currentAllocationRevisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'RecommendationAllocationRevision', required: true },
@@ -17,5 +18,9 @@ const recommendationStateSchema = new mongoose.Schema({
 }, { timestamps: true, strict: 'throw' });
 
 recommendationStateSchema.index({ userId: 1, profileId: 1 }, { unique: true });
+protectImmutableIdentity(recommendationStateSchema, ['userId', 'profileId'], {
+  code: 'RECOMMENDATION_STATE_IDENTITY_IMMUTABLE',
+  label: 'Recommendation state ownership',
+});
 
 export default mongoose.model('RecommendationState', recommendationStateSchema);

@@ -6,6 +6,7 @@ import portfolioRoutes from '../routes/portfolio.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import { closeServer, rawRequest } from '../test-utils/httpTestUtils.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
+import { assertRuntimeResponseMatchesContract } from './helpers/openapiRuntimeContract.js';
 
 process.env.JWT_SECRET = 'portfolio-route-test-secret';
 
@@ -62,6 +63,10 @@ test('portfolio optimise route responds for all frontend-exposed strategies', as
 
     const body = await response.json();
     assert.equal(response.status, 200, `${strategy}: ${JSON.stringify(body)}`);
+    assertRuntimeResponseMatchesContract({
+      method: 'POST', path: '/api/portfolio/optimise', status: response.status,
+      contentType: response.headers.get('content-type'), body,
+    });
     assert.equal(body.strategy, strategy);
     assert.ok(Number.isFinite(body.portfolio_return_assumption), `${strategy} portfolio_return_assumption`);
     assert.equal(body.return_data_class, 'MODEL_ASSUMPTION');

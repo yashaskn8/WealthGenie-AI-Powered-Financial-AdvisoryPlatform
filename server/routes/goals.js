@@ -15,7 +15,11 @@ import {
   buildLlmFinancialContext,
 } from '../services/recommendationProfile.js';
 import { assessSuitabilityRisk } from '../services/riskProfiler.js';
-import { completeMutationIdempotency, idempotency } from '../middleware/idempotency.js';
+import {
+  completeMutationIdempotency,
+  idempotency,
+  resolveCommittedMutationForClaim,
+} from '../middleware/idempotency.js';
 import {
   PROJECTION_ASSUMPTION_DATA_CLASS,
   PROJECTION_ASSUMPTION_SOURCE,
@@ -154,7 +158,6 @@ async function generateGoalAdvice(goal, profile) {
 }
 
 export async function persistGoalAtomically(goalData, _profileId, { testHooks = {} } = {}) {
-  await Goal.init();
   const goal = await Goal.create(goalData);
   await testHooks.afterGoalCreate?.(null, goal);
   return goal;
@@ -191,6 +194,10 @@ async function updateGoalWithCAS(goal, { userId, expectedVersion, session = null
   delete update.version;
   delete update.createdAt;
   delete update.updatedAt;
+  delete update.userId;
+  delete update.profileId;
+  delete update.idempotencyOperationId;
+  delete update.idempotencyRequestHash;
   const filter = { _id: goal._id, userId, ...goalVersionCondition(expectedVersion) };
   let query = Goal.findOneAndUpdate(filter, { $set: { ...update, version: expectedVersion + 1 } }, {
     new: true,
@@ -291,7 +298,6 @@ async function holdGoalSourceState(session, { userId, profileId, state }) {
 }
 
 async function persistGoalWithSourceState(goalData, { userId, profileId, sourceState, idempotencyClaim = null, testHooks = {} } = {}) {
-  await Goal.init();
   const session = await mongoose.startSession();
   let created;
   let transactionCommitted = false;
@@ -489,6 +495,13 @@ router.post('/create', verifyJWT, validateStrict(customGoalSchema), idempotency(
       idempotencyClaim: req.idempotencyClaim,
     });
   } catch (error) {
+    const committedReplay = await resolveCommittedMutationForClaim(req, req.idempotencyClaim);
+    if (committedReplay) {
+      req.idempotencyCommitted = true;
+      clearInterval(req.idempotencyClaim.heartbeat);
+      res.setHeader('X-Cache-Lookup', 'HIT - Idempotent');
+      return res.status(committedReplay.status).json(committedReplay.body);
+    }
     if (error.code === 11000) throw createError(409, `Duplicate goal name: ${goal_name}`, 'A goal with this name already exists.');
     throw error;
   }

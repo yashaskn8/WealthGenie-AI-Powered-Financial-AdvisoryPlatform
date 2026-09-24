@@ -101,7 +101,7 @@ async function createAdvisory(index) {
 async function clearAuditState() {
   await Promise.all([
     Recommendation.deleteMany({ userId }),
-    AuditRecord.deleteMany({ userId }),
+    AuditRecord.collection.deleteMany({ userId }),
     AuditChainHead.deleteMany({ _id: userId }),
     IdempotencyKey.deleteMany({ userId }),
   ]);
@@ -147,6 +147,35 @@ test('concurrent advisories retain a single ordered audit chain', async () => {
   );
 });
 
+test('audit records reject application-level mutation and deletion', async () => {
+  await createAdvisory(1);
+  const record = await AuditRecord.findOne({ userId }).lean();
+  const document = await AuditRecord.findById(record._id);
+  document.version_id = 'rewritten-through-save';
+  await assert.rejects(
+    document.save(),
+    error => error.code === 'AUDIT_RECORD_APPEND_ONLY',
+  );
+  await assert.rejects(
+    AuditRecord.updateOne({ _id: record._id }, { $set: { version_id: 'rewritten' } }),
+    error => error.code === 'AUDIT_RECORD_APPEND_ONLY',
+  );
+  await assert.rejects(
+    AuditRecord.replaceOne({ _id: record._id }, record),
+    error => error.code === 'AUDIT_RECORD_APPEND_ONLY',
+  );
+  await assert.rejects(
+    AuditRecord.deleteOne({ _id: record._id }),
+    error => error.code === 'AUDIT_RECORD_APPEND_ONLY',
+  );
+  assert.throws(
+    () => AuditRecord.bulkWrite([{ updateOne: { filter: { _id: record._id }, update: { $set: { version_id: 'rewritten' } } } }]),
+    error => error.code === 'AUDIT_RECORD_APPEND_ONLY',
+  );
+  assert.equal(await AuditRecord.countDocuments({ _id: record._id }), 1);
+  assert.equal((await verifyAuditChain(userId)).valid, true);
+});
+
 test('mutating any protected advisory field breaks chain verification', async () => {
   await createAdvisory(1);
   await createAdvisory(2);
@@ -163,7 +192,7 @@ test('mutating any protected advisory field breaks chain verification', async ()
   ];
 
   for (const [field, update] of mutations) {
-    const mutationResult = await AuditRecord.updateOne({ _id: target._id }, update);
+    const mutationResult = await AuditRecord.collection.updateOne({ _id: target._id }, update);
     assert.equal(mutationResult.matchedCount, 1, `${field} mutation must match its audit record`);
     assert.equal(mutationResult.modifiedCount, 1, `${field} mutation must modify its audit record`);
     const verification = await verifyAuditChain(userId);
@@ -173,7 +202,7 @@ test('mutating any protected advisory field breaks chain verification', async ()
       `${field} mutation must identify the changed record`,
     );
 
-    await AuditRecord.replaceOne({ _id: target._id }, target, { timestamps: false });
+    await AuditRecord.collection.replaceOne({ _id: target._id }, target);
     const restored = await verifyAuditChain(userId);
     assert.equal(restored.valid, true, `${field} restoration failed: ${JSON.stringify(restored.errors)}`);
   }

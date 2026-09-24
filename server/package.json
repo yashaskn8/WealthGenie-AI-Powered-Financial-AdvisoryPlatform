@@ -26,7 +26,8 @@
     "eval": "node scripts/run-eval.js",
     "eval:live": "node scripts/run-live-plan-review-evals.js",
     "test:reliability": "node --test --test-concurrency=1 test/reliabilityLab.test.js",
-    "profile:migrate": "node scripts/migrateFinancialProfilesV4.js"
+    "profile:migrate": "node scripts/migrateFinancialProfilesV4.js",
+    "migrate:phase2-indexes": "node scripts/migratePhase2Indexes.js"
   },
   "dependencies": {
     "@a2a-js/sdk": "1.2.0",

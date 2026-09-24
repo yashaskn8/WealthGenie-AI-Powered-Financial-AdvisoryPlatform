@@ -5,6 +5,7 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import recommendRoutes, { persistAdvisoryIfCurrent } from '../routes/recommend.js';
+import projectionRoutes from '../routes/projection.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
@@ -32,6 +33,7 @@ import goalsRoutes from '../routes/goals.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
 import { buildPortfolioFingerprint, buildRecommendationFingerprint } from '../services/recommendationFingerprint.js';
+import { assertFetchResponseMatchesOpenApi } from './helpers/openapiRuntimeContract.js';
 import {
   PROJECTION_ASSUMPTION_POLICY_HASH,
   PROJECTION_ASSUMPTION_SOURCE,
@@ -173,6 +175,9 @@ async function createAdvisoryLifecycleFixture() {
     audit_hash: 'b'.repeat(64),
     instruments: pipeline.instruments,
     model_version: modelVersion,
+    financial_profile_schema_version: 'financial-profile-1.0.0',
+    return_basis: 'PRE_TAX_NOMINAL',
+    final_risk_tier: suitability.finalRisk,
     advisory_text: 'snapshot explanation',
     advisory_explanation: {
       status: 'PENDING',
@@ -239,16 +244,18 @@ async function createAdvisoryLifecycleFixture() {
 }
 
 async function request(profileId, userId = userA) {
-  return fetch(`${baseUrl}/api/recommend/current?profileId=${profileId}`, {
+  const response = await fetch(`${baseUrl}/api/recommend/current?profileId=${profileId}`, {
     headers: { Authorization: `Bearer ${signToken(userId)}` },
   });
+  await assertFetchResponseMatchesOpenApi(response, 'GET', '/api/recommend/current');
+  return response;
 }
 
 async function submitGoal(profile, name, {
   key = crypto.randomUUID(),
   targetDate = new Date(Date.now() + 4 * 365.25 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
 } = {}) {
-  return fetch(`${baseUrl}/api/goals/create`, {
+  const response = await fetch(`${baseUrl}/api/goals/create`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -264,10 +271,12 @@ async function submitGoal(profile, name, {
       priority: 'High',
     }),
   });
+  await assertFetchResponseMatchesOpenApi(response, 'POST', '/api/goals/create');
+  return response;
 }
 
 async function patchGoal(goalId, payload) {
-  return fetch(`${baseUrl}/api/goals/${goalId}`, {
+  const response = await fetch(`${baseUrl}/api/goals/${goalId}`, {
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
@@ -275,10 +284,12 @@ async function patchGoal(goalId, payload) {
     },
     body: JSON.stringify(payload),
   });
+  await assertFetchResponseMatchesOpenApi(response, 'PATCH', '/api/goals/{goalId}');
+  return response;
 }
 
 async function submitWeights(payload, userId = userA) {
-  return fetch(`${baseUrl}/api/recommend/weights`, {
+  const response = await fetch(`${baseUrl}/api/recommend/weights`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -286,6 +297,8 @@ async function submitWeights(payload, userId = userA) {
     },
     body: JSON.stringify(payload),
   });
+  await assertFetchResponseMatchesOpenApi(response, 'POST', '/api/recommend/weights');
+  return response;
 }
 
 function createBarrier() {
@@ -415,6 +428,7 @@ test.before(async () => {
   app.use(express.json());
   app.use('/api/recommend', recommendRoutes);
   app.use('/api/goals', goalsRoutes);
+  app.use('/api/projection', projectionRoutes);
   app.use(errorHandler);
   await new Promise(resolve => {
     server = app.listen(0, '127.0.0.1', () => {
@@ -430,7 +444,7 @@ test.beforeEach(async () => {
     Recommendation.deleteMany({ userId: { $in: [userA, userB] } }),
     RecommendationState.deleteMany({ userId: { $in: [userA, userB] } }),
     Goal.deleteMany({ userId: { $in: [userA, userB] } }),
-    AuditRecord.deleteMany({ userId: { $in: [userA, userB] } }),
+    AuditRecord.collection.deleteMany({ userId: { $in: [userA, userB] } }),
     AuditChainHead.deleteMany({ _id: { $in: [userA, userB] } }),
     IdempotencyKey.deleteMany({ userId: { $in: [userA, userB] } }),
   ]);
@@ -439,6 +453,46 @@ test.beforeEach(async () => {
 test.after(async () => {
   if (server) await new Promise(resolve => server.close(resolve));
   await teardownTestDatabase();
+});
+
+test('recommendation and canonical-state owner/profile identities cannot be rewritten', async () => {
+  const profile = await createFixture();
+  const recommendation = await Recommendation.findOne({ userId: userA, profileId: profile._id });
+  const state = await RecommendationState.findOne({ userId: userA, profileId: profile._id });
+
+  for (const [field, value] of [
+    ['userId', userB],
+    ['profileId', new mongoose.Types.ObjectId()],
+    ['idempotencyOperationId', 'rewritten-operation'],
+    ['idempotencyRequestHash', 'c'.repeat(64)],
+    ['profileCompletionCandidateId', 'rewritten-candidate'],
+  ]) {
+    await assert.rejects(
+      Recommendation.updateOne({ _id: recommendation._id }, { $set: { [field]: value } }),
+      error => error.code === 'RECOMMENDATION_GENERATION_IMMUTABLE',
+      `recommendation query update must protect ${field}`,
+    );
+  }
+  const changedRecommendation = await Recommendation.findById(recommendation._id);
+  await assert.rejects((async () => {
+    changedRecommendation.profileId = new mongoose.Types.ObjectId();
+    await changedRecommendation.save();
+  })(), /immutable/i);
+
+  await assert.rejects(
+    RecommendationState.updateOne({ _id: state._id }, { $set: { profileId: new mongoose.Types.ObjectId() } }),
+    error => error.code === 'RECOMMENDATION_STATE_IDENTITY_IMMUTABLE',
+  );
+  const changedState = await RecommendationState.findById(state._id);
+  await assert.rejects((async () => {
+    changedState.userId = userB;
+    await changedState.save();
+  })(), /immutable/i);
+
+  const storedRecommendation = await Recommendation.findById(recommendation._id).lean();
+  const storedState = await RecommendationState.findById(state._id).lean();
+  assert.equal(String(storedRecommendation.userId), String(userA));
+  assert.equal(String(storedState.profileId), String(profile._id));
 });
 
 test('returns the latest matching recommendation without creating records', async () => {
@@ -459,6 +513,26 @@ test('returns the latest matching recommendation without creating records', asyn
     Recommendation.countDocuments({ userId: userA }),
     AuditRecord.countDocuments({ userId: userA }),
   ]), countsBefore);
+});
+
+test('stress test response contract is bound to a fresh canonical allocation', async () => {
+  const profile = await createFixture({ userId: userA });
+  const recommendation = await Recommendation.findOne({ userId: userA, profileId: profile._id }).lean();
+  const instrumentId = recommendation.instruments[0].id;
+  const response = await fetch(`${baseUrl}/api/projection/stress-test`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${signToken(userA)}`,
+    },
+    body: JSON.stringify({ profileId: String(profile._id), instrumentId, principal: 100000 }),
+  });
+  const body = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(body));
+  await assertFetchResponseMatchesOpenApi(response, 'POST', '/api/projection/stress-test', { body });
+  assert.equal(body.profile_id, String(profile._id));
+  assert.equal(body.allocation_revision, 1);
+  assert.ok(body.portfolio_fingerprint);
 });
 
 test('restores current advisory metadata and text over the original snapshot', async () => {
@@ -1164,6 +1238,7 @@ test('committed goal advisory reconciles to a newer allocation without returning
 
   const response = await pendingResponse;
   const body = await response.json();
+  await assertFetchResponseMatchesOpenApi(response, 'PATCH', '/api/goals/{goalId}/refresh-advice', { body });
   assert.equal(response.status, 200, JSON.stringify(body));
   assert.equal(body.operation_result.committed, true);
   assert.equal(body.operation_result.response_state, 'STALE');
@@ -1208,6 +1283,7 @@ test('committed goal advisory fails with committed semantics when canonical poin
   }
   const response = await pendingResponse;
   const body = await response.json();
+  await assertFetchResponseMatchesOpenApi(response, 'PATCH', '/api/goals/{goalId}/refresh-advice', { body });
   assert.equal(response.status, 503, JSON.stringify(body));
   assert.equal(body.code, 'COMMITTED_BUT_RESPONSE_RECONCILIATION_FAILED');
   assert.equal(body.details.operation_committed, true);
@@ -1238,6 +1314,7 @@ test('committed goal creation reconciles to a newer allocation and withholds sta
 
   const response = await pendingResponse;
   const body = await response.json();
+  await assertFetchResponseMatchesOpenApi(response, 'POST', '/api/goals/create', { body });
   assert.equal(response.status, 201, JSON.stringify(body));
   assert.equal(body.goal.calculation_freshness.fresh, false);
   assert.ok(body.goal.calculation_freshness.reasonCodes.includes('STALE_ALLOCATION'));
@@ -1433,6 +1510,12 @@ test('goal delete requires and atomically enforces the expected resource version
   const created = await createResponse.json();
   assert.equal(createResponse.status, 201, JSON.stringify(created));
   const goalId = String(created.goal._id);
+  const missingPrecondition = await fetch(`${baseUrl}/api/goals/${goalId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${signToken(userA)}` },
+  });
+  assert.equal(missingPrecondition.status, 428);
+  await assertFetchResponseMatchesOpenApi(missingPrecondition, 'DELETE', '/api/goals/{goalId}');
   const updateResponse = await patchGoal(goalId, { expectedVersion: created.goal.version, priority: 'Critical' });
   assert.equal(updateResponse.status, 200);
   const updated = await updateResponse.json();
@@ -1444,6 +1527,7 @@ test('goal delete requires and atomically enforces the expected resource version
   });
   const staleBody = await staleDelete.json();
   assert.equal(staleDelete.status, 409, JSON.stringify(staleBody));
+  await assertFetchResponseMatchesOpenApi(staleDelete, 'DELETE', '/api/goals/{goalId}', { body: staleBody });
   assert.equal(staleBody.code, 'GOAL_VERSION_CONFLICT');
   assert.ok(await Goal.exists({ _id: goalId, userId: userA }), 'stale delete must preserve the goal');
 
@@ -1453,6 +1537,7 @@ test('goal delete requires and atomically enforces the expected resource version
   });
   const currentBody = await currentDelete.json();
   assert.equal(currentDelete.status, 200, JSON.stringify(currentBody));
+  await assertFetchResponseMatchesOpenApi(currentDelete, 'DELETE', '/api/goals/{goalId}', { body: currentBody });
   assert.equal(currentBody.deleted, true);
   assert.equal(await Goal.exists({ _id: goalId, userId: userA }), null, 'current-version delete must remove the goal');
 });

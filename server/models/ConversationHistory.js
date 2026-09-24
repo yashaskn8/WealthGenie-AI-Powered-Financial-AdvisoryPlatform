@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { protectImmutableIdentity } from './immutableIdentity.js';
 
 const MessageSchema = new mongoose.Schema({
   role: {
@@ -56,20 +57,18 @@ const ConversationHistorySchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'FinancialProfile',
     required: true,
-    immutable: true,
   },
   session_id: {
     type: String,
     required: true,
-    immutable: true,
     maxlength: 100,
   },
-  profileVersion: { type: Number, min: 1, required: true, immutable: true },
-  profileInputHash: { type: String, required: true, match: /^[a-f0-9]{64}$/, immutable: true },
-  sourceRecommendationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Recommendation', default: null, immutable: true },
-  sourceAllocationRevisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'RecommendationAllocationRevision', default: null, immutable: true },
-  sourceRecommendationFingerprint: { type: String, match: /^[a-f0-9]{64}$/, default: null, immutable: true },
-  sourcePortfolioFingerprint: { type: String, match: /^[a-f0-9]{64}$/, default: null, immutable: true },
+  profileVersion: { type: Number, min: 1, required: true },
+  profileInputHash: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
+  sourceRecommendationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Recommendation', default: null },
+  sourceAllocationRevisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'RecommendationAllocationRevision', default: null },
+  sourceRecommendationFingerprint: { type: String, match: /^[a-f0-9]{64}$/, default: null },
+  sourcePortfolioFingerprint: { type: String, match: /^[a-f0-9]{64}$/, default: null },
   session_version: { type: Number, min: 1, default: 1 },
   message_sequence: { type: Number, min: 0, default: 0 },
   reserved_tokens: { type: Number, min: 0, default: 0 },
@@ -101,5 +100,14 @@ ConversationHistorySchema.pre('save', function (next) {
 ConversationHistorySchema.index({ userId: 1, updated_at: -1 });
 ConversationHistorySchema.index({ userId: 1, session_id: 1 }, { unique: true, name: 'unique_user_chat_session' });
 ConversationHistorySchema.index({ userId: 1, is_active: 1, updated_at: -1 });
+
+protectImmutableIdentity(ConversationHistorySchema, [
+  'userId', 'profileId', 'session_id', 'profileVersion', 'profileInputHash',
+  'sourceRecommendationId', 'sourceAllocationRevisionId',
+  'sourceRecommendationFingerprint', 'sourcePortfolioFingerprint',
+], {
+  code: 'CONVERSATION_IDENTITY_IMMUTABLE',
+  label: 'Conversation identity and financial provenance',
+});
 
 export default mongoose.model('ConversationHistory', ConversationHistorySchema);

@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { optionalUniqueIndex } from '../config/mongoCompatibility.js';
+import { protectImmutableIdentity } from './immutableIdentity.js';
 
 const GoalSchema = new mongoose.Schema({
   userId:     { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, immutable: true },
@@ -84,5 +85,9 @@ GoalSchema.index(
   { userId: 1, goal_name: 1 },
   { unique: true, collation: { locale: 'en', strength: 2 } }
 );
+protectImmutableIdentity(GoalSchema, ['userId', 'profileId', 'idempotencyOperationId', 'idempotencyRequestHash'], {
+  code: 'GOAL_IDENTITY_IMMUTABLE',
+  label: 'Goal ownership and creation identity',
+});
 
 export default mongoose.model('Goal', GoalSchema);

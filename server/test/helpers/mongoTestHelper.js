@@ -16,6 +16,7 @@
  */
 
 import mongoose from 'mongoose';
+import { PHASE2_INDEX_MODELS } from '../../services/persistenceIndexReadiness.js';
 
 const MONGO_IMAGE = process.env.MONGO_TEST_IMAGE || 'mongo:7.0';
 const MONGO_VERSION = '7.0.5';
@@ -24,6 +25,12 @@ let activeContainer = null;
 let activeMongoServer = null;
 let activeUri = null;
 let activeMechanism = null;
+
+async function initializeTestIndexes() {
+  // Test databases are disposable. Install their schema indexes explicitly so
+  // tests exercise the same read-only readiness gate as a migrated deploy.
+  await Promise.all(PHASE2_INDEX_MODELS.map(model => model.createIndexes()));
+}
 
 /**
  * Builds actionable fail-fast error message when no database mechanism is available.
@@ -73,6 +80,7 @@ async function tryExternalUri(requireReplicaSet = false) {
   if (mongoose.connection.readyState === 0) {
     await mongoose.connect(envUri);
   }
+  await initializeTestIndexes();
   if (requireReplicaSet) await assertReplicaSet();
   activeUri = envUri;
   activeMechanism = 'external_uri';
@@ -94,6 +102,7 @@ async function tryTestcontainers(requireReplicaSet = false) {
   if (mongoose.connection.readyState === 0) {
     await mongoose.connect(uri);
   }
+  await initializeTestIndexes();
   if (requireReplicaSet) await assertReplicaSet();
 
   activeContainer = container;
@@ -120,6 +129,7 @@ async function tryMongoMemoryServer() {
   if (mongoose.connection.readyState === 0) {
     await mongoose.connect(uri);
   }
+  await initializeTestIndexes();
 
   activeMongoServer = mongoServer;
   activeUri = uri;
@@ -145,6 +155,7 @@ export async function setupTestDatabase({ requireReplicaSet = false } = {}) {
 
   // If already connected and provisioned in this process, reuse
   if (mongoose.connection.readyState === 1 && activeUri) {
+    await initializeTestIndexes();
     if (requireReplicaSet) await assertReplicaSet();
     return {
       uri: activeUri,
@@ -156,6 +167,7 @@ export async function setupTestDatabase({ requireReplicaSet = false } = {}) {
   // If already provisioned but mongoose was disconnected, just reconnect to existing URI!
   if (activeUri && mongoose.connection.readyState === 0) {
     await mongoose.connect(activeUri);
+    await initializeTestIndexes();
     if (requireReplicaSet) await assertReplicaSet();
     return {
       uri: activeUri,

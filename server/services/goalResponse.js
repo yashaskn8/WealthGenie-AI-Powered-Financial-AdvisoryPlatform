@@ -171,7 +171,6 @@ export function buildCurrentGoalResponse(goal, { state = null } = {}) {
     for (const field of DERIVED_FIELDS) response[field] = field === 'chart_data' ? [] : null;
     response.chartData = [];
   }
-  if (!fresh) response.advisoryMetadata = null;
   return response;
 }
 

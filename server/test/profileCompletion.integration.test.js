@@ -11,13 +11,12 @@ import Recommendation from '../models/Recommendation.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import RecommendationState from '../models/RecommendationState.js';
 import AuditRecord from '../models/AuditRecord.js';
-import { connectRedis, redisClient } from '../config/redis.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
 import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
+import { assertFetchResponseMatchesOpenApi } from './helpers/openapiRuntimeContract.js';
 
 const JWT_SECRET = 'profile-completion-integration-secret';
-const enabled = process.env.RUN_PROFILE_COMPLETION_INTEGRATION === 'true';
 process.env.JWT_SECRET = JWT_SECRET;
 process.env.NODE_ENV = 'test';
 
@@ -25,9 +24,7 @@ function signToken(userId) {
   return jwt.sign({ userId: String(userId), jti: crypto.randomUUID() }, JWT_SECRET, { expiresIn: '1h' });
 }
 
-test('precompute -> complete persists one profile, recommendation, and audit and replays safely', {
-  skip: !enabled,
-}, async () => {
+test('profile completion persists one profile, recommendation, and audit and replays safely', async () => {
   let server;
   let baseUrl;
   const userId = new mongoose.Types.ObjectId();
@@ -41,11 +38,6 @@ test('precompute -> complete persists one profile, recommendation, and audit and
 
   try {
     await setupTestDatabase({ requireReplicaSet: true });
-    assert.equal(
-      await connectRedis({ url: process.env.REDIS_URL || 'redis://127.0.0.1:6379' }),
-      true,
-      'Redis-compatible test infrastructure is required when RUN_PROFILE_COMPLETION_INTEGRATION=true.',
-    );
 
     const app = express();
     app.use(express.json());
@@ -65,25 +57,17 @@ test('precompute -> complete persists one profile, recommendation, and audit and
     ]);
     assert.deepEqual(before, [0, 0, 0]);
 
-    const precomputeResponse = await fetch(`${baseUrl}/api/profile/precompute`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-    });
-    assert.equal(precomputeResponse.status, 200);
-    const candidate = await precomputeResponse.json();
-    assert.match(candidate.candidateId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
-
     const completeHeaders = { ...headers, 'Idempotency-Key': idempotencyKey };
     const completeResponse = await fetch(`${baseUrl}/api/profile/complete`, {
       method: 'POST',
       headers: completeHeaders,
-      body: JSON.stringify({ ...payload, candidateId: candidate.candidateId }),
+      body: JSON.stringify(payload),
     });
+    await assertFetchResponseMatchesOpenApi(completeResponse, 'POST', '/api/profile/complete');
     assert.equal(completeResponse.status, 200);
     const completed = await completeResponse.json();
-    assert.equal(completed.completion.candidateHit, true);
-    assert.equal(completed.completion.recomputed, false);
+    assert.equal(completed.completion.candidateHit, false);
+    assert.equal(completed.completion.recomputed, true);
     assert.equal(completed.recommendation.response_state, 'CURRENT');
     assert.equal(completed.recommendation.profileId, completed.profile.profileId);
     assert.equal(completed.recommendation.profile_version, completed.profile.version);
@@ -106,11 +90,6 @@ test('precompute -> complete persists one profile, recommendation, and audit and
     assert.equal(revisionOne.portfolioFingerprint, completed.recommendation.portfolio_fingerprint);
     assert.equal(String(currentState.currentRecommendationId), completed.recommendation.recommendationId);
     assert.equal(String(currentState.currentAllocationRevisionId), completed.recommendation.allocation_revision_id);
-    const candidateHitTiming = completeResponse.headers.get('server-timing');
-    assert.match(candidateHitTiming || '', /ml;dur=0\.00/);
-    assert.match(candidateHitTiming || '', /pipeline;dur=0\.00/);
-    assert.match(candidateHitTiming || '', /projection;dur=0\.00/);
-
     assert.deepEqual(await Promise.all([
       FinancialProfile.countDocuments({ userId }),
       Recommendation.countDocuments({ userId }),
@@ -118,13 +97,14 @@ test('precompute -> complete persists one profile, recommendation, and audit and
     ]), [1, 1, 1]);
     const persistedRecommendation = await Recommendation.findOne({ userId }).lean();
     assert.equal(persistedRecommendation.regulatoryRuleVersion, getCurrentRegulatoryRuleVersion());
-    assert.equal(persistedRecommendation.profileCompletionCandidateId, candidate.candidateId);
+    assert.equal(persistedRecommendation.profileCompletionCandidateId ?? null, null);
 
     const replayResponse = await fetch(`${baseUrl}/api/profile/complete`, {
       method: 'POST',
       headers: completeHeaders,
-      body: JSON.stringify({ ...payload, candidateId: candidate.candidateId }),
+      body: JSON.stringify(payload),
     });
+    await assertFetchResponseMatchesOpenApi(replayResponse, 'POST', '/api/profile/complete');
     assert.equal(replayResponse.status, 200);
     const replay = await replayResponse.json();
     assert.equal(replay.profile.profileId, completed.profile.profileId);
@@ -144,6 +124,7 @@ test('precompute -> complete persists one profile, recommendation, and audit and
       headers: completeHeaders,
       body: JSON.stringify({ ...payload, monthly_savings: payload.monthly_savings + 1 }),
     });
+    await assertFetchResponseMatchesOpenApi(conflictResponse, 'POST', '/api/profile/complete');
     assert.equal(conflictResponse.status, 409);
     const conflict = await conflictResponse.json();
     assert.equal(conflict.code, 'IDEMPOTENCY_PAYLOAD_CONFLICT');
@@ -153,6 +134,7 @@ test('precompute -> complete persists one profile, recommendation, and audit and
       headers: { ...headers, 'Idempotency-Key': crypto.randomUUID() },
       body: JSON.stringify({ ...payload, monthly_savings: payload.monthly_savings + 2 }),
     });
+    await assertFetchResponseMatchesOpenApi(missResponse, 'POST', '/api/profile/complete');
     assert.equal(missResponse.status, 200);
     const miss = await missResponse.json();
     assert.equal(miss.completion.candidateHit, false);
@@ -164,10 +146,9 @@ test('precompute -> complete persists one profile, recommendation, and audit and
     ]), [2, 2, 2]);
   } finally {
     if (server) await new Promise(resolve => server.close(resolve));
-    if (redisClient?.isOpen) await redisClient.quit().catch(() => {});
     await FinancialProfile.deleteMany({ userId }).catch(() => {});
     await Recommendation.deleteMany({ userId }).catch(() => {});
-    await AuditRecord.deleteMany({ userId }).catch(() => {});
+    await AuditRecord.collection.deleteMany({ userId }).catch(() => {});
     await teardownTestDatabase();
   }
 });

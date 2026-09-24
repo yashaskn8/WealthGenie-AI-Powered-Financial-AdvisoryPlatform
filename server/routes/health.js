@@ -4,6 +4,7 @@ import { redisClient, redisAvailable } from '../config/redis.js';
 import { checkMLHealth } from '../services/mlClient.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import logger from '../utils/logger.js';
+import { verifyPersistenceIndexes } from '../services/persistenceIndexReadiness.js';
 
 function withTimeout(promise, timeoutMs, label) {
   let timer;
@@ -110,11 +111,18 @@ export function createHealthRouter({ runtimeState = null, requireRedis = false, 
  * Readiness probe - returns 200 only when the database is connected and responsive.
  * Container orchestrators use this to decide when to route traffic.
  */
-  router.get('/ready', (_req, res) => {
+  router.get('/ready', asyncHandler(async (_req, res) => {
     const reasons = [];
     if (runtimeState && !runtimeState.isReady()) reasons.push(`Application lifecycle is ${runtimeState.snapshot().phase}`);
     if (mongoose.connection.readyState !== 1) reasons.push('Database not connected');
     if (requireRedis && (!redisAvailable || !redisClient?.isReady)) reasons.push('Redis not connected');
+    if (mongoose.connection.readyState === 1) {
+      try {
+        await verifyPersistenceIndexes();
+      } catch {
+        reasons.push('Required persistence indexes are not ready');
+      }
+    }
     if (reasons.length > 0) {
       return res.status(503).json({
         status: 'NOT_READY',
@@ -128,7 +136,7 @@ export function createHealthRouter({ runtimeState = null, requireRedis = false, 
       lifecycle: runtimeState?.snapshot() || null,
       timestamp: new Date().toISOString(),
     });
-  });
+  }));
 
 /**
  * GET /health/live

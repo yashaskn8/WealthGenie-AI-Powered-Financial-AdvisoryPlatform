@@ -50,12 +50,19 @@ test('candidate, idempotency, and audit-chain uniqueness remains enforced', () =
   assert.deepEqual(auditIndex[1].partialFilterExpression, { chain_sequence: { $exists: true } });
 });
 
-test('startup warms every transaction collection before transactional persistence', () => {
-  const source = fs.readFileSync(path.join(rootDir, 'server', 'services', 'advisoryPersistence.js'), 'utf8');
-  for (const model of ['FinancialProfile', 'Recommendation', 'AuditRecord', 'AuditChainHead', 'IdempotencyKey']) {
-    assert.match(source, new RegExp(`${model}\\.init\\(\\)`));
+test('transaction request paths verify migrated indexes without running DDL', () => {
+  const sourceFiles = [
+    'server/middleware/idempotency.js',
+    'server/services/advisoryPersistence.js',
+    'server/services/chatSessionStore.js',
+    'server/routes/goals.js',
+  ];
+  for (const file of sourceFiles) {
+    const source = fs.readFileSync(path.join(rootDir, file), 'utf8');
+    assert.doesNotMatch(source, /\.init\(\)|createIndex\(|createIndexes\(|dropIndex\(/, `${file} must not perform runtime DDL`);
   }
-  assert.ok(source.indexOf('FinancialProfile.init()') < source.indexOf('persistAdvisoryAtomically'));
+  const migration = fs.readFileSync(path.join(rootDir, 'server', 'scripts', 'migratePhase2Indexes.js'), 'utf8');
+  assert.match(migration, /MONGODB_MIGRATION_URI/);
 });
 
 test('MongoDB mode preserves caller options and is the default flavor', () => {

@@ -2,10 +2,10 @@ import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import ConversationHistory from '../models/ConversationHistory.js';
 import { createError } from '../middleware/errorHandler.js';
+import { verifyPersistenceIndexes } from './persistenceIndexReadiness.js';
 
 export const CHAT_SESSION_TOKEN_CAP = 50000;
 export const CHAT_SESSION_LEASE_MS = 90000;
-const indexReadyByConnection = new WeakMap();
 
 function persistenceError() {
   return createError(503, 'Chat session persistence is unavailable.', 'Chat is temporarily unavailable.', {
@@ -13,21 +13,9 @@ function persistenceError() {
   });
 }
 
-export async function ensureChatSessionIndexes(connection = mongoose.connection) {
-  if (connection.readyState !== 1) throw persistenceError();
-  let pending = indexReadyByConnection.get(connection);
-  if (!pending) {
-    pending = ConversationHistory.collection.createIndex(
-      { userId: 1, session_id: 1 },
-      { unique: true, name: 'unique_user_chat_session' },
-    ).catch(error => {
-      indexReadyByConnection.delete(connection);
-      throw error;
-    });
-    indexReadyByConnection.set(connection, pending);
-  }
+export async function verifyChatSessionIndexes() {
   try {
-    await pending;
+    await verifyPersistenceIndexes({ models: [ConversationHistory] });
   } catch {
     throw persistenceError();
   }
@@ -80,7 +68,7 @@ async function settleExpiredReservation({ userId, sessionId, now }) {
 }
 
 export async function acquireChatSession({ userId, sessionId, binding, now = new Date() }) {
-  await ensureChatSessionIndexes();
+  await verifyChatSessionIndexes();
   try {
     await settleExpiredReservation({ userId, sessionId, now });
   } catch {
@@ -290,7 +278,7 @@ export async function releaseChatSession(claim, { chargeReservation = false } = 
 }
 
 export async function closeChatSession({ userId, sessionId }) {
-  await ensureChatSessionIndexes();
+  await verifyChatSessionIndexes();
   try {
     return await ConversationHistory.findOneAndUpdate({
       userId,
@@ -299,6 +287,11 @@ export async function closeChatSession({ userId, sessionId }) {
     }, [{
       $set: {
         is_active: false,
+        // Closing fences the provider worker. Conservatively charge any
+        // outstanding reservation exactly once before clearing it, so token
+        // accounting cannot remain stranded or be charged by a stale release.
+        cumulative_tokens: { $add: [{ $ifNull: ['$cumulative_tokens', 0] }, { $ifNull: ['$reserved_tokens', 0] }] },
+        reserved_tokens: 0,
         processing_owner_id: null,
         processing_lease_until: null,
         session_version: { $add: [{ $ifNull: ['$session_version', 1] }, 1] },

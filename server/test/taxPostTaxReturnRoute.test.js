@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import express from 'express';
 import taxRoutes from '../routes/tax.js';
 import { withServer, jsonRequest } from '../test-utils/httpTestUtils.js';
+import { assertRuntimeResponseMatchesContract } from './helpers/openapiRuntimeContract.js';
 
 describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
   const app = express();
@@ -27,6 +28,10 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
       });
 
       assert.equal(response.status, 200);
+      assertRuntimeResponseMatchesContract({
+        method: 'POST', path: '/api/tax/post-tax-return', status: response.status,
+        contentType: response.headers.get('content-type'), body,
+      });
       assert.equal(body.postTaxReturn, 0.07);
       assert.equal(body.taxRate, 0);
     });
@@ -43,6 +48,10 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
         }),
       });
       assert.equal(response.status, 200);
+      assertRuntimeResponseMatchesContract({
+        method: 'POST', path: '/api/tax/post-tax-return', status: response.status,
+        contentType: response.headers.get('content-type'), body,
+      });
       assert.equal(body.status, 'TAX_CLASSIFICATION_REQUIRES_ACQUISITION_FACTS');
       assert.equal(body.postTaxReturn, null);
       assert.equal(body.what_if_net_gain, null);
@@ -70,6 +79,10 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
       });
 
       assert.equal(response.status, 200);
+      assertRuntimeResponseMatchesContract({
+        method: 'POST', path: '/api/tax/post-tax-return/batch', status: response.status,
+        contentType: response.headers.get('content-type'), body,
+      });
       assert.equal(body.results.length, 3);
 
       // FD: postTaxReturn should be 0.07 (0% tax rate at ₹10L income under new regime)
@@ -95,7 +108,7 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
 
   test('Validation - Bad input returns 400', async () => {
     await withServer(app, async (baseUrl) => {
-      const { response } = await jsonRequest(`${baseUrl}/api/tax/post-tax-return`, {
+      const { response, body } = await jsonRequest(`${baseUrl}/api/tax/post-tax-return`, {
         method: 'POST',
         body: JSON.stringify({
           instrumentType: '',
@@ -104,6 +117,10 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
         }),
       });
       assert.equal(response.status, 400);
+      assertRuntimeResponseMatchesContract({
+        method: 'POST', path: '/api/tax/post-tax-return', status: response.status,
+        contentType: response.headers.get('content-type'), body,
+      });
     });
   });
 
@@ -127,6 +144,10 @@ describe('WG-038: POST /api/tax/post-tax-return & /batch Endpoints', () => {
       });
       assert.equal(invalidBatch.response.status, 400);
       assert.equal(invalidBatch.body.error, 'Validation failed');
+      assertRuntimeResponseMatchesContract({
+        method: 'POST', path: '/api/tax/post-tax-return/batch', status: invalidBatch.response.status,
+        contentType: invalidBatch.response.headers.get('content-type'), body: invalidBatch.body,
+      });
     });
   });
 

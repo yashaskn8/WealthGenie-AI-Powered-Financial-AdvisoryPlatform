@@ -5,37 +5,17 @@ import { canonicalSha256 } from '../utils/canonicalJson.js';
 import { createError, errorEnvelope, sendError } from './errorHandler.js';
 import { buildPostCommitAdvisoryResponse } from '../services/advisoryResponse.js';
 import { reachFinancialStateTestHook } from '../services/financialStateTestHooks.js';
+import { verifyPersistenceIndexes } from '../services/persistenceIndexReadiness.js';
 
 const MUTATION_LEASE_MS = 30_000;
 const MUTATION_HEARTBEAT_MS = 8_000;
 const MUTATION_WAIT_MS = 5_000;
 const POLL_INTERVAL_MS = 40;
 const SAFE_KEY = /^[A-Za-z0-9._:-]{8,128}$/;
-let durableIdempotencyReady;
-
 async function ensureDurableIdempotencyReady() {
-  if (!durableIdempotencyReady) {
-    durableIdempotencyReady = (async () => {
-      let indexes = [];
-      try {
-        indexes = await IdempotencyKey.collection.indexes();
-      } catch (error) {
-        if (error.code !== 26 && error.codeName !== 'NamespaceNotFound') throw error;
-      }
-      for (const index of indexes) {
-        if (index.expireAfterSeconds !== undefined
-            && index.key?.createdAt === 1
-            && Object.keys(index.key).length === 1) {
-          await IdempotencyKey.collection.dropIndex(index.name);
-        }
-      }
-      await IdempotencyKey.init();
-    })().catch(error => {
-      durableIdempotencyReady = null;
-      throw error;
-    });
-  }
-  return durableIdempotencyReady;
+  // Read-only verification. Schema migration is an explicit deployment task;
+  // a mutation request must never alter MongoDB's index catalog.
+  return verifyPersistenceIndexes();
 }
 
 function mutationError(status, message, code, details) {
@@ -48,11 +28,11 @@ export function assertValidIdempotencyKey(key) {
   }
 }
 
-function mutationOperationId({ operation, userId, key }) {
+export function mutationOperationId({ operation, userId, key }) {
   return `mutation:${canonicalSha256({ version: 1, operation, userId: String(userId), key })}`;
 }
 
-function mutationRequestHash(req, operation, userId) {
+export function mutationRequestHash(req, operation, userId) {
   return canonicalSha256({
     version: 1,
     operation,
@@ -71,6 +51,23 @@ async function resolveMutationReplay(req, record, resolveReplay) {
   }
   const body = await resolveReplay(req, record);
   return { status: record.responseStatus || 200, body };
+}
+
+/**
+ * Reconcile a worker that lost its lease with a successor that already
+ * committed the same operation. The resolver remains ownership-scoped and
+ * rebuilds the response from the durable resource, not the old worker's body.
+ */
+export async function resolveCommittedMutationForClaim(req, claim) {
+  if (!claim?.operationId || !claim?.requestHash || !req.user?.userId) return null;
+  const record = await IdempotencyKey.findOne({
+    _id: claim.operationId,
+    userId: req.user.userId,
+    requestHash: claim.requestHash,
+    status: 'DONE',
+  }).lean();
+  if (!record) return null;
+  return resolveMutationReplay(req, record, req.idempotencyResolveReplay);
 }
 
 async function pollForMutationCompletion({ req, operationId, requestHash, resolveReplay, firstState }) {
@@ -174,12 +171,36 @@ export async function completeMutationIdempotency(session, claim, { resourceType
 export async function releaseMutationIdempotency(claim) {
   if (!claim?.operationId || !claim?.ownerToken) return;
   clearInterval(claim.heartbeat);
-  await IdempotencyKey.deleteOne({
+  const result = await IdempotencyKey.deleteOne({
     _id: claim.operationId,
     status: 'LOCK',
     requestHash: claim.requestHash,
     lockOwnerId: claim.ownerToken,
   });
+  await reachFinancialStateTestHook('idempotency.mutation.released', {
+    operation: claim.operation,
+    operationId: claim.operationId,
+    deletedCount: result.deletedCount,
+  });
+}
+
+/** The exact lease refresh used by the timer; exported for deterministic fault tests. */
+export async function heartbeatMutationIdempotency(claim) {
+  if (!claim?.operationId || !claim?.ownerToken) return false;
+  try {
+    const updated = await IdempotencyKey.updateOne({
+      _id: claim.operationId,
+      status: 'LOCK',
+      requestHash: claim.requestHash,
+      lockOwnerId: claim.ownerToken,
+    }, { $set: { leaseExpiresAt: new Date(Date.now() + MUTATION_LEASE_MS) } });
+    if (updated.matchedCount !== 1) claim.lost = true;
+  } catch {
+    // A failed heartbeat is a lost lease. Transaction completion remains
+    // guarded by the same owner-token check and refuses to commit.
+    claim.lost = true;
+  }
+  return !claim.lost;
 }
 
 /**
@@ -209,18 +230,7 @@ export const idempotency = ({ operation, resolveReplay } = {}) => {
 
       req.idempotencyClaim = result;
       req.idempotencyCommitted = false;
-      result.heartbeat = setInterval(async () => {
-        try {
-          const updated = await IdempotencyKey.updateOne({
-            _id: result.operationId, status: 'LOCK', requestHash, lockOwnerId: result.ownerToken,
-          }, { $set: { leaseExpiresAt: new Date(Date.now() + MUTATION_LEASE_MS) } });
-          if (updated.matchedCount !== 1) result.lost = true;
-        } catch {
-          // Commit remains guarded by the owner-token CAS. A heartbeat failure
-          // never authorizes an unprotected write.
-          result.lost = true;
-        }
-      }, MUTATION_HEARTBEAT_MS);
+      result.heartbeat = setInterval(() => { void heartbeatMutationIdempotency(result); }, MUTATION_HEARTBEAT_MS);
       result.heartbeat.unref?.();
 
       const originalJson = res.json.bind(res);

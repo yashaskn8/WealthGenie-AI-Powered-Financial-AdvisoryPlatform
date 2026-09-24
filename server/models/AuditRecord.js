@@ -118,6 +118,29 @@ const auditRecordSchema = new mongoose.Schema({
   timestamps: true,
 });
 
+function appendOnlyError() {
+  const error = new Error('Audit records are append-only.');
+  error.code = 'AUDIT_RECORD_APPEND_ONLY';
+  return error;
+}
+
+auditRecordSchema.pre('save', function rejectAuditRecordMutation() {
+  if (!this.isNew) throw appendOnlyError();
+});
+
+for (const operation of [
+  'updateOne', 'updateMany', 'findOneAndUpdate', 'replaceOne', 'findOneAndReplace',
+  'deleteOne', 'deleteMany', 'findOneAndDelete',
+]) {
+  auditRecordSchema.pre(operation, function rejectAuditRecordQueryMutation() {
+    throw appendOnlyError();
+  });
+}
+
+auditRecordSchema.static('bulkWrite', function rejectAuditRecordBulkWrite() {
+  throw appendOnlyError();
+});
+
 // Regulatory composite audit indexes
 auditRecordSchema.index({ userId: 1, timestamp: -1 });
 const chainSequenceIndex = optionalUniqueIndex('chain_sequence', 'unique_user_audit_chain_sequence');

@@ -25,6 +25,7 @@ import FinancialProfile from '../models/FinancialProfile.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { withServer, jsonRequest as jsonFetch, rawRequest } from '../test-utils/httpTestUtils.js';
 import { canonicalProfile, canonicalProfilePayload } from './helpers/canonicalProfile.js';
+import { assertRuntimeResponseMatchesContract } from './helpers/openapiRuntimeContract.js';
 
 process.env.JWT_SECRET = 'security-test-secret';
 process.env.NODE_ENV = 'test';
@@ -242,6 +243,10 @@ test('WG-005: POST /api/instruments/rank-wti returns 200 for valid authenticated
       headers: { authorization: `Bearer ${token}` },
     });
     assert.equal(response.status, 200, 'rank-wti must succeed with valid auth + valid payload');
+    assertRuntimeResponseMatchesContract({
+      method: 'POST', path: '/api/instruments/rank-wti', status: response.status,
+      contentType: response.headers.get('content-type'), body,
+    });
     assert.ok(body.success, 'Response should include success flag');
     assert.ok(Array.isArray(body.products), 'Response should include products array');
     assert.equal(body.total, 0, 'Unsupported product categories must not receive fallback products');

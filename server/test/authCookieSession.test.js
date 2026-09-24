@@ -6,6 +6,7 @@ import { errorHandler } from '../middleware/errorHandler.js';
 import { createCsrfProtection } from '../middleware/csrf.js';
 import { withServer, jsonRequest } from '../test-utils/httpTestUtils.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
+import { assertRuntimeResponseMatchesContract } from './helpers/openapiRuntimeContract.js';
 import User from '../models/User.js';
 
 process.env.NODE_ENV = 'test';
@@ -35,6 +36,20 @@ test('HttpOnly cookie session authenticates restore and logout without exposing 
       });
       assert.equal(registration.response.status, 201);
       assert.equal(registration.body.token, undefined);
+      assertRuntimeResponseMatchesContract({
+        method: 'POST', path: '/api/auth/register', status: registration.response.status,
+        contentType: registration.response.headers.get('content-type'), body: registration.body,
+      });
+
+      const login = await jsonRequest(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        body: JSON.stringify({ email: 'cookie-session@example.com', password: 'StrongPass1!' }),
+      });
+      assert.equal(login.response.status, 200);
+      assertRuntimeResponseMatchesContract({
+        method: 'POST', path: '/api/auth/login', status: login.response.status,
+        contentType: login.response.headers.get('content-type'), body: login.body,
+      });
 
       const rawSetCookie = registration.response.headers.get('set-cookie');
       const setCookie = Array.isArray(rawSetCookie) ? rawSetCookie[0] : rawSetCookie;
@@ -51,6 +66,10 @@ test('HttpOnly cookie session authenticates restore and logout without exposing 
       });
       assert.equal(restored.response.status, 200);
       assert.equal(restored.body.user.email, 'cookie-session@example.com');
+      assertRuntimeResponseMatchesContract({
+        method: 'GET', path: '/api/auth/session', status: restored.response.status,
+        contentType: restored.response.headers.get('content-type'), body: restored.body,
+      });
 
       const rejectedLogout = await jsonRequest(`${baseUrl}/api/auth/logout`, {
         method: 'POST',
@@ -59,6 +78,10 @@ test('HttpOnly cookie session authenticates restore and logout without exposing 
       });
       assert.equal(rejectedLogout.response.status, 403);
       assert.equal(rejectedLogout.body.code, 'CSRF_TOKEN_INVALID');
+      assertRuntimeResponseMatchesContract({
+        method: 'POST', path: '/api/auth/logout', status: rejectedLogout.response.status,
+        contentType: rejectedLogout.response.headers.get('content-type'), body: rejectedLogout.body,
+      });
 
       const logout = await jsonRequest(`${baseUrl}/api/auth/logout`, {
         method: 'POST',
@@ -66,6 +89,10 @@ test('HttpOnly cookie session authenticates restore and logout without exposing 
         body: JSON.stringify({}),
       });
       assert.equal(logout.response.status, 200);
+      assertRuntimeResponseMatchesContract({
+        method: 'POST', path: '/api/auth/logout', status: logout.response.status,
+        contentType: logout.response.headers.get('content-type'), body: logout.body,
+      });
       const rawClearedCookie = logout.response.headers.get('set-cookie');
       const clearedCookie = Array.isArray(rawClearedCookie) ? rawClearedCookie[0] : rawClearedCookie;
       assert.match(clearedCookie, /wg_session=;/);

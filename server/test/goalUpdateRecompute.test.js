@@ -12,10 +12,13 @@ import crypto from 'crypto';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 
 import goalRoutes from '../routes/goals.js';
+import profileRoutes from '../routes/profile.js';
 import { enforceJsonContentType } from '../middleware/contentType.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import { withServer, jsonRequest } from '../test-utils/httpTestUtils.js';
+import { assertRuntimeResponseMatchesContract } from './helpers/openapiRuntimeContract.js';
 import Goal from '../models/Goal.js';
+import IdempotencyKey from '../models/IdempotencyKey.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
@@ -49,6 +52,7 @@ function buildTestApp() {
   const app = express();
   app.use(enforceJsonContentType);
   app.use(express.json());
+  app.use('/api/profile', profileRoutes);
   app.use('/api/goals', goalRoutes);
   app.use(errorHandler);
   return app;
@@ -146,11 +150,117 @@ async function ensureDb() {
 test.after(async () => {
   try {
     await Goal.deleteMany({ userId: TEST_USER_ID });
+    await IdempotencyKey.deleteMany({ userId: TEST_USER_ID });
     await RecommendationState.deleteMany({ userId: TEST_USER_ID });
     await Recommendation.deleteMany({ userId: TEST_USER_ID });
     await FinancialProfile.deleteMany({ userId: TEST_USER_ID });
   } catch (_) {}
   await teardownTestDatabase();
+});
+
+test('goal ownership and idempotent create identity cannot be rewritten through model updates', async () => {
+  const profile = await ensureDb();
+  const goal = await Goal.create({
+    userId: TEST_USER_ID,
+    profileId: profile._id,
+    goal_name: 'Identity invariant goal',
+    target_amount: 100000,
+    target_date: new Date(Date.now() + 3 * 365 * 24 * 60 * 60 * 1000),
+    current_savings: 1000,
+    priority: 'Medium',
+    idempotencyOperationId: 'goal-identity-operation-test',
+    idempotencyRequestHash: 'c'.repeat(64),
+  });
+
+  await assert.rejects(
+    Goal.updateOne({ _id: goal._id }, { $set: { userId: new mongoose.Types.ObjectId() } }),
+    error => error.code === 'GOAL_IDENTITY_IMMUTABLE',
+  );
+  await assert.rejects(
+    Goal.findOneAndUpdate({ _id: goal._id }, { $set: { idempotencyRequestHash: 'd'.repeat(64) } }),
+    error => error.code === 'GOAL_IDENTITY_IMMUTABLE',
+  );
+  await assert.rejects(
+    Goal.updateOne({ _id: goal._id }, { $set: { profileId: new mongoose.Types.ObjectId() } }),
+    error => error.code === 'GOAL_IDENTITY_IMMUTABLE',
+  );
+  const changedDocument = await Goal.findById(goal._id);
+  await assert.rejects((async () => {
+    changedDocument.userId = new mongoose.Types.ObjectId();
+    await changedDocument.save();
+  })(), /immutable/i);
+  const stored = await Goal.findById(goal._id).lean();
+  assert.equal(String(stored.userId), TEST_USER_ID);
+  assert.equal(String(stored.profileId), String(profile._id));
+  assert.equal(stored.idempotencyRequestHash, 'c'.repeat(64));
+});
+
+test('the same caller key independently commits profile and goal operations with owned resource links', async () => {
+  const profile = await ensureDb();
+  const token = signToken();
+  const key = `cross-operation-${crypto.randomUUID()}`;
+  const goalName = `Cross operation ${crypto.randomUUID()}`;
+  const app = buildTestApp();
+  await withServer(app, async baseUrl => {
+    const profileResponse = await jsonRequest(`${baseUrl}/api/profile/build`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': key },
+      body: JSON.stringify({
+        monthly_take_home: 100000,
+        monthly_savings: 30000,
+        age: 32,
+        risk_tolerance: 'Moderate',
+        investment_goals: ['Wealth Growth'],
+        investment_horizon_years: 15,
+      }),
+    });
+    assert.equal(profileResponse.response.status, 201, JSON.stringify(profileResponse.body));
+    assertRuntimeResponseMatchesContract({
+      method: 'POST', path: '/api/profile/build', status: profileResponse.response.status,
+      contentType: profileResponse.response.headers.get('content-type'), body: profileResponse.body,
+    });
+
+    const goalResponse = await jsonRequest(`${baseUrl}/api/goals/create`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': key },
+      body: JSON.stringify({
+        goal_name: goalName,
+        target_amount: 500000,
+        target_date: new Date(Date.now() + 8 * 365 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+        current_savings: 10000,
+        profileId: String(profile._id),
+        priority: 'Medium',
+      }),
+    });
+    assert.equal(goalResponse.response.status, 201, JSON.stringify(goalResponse.body));
+    assertRuntimeResponseMatchesContract({
+      method: 'POST', path: '/api/goals/create', status: goalResponse.response.status,
+      contentType: goalResponse.response.headers.get('content-type'), body: goalResponse.body,
+    });
+
+    const goalRecord = await Goal.findOne({ userId: TEST_USER_ID, goal_name: goalName }).lean();
+    const profileOperation = await IdempotencyKey.findOne({
+      userId: TEST_USER_ID,
+      operation: 'profile.build',
+      resourceId: profileResponse.body.profileId,
+    }).lean();
+    const goalOperation = await IdempotencyKey.findOne({
+      userId: TEST_USER_ID,
+      operation: 'goals.create',
+      resourceId: goalRecord._id,
+    }).lean();
+    assert.ok(profileOperation && goalOperation);
+    assert.notEqual(profileOperation._id, goalOperation._id);
+    assert.notEqual(profileOperation.requestHash, goalOperation.requestHash);
+    assert.equal(profileOperation.status, 'DONE');
+    assert.equal(goalOperation.status, 'DONE');
+    assert.equal(profileOperation.resourceType, 'FinancialProfile');
+    assert.equal(goalOperation.resourceType, 'Goal');
+    assert.equal(String(profileOperation.resourceId), profileResponse.body.profileId);
+    assert.equal(String(goalOperation.resourceId), String(goalRecord._id));
+    assert.equal(await FinancialProfile.countDocuments({ _id: profileOperation.resourceId, userId: TEST_USER_ID }), 1);
+    assert.equal(await Goal.countDocuments({ _id: goalOperation.resourceId, userId: TEST_USER_ID }), 1);
+  });
 });
 
 test('WG-037 Scenario (a): POST /create goal with known target_amount and target_date', async () => {
@@ -183,12 +293,55 @@ test('WG-037 Scenario (a): POST /create goal with known target_amount and target
     });
 
     assert.equal(response.status, 201, `POST /create failed with status ${response.status}`);
+    assertRuntimeResponseMatchesContract({
+      method: 'POST', path: '/api/goals/create', status: response.status,
+      contentType: response.headers.get('content-type'), body,
+    });
     assert.ok(body.goal, 'Response must include created goal object');
     assert.equal(body.goal.goal_name, 'Retirement Corpus 2036');
     assert.equal(body.goal.target_amount, 1000000);
     assert.ok(body.goal.inflation_adjusted_target > 1000000, 'Inflation target must be greater than initial target_amount');
     assert.ok(body.goal.recommended_sip > 0, 'Recommended SIP must be positive');
     assert.ok(body.goal.simulated_monthly_contribution <= 30000, 'Goal simulation must not exceed profile savings capacity');
+  });
+});
+
+test('POST /api/goals/:goalId/simulate returns a schema-valid deterministic what-if response', async () => {
+  const profile = await ensureDb();
+  const token = signToken();
+  const app = buildTestApp();
+  const targetDate = new Date();
+  targetDate.setFullYear(targetDate.getFullYear() + 8);
+  const targetDateString = targetDate.toISOString().slice(0, 10);
+
+  await withServer(app, async baseUrl => {
+    const created = await jsonRequest(`${baseUrl}/api/goals/create`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'Idempotency-Key': crypto.randomUUID() },
+      body: JSON.stringify({
+        goal_name: `Simulation contract ${crypto.randomUUID()}`,
+        target_amount: 900000,
+        target_date: targetDateString,
+        current_savings: 50000,
+        profileId: String(profile._id),
+        priority: 'Medium',
+      }),
+    });
+    assert.equal(created.response.status, 201, JSON.stringify(created.body));
+    const goalId = String(created.body.goal._id);
+
+    const simulated = await jsonRequest(`${baseUrl}/api/goals/${goalId}/simulate`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify({ monthly_contribution: 10000 }),
+    });
+    assert.equal(simulated.response.status, 200, JSON.stringify(simulated.body));
+    assertRuntimeResponseMatchesContract({
+      method: 'POST', path: '/api/goals/{goalId}/simulate', status: simulated.response.status,
+      contentType: simulated.response.headers.get('content-type'), body: simulated.body,
+    });
+    assert.equal(simulated.body.simulation_classification, 'NON_RECOMMENDATION_GOAL_WHAT_IF');
+    assert.equal(simulated.body.provider_forecast, false);
   });
 });
 
@@ -227,6 +380,10 @@ test('WG-037 Scenario (b): PATCH target_amount recomputes inflation_adjusted_tar
     });
 
     assert.equal(patchRes.status, 200, `PATCH failed with status ${patchRes.status}`);
+    assertRuntimeResponseMatchesContract({
+      method: 'PATCH', path: '/api/goals/{goalId}', status: patchRes.status,
+      contentType: patchRes.headers.get('content-type'), body: patchBody,
+    });
     assert.ok(patchBody.success, 'PATCH response must indicate success');
 
     const updatedGoal = patchBody.goal;

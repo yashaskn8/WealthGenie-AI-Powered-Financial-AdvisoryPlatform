@@ -14,6 +14,7 @@ import { defaultChatSessionStore } from '../services/chatSessionStore.js';
 import { ProviderManager } from '../services/providerAbstraction.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
 import { installMockChatSessionStore } from './helpers/mockChatSessionStore.js';
+import { assertRuntimeResponseMatchesContract } from './helpers/openapiRuntimeContract.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret-wealthgenie-2026';
 process.env.JWT_SECRET = JWT_SECRET;
@@ -40,6 +41,7 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
   let originalRecFindOne;
   let originalGoalFind;
   let originalConvFindOne;
+  let originalConvFind;
   let originalUserFindById;
   let restoreChatStore;
 
@@ -53,6 +55,7 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
     originalRecFindOne = Recommendation.findOne;
     originalGoalFind = Goal.find;
     originalConvFindOne = ConversationHistory.findOne;
+    originalConvFind = ConversationHistory.find;
     originalUserFindById = User.findById;
 
     FinancialProfile.findOne = (query) => ({
@@ -79,6 +82,12 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
       messages: [],
       save: async () => true,
     });
+    ConversationHistory.find = () => ({
+      sort() { return this; },
+      limit() { return this; },
+      select() { return this; },
+      lean: async () => [],
+    });
     restoreChatStore = installMockChatSessionStore(async ({ userId, sessionId }) => ({
       userId,
       profileId: mockProfile._id,
@@ -102,6 +111,7 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
     Recommendation.findOne = originalRecFindOne;
     Goal.find = originalGoalFind;
     ConversationHistory.findOne = originalConvFindOne;
+    ConversationHistory.find = originalConvFind;
     User.findById = originalUserFindById;
     restoreChatStore?.();
   });
@@ -114,6 +124,10 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
         body: JSON.stringify({ message: 'Hello' }),
       });
       assert.equal(res.status, 401);
+      assertRuntimeResponseMatchesContract({
+        method: 'POST', path: '/api/chat/message', status: res.status,
+        contentType: res.headers.get('content-type'), body: await res.json(),
+      });
     });
   });
 
@@ -129,6 +143,10 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
       });
       assert.equal(res.status, 400);
       const data = await res.json();
+      assertRuntimeResponseMatchesContract({
+        method: 'POST', path: '/api/chat/message', status: res.status,
+        contentType: res.headers.get('content-type'), body: data,
+      });
       assert.match(data.error || data.details?.[0], /Validation failed|cannot be empty/);
     });
   });
@@ -145,7 +163,78 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
         body: JSON.stringify({ message: hugeMessage }),
       });
       assert.equal(res.status, 400);
+      assertRuntimeResponseMatchesContract({
+        method: 'POST', path: '/api/chat/message', status: res.status,
+        contentType: res.headers.get('content-type'), body: await res.json(),
+      });
     });
+  });
+
+  it('same literal session ID never reveals or closes another user conversation over HTTP', async () => {
+    const otherUserId = '60d5ecb8b3b3a72d9c8e4a99';
+    const otherToken = jwt.sign({ userId: otherUserId, email: 'other@example.com' }, JWT_SECRET, { expiresIn: '1h' });
+    const originalFind = ConversationHistory.find;
+    const originalClose = defaultChatSessionStore.close;
+    const ownerConversation = {
+      userId: mockUserId,
+      session_id: 'shared-name',
+      messages: [{ role: 'user', content: 'private owner message', sourceIds: ['private-source'] }],
+      message_count: 1,
+    };
+    const queries = [];
+    let closedBy;
+    ConversationHistory.find = query => {
+      queries.push(query);
+      const conversations = String(query.userId) === mockUserId ? [ownerConversation] : [];
+      return {
+        sort() { return this; },
+        limit() { return this; },
+        select() { return this; },
+        lean: async () => conversations,
+      };
+    };
+    defaultChatSessionStore.close = async input => { closedBy = input; };
+
+    try {
+      await withServer(buildApp(), async baseUrl => {
+        const ownerResponse = await rawRequest(`${baseUrl}/api/chat/history?session_id=shared-name`, {
+          headers: { authorization: `Bearer ${validToken}` },
+        });
+        assert.equal(ownerResponse.status, 200);
+        const ownerBody = await ownerResponse.json();
+        assertRuntimeResponseMatchesContract({
+          method: 'GET', path: '/api/chat/history', status: ownerResponse.status,
+          contentType: ownerResponse.headers.get('content-type'), body: ownerBody,
+        });
+        assert.equal(ownerBody.conversations[0].messages[0].content, 'private owner message');
+
+        const otherResponse = await rawRequest(`${baseUrl}/api/chat/history?session_id=shared-name`, {
+          headers: { authorization: `Bearer ${otherToken}` },
+        });
+        assert.equal(otherResponse.status, 200);
+        const otherBody = await otherResponse.json();
+        assertRuntimeResponseMatchesContract({
+          method: 'GET', path: '/api/chat/history', status: otherResponse.status,
+          contentType: otherResponse.headers.get('content-type'), body: otherBody,
+        });
+        assert.deepEqual(otherBody.conversations, []);
+        assert.deepEqual(queries.map(query => String(query.userId)), [mockUserId, otherUserId]);
+
+        const deleteResponse = await rawRequest(`${baseUrl}/api/chat/session/shared-name`, {
+          method: 'DELETE',
+          headers: { authorization: `Bearer ${otherToken}` },
+        });
+        assert.equal(deleteResponse.status, 200);
+        assertRuntimeResponseMatchesContract({
+          method: 'DELETE', path: '/api/chat/session/{sessionId}', status: deleteResponse.status,
+          contentType: deleteResponse.headers.get('content-type'), body: await deleteResponse.json(),
+        });
+        assert.deepEqual(closedBy, { userId: otherUserId, sessionId: 'shared-name' });
+      });
+    } finally {
+      ConversationHistory.find = originalFind;
+      defaultChatSessionStore.close = originalClose;
+    }
   });
 
   // ── MCP Two-Pass Contract Protocol & Route Coverage ──
@@ -163,6 +252,10 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
       });
       assert.equal(res.status, 200);
       const data = await res.json();
+      assertRuntimeResponseMatchesContract({
+        method: 'POST', path: '/api/chat/message', status: res.status,
+        contentType: res.headers.get('content-type'), body: data,
+      });
       assert.equal(typeof data.response, 'string');
       assert.equal(typeof data.session_id, 'string');
       assert.equal(data.version, '3.0');
@@ -221,6 +314,10 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
 
         assert.equal(res.status, 200);
         const data = await res.json();
+        assertRuntimeResponseMatchesContract({
+          method: 'POST', path: '/api/chat/message', status: res.status,
+          contentType: res.headers.get('content-type'), body: data,
+        });
         assert.equal(callCount, 1);
         assert.equal(generationArgs.tools, null);
         assert.equal(generationArgs.jsonMode, true);
@@ -254,11 +351,28 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
         });
         assert.equal(res.status, 200);
         const data = await res.json();
+        assertRuntimeResponseMatchesContract({
+          method: 'DELETE', path: '/api/chat/session/{sessionId}', status: res.status,
+          contentType: res.headers.get('content-type'), body: data,
+        });
         assert.equal(data.message, 'Session cleared.');
         assert.deepEqual(closedSession, { userId: mockUserId, sessionId: 'sess-123' });
       });
     } finally {
       defaultChatSessionStore.close = originalClose;
     }
+  });
+
+  it('GET /api/chat/history validates the live authenticated response envelope', async () => {
+    await withServer(buildApp(), async baseUrl => {
+      const res = await rawRequest(`${baseUrl}/api/chat/history?limit=10`, {
+        headers: { authorization: `Bearer ${validToken}` },
+      });
+      assert.equal(res.status, 200);
+      assertRuntimeResponseMatchesContract({
+        method: 'GET', path: '/api/chat/history', status: res.status,
+        contentType: res.headers.get('content-type'), body: await res.json(),
+      });
+    });
   });
 });

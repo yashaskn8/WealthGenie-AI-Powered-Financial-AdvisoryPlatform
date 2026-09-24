@@ -1,12 +1,13 @@
 import mongoose from 'mongoose';
 import { assessSuitabilityRisk } from '../services/riskProfiler.js';
 import { optionalUniqueIndex } from '../config/mongoCompatibility.js';
+import { protectImmutableIdentity } from './immutableIdentity.js';
 
 const CORE_GOALS = ['Retirement', 'Wealth Growth', 'Tax Saving', 'Emergency Fund'];
 const RISK_LEVELS = ['Conservative', 'Conservative-Moderate', 'Moderate', 'Moderate-Aggressive', 'Aggressive'];
 
 const financialProfileSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, immutable: true },
   idempotencyOperationId: { type: String, immutable: true },
   idempotencyRequestHash: { type: String, immutable: true, match: /^[a-f0-9]{64}$/ },
 
@@ -95,5 +96,10 @@ financialProfileSchema.pre('validate', function validateFrozenRelationships(next
 financialProfileSchema.index({ userId: 1, createdAt: -1 });
 const idempotencyIndex = optionalUniqueIndex('idempotencyOperationId', 'unique_profile_create_idempotency_operation');
 financialProfileSchema.index(idempotencyIndex.key, idempotencyIndex.options);
+
+protectImmutableIdentity(financialProfileSchema, ['userId'], {
+  code: 'FINANCIAL_PROFILE_IDENTITY_IMMUTABLE',
+  label: 'Financial profile ownership',
+});
 
 export default mongoose.model('FinancialProfile', financialProfileSchema);
