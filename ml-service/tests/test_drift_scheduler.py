@@ -48,6 +48,7 @@ async def test_drift_scheduler_triggers_check_on_sufficient_samples():
         call_kwargs = mock_drift_check.call_args[1]
         assert call_kwargs.get("registered_by") == "drift_scheduler"
         assert call_kwargs.get("input_df") is evaluation_frame
+        assert call_kwargs.get("force_retrain_on_drift") is False
         mock_discard.assert_called_once_with(150)
 
 

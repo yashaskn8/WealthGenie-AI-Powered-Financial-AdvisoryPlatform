@@ -201,3 +201,70 @@ class TestMongoVectorStore:
     def test_search_empty_store_returns_empty(self, store):
         results = store.search(query_vector=_random_embedding(), top_k=5)
         assert results == []
+
+    def test_non_active_chunks_are_excluded_after_restart(self, store, mock_mongo_client):
+        embedding = _random_embedding()
+        store.add_chunks([_make_chunk("life-c1", "life-doc", "Lifecycle test", embedding)])
+        assert len(store.search(embedding, top_k=1)) == 1
+
+        assert store.set_document_state("life-doc", "SOFT_DELETED") == 1
+        from rag.vector_store.mongo_vector_store import MongoVectorStore
+        with patch("rag.vector_store.mongo_vector_store.MongoClient", return_value=mock_mongo_client):
+            restarted = MongoVectorStore(
+                mongo_uri=TEST_MONGO_URI,
+                db_name=TEST_DB_NAME,
+                collection_name=TEST_COLLECTION,
+                force_numpy=True,
+            )
+        assert restarted.search(embedding, top_k=1) == []
+
+        assert restarted.delete_document("life-doc") == 1
+        with patch("rag.vector_store.mongo_vector_store.MongoClient", return_value=mock_mongo_client):
+            after_delete = MongoVectorStore(
+                mongo_uri=TEST_MONGO_URI,
+                db_name=TEST_DB_NAME,
+                collection_name=TEST_COLLECTION,
+                force_numpy=True,
+            )
+        assert after_delete.search(embedding, top_k=1) == []
+        assert after_delete.get_stats()["total_chunks"] == 0
+        restarted.close()
+        after_delete.close()
+
+    def test_replica_refreshes_when_shared_corpus_revision_changes(self, store, mock_mongo_client):
+        first_vector = [1.0] + [0.0] * 383
+        second_vector = [0.0, 1.0] + [0.0] * 382
+        store.add_chunks([_make_chunk("replica-c1", "replica-d1", "first", first_vector)])
+
+        from rag.vector_store.mongo_vector_store import MongoVectorStore
+        with patch("rag.vector_store.mongo_vector_store.MongoClient", return_value=mock_mongo_client):
+            replica = MongoVectorStore(
+                mongo_uri=TEST_MONGO_URI,
+                db_name=TEST_DB_NAME,
+                collection_name=TEST_COLLECTION,
+                force_numpy=True,
+            )
+        store.add_chunks([_make_chunk("replica-c2", "replica-d2", "second", second_vector)])
+        results = replica.search(second_vector, top_k=2)
+        assert any(item.chunk.chunk_id == "replica-c2" for item in results)
+        replica.close()
+
+    def test_malformed_active_vectors_fail_closed_without_index_misalignment(self, store):
+        valid = _make_chunk("valid-c1", "valid-d1", "valid", [1.0, 0.0])
+        store.add_chunks([valid])
+        bad = _make_chunk("bad-c1", "bad-d1", "bad", [1.0, 0.0, 0.0])
+        store._collection.insert_one({
+            "chunk_id": bad.chunk_id,
+            "document_id": bad.document_id,
+            "content": bad.content,
+            "metadata": bad.metadata.model_dump(),
+            "tenant_id": bad.tenant_id,
+            "scope": bad.scope,
+            "lifecycle_state": "ACTIVE",
+            "embedding": bad.embedding,
+        })
+
+        with pytest.raises(ValueError, match="mixed embedding dimensions"):
+            store.load()
+        assert store._chunks == []
+        assert store._embeddings == []

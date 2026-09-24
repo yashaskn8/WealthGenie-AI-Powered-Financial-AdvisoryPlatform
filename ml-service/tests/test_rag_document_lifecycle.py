@@ -30,6 +30,15 @@ def test_document_lifecycle_registration_and_soft_delete(tmp_path):
     store = PersistentVectorStore(index_path=tmp_path / "test_store.json")
     manager = DocumentLifecycleManager(vector_store=store, registry_path=reg_file)
 
+    chunk_metadata = ChunkMetadata(
+        chunk_id="doc1#0", document_id="doc1", chunk_index=0,
+        title="Tax Guide", source="tax.md",
+    )
+    store.add_chunks([TextChunk(
+        chunk_id="doc1#0", document_id="doc1", content="Tax guide lifecycle fixture",
+        metadata=chunk_metadata, embedding=[1.0, 0.0],
+    )])
+
     doc = Document(
         document_id="doc1",
         content="Sample content",
@@ -48,6 +57,41 @@ def test_document_lifecycle_registration_and_soft_delete(tmp_path):
     all_docs = manager.list_documents(include_inactive=True)
     assert len(active_docs) == 0
     assert len(all_docs) == 1
+    restarted = PersistentVectorStore(index_path=tmp_path / "test_store.json", force_numpy=True)
+    assert restarted.search([1.0, 0.0], top_k=1) == []
+
+
+def test_soft_deleted_document_is_not_retrievable_or_served_from_response_cache(tmp_path):
+    from rag.embeddings.dense_embedding import DenseVectorEmbeddingProvider
+    from rag.ingestion.pipeline import IngestionPipeline
+    from rag.retrieval.pipeline import RAGPipeline
+    from rag.schema import RAGQueryRequest
+
+    store = PersistentVectorStore(index_path=tmp_path / "cache_lifecycle_vectors.json", force_numpy=True)
+    manager = DocumentLifecycleManager(
+        vector_store=store,
+        registry_path=tmp_path / "cache_lifecycle_registry.json",
+    )
+    embedder = DenseVectorEmbeddingProvider(dimension=64, enable_cache=False)
+    ingestion = IngestionPipeline(embedder=embedder, vector_store=store, lifecycle_manager=manager)
+    ingestion.ingest_text(
+        text="Fixture evidence: SEBI provides mutual fund category guidance for investors.",
+        title="Cache lifecycle fixture",
+        source="https://www.sebi.gov.in/test/mutual-fund-guidance",
+        source_trust_tier="government_official",
+    )
+    query = RAGQueryRequest(question="What mutual fund category guidance does SEBI provide?")
+    retrieval = RAGPipeline(embedder=embedder, vector_store=store)
+
+    first = retrieval.query(query)
+    assert first.grounded
+    assert first.retrieved_chunks
+
+    document_id = first.retrieved_chunks[0].chunk.document_id
+    assert manager.soft_delete_document(document_id)
+    second = retrieval.query(query)
+    assert not second.grounded
+    assert second.retrieved_chunks == []
 
 
 def test_document_hard_delete_and_chunk_purging(tmp_path):
@@ -71,6 +115,8 @@ def test_document_hard_delete_and_chunk_purging(tmp_path):
     assert success
     assert len(store._chunks) == 0
     assert len(manager.list_documents()) == 0
+    restarted = PersistentVectorStore(index_path=tmp_path / "test_store.json", force_numpy=True)
+    assert restarted.get_chunks("doc1") == []
 
 
 def test_document_metadata_update(tmp_path):

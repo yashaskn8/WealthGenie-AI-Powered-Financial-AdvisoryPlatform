@@ -15,6 +15,9 @@ class BasePredictor(ABC):
     """
 
     TARGET_CLASSES: List[str] = ["Equity_MF", "ELSS", "ETF", "Debt_MF", "FD", "RBI_Bond"]
+    # Version of the artifact bytes currently held by this predictor instance.
+    # The serving API must never substitute the registry's newer pointer here.
+    loaded_version_id: str | None = None
 
     @abstractmethod
     def load_artifacts(self) -> None:

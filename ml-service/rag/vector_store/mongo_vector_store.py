@@ -10,6 +10,7 @@ For very large corpora this will not scale well memory-wise per replica.
 """
 
 import logging
+import math
 from typing import Dict, List, Any, Optional
 import numpy as np
 
@@ -51,6 +52,8 @@ class MongoVectorStore(BaseVectorStore):
         self._client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
         self._db = self._client[db_name]
         self._collection = self._db[collection_name]
+        self._revision_collection = self._db["rag_state"]
+        self._loaded_corpus_revision: Optional[int] = None
         self.force_numpy = force_numpy
 
         # In-memory search state
@@ -81,6 +84,17 @@ class MongoVectorStore(BaseVectorStore):
 
     def add_chunks(self, chunks: List[TextChunk]) -> int:
         """Adds embedded text chunks to MongoDB, avoiding duplicate chunk_ids."""
+        incoming = [chunk.embedding for chunk in chunks if chunk.embedding]
+        if any(
+            not isinstance(vector, list)
+            or not vector
+            or any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in vector)
+            for vector in incoming
+        ):
+            raise ValueError("Cannot persist malformed or non-finite embeddings.")
+        dimensions = {len(vector) for vector in incoming}
+        if len(dimensions) > 1 or (self._stored_embedding_dim and dimensions and dimensions != {self._stored_embedding_dim}):
+            raise ValueError("Cannot mix embedding dimensions in a Mongo vector-store generation.")
         added_count = 0
         for chunk in chunks:
             if not chunk.embedding:
@@ -94,6 +108,7 @@ class MongoVectorStore(BaseVectorStore):
                 "metadata": chunk.metadata.model_dump(),
                 "tenant_id": chunk.tenant_id,
                 "scope": scope,
+                "lifecycle_state": chunk.lifecycle_state,
                 "embedding": chunk.embedding,
             }
 
@@ -106,8 +121,9 @@ class MongoVectorStore(BaseVectorStore):
             if result.upserted_id is not None:
                 added_count += 1
 
-        # Reload in-memory index after adding
-        self._reload_in_memory()
+        if incoming:
+            self._advance_corpus_revision()
+            self._reload_in_memory()
         logger.info(
             f"Added {added_count} new chunks to MongoVectorStore. "
             f"Total: {self._collection.count_documents({})}"
@@ -128,10 +144,13 @@ class MongoVectorStore(BaseVectorStore):
         Filters chunks to scope=='global' OR scope=='user:{requesting_user_id}',
         never returning another user's scoped content.
         """
+        self._refresh_if_changed()
         if not self._chunks or not self._embeddings:
             return []
 
         q_vec = np.array(query_vector, dtype=np.float32)
+        if q_vec.ndim != 1 or not np.isfinite(q_vec).all():
+            raise ValueError("Query embedding must be a finite one-dimensional vector.")
         q_norm = np.linalg.norm(q_vec)
         if q_norm == 0:
             return []
@@ -140,7 +159,7 @@ class MongoVectorStore(BaseVectorStore):
         # Scope & Tenant filtering: global content or matching user's private content
         valid_indices = [
             i for i, c in enumerate(self._chunks)
-            if is_scope_accessible(
+            if c.lifecycle_state == "ACTIVE" and is_scope_accessible(
                 chunk_scope=getattr(c, "scope", getattr(c.metadata, "scope", "global")),
                 chunk_tenant_id=getattr(c, "tenant_id", getattr(c.metadata, "tenant_id", "default")),
                 requesting_scope=scope,
@@ -310,36 +329,117 @@ class MongoVectorStore(BaseVectorStore):
         """
         self._reload_in_memory()
 
+    def get_chunks(self, document_id: Optional[str] = None) -> List[TextChunk]:
+        query = {"document_id": document_id} if document_id is not None else {}
+        return [self._chunk_from_document(doc) for doc in self._collection.find(query, {"_id": 0})]
+
+    def delete_document(self, document_id: str) -> int:
+        result = self._collection.delete_many({"document_id": document_id})
+        if result.deleted_count:
+            self._advance_corpus_revision()
+            self._reload_in_memory()
+        return result.deleted_count
+
+    def set_document_state(self, document_id: str, state: str) -> int:
+        allowed = {"PENDING", "ACTIVE", "SUPERSEDED", "SOFT_DELETED", "DELETED", "QUARANTINED", "FAILED"}
+        if state not in allowed:
+            raise ValueError("Unsupported document lifecycle state.")
+        result = self._collection.update_many(
+            {"document_id": document_id}, {"$set": {"lifecycle_state": state}}
+        )
+        if result.modified_count:
+            self._advance_corpus_revision()
+            self._reload_in_memory()
+        return result.modified_count
+
+    def update_document_metadata(
+        self,
+        document_id: str,
+        title: Optional[str] = None,
+        author: Optional[str] = None,
+    ) -> int:
+        updates = {}
+        if title is not None:
+            updates["metadata.title"] = title
+        if author is not None:
+            updates["metadata.author"] = author
+        if not updates:
+            return 0
+        result = self._collection.update_many({"document_id": document_id}, {"$set": updates})
+        if result.modified_count:
+            self._advance_corpus_revision()
+            self._reload_in_memory()
+        return result.modified_count
+
+    def get_corpus_revision(self) -> str:
+        record = self._revision_collection.find_one({"_id": "active_corpus"}) or {}
+        return str(record.get("revision", 0))
+
+    def _advance_corpus_revision(self) -> None:
+        self._revision_collection.update_one(
+            {"_id": "active_corpus"}, {"$inc": {"revision": 1}}, upsert=True
+        )
+
+    def _refresh_if_changed(self) -> None:
+        current = int(self.get_corpus_revision())
+        if self._loaded_corpus_revision != current:
+            self._reload_in_memory()
+
+    @staticmethod
+    def _chunk_from_document(doc: Dict[str, Any]) -> TextChunk:
+        embedding = doc.get("embedding")
+        if not isinstance(embedding, list) or not embedding:
+            raise ValueError(f"Chunk {doc.get('chunk_id')} has no valid embedding.")
+        if any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in embedding):
+            raise ValueError(f"Chunk {doc.get('chunk_id')} has non-finite embedding values.")
+        metadata = dict(doc.get("metadata", {}))
+        scope = doc.get("scope", metadata.get("scope", "global"))
+        metadata["scope"] = scope
+        return TextChunk(
+            chunk_id=doc["chunk_id"],
+            document_id=doc["document_id"],
+            content=doc["content"],
+            metadata=ChunkMetadata(**metadata),
+            tenant_id=doc.get("tenant_id", "default"),
+            scope=scope,
+            lifecycle_state=doc.get("lifecycle_state", "QUARANTINED"),
+            embedding=embedding,
+        )
+
     def _reload_in_memory(self) -> None:
         """Pull all chunks from MongoDB into in-memory arrays for search."""
-        cursor = self._collection.find({}, {"_id": 0})
+        # Clear the old generation first: corruption must never leave a stale
+        # index available after a failed reload.
         self._chunks = []
         self._embeddings = []
-
+        self._stored_embedding_dim = 0
+        self._faiss_index = None
+        self._faiss_dirty = True
+        revision_before = int(self.get_corpus_revision())
+        cursor = self._collection.find({"lifecycle_state": "ACTIVE"}, {"_id": 0})
+        chunks: List[TextChunk] = []
+        embeddings: List[List[float]] = []
+        expected_dimension: Optional[int] = None
         for doc in cursor:
-            try:
-                meta_dict = dict(doc.get("metadata", {}))
-                scope = doc.get("scope", meta_dict.get("scope", "global"))
-                meta_dict["scope"] = scope
-                metadata = ChunkMetadata(**meta_dict)
-                chunk = TextChunk(
-                    chunk_id=doc["chunk_id"],
-                    document_id=doc["document_id"],
-                    content=doc["content"],
-                    metadata=metadata,
-                    tenant_id=doc.get("tenant_id", "default"),
-                    scope=scope,
-                    embedding=doc.get("embedding"),
-                )
-                self._chunks.append(chunk)
-                if chunk.embedding:
-                    self._embeddings.append(chunk.embedding)
-            except Exception as e:
-                logger.warning(f"Skipping invalid chunk {doc.get('chunk_id')}: {e}")
+            chunk = self._chunk_from_document(doc)
+            embedding = chunk.embedding
+            if embedding is None:
+                raise ValueError(f"Chunk {chunk.chunk_id} has no embedding.")
+            if expected_dimension is None:
+                expected_dimension = len(embedding)
+            elif len(embedding) != expected_dimension:
+                raise ValueError("Mongo vector store contains mixed embedding dimensions.")
+            chunks.append(chunk)
+            embeddings.append(embedding)
 
-        self._stored_embedding_dim = (
-            len(self._embeddings[0]) if self._embeddings else 0
-        )
+        # Publish only a fully validated generation: chunk/vector positions stay aligned.
+        self._chunks = chunks
+        self._embeddings = embeddings
+        self._stored_embedding_dim = expected_dimension or 0
+        self._loaded_corpus_revision = int(self.get_corpus_revision())
+        if self._loaded_corpus_revision != revision_before:
+            self._loaded_corpus_revision = None
+            raise RuntimeError("RAG corpus changed during vector index reload; retry required.")
         self._faiss_dirty = True
 
         logger.info(

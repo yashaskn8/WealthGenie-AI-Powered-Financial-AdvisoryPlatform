@@ -99,6 +99,8 @@ class DocumentLifecycleManager:
                 "updated_at_utc": datetime.now(timezone.utc).isoformat(),
             }
             self._save_registry_unlocked()
+            # Pending chunks become retrievable only after the document record is durable.
+            self.vector_store.set_document_state(doc_id, "ACTIVE")
             logger.info(
                 f"Registered document '{document.metadata.title}' (v{version}, scope={doc_scope}, owner={resolved_owner}) in DocumentRegistry."
             )
@@ -127,6 +129,7 @@ class DocumentLifecycleManager:
                         "Forbidden: Global documents cannot be modified or deleted by standard users"
                     )
 
+            self.vector_store.set_document_state(document_id, "SOFT_DELETED")
             doc_entry["is_active"] = False
             doc_entry["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
             self._save_registry_unlocked()
@@ -149,8 +152,8 @@ class DocumentLifecycleManager:
         with self._lock:
             self._sync_registry_unlocked()
             found_in_registry = document_id in self._registry
-            chunks: List[TextChunk] = getattr(self.vector_store, "_chunks", [])
-            has_matching_chunks = any(c.document_id == document_id for c in chunks)
+            chunks = self.vector_store.get_chunks(document_id)
+            has_matching_chunks = bool(chunks)
 
             if not found_in_registry and not has_matching_chunks:
                 return False
@@ -183,25 +186,9 @@ class DocumentLifecycleManager:
                     )
 
             # 1. Purge chunks and embeddings from vector store FIRST
-            embeddings: List[List[float]] = getattr(self.vector_store, "_embeddings", [])
-            initial_count = len(chunks)
-            filtered_chunks = []
-            filtered_embeddings = []
-
-            for c, emb in zip(chunks, embeddings):
-                if c.document_id != document_id:
-                    filtered_chunks.append(c)
-                    filtered_embeddings.append(emb)
-
-            purged_chunks_count = initial_count - len(filtered_chunks)
-            if purged_chunks_count > 0:
-                setattr(self.vector_store, "_chunks", filtered_chunks)
-                setattr(self.vector_store, "_embeddings", filtered_embeddings)
-                setattr(self.vector_store, "_faiss_dirty", True)
-                self.vector_store.save()
-                logger.info(
-                    f"Hard-deleted {purged_chunks_count} chunks for document '{document_id}' from PersistentVectorStore."
-                )
+            purged_chunks_count = self.vector_store.delete_document(document_id)
+            if purged_chunks_count:
+                logger.info("Hard-deleted %s chunks for document '%s' from vector store.", purged_chunks_count, document_id)
 
             # 2. Remove document record from registry SECOND
             if found_in_registry:
@@ -232,8 +219,8 @@ class DocumentLifecycleManager:
         with self._lock:
             self._sync_registry_unlocked()
             found_in_reg = document_id in self._registry
-            chunks: List[TextChunk] = getattr(self.vector_store, "_chunks", [])
-            has_matching_chunks = any(c.document_id == document_id for c in chunks)
+            chunks = self.vector_store.get_chunks(document_id)
+            has_matching_chunks = bool(chunks)
 
             if not found_in_reg and not has_matching_chunks:
                 return False
@@ -266,18 +253,11 @@ class DocumentLifecycleManager:
                     )
 
             # 1. Update metadata in vector store chunks FIRST
-            chunks_modified = False
-            for c in chunks:
-                if c.document_id == document_id:
-                    if new_title:
-                        c.metadata.title = new_title
-                        chunks_modified = True
-                    if new_author:
-                        c.metadata.author = new_author
-                        chunks_modified = True
+            chunks_modified = self.vector_store.update_document_metadata(
+                document_id, title=new_title, author=new_author
+            )
 
             if chunks_modified:
-                self.vector_store.save()
                 logger.info(f"Updated chunk metadata for document '{document_id}' in vector store.")
 
             # 2. Update registry metadata SECOND
@@ -474,7 +454,7 @@ class DocumentLifecycleManager:
             registry_doc_ids: Set[str] = set(accessible_registry.keys())
 
             # Filter vector store chunks accessible to requesting identity
-            all_chunks: List[TextChunk] = getattr(self.vector_store, "_chunks", [])
+            all_chunks = self.vector_store.get_chunks()
             accessible_chunks = all_chunks
             if requesting_user_id is not None or requesting_scope is not None:
                 accessible_chunks = [

@@ -20,8 +20,8 @@ class DriftScheduler:
     """
     Asyncio-based periodic drift checker.
 
-    Calls the same check_drift_and_trigger_retrain() code path used by the
-    /drift-check endpoint, but triggered by a clock instead of a human.
+    Scheduled runs are diagnostic only. Candidate training remains an explicit
+    operator/offline action and is never triggered by this background loop.
 
     Configuration (via environment variables):
         DRIFT_CHECK_INTERVAL_SECONDS: Seconds between checks (default: 300)
@@ -162,7 +162,7 @@ class DriftScheduler:
             architecture="RandomForest",
             input_df=input_df,
             store=self._store,
-            force_retrain_on_drift=True,
+            force_retrain_on_drift=False,
             registered_by=self.REGISTERED_BY_TAG,
         )
 

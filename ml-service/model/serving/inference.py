@@ -40,6 +40,7 @@ class RandomForestPredictor(BasePredictor):
     def load_artifacts(self, artifact_path: Optional[Path] = None, label_encoder_path: Optional[Path] = None) -> None:
         """Loads RandomForest pkl and label encoder from disk."""
         self._is_loaded = False
+        self.loaded_version_id = None
         if artifact_path:
             self.model_path = Path(artifact_path)
         if label_encoder_path:
@@ -73,6 +74,7 @@ class RandomForestPredictor(BasePredictor):
         self.model = candidate_model
         self.label_encoder = candidate_encoder
         self._class_labels = class_labels
+        self.loaded_version_id = metadata.get("model_version")
         self._is_loaded = True
         logger.info(f"RandomForestPredictor loaded successfully from {self.model_path}.")
 
@@ -125,6 +127,7 @@ class MLPPredictor(BasePredictor):
     def load_artifacts(self, artifact_path: Optional[Path] = None) -> None:
         """Loads PyTorch model weights and scaler from disk."""
         self._is_loaded = False
+        self.loaded_version_id = None
         if artifact_path:
             self.paths.model_weights = Path(artifact_path)
 
@@ -153,6 +156,7 @@ class MLPPredictor(BasePredictor):
             torch.load(self.paths.model_weights, map_location=self.device, weights_only=True)
         )
         self.model.eval()
+        self.loaded_version_id = metadata.get("version") or metadata.get("model_version")
         self._is_loaded = True
         logger.info(f"MLPPredictor loaded successfully from {self.paths.model_weights} on {self.device}.")
 
@@ -208,6 +212,7 @@ class FTTransformerPredictor(BasePredictor):
     def load_artifacts(self, artifact_path: Optional[Path] = None) -> None:
         """Loads FT-Transformer weights and preprocessor."""
         self._is_loaded = False
+        self.loaded_version_id = None
         if artifact_path:
             self.weights_path = Path(artifact_path)
 
@@ -241,6 +246,7 @@ class FTTransformerPredictor(BasePredictor):
             self.model = None
             return
         self.model.eval()
+        self.loaded_version_id = metadata.get("version") or metadata.get("model_version")
         self._is_loaded = True
         logger.info(f"FTTransformerPredictor loaded successfully from {self.weights_path} on {self.device}.")
 

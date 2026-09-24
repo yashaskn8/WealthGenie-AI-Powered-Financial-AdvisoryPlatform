@@ -4,6 +4,7 @@ Executes end-to-end ingestion: Loader -> Cleaning -> Chunking -> Embedding -> Ve
 """
 
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -190,9 +191,22 @@ class IngestionPipeline:
         # 3. Generate Vector Embeddings
         chunk_texts = [c.content for c in chunks]
         embeddings = self.embedder.embed_batch(chunk_texts)
+        if len(embeddings) != len(chunks):
+            raise RuntimeError("Embedding provider returned a different number of vectors than chunks.")
+        dimensions = {len(vector) for vector in embeddings if isinstance(vector, list)}
+        if len(dimensions) != 1 or any(
+            not isinstance(vector, list)
+            or not vector
+            or any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in vector)
+            for vector in embeddings
+        ):
+            raise RuntimeError("Embedding provider returned malformed or inconsistent vectors.")
 
         for chunk, emb in zip(chunks, embeddings):
             chunk.embedding = emb
+            # A crash between vector persistence and lifecycle registration keeps
+            # this generation out of retrieval.
+            chunk.lifecycle_state = "PENDING"
 
         # 4. Store Chunks in Vector Store
         added_count = self.vector_store.add_chunks(chunks)

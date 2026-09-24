@@ -4,7 +4,7 @@ Defines Pydantic data contracts for documents, chunks, queries, citations, and m
 """
 
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -105,6 +105,7 @@ class TextChunk(BaseModel):
     metadata: ChunkMetadata
     tenant_id: str = Field("default", description="Tenant isolation scope identifier")
     scope: str = Field("global", description="Tenant isolation scope: 'global' or 'user:{user_id}'")
+    lifecycle_state: Literal["PENDING", "ACTIVE", "SUPERSEDED", "SOFT_DELETED", "DELETED", "QUARANTINED", "FAILED"] = "ACTIVE"
     embedding: Optional[List[float]] = None
 
 

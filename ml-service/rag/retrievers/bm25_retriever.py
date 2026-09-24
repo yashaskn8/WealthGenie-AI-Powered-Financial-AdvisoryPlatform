@@ -47,10 +47,10 @@ class BM25KeywordRetriever(BaseRetriever):
         scope: Optional[str] = None,
     ) -> List[RetrievedChunk]:
         """Executes BM25 keyword search across tenant/scope-filtered vector store chunks."""
-        all_chunks: List[TextChunk] = getattr(self.vector_store, "_chunks", [])
+        all_chunks = self.vector_store.get_chunks()
         chunks = [
             c for c in all_chunks
-            if is_scope_accessible(
+            if c.lifecycle_state == "ACTIVE" and is_scope_accessible(
                 chunk_scope=getattr(c, "scope", getattr(c.metadata, "scope", "global")),
                 chunk_tenant_id=getattr(c, "tenant_id", getattr(c.metadata, "tenant_id", "default")),
                 requesting_scope=scope,

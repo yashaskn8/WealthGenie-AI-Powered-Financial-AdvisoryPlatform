@@ -51,7 +51,7 @@
     "express-rate-limit": "^8.5.0",
     "fast-check": "^4.8.0",
     "helmet": "^8.0.0",
-    "joi": "^18.1.2",
+    "joi": "18.2.9",
     "joi-to-json": "^5.0.5",
     "joi-to-json-schema": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
@@ -60,6 +60,9 @@
     "rate-limit-redis": "^5.0.0",
     "redis": "^4.7.0",
     "winston": "^3.19.0"
+  },
+  "overrides": {
+    "hono": "4.13.9"
   },
   "devDependencies": {
     "ajv": "^8.18.0",

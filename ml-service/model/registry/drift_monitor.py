@@ -37,6 +37,45 @@ logger = logging.getLogger("wealthgenie.drift_monitor")
 
 _BASE_DIR = Path(__file__).resolve().parent.parent.parent
 _DEFAULT_CANDIDATE_MODELS_DIR = _BASE_DIR / "model" / "saved_models"
+MIN_OBSERVATIONS_PER_PSI_BIN = 10
+
+
+def _minimum_drift_sample_count(reference_distributions: Dict[str, Any]) -> Optional[int]:
+    """Derive a conservative sample floor from the active model's PSI bins.
+
+    Reference metadata is the authority for the configured histogram shape. Do
+    not silently substitute the default bin count when it is absent or corrupt.
+    Ten observations per configured bin is the minimum operational evidence
+    contract used by this monitor; it is not a claim of statistical power.
+    """
+    bin_counts = []
+    for distribution in reference_distributions.values():
+        if not isinstance(distribution, dict):
+            return None
+        edges = distribution.get("bin_edges")
+        proportions = distribution.get("bin_proportions")
+        if not isinstance(edges, list) or not isinstance(proportions, list):
+            return None
+        if len(proportions) < 1 or len(edges) != len(proportions) + 1:
+            return None
+        try:
+            edge_values = np.asarray(edges, dtype=float)
+            proportion_values = np.asarray(proportions, dtype=float)
+        except (TypeError, ValueError):
+            return None
+        if (
+            not np.all(np.isfinite(edge_values))
+            or not np.all(np.isfinite(proportion_values))
+            or np.any(np.diff(edge_values) <= 0)
+            or np.any(proportion_values < 0)
+            or not np.isclose(float(proportion_values.sum()), 1.0, atol=1e-6)
+        ):
+            return None
+        bin_counts.append(len(proportions))
+
+    if not bin_counts:
+        return None
+    return max(bin_counts) * MIN_OBSERVATIONS_PER_PSI_BIN
 
 
 def _candidate_models_dir() -> Path:
@@ -134,6 +173,8 @@ def trigger_candidate_retrain(
     """
     import joblib
     from sklearn.ensemble import RandomForestClassifier
+    from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
+    from sklearn.model_selection import train_test_split
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import StandardScaler, LabelEncoder
 
@@ -165,10 +206,25 @@ def trigger_candidate_retrain(
                 class_weight="balanced",
             )),
         ])
-        pipeline.fit(X, y)
+        X_train, X_validation, y_train, y_validation = train_test_split(
+            X,
+            y,
+            test_size=0.2,
+            random_state=seed,
+            stratify=y,
+        )
+        pipeline.fit(X_train, y_train)
 
-        preds = pipeline.predict(X)
-        train_acc = float(np.mean(preds == y))
+        training_predictions = pipeline.predict(X_train)
+        validation_predictions = pipeline.predict(X_validation)
+        training_metrics = {
+            "accuracy": float(accuracy_score(y_train, training_predictions)),
+        }
+        validation_metrics = {
+            "accuracy": float(accuracy_score(y_validation, validation_predictions)),
+            "balanced_accuracy": float(balanced_accuracy_score(y_validation, validation_predictions)),
+            "macro_f1": float(f1_score(y_validation, validation_predictions, average="macro", zero_division=0)),
+        }
 
         joblib.dump(pipeline, candidate_artifact_path)
         joblib.dump(le, candidate_le_path)
@@ -178,13 +234,16 @@ def trigger_candidate_retrain(
         data_hash = compute_dataset_hash_from_arrays(X, np.array(y_indices))
         lineage_params = get_dataset_generation_params(num_samples=num_samples, seed=seed)
 
-        df_train = pd.DataFrame(X, columns=FEATURE_NAMES)
+        df_train = pd.DataFrame(X_train, columns=FEATURE_NAMES)
         ref_dist = compute_reference_distributions(df_train, list(df_train.columns))
 
         metrics = {
-            "rule_approximation_fidelity": round(train_acc, 4),
-            "balanced_accuracy": round(train_acc * 0.92, 4),
-            "macro_f1": round(train_acc * 0.915, 4),
+            "rule_approximation_fidelity": round(validation_metrics["accuracy"], 4),
+            "balanced_accuracy": round(validation_metrics["balanced_accuracy"], 4),
+            "macro_f1": round(validation_metrics["macro_f1"], 4),
+            "training_metrics": training_metrics,
+            "validation_metrics": validation_metrics,
+            "holdout_metrics": None,
             "metric_interpretation": "policy-approximation fidelity, not investment outcome accuracy",
         }
         hparams = {
@@ -194,6 +253,9 @@ def trigger_candidate_retrain(
             "num_samples": num_samples,
             "model_type": "RandomForestClassifier",
             "dataset_lineage": lineage_params,
+            "dataset_kind": "synthetic_policy_approximation",
+            "dataset_split": {"method": "stratified_train_validation", "validation_fraction": 0.2, "seed": seed},
+            "serving_qualified": False,
             "registered_by": registered_by,
             "feature_schema_version": FEATURE_SCHEMA_VERSION,
             "feature_names": FEATURE_NAMES,
@@ -261,20 +323,44 @@ def check_drift_and_trigger_retrain(
 
     ref_distributions = active_version.get("reference_distributions")
     if not ref_distributions:
-        # Fallback: compute reference distributions from base profiles data
-        logger.warning(f"Active model '{active_version['version_id']}' has no reference_distributions. Generating baseline...")
-        base_df = generate_synthetic_feature_batch(n_samples=500, seed=42)
-        ref_distributions = compute_reference_distributions(base_df, list(base_df.columns))
+        logger.error(
+            "Drift cannot be evaluated: active model %s has no registered reference distribution",
+            active_version.get("version_id"),
+        )
+        return {
+            "status": "UNAVAILABLE",
+            "reason": "DRIFT_REFERENCE_UNAVAILABLE",
+            "active_version_id": active_version.get("version_id"),
+            "drift_detected": None,
+            "retrain_triggered": False,
+            "candidate_version": None,
+        }
     if set(ref_distributions) != set(FEATURE_NAMES):
         raise ValueError("Active model reference distributions do not match the v4 feature allowlist")
+
+    minimum_sample_count = _minimum_drift_sample_count(ref_distributions)
+    if minimum_sample_count is None:
+        logger.error(
+            "Drift cannot be evaluated: active model %s has invalid reference histogram metadata",
+            active_version.get("version_id"),
+        )
+        return {
+            "status": "UNAVAILABLE",
+            "reason": "DRIFT_REFERENCE_UNAVAILABLE",
+            "active_version_id": active_version.get("version_id"),
+            "drift_detected": None,
+            "retrain_triggered": False,
+            "candidate_version": None,
+        }
 
     if input_df is None or input_df.empty:
         input_df = inference_buffer.get_dataframe()
 
-    if input_df is None or len(input_df) < 10:
+    if input_df is None or len(input_df) < minimum_sample_count:
         return {
             "status": "SKIPPED",
-            "reason": "Insufficient observations for drift calculation (need >= 10 samples).",
+            "reason": f"Insufficient observations for drift calculation (need >= {minimum_sample_count} samples).",
+            "minimum_sample_count": minimum_sample_count,
             "drift_detected": False,
             "retrain_triggered": False,
             "buffer_size": inference_buffer.size(),

@@ -9,6 +9,7 @@ import {
   instrumentRiskTier,
   normaliseConfidenceScores,
   parseProfile,
+  rankInstruments,
   rankWhereToInvestBackend,
   reconcileRisk,
   resolveBackendType,
@@ -132,6 +133,56 @@ test('pipeline output is backend-owned, pre-tax nominal, suitable, and capacity-
   assert.ok(output.instruments.every(item => item.riskScore <= output.riskReconciliation.final_score));
   assert.ok(Math.abs(output.instruments.reduce((sum, item) => sum + item.allocationWeight, 0) - 1) <= 0.001);
   assert.deepEqual(forbiddenNoise, output, 'forbidden profile fields cannot change ranking or allocation');
+});
+
+test('ML outputs are observational only and cannot change financial ranking or allocation', () => {
+  const profile = canonicalProfile();
+  const parsed = parseProfile(profile);
+  const weights = deriveWeights(parsed);
+  const baseline = runPipeline(profile, {});
+  const eligible = filterEligible(investmentDatabase, profile, baseline.riskReconciliation.final_score).eligible;
+  const expectedRanking = rankInstruments(eligible, parsed, weights).map(({ instrument, score, factors }) => ({
+    id: instrument.id,
+    score,
+    factors,
+  }));
+  const financialProjection = result => ({
+    instruments: result.instruments,
+    riskReconciliation: result.riskReconciliation,
+    computedWeights: result.computedWeights,
+  });
+  const variants = [
+    {
+      primary: 'Equity_MF', secondary: 'FD', tertiary: 'PPF',
+      confidence_scores: { Equity_MF: 1, FD: 0, PPF: 0 },
+      decision_path: ['equity'], explanation: 'ML vector A', model_version: 'model-a',
+    },
+    {
+      primary: 'FD', secondary: 'PPF', tertiary: 'Equity_MF',
+      confidence_scores: { FD: 1, PPF: 0, Equity_MF: 0 },
+      decision_path: ['fixed-income'], explanation: 'ML vector B', model_version: 'model-b',
+    },
+    {
+      primary: 'PPF', secondary: 'Equity_MF', tertiary: 'FD',
+      confidence_scores: { Equity_MF: 1 / 3, FD: 1 / 3, PPF: 1 / 3 },
+      decision_path: ['uniform'], explanation: 'ML vector C', model_version: 'model-c',
+    },
+    null,
+    { primary: 'FD', secondary: 'Equity_MF', tertiary: 'PPF', confidence_scores: { FD: NaN } },
+  ];
+
+  assert.deepEqual(expectedRanking, rankInstruments(eligible, parsed, weights).map(({ instrument, score, factors }) => ({
+    id: instrument.id,
+    score,
+    factors,
+  })));
+  for (const mlResult of variants) {
+    const candidate = runPipeline(profile, mlResult);
+    assert.deepEqual(financialProjection(candidate), financialProjection(baseline));
+    assert.deepEqual(candidate.instruments.map(item => item.id), baseline.instruments.map(item => item.id));
+  }
+  assert.equal(Object.hasOwn(baseline.computedWeights, 'mlConfidence'), false);
+  assert.equal(Object.hasOwn(baseline.instruments[0].scoreFactors, 'mlConfidence'), false);
 });
 
 test('WTI unsupported categories fail closed while preserving parent suitability', async () => {

@@ -4,6 +4,7 @@ Executes domain classification, scoped retrieval, trust/relevance gating, absten
 """
 
 import logging
+import json
 import re
 import time
 from typing import Dict, Any, List, Optional
@@ -117,10 +118,23 @@ class RAGPipeline:
     def query(self, request: RAGQueryRequest) -> RAGQueryResponse:
         """Return extractive evidence only when domain, trust, and relevance gates pass."""
         effective_scope = request.scope or (f"user:{request.user_id}" if request.user_id else request.tenant_id)
-        response_cache_key = (
-            f"{request.question}|top_k={request.top_k or self.config.top_k}"
-            f"|citations={request.include_citations}"
-        )
+        top_k = request.top_k or self.config.top_k
+        embedding_identity = getattr(self.embedder, "embedding_identity", None)
+        cache_identity = {
+            "scope": effective_scope,
+            "question": request.question,
+            "top_k": top_k,
+            "citations": request.include_citations,
+            "retrieval_strategy": self.config.retrieval_strategy,
+            "fusion_mode": self.config.fusion_mode,
+            "dense_weight": self.config.dense_weight,
+            "keyword_weight": self.config.keyword_weight,
+            "reranker_strategy": self.config.reranker_strategy,
+            "similarity_threshold": self.config.similarity_threshold,
+            "embedding_identity": embedding_identity or {"provider_class": type(self.embedder).__qualname__},
+            "corpus_revision": self.vector_store.get_corpus_revision(),
+        }
+        response_cache_key = json.dumps(cache_identity, sort_keys=True, separators=(",", ":"), default=str)
         # Check Response Cache
         cached_response = self.cache_manager.get_response(response_cache_key, tenant_id=effective_scope)
         if cached_response is not None:
@@ -128,8 +142,6 @@ class RAGPipeline:
             return cached_response
 
         start_time = time.perf_counter()
-        top_k = request.top_k or self.config.top_k
-
         # 1. Query Understanding & Expansion
         t0 = time.perf_counter()
         qu_result = self.query_understanding.process(request.question)

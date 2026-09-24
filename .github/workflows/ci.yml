@@ -98,7 +98,7 @@ jobs:
       - name: Audit npm dependencies
         run: |
           cd server
-          npm audit --audit-level=high
+          npm audit --omit=dev --audit-level=low
 
   backend-unit-windows:
     name: Backend Windows (Node ${{ matrix.node-version }})

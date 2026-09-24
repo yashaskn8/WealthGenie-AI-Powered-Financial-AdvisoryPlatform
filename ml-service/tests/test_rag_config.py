@@ -25,6 +25,17 @@ def test_invalid_chunk_overlap_validation():
     assert "chunk_overlap" in str(exc_info.value)
 
 
+def test_unknown_rag_strategies_and_invalid_weighted_fusion_fail_configuration():
+    with pytest.raises(ValidationError):
+        RAGConfig(retrieval_strategy="unknown")
+    with pytest.raises(ValidationError):
+        RAGConfig(embedding_provider="unknown")
+    with pytest.raises(ValidationError):
+        RAGConfig(reranker_strategy="unknown")
+    with pytest.raises(ValidationError, match="sum to 1.0"):
+        RAGConfig(fusion_mode="weighted", dense_weight=0.8, keyword_weight=0.8)
+
+
 def test_from_env_overrides():
     os.environ["RAG_CHUNK_SIZE"] = "1024"
     os.environ["RAG_TOP_K"] = "8"

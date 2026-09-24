@@ -37,7 +37,6 @@ export const PIPELINE_CONFIG = Object.freeze({
     goalFit: 0.15,
     horizonFit: 0.10,
     cost: 0.05,
-    mlConfidence: 0.05,
   }),
 });
 
@@ -232,7 +231,6 @@ export function deriveWeights(parsedProfile) {
     goalFit: goalWeight,
     horizonFit: shortHorizon ? 0.14 : 0.10,
     cost: 0.05,
-    mlConfidence: 0.05,
   };
   const total = Object.values(weights).reduce((sum, value) => sum + value, 0);
   return Object.freeze(Object.fromEntries(Object.entries(weights).map(([key, value]) => [key, value / total])));
@@ -277,8 +275,7 @@ export function normaliseConfidenceScores(mlResult = {}) {
   return result;
 }
 
-export function computeInstrumentScore(instrument, profile, weights, confidenceScores = {}) {
-  const backendType = resolveBackendType(instrument);
+export function computeInstrumentScore(instrument, profile, weights) {
   const factors = {
     expectedReturn: scoreReturn(instrument),
     riskFit: scoreRisk(instrument, profile),
@@ -286,16 +283,15 @@ export function computeInstrumentScore(instrument, profile, weights, confidenceS
     goalFit: scoreGoal(instrument, profile),
     horizonFit: scoreHorizon(instrument, profile),
     cost: scoreCost(instrument),
-    mlConfidence: (confidenceScores[backendType] || 0) * 100,
   };
   const score = Object.entries(weights).reduce((sum, [key, weight]) => sum + factors[key] * weight, 0);
   return { score: round(score), factors };
 }
 
-export function rankInstruments(instruments, profile, weights, confidenceScores = {}) {
+export function rankInstruments(instruments, profile, weights) {
   return [...instruments].map(instrument => ({
     instrument,
-    ...computeInstrumentScore(instrument, profile, weights, confidenceScores),
+    ...computeInstrumentScore(instrument, profile, weights),
   })).sort((a, b) => b.score - a.score || String(a.instrument.id).localeCompare(String(b.instrument.id)));
 }
 
@@ -332,7 +328,7 @@ export function enforceAllocationTargets(instruments) {
   }
   const totalScore = instruments.reduce((sum, item) => sum + Math.max(0, item.score), 0);
   if (totalScore <= 0) throw new RangeError('Allocation scores must contain a positive value');
-  let allocations = instruments.map(item => ({
+  const allocations = instruments.map(item => ({
     ...item,
     allocation_pct: Math.max(0, item.score) / totalScore * 100,
   }));
@@ -436,9 +432,16 @@ export function runPipeline(profileInput, mlResult = {}, options = {}) {
   const riskReconciliation = reconcileRisk(canonical);
   const parsed = parseProfile(canonical);
   const computedWeights = deriveWeights(parsed);
-  const confidenceScores = normaliseConfidenceScores(mlResult);
+  // ML output is telemetry-only. Malformed or unavailable telemetry must not
+  // affect whether the deterministic financial pipeline can produce a result.
+  let confidenceScores = {};
+  try {
+    confidenceScores = normaliseConfidenceScores(mlResult);
+  } catch {
+    confidenceScores = {};
+  }
   const { eligible, excluded } = filterEligible(investmentDatabase, canonical, riskReconciliation.final_score);
-  const ranked = rankInstruments(eligible, parsed, computedWeights, confidenceScores);
+  const ranked = rankInstruments(eligible, parsed, computedWeights);
   const topN = options.topN === undefined ? PIPELINE_CONFIG.topN : options.topN;
   const minAssetClasses = options.minAssetClasses === undefined ? 3 : options.minAssetClasses;
   if (!Number.isInteger(topN) || topN < 1 || topN > 20) throw new RangeError('topN must be an integer from 1 to 20');

@@ -4,6 +4,11 @@ Proves semantic understanding, batch efficiency, dimension mismatch guards, and 
 """
 
 import time
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 import pytest
 import numpy as np
 
@@ -15,6 +20,7 @@ from rag.embeddings.dense_embedding import (
 )
 from rag.vector_store.memory_vector_store import PersistentVectorStore
 from rag.schema import TextChunk, ChunkMetadata
+from rag.embeddings.cache import EmbeddingCache
 
 
 def cosine_similarity(a, b):
@@ -183,9 +189,42 @@ def test_factory_returns_hashing_for_tf_idf_dense():
 
 
 def test_factory_raises_for_unknown_provider():
-    config = RAGConfig(embedding_provider="nonexistent")
-    with pytest.raises(ValueError, match="Unknown embedding_provider"):
-        get_embedding_provider(config)
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        RAGConfig(embedding_provider="nonexistent")
+
+
+def test_lexical_fallback_is_identical_across_python_processes():
+    service_root = Path(__file__).resolve().parents[1]
+    command = (
+        "import json; from rag.embeddings.dense_embedding import DenseVectorEmbeddingProvider; "
+        "print(json.dumps(DenseVectorEmbeddingProvider(dimension=64, enable_cache=False).embed_text('stable financial token vector')))"
+    )
+    vectors = []
+    for _ in range(2):
+        result = subprocess.run(
+            [sys.executable, "-c", command],
+            cwd=service_root,
+            env={**os.environ, "PYTHONHASHSEED": "random"},
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        vectors.append(json.loads(result.stdout))
+    assert vectors[0] == vectors[1]
+
+
+def test_embedding_cache_is_bound_to_embedding_space(tmp_path):
+    cache_path = tmp_path / "cache.json"
+    text = "same text, distinct vector spaces"
+    cache_v1 = EmbeddingCache(cache_path, {"provider": "model", "model_id": "x", "model_revision": "a", "dimension": 3, "config_hash": "a"})
+    cache_v1.put(text, [1.0, 0.0, 0.0])
+    cache_v1.save()
+
+    same_space = EmbeddingCache(cache_path, {"provider": "model", "model_id": "x", "model_revision": "a", "dimension": 3, "config_hash": "a"})
+    other_revision = EmbeddingCache(cache_path, {"provider": "model", "model_id": "x", "model_revision": "b", "dimension": 3, "config_hash": "a"})
+    assert same_space.get(text) == [1.0, 0.0, 0.0]
+    assert other_revision.get(text) is None
 
 
 # ── 5. Embedding Dimension Property ─────────────────────────────────────

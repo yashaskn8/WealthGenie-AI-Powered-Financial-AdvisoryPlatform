@@ -9,7 +9,9 @@ const scoreFactorSchema = new mongoose.Schema({
   goalFit: { type: Number, min: 0, max: 100, required: true },
   horizonFit: { type: Number, min: 0, max: 100, required: true },
   cost: { type: Number, min: 0, max: 100, required: true },
-  mlConfidence: { type: Number, min: 0, max: 100, required: true },
+  // Legacy persisted recommendations may still contain this telemetry field.
+  // It is optional and is never used to score or allocate instruments.
+  mlConfidence: { type: Number, min: 0, max: 100, required: false },
 }, { _id: false, strict: 'throw' });
 
 const instrumentDetailSchema = new mongoose.Schema({

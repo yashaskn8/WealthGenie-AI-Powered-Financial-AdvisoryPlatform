@@ -3,13 +3,15 @@
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from main import app, build_model_input, get_decision_path_description
+from main import app, build_model_input, get_decision_path_description, get_live_model_version
 from model.data.feature_engineering import FEATURE_NAMES, FEATURE_SCHEMA_VERSION, engineer_features, to_model_array
 from model.serving.inference import RandomForestPredictor
 from model.serving.registry import registry
@@ -173,6 +175,40 @@ def test_health_exposes_feature_schema_version(client):
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["feature_schema_version"] == FEATURE_SCHEMA_VERSION
+
+
+def test_prediction_version_comes_from_loaded_predictor_and_rejects_registry_drift(monkeypatch):
+    predictor = SimpleNamespace(loaded_version_id="version-A")
+
+    class VersionStore:
+        def __init__(self, active_id):
+            self.active_id = active_id
+
+        def get_active_model(self, _architecture):
+            return {"version_id": self.active_id}
+
+    monkeypatch.setattr(registry, "get_version_registry", lambda: VersionStore("version-A"))
+    assert get_live_model_version("RandomForest", predictor, "baseline") == "version-A"
+
+    monkeypatch.setattr(registry, "get_version_registry", lambda: VersionStore("version-B"))
+    with pytest.raises(HTTPException) as error:
+        get_live_model_version("RandomForest", predictor, "baseline")
+    assert error.value.status_code == 503
+    assert error.value.detail["code"] == "MODEL_VERSION_RECONCILIATION_REQUIRED"
+
+
+def test_prediction_version_fails_closed_when_active_registry_cannot_be_read(monkeypatch):
+    predictor = SimpleNamespace(loaded_version_id="version-A")
+
+    class BrokenVersionStore:
+        def get_active_model(self, _architecture):
+            raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(registry, "get_version_registry", lambda: BrokenVersionStore())
+    with pytest.raises(HTTPException) as error:
+        get_live_model_version("RandomForest", predictor, "baseline")
+    assert error.value.status_code == 503
+    assert error.value.detail["code"] == "MODEL_VERSION_RECONCILIATION_REQUIRED"
 
 
 def test_fail_closed_auth_when_api_key_unset(client):

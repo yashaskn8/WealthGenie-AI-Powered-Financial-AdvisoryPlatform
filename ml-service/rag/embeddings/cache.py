@@ -17,8 +17,15 @@ logger = logging.getLogger("wealthgenie.rag.cache")
 class EmbeddingCache:
     """Disk and memory-backed cache for text vector embeddings."""
 
-    def __init__(self, cache_path: Optional[Path] = None):
+    def __init__(self, cache_path: Optional[Path] = None, embedding_identity: Optional[Dict[str, object]] = None):
         self.cache_path = cache_path or RAGConfig().cache_path
+        self.embedding_identity = dict(embedding_identity or {
+            "provider": "unspecified",
+            "model_id": "unspecified",
+            "model_revision": "unspecified",
+            "dimension": None,
+            "config_hash": "unspecified",
+        })
         self._cache: Dict[str, List[float]] = {}
         self.hits = 0
         self.misses = 0
@@ -31,7 +38,7 @@ class EmbeddingCache:
 
     def get(self, text: str) -> Optional[List[float]]:
         """Retrieves cached embedding for text if present."""
-        key = self.hash_text(text)
+        key = self._cache_key(text)
         if key in self._cache:
             self.hits += 1
             return self._cache[key]
@@ -40,8 +47,16 @@ class EmbeddingCache:
 
     def put(self, text: str, embedding: List[float]) -> None:
         """Stores embedding in cache."""
-        key = self.hash_text(text)
+        key = self._cache_key(text)
         self._cache[key] = embedding
+
+    def _cache_key(self, text: str) -> str:
+        identity = {
+            **self.embedding_identity,
+            "text_sha256": self.hash_text(text),
+        }
+        canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def save(self) -> None:
         """Persists memory cache to disk."""

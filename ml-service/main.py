@@ -283,6 +283,7 @@ async def lifespan(app: FastAPI):
     if active_rf and Path(active_rf["artifact_path"]).exists() and active_rf_schema == FEATURE_SCHEMA_VERSION:
         rf_pred.load_artifacts(artifact_path=Path(active_rf["artifact_path"]))
         if rf_pred.is_loaded:
+            rf_pred.loaded_version_id = str(active_rf["version_id"])
             model_version = active_rf["version_id"]
             model_accuracy = active_rf.get("metrics", {}).get("rule_approximation_fidelity")
             model = rf_pred.model
@@ -295,12 +296,16 @@ async def lifespan(app: FastAPI):
     active_mlp_schema = (active_mlp or {}).get("hyperparameters", {}).get("feature_schema_version")
     if active_mlp and Path(active_mlp["artifact_path"]).exists() and active_mlp_schema == FEATURE_SCHEMA_VERSION:
         mlp_pred.load_artifacts(artifact_path=Path(active_mlp["artifact_path"]))
+        if mlp_pred.is_loaded:
+            mlp_pred.loaded_version_id = str(active_mlp["version_id"])
         logger.info(f"PyTorch_MLP loaded from registry version {active_mlp['version_id']}")
 
     active_ft = version_registry.get_active_model("FT_Transformer")
     active_ft_schema = (active_ft or {}).get("hyperparameters", {}).get("feature_schema_version")
     if active_ft and Path(active_ft["artifact_path"]).exists() and active_ft_schema == FEATURE_SCHEMA_VERSION:
         ft_pred.load_artifacts(artifact_path=Path(active_ft["artifact_path"]))
+        if ft_pred.is_loaded:
+            ft_pred.loaded_version_id = str(active_ft["version_id"])
         logger.info(f"FT_Transformer loaded from registry version {active_ft['version_id']}")
 
     # 4. Load TreeSHAP Explainer from RF model
@@ -427,18 +432,20 @@ def health():
     rf = registry.get("random_forest")
     status_str = "ok" if (rf and rf.is_loaded) else "model_not_loaded"
 
-    # Query live version registry at request time, not stale startup globals
-    live_version = model_version
+    # Report the version corresponding to bytes actually loaded in this process.
+    live_version = getattr(rf, "loaded_version_id", None) or model_version
     live_accuracy = model_accuracy
     version_store = registry.get_version_registry()
     if version_store is not None:
         try:
             active = version_store.get_active_model("RandomForest")
             if active:
-                live_version = active["version_id"]
-                live_accuracy = active.get("metrics", {}).get("rule_approximation_fidelity", live_accuracy)
+                if str(active["version_id"]) != str(live_version):
+                    status_str = "model_version_reconciliation_required"
+                else:
+                    live_accuracy = active.get("metrics", {}).get("rule_approximation_fidelity", live_accuracy)
         except Exception:
-            pass  # Fall back to globals on any registry read error
+            status_str = "model_registry_unavailable"
 
     return HealthResponse(
         status=status_str,
@@ -476,17 +483,31 @@ def list_registered_models():
     return {"registered_models": registry.list_models()}
 
 
-def get_live_model_version(architecture: str, default_version: str) -> str:
-    """Dynamically resolve the currently active version_id from the version registry."""
+def get_live_model_version(architecture: str, predictor, default_version: str) -> str:
+    """Return the loaded artifact identity, failing closed if registry has moved."""
+    loaded_version = getattr(predictor, "loaded_version_id", None)
     version_store = registry.get_version_registry()
     if version_store is not None:
         try:
             active = version_store.get_active_model(architecture)
             if active and "version_id" in active:
-                return str(active["version_id"])
-        except Exception:
-            pass
-    return default_version
+                active_version = str(active["version_id"])
+                if loaded_version is None or str(loaded_version) != active_version:
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "code": "MODEL_VERSION_RECONCILIATION_REQUIRED",
+                            "message": "The active model changed and this replica has not loaded that version.",
+                        },
+                    )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "MODEL_VERSION_RECONCILIATION_REQUIRED", "message": "The active model version could not be verified."},
+            ) from exc
+    return str(loaded_version or default_version)
 
 
 def record_inference_features(features: dict) -> None:
@@ -541,7 +562,7 @@ async def predict_enriched(data: PredictRequest):
         model_used="RandomForest",
         low_confidence=res["low_confidence"],
         confidence_threshold=confidence_threshold,
-        model_version=get_live_model_version("RandomForest", model_version),
+        model_version=get_live_model_version("RandomForest", predictor, model_version),
         dataset_version=dataset_version,
         git_commit_hash=git_commit_hash,
         explanation=explanation,
@@ -574,7 +595,7 @@ async def predict_pytorch(data: PredictRequest):
         model_used="PyTorch_FinancialMLP",
         low_confidence=res["low_confidence"],
         confidence_threshold=0.45,
-        model_version=get_live_model_version("PyTorch_MLP", "4.0.0-pytorch"),
+        model_version=get_live_model_version("PyTorch_MLP", predictor, "4.0.0-pytorch"),
         dataset_version=dataset_version,
         git_commit_hash=git_commit_hash,
         explanation=None,
@@ -607,7 +628,7 @@ async def predict_ft_transformer(data: PredictRequest):
         model_used="PyTorch_FTTransformer",
         low_confidence=res["low_confidence"],
         confidence_threshold=0.45,
-        model_version=get_live_model_version("FT_Transformer", "4.0.0-ft_transformer"),
+        model_version=get_live_model_version("FT_Transformer", predictor, "4.0.0-ft_transformer"),
         dataset_version=dataset_version,
         git_commit_hash=git_commit_hash,
         explanation=None,

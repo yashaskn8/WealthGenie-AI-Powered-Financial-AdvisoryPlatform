@@ -52,6 +52,15 @@ class PersistentVectorStore(BaseVectorStore):
 
     def add_chunks(self, chunks: List[TextChunk]) -> int:
         """Adds embedded text chunks to store, avoiding duplicate chunk_ids."""
+        incoming = [chunk.embedding for chunk in chunks if chunk.embedding]
+        if any(not np.isfinite(np.asarray(vector, dtype=np.float64)).all() for vector in incoming):
+            raise ValueError("Cannot persist non-finite embedding values.")
+        incoming_dimensions = {len(vector) for vector in incoming}
+        current_dimension = len(self._embeddings[0]) if self._embeddings else 0
+        if len(incoming_dimensions) > 1 or (
+            current_dimension and incoming_dimensions and incoming_dimensions != {current_dimension}
+        ):
+            raise ValueError("Cannot mix embedding dimensions in a persistent vector-store generation.")
         existing_ids = {c.chunk_id for c in self._chunks}
         added_count = 0
 
@@ -113,7 +122,7 @@ class PersistentVectorStore(BaseVectorStore):
         # Filter indices by scope & tenant_id
         valid_indices = [
             i for i, c in enumerate(self._chunks)
-            if is_scope_accessible(
+            if c.lifecycle_state == "ACTIVE" and is_scope_accessible(
                 chunk_scope=getattr(c, "scope", getattr(c.metadata, "scope", "global")),
                 chunk_tenant_id=getattr(c, "tenant_id", getattr(c.metadata, "tenant_id", "default")),
                 requesting_scope=scope,
@@ -125,6 +134,8 @@ class PersistentVectorStore(BaseVectorStore):
             return []
 
         q_vec = np.array(query_vector, dtype=np.float32)
+        if q_vec.ndim != 1 or not np.isfinite(q_vec).all():
+            raise ValueError("Query embedding must be a finite one-dimensional vector.")
 
         # Dimension mismatch guard
         stored_dim = len(self._embeddings[0])
@@ -261,6 +272,58 @@ class PersistentVectorStore(BaseVectorStore):
             "is_using_faiss": self.is_using_faiss,
         }
 
+    def get_chunks(self, document_id: Optional[str] = None) -> List[TextChunk]:
+        return [chunk for chunk in self._chunks if document_id is None or chunk.document_id == document_id]
+
+    def get_corpus_revision(self) -> str:
+        payload = json.dumps(
+            [chunk.model_dump() for chunk in self._chunks], sort_keys=True, separators=(",", ":")
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def delete_document(self, document_id: str) -> int:
+        keep_indices = [i for i, chunk in enumerate(self._chunks) if chunk.document_id != document_id]
+        removed = len(self._chunks) - len(keep_indices)
+        if removed:
+            self._chunks = [self._chunks[i] for i in keep_indices]
+            self._embeddings = [self._embeddings[i] for i in keep_indices]
+            self._faiss_dirty = True
+            self.save()
+        return removed
+
+    def set_document_state(self, document_id: str, state: str) -> int:
+        allowed = {"PENDING", "ACTIVE", "SUPERSEDED", "SOFT_DELETED", "DELETED", "QUARANTINED", "FAILED"}
+        if state not in allowed:
+            raise ValueError("Unsupported document lifecycle state.")
+        changed = 0
+        for chunk in self._chunks:
+            if chunk.document_id == document_id and chunk.lifecycle_state != state:
+                chunk.lifecycle_state = state
+                changed += 1
+        if changed:
+            self._faiss_dirty = True
+            self.save()
+        return changed
+
+    def update_document_metadata(
+        self,
+        document_id: str,
+        title: Optional[str] = None,
+        author: Optional[str] = None,
+    ) -> int:
+        changed = 0
+        for chunk in self._chunks:
+            if chunk.document_id != document_id:
+                continue
+            if title is not None:
+                chunk.metadata.title = title
+            if author is not None:
+                chunk.metadata.author = author
+            changed += 1
+        if changed:
+            self.save()
+        return changed
+
     def save(self) -> None:
         """
         Persists chunks and vector embeddings to disk using atomic write and backup snapshot creation.
@@ -297,6 +360,11 @@ class PersistentVectorStore(BaseVectorStore):
 
     def load(self) -> None:
         """Loads index from disk with corruption detection and backup recovery."""
+        self._chunks = []
+        self._embeddings = []
+        self._stored_embedding_dim = 0
+        self._faiss_index = None
+        self._faiss_dirty = True
         if not self.index_path.exists():
             return
 
@@ -333,8 +401,21 @@ class PersistentVectorStore(BaseVectorStore):
         else:
             raise ValueError("Invalid vector index structure.")
 
-        self._chunks = [TextChunk(**item) for item in chunks_list]
-        self._embeddings = [c.embedding for c in self._chunks if c.embedding]
+        normalized_items = [
+            item if "lifecycle_state" in item else {**item, "lifecycle_state": "QUARANTINED"}
+            for item in chunks_list
+        ]
+        loaded_chunks = [TextChunk(**item) for item in normalized_items]
+        loaded_embeddings = [chunk.embedding for chunk in loaded_chunks]
+        if any(not embedding for embedding in loaded_embeddings):
+            raise ValueError("Persisted vector index contains a chunk without an embedding.")
+        if any(not np.isfinite(np.asarray(embedding, dtype=np.float64)).all() for embedding in loaded_embeddings):
+            raise ValueError("Persisted vector index contains non-finite embedding values.")
+        dimensions = {len(embedding) for embedding in loaded_embeddings}
+        if len(dimensions) > 1:
+            raise ValueError("Persisted vector index contains mixed embedding dimensions.")
+        self._chunks = loaded_chunks
+        self._embeddings = loaded_embeddings
         self._stored_embedding_dim = len(self._embeddings[0]) if self._embeddings else 0
         self._faiss_dirty = True
         logger.info(f"Loaded {len(self._chunks)} chunks (dim={self._stored_embedding_dim}) into PersistentVectorStore from {file_path}")

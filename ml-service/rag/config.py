@@ -6,8 +6,8 @@ Defines hyperparameters for chunking, vector embeddings, storage paths, and retr
 import json
 import os
 from pathlib import Path
-from typing import Dict, Any
-from pydantic import BaseModel, Field, model_validator
+from typing import Dict, Any, Literal
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from model.config import BASE_DIR
 
 RAG_DIR = BASE_DIR / "rag"
@@ -17,17 +17,19 @@ STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 class RAGConfig(BaseModel):
     """Centralized configuration for Retrieval-Augmented Generation pipeline."""
+    model_config = ConfigDict(extra="forbid")
+
     chunk_size: int = Field(512, ge=64, le=4096, description="Default chunk size in characters")
     chunk_overlap: int = Field(64, ge=0, le=512, description="Overlap between consecutive chunks")
     embedding_dim: int = Field(384, description="Dense embedding vector dimension")
-    embedding_provider: str = Field("sentence_transformer", description="Embedding provider: sentence_transformer, tf_idf_dense, or custom")
+    embedding_provider: Literal["sentence_transformer", "tf_idf_dense"] = Field("sentence_transformer", description="Embedding provider")
     top_k: int = Field(4, ge=1, le=20, description="Top-k chunks to retrieve")
     similarity_threshold: float = Field(0.1, ge=0.0, le=1.0, description="Minimum cosine similarity score")
-    retrieval_strategy: str = Field("hybrid", description="Retrieval strategy: dense, keyword, or hybrid")
-    fusion_mode: str = Field("rrf", description="Fusion strategy: rrf or weighted")
+    retrieval_strategy: Literal["dense", "keyword", "hybrid"] = Field("hybrid", description="Retrieval strategy")
+    fusion_mode: Literal["rrf", "weighted"] = Field("rrf", description="Fusion strategy")
     dense_weight: float = Field(0.6, ge=0.0, le=1.0, description="Dense vector weight in weighted fusion")
     keyword_weight: float = Field(0.4, ge=0.0, le=1.0, description="Keyword BM25 weight in weighted fusion")
-    reranker_strategy: str = Field("no_op", description="Reranker strategy: no_op, relevance_score, or cross_encoder")
+    reranker_strategy: Literal["no_op", "relevance_score", "cross_encoder"] = Field("no_op", description="Reranker strategy")
     vector_store_path: Path = Field(STORAGE_DIR / "vector_index.json", description="Persisted vector store index path")
     cache_path: Path = Field(STORAGE_DIR / "embedding_cache.json", description="Persisted embedding cache path")
     document_registry_path: Path = Field(STORAGE_DIR / "documents.json", description="Document metadata store path")
@@ -37,6 +39,8 @@ class RAGConfig(BaseModel):
         """Ensures chunk overlap is strictly smaller than chunk size."""
         if self.chunk_overlap >= self.chunk_size:
             raise ValueError(f"chunk_overlap ({self.chunk_overlap}) must be strictly less than chunk_size ({self.chunk_size}).")
+        if self.fusion_mode == "weighted" and abs(self.dense_weight + self.keyword_weight - 1.0) > 1e-9:
+            raise ValueError("dense_weight and keyword_weight must sum to 1.0 for weighted fusion.")
         return self
 
     @classmethod
