@@ -72,11 +72,19 @@ jobs:
           kind load docker-image wealthgenie-ml-service:latest --name kind
           kind load docker-image wealthgenie-frontend:latest --name kind
 
-      - name: Apply Kubernetes Manifests via Kustomize
+      - name: Apply database prerequisites
         run: |
-          echo "Applying Kubernetes manifests in k8s/..."
-          kubectl apply -k k8s/
-          echo "Injecting ephemeral test secrets for Kind validation cluster..."
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply \
+            -f k8s/configmap.yaml \
+            -f k8s/mongodb/pvc.yaml \
+            -f k8s/mongodb/statefulset.yaml \
+            -f k8s/mongodb/service.yaml \
+            -f k8s/redis/deployment.yaml \
+            -f k8s/redis/service.yaml
+
+      - name: Inject ephemeral secrets for Kind validation cluster
+        run: |
           EPHEMERAL_JWT=$(openssl rand -hex 32)
           EPHEMERAL_ML_KEY=$(openssl rand -hex 16)
           EPHEMERAL_ML_OPERATOR_KEY=$(openssl rand -hex 16)
@@ -97,6 +105,22 @@ jobs:
 
           echo "Waiting for Redis Deployment to be Ready..."
           kubectl rollout status deployment/wealthgenie-redis -n wealthgenie --timeout=240s
+
+      - name: Run the one-shot Phase 2 index migration
+        run: |
+          set -euo pipefail
+          JOB_NAME=$(kubectl create -f k8s/phase2-index-migration/job.yaml -o jsonpath='{.metadata.name}')
+          echo "Waiting for migration Job ${JOB_NAME} to complete..."
+          if kubectl wait --for=condition=complete "job/${JOB_NAME}" -n wealthgenie --timeout=300s; then
+            kubectl logs "job/${JOB_NAME}" -n wealthgenie
+          else
+            kubectl describe "job/${JOB_NAME}" -n wealthgenie || true
+            kubectl logs "job/${JOB_NAME}" -n wealthgenie --all-containers=true || true
+            exit 1
+          fi
+
+      - name: Apply application manifests after index migration
+        run: kubectl apply -k k8s/
 
       - name: Wait for Microservices to be Ready
         run: |

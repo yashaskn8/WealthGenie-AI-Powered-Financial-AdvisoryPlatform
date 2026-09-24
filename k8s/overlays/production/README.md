@@ -14,3 +14,13 @@ the deployment pipeline.
 The Terraform in this repository provisions network, database, ALB, and DNS
 scaffolding only. Application compute/runtime attachment remains a separate
 deployment step.
+
+The Kind CD workflow applies database prerequisites, runs the one-shot Job at
+`k8s/phase2-index-migration/job.yaml`, waits for `Complete`, and only then
+applies application workloads. That Job uses the base MongoDB topology and the
+ephemeral `wealthgenie-secrets/MONGODB_URI` used by Kind. Production DocumentDB
+runtime attachment is separate: its deployment pipeline must provide a
+controlled one-shot index migration with the production URI and TLS/CA
+configuration before API rollout; do not apply the Kind-specific Job unchanged
+to DocumentDB. API startup verification remains read-only and never creates
+indexes.

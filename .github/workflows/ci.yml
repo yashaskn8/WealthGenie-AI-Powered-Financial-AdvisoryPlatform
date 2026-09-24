@@ -265,6 +265,9 @@ jobs:
           cd reactapp
           npx playwright install --with-deps chromium
 
+      - name: Migrate Phase 2 persistence indexes
+        run: MONGODB_MIGRATION_URI="$MONGODB_URI" npm run migrate:phase2-indexes --prefix server
+
       - name: Start real application services
         run: |
           cd ml-service
