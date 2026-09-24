@@ -5,6 +5,24 @@ import Recommendation from '../models/Recommendation.js';
 
 const id = new mongoose.Types.ObjectId();
 
+function runQueryPreHooks(query) {
+  return new Promise((resolve, reject) => {
+    query.model.schema.s.hooks.execPre(query.op, query, error => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+function runBulkWritePreHooks(model, operations) {
+  return new Promise((resolve, reject) => {
+    model.schema.s.hooks.execPre('bulkWrite', model, [operations, {}], error => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
 test('generation allocation and response snapshot cannot be changed by query updates', async () => {
   for (const update of [
     { $set: { instruments: [] } },
@@ -17,6 +35,24 @@ test('generation allocation and response snapshot cannot be changed by query upd
       Recommendation.updateOne({ _id: id }, update).exec(),
       error => error.code === 'RECOMMENDATION_GENERATION_IMMUTABLE',
     );
+  }
+});
+
+test('mutable advisory text and metadata remain writable through query and bulk middleware', async () => {
+  const filter = { _id: id };
+  for (const [field, value] of [
+    ['advisoryText', 'A verified explanation.'],
+    ['advisoryMetadata', { status: 'READY', evidenceIdsUsed: ['E_TEST'] }],
+  ]) {
+    await runQueryPreHooks(Recommendation.updateOne(filter, { $set: { [field]: value } }));
+    await runQueryPreHooks(Recommendation.updateMany(filter, { $set: { [field]: value } }));
+    await runQueryPreHooks(Recommendation.findOneAndUpdate(filter, { $set: { [field]: value } }));
+    await runBulkWritePreHooks(Recommendation, [
+      { updateOne: { filter, update: { $set: { [field]: value } } } },
+    ]);
+    await runBulkWritePreHooks(Recommendation, [
+      { updateMany: { filter, update: { $set: { [field]: value } } } },
+    ]);
   }
 });
 

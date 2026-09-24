@@ -145,6 +145,63 @@ test('expired chat reservation is settled once and stale owner cannot affect the
   ]);
 });
 
+test('bulkWrite inserts chat identity and applies a safe mutable aggregation update', async () => {
+  const sessionId = 'bulk-mutable-pipeline-session';
+  const document = {
+    userId,
+    profileId: binding.profileId,
+    session_id: sessionId,
+    profileVersion: binding.profileVersion,
+    profileInputHash: binding.profileInputHash,
+    sourceRecommendationId: binding.sourceRecommendationId,
+    sourceAllocationRevisionId: binding.sourceAllocationRevisionId,
+    sourceRecommendationFingerprint: binding.sourceRecommendationFingerprint,
+    sourcePortfolioFingerprint: binding.sourcePortfolioFingerprint,
+    messages: [],
+    message_count: 0,
+    message_sequence: 0,
+    cumulative_tokens: 100,
+    reserved_tokens: 25,
+    session_version: 4,
+    processing_owner_id: 'expired-owner',
+    processing_lease_until: new Date(Date.now() - 1000),
+    is_active: true,
+  };
+
+  const inserted = await ConversationHistory.bulkWrite([{ insertOne: { document } }]);
+  assert.equal(inserted.insertedCount, 1, 'bulk insert establishes a new immutable identity');
+
+  const updated = await ConversationHistory.bulkWrite([{
+    updateOne: {
+      filter: { userId, session_id: sessionId, is_active: true },
+      update: [{
+        $set: {
+          cumulative_tokens: {
+            $add: [
+              { $ifNull: ['$cumulative_tokens', 0] },
+              { $ifNull: ['$reserved_tokens', 0] },
+            ],
+          },
+          reserved_tokens: 0,
+          processing_owner_id: null,
+          processing_lease_until: null,
+          session_version: { $add: [{ $ifNull: ['$session_version', 1] }, 1] },
+        },
+      }],
+    },
+  }]);
+
+  assert.equal(updated.modifiedCount, 1);
+  const persisted = await ConversationHistory.findOne({ userId, session_id: sessionId })
+    .select('+processing_owner_id +processing_lease_until')
+    .lean();
+  assert.equal(persisted.cumulative_tokens, 125);
+  assert.equal(persisted.reserved_tokens, 0);
+  assert.equal(persisted.processing_owner_id, null);
+  assert.equal(persisted.processing_lease_until, null);
+  assert.equal(persisted.session_version, 5);
+});
+
 test('same literal session ID is isolated by user and closed IDs cannot be reopened', async () => {
   const otherBinding = Object.freeze({
     ...binding,
