@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { verifyJWT, requireRole } from '../middleware/authMiddleware.js';
-import { asyncHandler } from '../middleware/errorHandler.js';
+import { asyncHandler, sendError } from '../middleware/errorHandler.js';
 import { createEndpointRateLimiter, ipKeyGenerator } from '../middleware/rateLimiter.js';
 import { AMFI_REFRESH_LOCK_TTL_SECONDS, withMarketRefreshLease } from '../jobs/marketDataRefresh.js';
 import { validateQuery, marketNavQuerySchema } from '../validation/schemas.js';
@@ -65,7 +65,7 @@ router.get('/params', asyncHandler(async (_req, res) => {
 }));
 
 /** Refreshes the bounded official source snapshots without widening scope. */
-router.post('/refresh', verifyJWT, requireRole('admin'), marketRefreshLimiter, asyncHandler(async (_req, res) => {
+router.post('/refresh', verifyJWT, requireRole('admin'), marketRefreshLimiter, asyncHandler(async (req, res) => {
   const refreshResult = await withMarketRefreshLease('Manual Market Refresh', async () => Promise.allSettled([
     fetchAmfiProductSnapshot({ forceRefresh: true }),
     fetchAmfiHistoricalNavSnapshot({ forceRefresh: true }),
@@ -75,10 +75,9 @@ router.post('/refresh', verifyJWT, requireRole('admin'), marketRefreshLimiter, a
   ]), { ttlSeconds: AMFI_REFRESH_LOCK_TTL_SECONDS });
 
   if (refreshResult === null) {
-    return res.status(process.env.NODE_ENV === 'production' ? 503 : 409).json({
+    const status = process.env.NODE_ENV === 'production' ? 503 : 409;
+    return sendError(req, res, status, 'Another refresh is active or distributed refresh coordination is unavailable.', 'MARKET_REFRESH_LEASE_UNAVAILABLE', {
       status: 'REFRESH_UNAVAILABLE',
-      code: 'MARKET_REFRESH_LEASE_UNAVAILABLE',
-      message: 'Another refresh is active or distributed refresh coordination is unavailable.',
     });
   }
 

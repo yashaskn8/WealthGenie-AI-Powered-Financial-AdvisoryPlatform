@@ -30,11 +30,6 @@ export const loginSchema = Joi.object({
   password: Joi.string().min(1).required(),
 }).unknown(false);
 
-export const chatMessageSchema = Joi.object({
-  message: Joi.string().trim().min(1).max(1000).required(),
-  session_id: Joi.string().max(100).optional(),
-}).unknown(false);
-
 const taxFields = {
   income: Joi.number().min(0).max(1000000000).required(),
   incomeSource: Joi.string().valid(...incomeSourceValues).required(),
@@ -124,6 +119,64 @@ export const marketNavQuerySchema = Joi.object({
     .pattern(/^\d+(,\d+){0,49}$/)
     .max(600)
     .required(),
+}).unknown(false);
+
+const boundedIntegerQuery = (min, max) => Joi.string()
+  .pattern(/^(0|[1-9]\d*)$/)
+  .custom((value, helpers) => Number(value) >= min && Number(value) <= max
+    ? value
+    : helpers.error('number.range', { limit: max }))
+  .optional();
+
+export const instrumentListQuerySchema = Joi.object({
+  type: Joi.string().valid('FD', 'Mutual_Fund', 'ETF', 'Government', 'ELSS').optional(),
+  sort: Joi.string().valid('name', 'interestRate', 'rate', 'returns1yr', 'returns3yr', 'returns5yr', 'riskLevel', 'aumCr', 'expenseRatio').optional(),
+  order: Joi.string().valid('asc', 'desc').optional(),
+  limit: boundedIntegerQuery(1, 100),
+  page: boundedIntegerQuery(1, 100000),
+}).unknown(false);
+
+const queryInteger = (minimum, maximum) => Joi.string()
+  .pattern(/^(0|[1-9]\d*)$/)
+  .custom((value, helpers) => {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed >= minimum && parsed <= maximum
+      ? value
+      : helpers.error('any.invalid');
+  });
+
+export const recommendationCurrentQuerySchema = Joi.object({
+  profileId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).required(),
+}).unknown(false);
+
+export const recommendationAuditQuerySchema = Joi.object({
+  profileId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).optional(),
+  limit: queryInteger(1, 100).optional(),
+  skip: queryInteger(0, 10000000).optional(),
+  correlationId: Joi.string().pattern(/^[A-Za-z0-9._:-]{1,128}$/).optional(),
+}).unknown(false);
+
+const sessionIdSchema = Joi.string().pattern(/^[A-Za-z0-9._:-]{1,100}$/);
+export const chatMessageSchema = Joi.object({
+  message: Joi.string().trim().min(1).max(1000).required(),
+  session_id: sessionIdSchema.optional(),
+}).unknown(false);
+
+export const chatHistoryQuerySchema = Joi.object({
+  session_id: sessionIdSchema.optional(),
+  limit: queryInteger(1, 200).optional(),
+}).unknown(false);
+
+export const agentProfileQuerySchema = Joi.object({
+  profileId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).required(),
+}).unknown(false);
+
+export const mandateListQuerySchema = Joi.object({
+  limit: queryInteger(1, 100).optional(),
+}).unknown(false);
+
+export const planHealthEventsQuerySchema = Joi.object({
+  limit: queryInteger(1, 50).optional(),
 }).unknown(false);
 
 export const regimeAdjustSchema = Joi.object({

@@ -43,6 +43,7 @@ const profile = {
 
 const savedGoal = {
   _id: 'goal-1',
+  version: 1,
   goal_name: 'Dream Studio',
   target_amount: 500000,
   current_savings: 50000,
@@ -193,6 +194,7 @@ describe('GoalTracker custom-goal boundary', () => {
     fireEvent.click(await screen.findByRole('button', { name: /save changes & update projections/i }));
 
     await waitFor(() => expect(api.updateGoal).toHaveBeenCalledWith('goal-1', {
+      expectedVersion: 1,
       target_amount: 550000,
       current_savings: 50000,
     }));
@@ -207,7 +209,7 @@ describe('GoalTracker custom-goal boundary', () => {
     render(<GoalTracker profile={profile} />);
 
     fireEvent.click(await screen.findByTitle('Delete Goal'));
-    await waitFor(() => expect(api.deleteGoal).toHaveBeenCalledWith('goal-1'));
+    await waitFor(() => expect(api.deleteGoal).toHaveBeenCalledWith('goal-1', 1));
     await waitFor(() => expect(screen.queryByText('Dream Studio')).toBeNull());
   });
 });

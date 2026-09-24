@@ -9,6 +9,7 @@ import Goal from '../models/Goal.js';
 import User from '../models/User.js';
 import ConversationHistory from '../models/ConversationHistory.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
+import { installMockChatSessionStore } from './helpers/mockChatSessionStore.js';
 
 const mockUserId = '60d5ecb8b3b3a72d9c8e4a11';
 const mockSessionId = 'test-groq-session';
@@ -42,6 +43,7 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
   let originalConvFindOne;
   let originalNvidiaKey;
   let originalPrimaryProvider;
+  let restoreChatStore;
   let savedMessages = [];
 
   beforeEach(() => {
@@ -73,6 +75,17 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
       messages: savedMessages,
       save: async function () { return true; },
     });
+    restoreChatStore = installMockChatSessionStore(async () => ({
+      userId: mockUserId,
+      profileId: mockProfile._id,
+      profileVersion: mockProfile.version || 1,
+      session_id: mockSessionId,
+      messages: savedMessages,
+      message_sequence: 0,
+      session_version: 1,
+      cumulative_tokens: 0,
+      reserved_tokens: 0,
+    }));
   });
 
   afterEach(() => {
@@ -82,6 +95,7 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
     Goal.find = originalGoalFind;
     User.findById = originalUserFindById;
     ConversationHistory.findOne = originalConvFindOne;
+    restoreChatStore?.();
     if (originalNvidiaKey === undefined) delete process.env.NVIDIA_API_KEY; else process.env.NVIDIA_API_KEY = originalNvidiaKey;
     if (originalPrimaryProvider === undefined) delete process.env.LLM_PRIMARY_PROVIDER; else process.env.LLM_PRIMARY_PROVIDER = originalPrimaryProvider;
   });

@@ -177,6 +177,7 @@ test('WG-037 Scenario (a): POST /create goal with known target_amount and target
       method: 'POST',
       headers: {
         authorization: `Bearer ${token}`,
+        'Idempotency-Key': crypto.randomUUID(),
       },
       body: JSON.stringify(createPayload),
     });
@@ -204,7 +205,7 @@ test('WG-037 Scenario (b): PATCH target_amount recomputes inflation_adjusted_tar
     // 1. Create initial goal
     const { response: createRes, body: createBody } = await jsonRequest(`${baseUrl}/api/goals/create`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, 'Idempotency-Key': crypto.randomUUID() },
       body: JSON.stringify({
         goal_name: 'Home Downpayment 2036',
         target_amount: 1000000,
@@ -222,7 +223,7 @@ test('WG-037 Scenario (b): PATCH target_amount recomputes inflation_adjusted_tar
     const { response: patchRes, body: patchBody } = await jsonRequest(`${baseUrl}/api/goals/${createdGoal._id}`, {
       method: 'PATCH',
       headers: { authorization: `Bearer ${token}` },
-      body: JSON.stringify({ target_amount: newTargetAmount }),
+      body: JSON.stringify({ target_amount: newTargetAmount, expectedVersion: createdGoal.version }),
     });
 
     assert.equal(patchRes.status, 200, `PATCH failed with status ${patchRes.status}`);
@@ -262,7 +263,7 @@ test('WG-037 Scenario (c): PATCH current_savings reduces/maintains SIP and leave
     // 1. Create goal
     const { response: createRes, body: createBody } = await jsonRequest(`${baseUrl}/api/goals/create`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, 'Idempotency-Key': crypto.randomUUID() },
       body: JSON.stringify({
         goal_name: 'Child Education 2036',
         target_amount: 1500000,
@@ -282,7 +283,7 @@ test('WG-037 Scenario (c): PATCH current_savings reduces/maintains SIP and leave
     const { response: patchRes, body: patchBody } = await jsonRequest(`${baseUrl}/api/goals/${initialGoal._id}`, {
       method: 'PATCH',
       headers: { authorization: `Bearer ${token}` },
-      body: JSON.stringify({ current_savings: 400000 }),
+      body: JSON.stringify({ current_savings: 400000, expectedVersion: initialGoal.version }),
     });
 
     assert.equal(patchRes.status, 200);
@@ -314,7 +315,7 @@ test('WG-037 Scenario (d): PATCH priority-only leaves inflation_adjusted_target,
     // 1. Create goal
     const { response: createRes, body: createBody } = await jsonRequest(`${baseUrl}/api/goals/create`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, 'Idempotency-Key': crypto.randomUUID() },
       body: JSON.stringify({
         goal_name: 'Emergency Fund 2036',
         target_amount: 500000,
@@ -331,7 +332,7 @@ test('WG-037 Scenario (d): PATCH priority-only leaves inflation_adjusted_target,
     const { response: patchRes, body: patchBody } = await jsonRequest(`${baseUrl}/api/goals/${initialGoal._id}`, {
       method: 'PATCH',
       headers: { authorization: `Bearer ${token}` },
-      body: JSON.stringify({ priority: 'Low' }),
+      body: JSON.stringify({ priority: 'Low', expectedVersion: initialGoal.version }),
     });
 
     assert.equal(patchRes.status, 200);

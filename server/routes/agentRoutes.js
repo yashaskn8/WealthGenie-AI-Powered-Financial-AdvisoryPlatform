@@ -12,6 +12,7 @@ import AgentRunEvent from '../models/AgentRunEvent.js';
 import { buildPlanReviewA2UI } from '../agents/a2ui/a2uiSchemas.js';
 import { A2A_PROTOCOL_VERSION, getAgentCard, listAgentCards } from '../agents/a2a/agentCards.js';
 import { validateStrict } from '../validation/financialSchemas.js';
+import { validateQuery, agentProfileQuerySchema, mandateListQuerySchema, planHealthEventsQuerySchema } from '../validation/schemas.js';
 import { mandateApprovalAssertionSchema, mandateRevokeSchema, passkeyRegistrationResponseSchema } from '../agents/authorization/authorizationSchemas.js';
 import {
   createMandateForPlanReview,
@@ -68,11 +69,8 @@ router.post('/plan-review', verifyJWT, planReviewLimiter, validateStrict(planRev
   return res.status(result.created ? 202 : 200).json(result.run);
 }));
 
-router.get('/plan-review/current', verifyJWT, asyncHandler(async (req, res) => {
+router.get('/plan-review/current', verifyJWT, validateQuery(agentProfileQuerySchema), asyncHandler(async (req, res) => {
   if (!isEnabled(req)) return featureUnavailable();
-  if (!/^[0-9a-f]{24}$/i.test(String(req.query.profileId || ''))) {
-    throw createError(400, 'A valid profile ID is required.', 'Invalid profile ID.');
-  }
   const run = await getCurrentPlanReviewRun({ userId: req.user.userId, profileId: req.query.profileId });
   if (!run) throw createError(404, 'No plan review run found.', 'No plan review run found.');
   return res.json(run);
@@ -205,7 +203,7 @@ router.post('/plan-review/:runId/action', verifyJWT, validateStrict(planReviewAc
   return res.json(descriptor);
 }));
 
-router.get('/mandates', verifyJWT, asyncHandler(async (req, res) => {
+router.get('/mandates', verifyJWT, validateQuery(mandateListQuerySchema), asyncHandler(async (req, res) => {
   if (!authorizationEnabled(req)) return featureUnavailable();
   return res.json({ mandates: await listMandatesForUser({ userId: req.user.userId, limit: req.query.limit }) });
 }));
@@ -279,16 +277,13 @@ router.get('/receipts/:receiptId/verify', verifyJWT, asyncHandler(async (req, re
   return res.json(result);
 }));
 
-router.get('/plan-health', verifyJWT, asyncHandler(async (req, res) => {
+router.get('/plan-health', verifyJWT, validateQuery(agentProfileQuerySchema), asyncHandler(async (req, res) => {
   if (!isEnabled(req)) return featureUnavailable();
-  if (!/^[0-9a-f]{24}$/i.test(String(req.query.profileId || ''))) {
-    throw createError(400, 'A valid profile ID is required.', 'Invalid profile ID.');
-  }
   const result = await inspectPlanHealth({ userId: req.user.userId, profileId: req.query.profileId });
   return res.json(result);
 }));
 
-router.get('/plan-health/events', verifyJWT, asyncHandler(async (req, res) => {
+router.get('/plan-health/events', verifyJWT, validateQuery(planHealthEventsQuerySchema), asyncHandler(async (req, res) => {
   if (!isEnabled(req)) return featureUnavailable();
   const events = await listPlanHealthEvents({ userId: req.user.userId, limit: req.query.limit });
   return res.json({ events });

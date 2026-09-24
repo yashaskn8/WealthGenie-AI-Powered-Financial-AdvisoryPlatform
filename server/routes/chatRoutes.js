@@ -6,9 +6,11 @@ import crypto from 'crypto';
 import { verifyJWT } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
 import { validate, chatMessageSchema } from '../validation/schemas.js';
+import { chatHistoryQuerySchema, validateQuery } from '../validation/schemas.js';
 import { processChat, buildClientResponseDTO } from '../services/geminiChatService.js';
 import { checkTokenBudget, recordTokenUsage } from '../middleware/tokenBudget.js';
 import ConversationHistory from '../models/ConversationHistory.js';
+import { defaultChatSessionStore } from '../services/chatSessionStore.js';
 
 const router = Router();
 
@@ -40,17 +42,14 @@ router.post('/message', verifyJWT, checkTokenBudget(), validate(chatMessageSchem
  * GET /api/chat/history [Protected]
  * Retrieve conversation history for the current user.
  */
-router.get('/history', verifyJWT, asyncHandler(async (req, res) => {
+router.get('/history', verifyJWT, validateQuery(chatHistoryQuerySchema), asyncHandler(async (req, res) => {
   const { session_id } = req.query;
 
   // Clamp limit to prevent excessive queries
-  const rawLimit = parseInt(req.query.limit) || 50;
-  const limit = Math.min(Math.max(rawLimit, 1), 200);
+  const limit = req.query.limit === undefined ? 50 : Number(req.query.limit);
 
   const query = { userId: req.user.userId, is_active: true };
-  if (session_id && typeof session_id === 'string' && session_id.length <= 100) {
-    query.session_id = session_id;
-  }
+  if (session_id) query.session_id = session_id;
 
   const conversations = await ConversationHistory
     .find(query)
@@ -69,15 +68,11 @@ router.get('/history', verifyJWT, asyncHandler(async (req, res) => {
 router.delete('/session/:sessionId', verifyJWT, asyncHandler(async (req, res) => {
   const { sessionId } = req.params;
 
-  if (!sessionId || typeof sessionId !== 'string' || sessionId.length > 100) {
+  if (!/^[A-Za-z0-9._:-]{1,100}$/.test(sessionId || '')) {
     throw createError(400, 'Invalid sessionId', 'Invalid session ID.');
   }
 
-  await ConversationHistory.findOneAndUpdate(
-    { userId: req.user.userId, session_id: sessionId, is_active: true },
-    { is_active: false },
-    { new: true }
-  );
+  await defaultChatSessionStore.close({ userId: req.user.userId, sessionId });
 
   res.json({ message: 'Session cleared.' });
 }));

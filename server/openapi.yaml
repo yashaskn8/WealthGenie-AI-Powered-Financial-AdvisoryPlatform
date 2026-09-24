@@ -44,9 +44,10 @@ paths:
       tags: [Profiles]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       x-csrf-protection: cookie-session
-      x-idempotency-key: optional
+      x-idempotency-key: required
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody: { $ref: '#/components/requestBodies/ProfileCreate' }
-      responses: { '201': { $ref: '#/components/responses/Profile' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '409': { $ref: '#/components/responses/Conflict' } }
+      responses: { '201': { $ref: '#/components/responses/Profile' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '409': { $ref: '#/components/responses/Conflict' }, '503': { $ref: '#/components/responses/Unavailable' } }
   /api/profile/precompute:
     post:
       operationId: precomputeProfileRecommendation
@@ -115,15 +116,22 @@ paths:
       tags: [Advisory]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       parameters:
-        - { name: profileId, in: query, schema: { type: string } }
-        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }
-      responses: { '200': { description: Owned audit records, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/AuditMetadata' } } } } }, '401': { $ref: '#/components/responses/Unauthorized' } }
+        - { name: profileId, in: query, schema: { type: string, pattern: '^[0-9a-fA-F]{24}$' } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, x-raw-query-pattern: '^(0|[1-9][0-9]*)$' } }
+        - { name: skip, in: query, schema: { type: integer, minimum: 0, maximum: 10000000, x-raw-query-pattern: '^(0|[1-9][0-9]*)$' } }
+        - { name: correlationId, in: query, schema: { type: string, pattern: '^[A-Za-z0-9._:-]{1,128}$' } }
+      responses: { '200': { description: Owned paginated audit records, content: { application/json: { schema: { $ref: '#/components/schemas/AuditListResponse' } } } }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '503': { $ref: '#/components/responses/Unavailable' } }
   /api/recommend/audit/verify:
     get:
       operationId: verifyRecommendationAuditChain
       tags: [Advisory]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
-      responses: { '200': { description: Tamper-evident chain status, content: { application/json: { schema: { $ref: '#/components/schemas/AuditVerification' } } } }, '401': { $ref: '#/components/responses/Unauthorized' } }
+      responses:
+        '200': { description: Valid tamper-evident chain, content: { application/json: { schema: { $ref: '#/components/schemas/AuditVerification' } } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { description: Chain verification found an integrity discrepancy, content: { application/json: { schema: { $ref: '#/components/schemas/AuditVerification' } } } }
+        '503': { $ref: '#/components/responses/Unavailable' }
   /api/recommend/audit/{id}:
     get:
       operationId: getRecommendationAudit
@@ -224,6 +232,7 @@ paths:
       tags: [AgentAuthorization]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       description: Read-only list of owned AP2-inspired verifiable action mandates. This is not a payment mandate API.
+      parameters: [{ name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, x-raw-query-pattern: '^(0|[1-9][0-9]*)$' } }]
       responses: { '200': { description: Owned mandates, content: { application/json: { schema: { type: object, required: [mandates], properties: { mandates: { type: array, items: { $ref: '#/components/schemas/UserIntentMandate' } } } } } } }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
   /api/agent/passkeys/registration/options:
     post:
@@ -310,6 +319,7 @@ paths:
       operationId: listPlanHealthEvents
       tags: [Agent]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
+      parameters: [{ name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 50, x-raw-query-pattern: '^(0|[1-9][0-9]*)$' } }]
       responses: { '200': { $ref: '#/components/responses/Object' }, '401': { $ref: '#/components/responses/Unauthorized' } }
   /api/agent/plan-health/events/{eventId}/acknowledge:
     patch:
@@ -326,9 +336,10 @@ paths:
       tags: [Goals]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       x-csrf-protection: cookie-session
-      x-idempotency-key: optional
+      x-idempotency-key: required
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody: { $ref: '#/components/requestBodies/GoalCreate' }
-      responses: { '201': { $ref: '#/components/responses/Goal' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '409': { $ref: '#/components/responses/Conflict' } }
+      responses: { '201': { $ref: '#/components/responses/GoalCreate' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '409': { $ref: '#/components/responses/Conflict' }, '503': { $ref: '#/components/responses/Unavailable' } }
   /api/goals:
     get:
       operationId: listGoals
@@ -352,7 +363,7 @@ paths:
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       x-csrf-protection: cookie-session
       parameters: [{ $ref: '#/components/parameters/GoalId' }]
-      responses: { '200': { $ref: '#/components/responses/Goal' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+      responses: { '200': { $ref: '#/components/responses/GoalAdvice' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' }, '503': { $ref: '#/components/responses/Unavailable' } }
   /api/goals/{goalId}/simulate:
     post:
       operationId: simulateGoalContribution
@@ -370,21 +381,27 @@ paths:
       x-csrf-protection: cookie-session
       parameters: [{ $ref: '#/components/parameters/GoalId' }]
       requestBody: { $ref: '#/components/requestBodies/GoalUpdate' }
-      responses: { '200': { $ref: '#/components/responses/Goal' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+      responses: { '200': { $ref: '#/components/responses/GoalUpdate' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' }, '503': { $ref: '#/components/responses/Unavailable' } }
     delete:
       operationId: deleteGoal
       tags: [Goals]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       x-csrf-protection: cookie-session
-      parameters: [{ $ref: '#/components/parameters/GoalId' }]
-      responses: { '200': { $ref: '#/components/responses/Message' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+      parameters: [{ $ref: '#/components/parameters/GoalId' }, { $ref: '#/components/parameters/GoalIfMatch' }]
+      responses: { '200': { $ref: '#/components/responses/GoalDelete' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' }, '428': { $ref: '#/components/responses/PreconditionRequired' }, '503': { $ref: '#/components/responses/Unavailable' } }
 
   /api/instruments:
     get:
       operationId: listInstruments
       tags: [Instruments]
       security: []
-      responses: { '200': { description: Canonical investment catalog, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/Instrument' } } } } } }
+      parameters:
+        - { name: type, in: query, schema: { type: string, enum: [FD, Mutual_Fund, ETF, Government, ELSS] } }
+        - { name: sort, in: query, schema: { type: string, enum: [name, interestRate, rate, returns1yr, returns3yr, returns5yr, riskLevel, aumCr, expenseRatio] } }
+        - { name: order, in: query, schema: { type: string, enum: [asc, desc] } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, x-raw-query-pattern: '^(0|[1-9][0-9]*)$' } }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 100000, x-raw-query-pattern: '^(0|[1-9][0-9]*)$' } }
+      responses: { '200': { description: Canonical paginated public investment catalog, content: { application/json: { schema: { $ref: '#/components/schemas/InstrumentPage' } } } }, '400': { $ref: '#/components/responses/BadRequest' }, '503': { $ref: '#/components/responses/Unavailable' } }
   /api/instruments/rank-wti:
     post:
       operationId: rankInstruments
@@ -502,8 +519,31 @@ paths:
       operationId: computeTax
       tags: [Tax]
       security: []
-      parameters: [{ $ref: '#/components/parameters/Income' }, { $ref: '#/components/parameters/IncomeSource' }, { $ref: '#/components/parameters/FiscalYear' }, { name: age, in: query, required: false, schema: { type: integer, minimum: 18, maximum: 120, description: Required for old-regime calculations and age-dependent deductions. } }, { name: regime, in: query, required: true, schema: { type: string, enum: [new, old] } }]
-      responses: { '200': { $ref: '#/components/responses/TaxCalculation' }, '400': { $ref: '#/components/responses/BadRequest' } }
+      parameters:
+        - { $ref: '#/components/parameters/Income' }
+        - { $ref: '#/components/parameters/IncomeSource' }
+        - { $ref: '#/components/parameters/FiscalYear' }
+        - { name: age, in: query, required: false, schema: { type: integer, minimum: 18, maximum: 120 } }
+        - { name: regime, in: query, required: true, schema: { type: string, enum: [new, old] } }
+        - { name: section80C, in: query, required: false, schema: { type: number, minimum: 0, maximum: 150000 } }
+        - { name: nps80CCD1B, in: query, required: false, schema: { type: number, minimum: 0, maximum: 50000 } }
+        - { name: section80CCD, in: query, required: false, schema: { type: number, minimum: 0, maximum: 50000 } }
+        - { name: nps80CCD2, in: query, required: false, schema: { type: number, minimum: 0, maximum: 100000000 } }
+        - { name: basicSalary, in: query, required: false, schema: { type: number, minimum: 0, maximum: 1000000000 } }
+        - { name: isGovtEmployee, in: query, required: false, schema: { type: boolean } }
+        - { name: section80D, in: query, required: false, schema: { type: number, minimum: 0, maximum: 100000 } }
+        - { name: section80D_self, in: query, required: false, schema: { type: number, minimum: 0, maximum: 50000 } }
+        - { name: section80D_parents, in: query, required: false, schema: { type: number, minimum: 0, maximum: 50000 } }
+        - { name: parents_senior, in: query, required: false, schema: { type: boolean } }
+        - { name: self_senior, in: query, required: false, schema: { type: boolean } }
+        - { name: hra, in: query, required: false, schema: { type: number, minimum: 0, maximum: 100000000 } }
+        - { name: homeLoanInterest, in: query, required: false, schema: { type: number, minimum: 0, maximum: 200000 } }
+        - { name: section80EEA, in: query, required: false, schema: { type: number, minimum: 0, maximum: 150000 } }
+        - { name: savingsInterest, in: query, required: false, schema: { type: number, minimum: 0, maximum: 100000000 } }
+        - { name: section80TTA, in: query, required: false, schema: { type: number, minimum: 0, maximum: 10000 } }
+        - { name: section80TTB, in: query, required: false, schema: { type: number, minimum: 0, maximum: 50000 } }
+        - { name: other, in: query, required: false, schema: { type: number, const: 0 } }
+      responses: { '200': { $ref: '#/components/responses/TaxCalculation' }, '400': { $ref: '#/components/responses/BadRequest' }, '422': { $ref: '#/components/responses/Unprocessable' } }
   /api/tax/policies:
     get:
       operationId: getTaxPolicyMetadata
@@ -515,8 +555,30 @@ paths:
       operationId: compareTaxRegimes
       tags: [Tax]
       security: []
-      parameters: [{ $ref: '#/components/parameters/Income' }, { $ref: '#/components/parameters/IncomeSource' }, { $ref: '#/components/parameters/FiscalYear' }, { name: age, in: query, required: true, schema: { type: integer, minimum: 18, maximum: 120, description: Required because comparison includes age-sensitive old-regime slabs. } }]
-      responses: { '200': { $ref: '#/components/responses/TaxComparison' }, '400': { $ref: '#/components/responses/BadRequest' } }
+      parameters:
+        - { $ref: '#/components/parameters/Income' }
+        - { $ref: '#/components/parameters/IncomeSource' }
+        - { $ref: '#/components/parameters/FiscalYear' }
+        - { name: age, in: query, required: true, schema: { type: integer, minimum: 18, maximum: 120 } }
+        - { name: section80C, in: query, required: false, schema: { type: number, minimum: 0, maximum: 150000 } }
+        - { name: nps80CCD1B, in: query, required: false, schema: { type: number, minimum: 0, maximum: 50000 } }
+        - { name: section80CCD, in: query, required: false, schema: { type: number, minimum: 0, maximum: 50000 } }
+        - { name: nps80CCD2, in: query, required: false, schema: { type: number, minimum: 0, maximum: 100000000 } }
+        - { name: basicSalary, in: query, required: false, schema: { type: number, minimum: 0, maximum: 1000000000 } }
+        - { name: isGovtEmployee, in: query, required: false, schema: { type: boolean } }
+        - { name: section80D, in: query, required: false, schema: { type: number, minimum: 0, maximum: 100000 } }
+        - { name: section80D_self, in: query, required: false, schema: { type: number, minimum: 0, maximum: 50000 } }
+        - { name: section80D_parents, in: query, required: false, schema: { type: number, minimum: 0, maximum: 50000 } }
+        - { name: parents_senior, in: query, required: false, schema: { type: boolean } }
+        - { name: self_senior, in: query, required: false, schema: { type: boolean } }
+        - { name: hra, in: query, required: false, schema: { type: number, minimum: 0, maximum: 100000000 } }
+        - { name: homeLoanInterest, in: query, required: false, schema: { type: number, minimum: 0, maximum: 200000 } }
+        - { name: section80EEA, in: query, required: false, schema: { type: number, minimum: 0, maximum: 150000 } }
+        - { name: savingsInterest, in: query, required: false, schema: { type: number, minimum: 0, maximum: 100000000 } }
+        - { name: section80TTA, in: query, required: false, schema: { type: number, minimum: 0, maximum: 10000 } }
+        - { name: section80TTB, in: query, required: false, schema: { type: number, minimum: 0, maximum: 50000 } }
+        - { name: other, in: query, required: false, schema: { type: number, const: 0 } }
+      responses: { '200': { $ref: '#/components/responses/TaxComparison' }, '400': { $ref: '#/components/responses/BadRequest' }, '422': { $ref: '#/components/responses/Unprocessable' } }
   /api/tax/post-tax-return:
     post:
       operationId: calculatePostTaxReturn
@@ -564,15 +626,16 @@ paths:
       operationId: getChatHistory
       tags: [Chat]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
-      responses: { '200': { description: Current user's history, content: { application/json: { schema: { type: array, items: { type: object, additionalProperties: true } } } } }, '401': { $ref: '#/components/responses/Unauthorized' } }
+      parameters: [{ name: session_id, in: query, schema: { type: string, pattern: '^[A-Za-z0-9._:-]{1,100}$' } }, { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, x-raw-query-pattern: '^(0|[1-9][0-9]*)$' } }]
+      responses: { '200': { description: Current user's history envelope, content: { application/json: { schema: { $ref: '#/components/schemas/ChatHistoryResponse' } } } }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '503': { $ref: '#/components/responses/Unavailable' } }
   /api/chat/session/{sessionId}:
     delete:
       operationId: deleteChatSession
       tags: [Chat]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       x-csrf-protection: cookie-session
-      parameters: [{ name: sessionId, in: path, required: true, schema: { type: string, maxLength: 100 } }]
-      responses: { '200': { $ref: '#/components/responses/Message' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+      parameters: [{ name: sessionId, in: path, required: true, schema: { type: string, pattern: '^[A-Za-z0-9._:-]{1,100}$' } }]
+      responses: { '200': { $ref: '#/components/responses/Message' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '503': { $ref: '#/components/responses/Unavailable' } }
 
   /api/regime/current:
     get: { operationId: getCurrentMarketContext, tags: [Regime], security: [], responses: { '200': { description: Verified market context and additive market snapshot, content: { application/json: { schema: { $ref: '#/components/schemas/MarketContextResponse' } } } } } }
@@ -609,9 +672,10 @@ components:
     CookieAuth: { type: apiKey, in: cookie, name: wg_session, description: Secure HttpOnly browser session cookie. }
     BearerAuth: { type: http, scheme: bearer, bearerFormat: JWT, description: Explicitly configured non-browser compatibility authentication. }
   parameters:
-    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 8, maxLength: 128 } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, pattern: '^[A-Za-z0-9._:-]{8,128}$', minLength: 8, maxLength: 128 } }
     ProfileId: { name: profileId, in: path, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{24}$' } }
     GoalId: { name: goalId, in: path, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{24}$' } }
+    GoalIfMatch: { name: If-Match, in: header, required: true, description: Expected current goal version. The server atomically compares this version before deletion., schema: { type: string, pattern: '^(W/)?\"?[1-9][0-9]*\"?$' } }
     Income: { name: income, in: query, required: true, schema: { type: number, minimum: 0, maximum: 1000000000 } }
     IncomeSource: { name: incomeSource, in: query, required: true, schema: { type: string, enum: [salary, pension, family_pension, business, other] } }
     FiscalYear: { name: fiscalYear, in: query, required: true, schema: { type: string, enum: [FY2025-26, FY2026-27] } }
@@ -657,6 +721,58 @@ components:
     ExecutionReceipt: { description: Tamper-evident authorized action execution receipt, content: { application/json: { schema: { $ref: '#/components/schemas/ExecutionReceipt' } } } }
     ExecutionResult: { description: Authorized action result and execution receipt, content: { application/json: { schema: { type: object, required: [receipt], properties: { receipt: { $ref: '#/components/schemas/ExecutionReceipt' }, response: { type: object, additionalProperties: true } } } } } }
     Goal: { description: Goal state, content: { application/json: { schema: { $ref: '#/components/schemas/Goal' } } } }
+    GoalCreate:
+      description: Created goal.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [goal]
+            properties:
+              goal: { $ref: '#/components/schemas/Goal' }
+            additionalProperties: false
+    GoalUpdate:
+      description: Updated goal.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [success, goal]
+            properties:
+              success: { type: boolean, const: true }
+              goal: { $ref: '#/components/schemas/Goal' }
+            additionalProperties: false
+    GoalAdvice:
+      description: Goal advisory bound to the saved goal and source financial state.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [goal, goalId, gemini_advice, operation_result]
+            properties:
+              goal: { $ref: '#/components/schemas/Goal' }
+              goalId: { type: string }
+              gemini_advice: { type: [string, 'null'] }
+              operation_result:
+                type: object
+                required: [committed, goal_version, response_state]
+                properties:
+                  committed: { type: boolean, const: true }
+                  goal_version: { type: integer, minimum: 1 }
+                  response_state: { type: string, enum: [CURRENT, STALE] }
+                additionalProperties: false
+            additionalProperties: false
+    GoalDelete:
+      description: Deleted goal identity.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [deleted, goalId]
+            properties:
+              deleted: { type: boolean, const: true }
+              goalId: { type: string }
+            additionalProperties: false
     TaxCalculation: { description: Authoritative tax calculation, content: { application/json: { schema: { $ref: '#/components/schemas/TaxCalculation' } } } }
     TaxComparison: { description: Authoritative regime comparison, content: { application/json: { schema: { $ref: '#/components/schemas/TaxComparison' } } } }
     Portfolio: { description: Server-authoritative portfolio decision, content: { application/json: { schema: { $ref: '#/components/schemas/PortfolioResult' } } } }
@@ -666,6 +782,9 @@ components:
     Unauthorized: { description: Authentication required or invalid, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     NotFound: { description: Resource not found, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     Conflict: { description: Request conflicts with current state, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Error: { description: Canonical API error envelope, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    PreconditionRequired: { description: A version precondition is required, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    Unprocessable: { description: A well-formed request cannot be processed under current policy, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     Unavailable: { description: Service or dependency unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   schemas:
     Error:
@@ -697,7 +816,8 @@ components:
       type: object
       additionalProperties: false
       required: [email, password]
-      properties: { email: { type: string, format: email }, password: { type: string, minLength: 8, maxLength: 128, writeOnly: true } }
+      description: Login accepts any historically valid non-empty password; registration enforces the stronger password policy.
+      properties: { email: { type: string, format: email }, password: { type: string, minLength: 1, writeOnly: true } }
     FinancialProfileInput:
       type: object
       unevaluatedProperties: false
@@ -995,48 +1115,143 @@ components:
       additionalProperties: false
       required: [goal_name, target_amount, target_date, current_savings, profileId, priority]
       properties: { goal_name: { type: string, minLength: 2, maxLength: 100 }, target_amount: { type: number, minimum: 1000, maximum: 10000000000 }, target_date: { type: string, format: date }, current_savings: { type: number, minimum: 0, maximum: 10000000000 }, profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, priority: { type: string, enum: [Critical, High, Medium, Low] } }
-    GoalUpdateRequest: { type: object, additionalProperties: false, minProperties: 1, properties: { target_amount: { type: number, minimum: 1000, maximum: 10000000000 }, current_savings: { type: number, minimum: 0, maximum: 10000000000 }, priority: { type: string, enum: [Critical, High, Medium, Low] } } }
+    GoalUpdateRequest: { type: object, additionalProperties: false, minProperties: 2, required: [expectedVersion], properties: { expectedVersion: { type: integer, minimum: 1 }, target_amount: { type: number, minimum: 1000, maximum: 10000000000 }, current_savings: { type: number, minimum: 0, maximum: 10000000000 }, priority: { type: string, enum: [Critical, High, Medium, Low] } } }
     GoalSimulationRequest: { type: object, additionalProperties: false, required: [monthly_contribution], properties: { monthly_contribution: { type: number, exclusiveMinimum: 0, maximum: 10000000 } } }
     Goal:
-      allOf:
-        - { $ref: '#/components/schemas/GoalCreateRequest' }
-        - type: object
+      type: object
+      required: [goalId, version, goal_name, target_amount, target_date, current_savings, priority, calculation_freshness, advisory_freshness, advice_stale, source_provenance]
+      properties:
+        _id: { type: string }
+        goalId: { type: string, minLength: 1 }
+        profileId: { type: string }
+        version: { type: integer, minimum: 1 }
+        goal_name: { type: string, minLength: 2, maxLength: 100 }
+        target_amount: { type: number, minimum: 1000 }
+        inflation_adjusted_target: { type: [number, 'null'] }
+        target_date: { type: string, format: date-time }
+        current_savings: { type: number, minimum: 0 }
+        recommended_sip: { type: [number, 'null'] }
+        simulated_monthly_contribution: { type: [number, 'null'] }
+        recommended_instrument: { type: [string, 'null'] }
+        probability_of_success: { type: [number, 'null'], minimum: 0, maximum: 1 }
+        gap_amount: { type: [number, 'null'] }
+        priority: { type: string, enum: [Critical, High, Medium, Low] }
+        status: { type: [string, 'null'], enum: [on_track, at_risk, off_track, null] }
+        monte_carlo_summary: { type: [object, 'null'], additionalProperties: true }
+        chart_data: { type: array, items: { type: object, additionalProperties: true } }
+        chartData: { type: array, items: { type: object, additionalProperties: true } }
+        mc_computed_at: { type: [string, 'null'], format: date-time }
+        years_remaining: { type: [number, 'null'] }
+        simulation_classification: { type: [string, 'null'], enum: [PROFILE_GROUNDED_GOAL_PLAN, NON_RECOMMENDATION_GOAL_WHAT_IF, null] }
+        return_basis: { type: [string, 'null'], enum: [PRE_TAX_NOMINAL, null] }
+        return_data_class: { type: [string, 'null'], enum: [MODEL_ASSUMPTION, null] }
+        return_assumption_version: { type: [string, 'null'] }
+        return_assumption_source: { type: [string, 'null'], enum: [WEALTHGENIE_MODEL_POLICY, null] }
+        observed_market_fact: { type: [boolean, 'null'] }
+        provider_forecast: { type: [boolean, 'null'] }
+        inflation_assumption: { type: [number, 'null'] }
+        sourceRecommendationId: { type: [string, 'null'] }
+        sourceAllocationRevision: { type: [integer, 'null'] }
+        sourceAllocationRevisionId: { type: [string, 'null'] }
+        sourceProfileInputHash: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }
+        sourceProfileVersion: { type: [integer, 'null'] }
+        sourceModelVersion: { type: [string, 'null'] }
+        sourceRecommendationPolicyVersion: { type: [string, 'null'] }
+        sourceRegulatoryRuleVersion: { type: [string, 'null'] }
+        sourceReturnAssumptionVersion: { type: [string, 'null'] }
+        sourceReturnAssumptionHash: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }
+        sourceReturnAssumptionSource: { type: [string, 'null'] }
+        sourceRecommendationFingerprint: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }
+        sourcePortfolioFingerprint: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }
+        sourceGoalCalculationInputFingerprint: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }
+        sourceGoalCalculationPolicyVersion: { type: [string, 'null'] }
+        calculationFreshness: { type: [object, 'null'], additionalProperties: true }
+        calculation_freshness:
+          type: object
+          required: [fresh, reasonCodes]
           properties:
-            _id: { type: string }
-            goalId: { type: string }
-            monthly_sip_required: { type: [number, 'null'] }
-            probability: { type: [number, 'null'] }
-            status: { type: [string, 'null'] }
-            calculation_freshness:
-              type: object
-              required: [fresh, reasonCodes]
-              properties:
-                fresh: { type: boolean }
-                reasonCodes: { type: array, items: { type: string } }
-              additionalProperties: true
-            advisory_freshness:
-              type: object
-              required: [fresh, reasonCodes]
-              properties:
-                fresh: { type: boolean }
-                reasonCodes: { type: array, items: { type: string } }
-              additionalProperties: true
-            advice_stale: { type: boolean }
-            source_provenance: { type: object, additionalProperties: true }
-            sourceRecommendationId: { type: [string, 'null'] }
-            sourceAllocationRevision: { type: [integer, 'null'] }
-            sourceAllocationRevisionId: { type: [string, 'null'] }
-            sourceProfileInputHash: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }
-            sourceProfileVersion: { type: [integer, 'null'] }
-            sourceModelVersion: { type: [string, 'null'] }
-            sourceRecommendationPolicyVersion: { type: [string, 'null'] }
-            sourceRegulatoryRuleVersion: { type: [string, 'null'] }
-            sourceReturnAssumptionVersion: { type: [string, 'null'] }
-            sourceReturnAssumptionHash: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }
-            sourceRecommendationFingerprint: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }
-            sourcePortfolioFingerprint: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }
+            fresh: { type: boolean }
+            reasonCodes: { type: array, items: { type: string } }
           additionalProperties: true
-    Instrument: { type: object, required: [id, name], properties: { id: { type: string }, name: { type: string }, type: { type: string }, expectedReturn: { type: number }, risk: { type: string } }, additionalProperties: true }
+        advisory_freshness:
+          type: object
+          required: [fresh, reasonCodes]
+          properties:
+            fresh: { type: boolean }
+            reasonCodes: { type: array, items: { type: string } }
+          additionalProperties: true
+        advice_stale: { type: boolean }
+        source_provenance: { type: object, additionalProperties: true }
+        gemini_advice: { type: [string, 'null'], maxLength: 2000 }
+        createdAt: { type: [string, 'null'], format: date-time }
+        updatedAt: { type: [string, 'null'], format: date-time }
+      additionalProperties: false
+    Instrument:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id: { type: string, minLength: 1 }
+        name: { type: string, minLength: 1 }
+        abbr: { type: string }
+        type: { type: string }
+        category: { type: string }
+        cat: { type: string }
+        subCategory: { type: string }
+        assetClass: { type: string }
+        provider: { type: string }
+        expectedReturn: { type: number }
+        rate: { type: number }
+        returnRange: { type: object, additionalProperties: false, properties: { min: { type: number }, max: { type: number } } }
+        interestRate: { type: number }
+        interestRateSenior: { type: number }
+        returns1yr: { type: number }
+        returns3yr: { type: number }
+        returns5yr: { type: number }
+        riskLevel: { type: [string, number, boolean, object, array, 'null'] }
+        risk: { type: number }
+        riskLabel: { type: string }
+        volatility: { type: number }
+        liquidityScore: { type: number }
+        lockIn: { type: number }
+        lockInYears: { type: number }
+        taxType: { type: string }
+        taxEfficiencyScore: { type: number }
+        expenseRatio: { type: number }
+        minMonthlyInvestment: { type: number }
+        maxAnnualInvestment: { type: number }
+        minInvestment: { type: number }
+        idealHorizon: { type: object, additionalProperties: false, properties: { min: { type: number }, max: { type: number } } }
+        goalTags: { type: array, items: { type: string } }
+        maturityYears: { type: number }
+        eligibility:
+          type: object
+          additionalProperties: false
+          properties:
+            minAge: { type: number }
+            maxAge: { type: number }
+            minAnnualIncome: { type: number }
+            minMonthlySavings: { type: number }
+            requiresDemat: { type: boolean }
+            hasGirlChild: { type: boolean }
+            requires_daughter_under_10: { type: boolean }
+            notes: { type: string }
+        nav: { type: number }
+        aumCr: { type: number }
+        exitLoad: { type: string }
+        sebiRating: { type: string }
+        trackingError: { type: number }
+        underlyingIndex: { type: string }
+        exchange: { type: string }
+        issuer: { type: string }
+        sovereignGuarantee: { type: boolean }
+        tdsApplicable: { type: boolean }
+        prematureWithdrawalPenalty: { type: string }
+        color: { type: string }
+        desc: { type: string }
+    InstrumentPage: { type: object, additionalProperties: false, required: [instruments, total, page, pageSize, totalPages], properties: { instruments: { type: array, items: { $ref: '#/components/schemas/Instrument' } }, total: { type: integer, minimum: 0 }, page: { type: integer, minimum: 1 }, pageSize: { type: integer, minimum: 1 }, totalPages: { type: integer, minimum: 0 } } }
+    AuditListResponse: { type: object, required: [status, total, count, skip, limit, records], properties: { status: { type: string, const: success }, total: { type: integer, minimum: 0 }, count: { type: integer, minimum: 0 }, skip: { type: integer, minimum: 0 }, limit: { type: integer, minimum: 1, maximum: 100 }, records: { type: array, items: { $ref: '#/components/schemas/AuditMetadata' } } }, additionalProperties: false }
+    ChatHistoryResponse: { type: object, additionalProperties: false, required: [conversations], properties: { conversations: { type: array, items: { type: object, required: [session_id, messages], properties: { session_id: { type: string }, messages: { type: array, items: { type: object, additionalProperties: true } }, message_count: { type: integer }, created_at: { type: string }, updated_at: { type: string } }, additionalProperties: true } } } }
     MarketContextResponse:
       type: object
       required: [status, evaluatedAt, marketSnapshot]
@@ -1130,7 +1345,8 @@ components:
     MonteCarloRequest: { type: object, additionalProperties: false, required: [profileId, instrument, monthly_investment, years], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, instrument: { type: string, maxLength: 50 }, monthly_investment: { type: number, exclusiveMinimum: 0, maximum: 10000000 }, years: { type: integer, minimum: 1, maximum: 30 }, target_amount: { type: number, minimum: 1000, maximum: 10000000000 } } }
     PortfolioMonteCarloRequest: { type: object, additionalProperties: false, required: [profileId, allocations, years], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' }, allocations: { $ref: '#/components/schemas/PortfolioWeights' }, years: { type: integer, minimum: 1, maximum: 30 }, target_amount: { type: number, minimum: 1000, maximum: 10000000000 } } }
     TaxCalculation: { type: object, required: [fiscalYear, policyVersion, inputsUsed], properties: { regime: { type: string, enum: [new, old] }, tax: { type: number }, taxAmount: { type: number }, effectiveRate: { type: number }, fiscalYear: { type: string, pattern: '^FY\\d{4}-\\d{2}$' }, policyVersion: { type: string }, inputsUsed: { type: object, additionalProperties: true }, rulesApplied: { type: array, items: { type: string } }, sourceReferences: { type: array, items: { type: object, additionalProperties: true } } }, additionalProperties: true }
-    TaxComparison: { type: object, properties: { old: { $ref: '#/components/schemas/TaxCalculation' }, new: { $ref: '#/components/schemas/TaxCalculation' }, recommendedRegime: { type: string, enum: [old, new] } }, additionalProperties: true }
+    TaxRegimeComparison: { type: object, required: [tax, effective_rate, rebate_applied, taxable_income, standard_deduction, cess, nps80CCD2, allowed80D, slab_breakdown], properties: { tax: { type: number }, effective_rate: { type: number }, rebate_applied: { type: boolean }, taxable_income: { type: number }, standard_deduction: { type: number }, old_regime_deductions: { type: number }, marginal_relief_applied: { type: boolean }, marginal_relief_amount: { type: number }, cess: { type: number }, nps80CCD2: { type: number }, allowed80D: { type: number }, slab_breakdown: { type: array, items: { type: object, additionalProperties: true } } }, additionalProperties: true }
+    TaxComparison: { type: object, required: [income, fiscal_year, verified, new_regime, old_regime, recommended_regime, saving, saving_pct, saving_with, calculation_classification, deduction_limits, remaining_deductions, optimized_old_regime_tax, potential_tax_saving, crossover_breakpoint], properties: { income: { type: number }, fiscal_year: { type: string, pattern: '^FY\d{4}-\d{2}$' }, verified: { type: boolean, const: true }, policyVersion: { type: string }, statuteMetadata: { type: object, additionalProperties: true }, verifiedRuleIds: { type: array, items: { type: string } }, sourceReferences: { type: array, items: { type: object, additionalProperties: true } }, rules: { type: object, additionalProperties: true }, inputsUsed: { type: object, additionalProperties: true }, rulesApplied: { type: array, items: { type: string } }, assumptions: { type: array, items: { type: string } }, unavailableReasons: { type: array, items: { type: string } }, new_regime: { $ref: '#/components/schemas/TaxRegimeComparison' }, old_regime: { $ref: '#/components/schemas/TaxRegimeComparison' }, recommended_regime: { type: string, enum: [old, new] }, saving: { type: number }, saving_pct: { type: number }, saving_with: { type: string, enum: [old, new] }, calculation_classification: { type: string, const: SEPARATE_TAX_WHAT_IF }, deduction_limits: { type: object, additionalProperties: true }, remaining_deductions: { type: object, additionalProperties: true }, optimized_old_regime_tax: { type: number }, potential_tax_saving: { type: number }, crossover_breakpoint: { type: [number, 'null'] } }, additionalProperties: true }
     TaxPolicyMetadata: { type: object, required: [currentFiscalYear, verifiedFiscalYears, policies], properties: { currentFiscalYear: { type: string }, currentFiscalYearVerified: { type: boolean }, verifiedFiscalYears: { type: array, items: { type: string } }, policies: { type: array, items: { type: object, required: [fiscalYear, policyVersion, sourceReferences], additionalProperties: true } } }, additionalProperties: false }
     TaxDeductionInputs: { type: object, additionalProperties: false, description: All deduction identifiers are compatibility input names, not current statutory authority. Positive unclassified other deductions are rejected; zero is accepted only for backward compatibility., properties: { section80C: { type: number, minimum: 0, maximum: 150000, description: Legacy input name; eligibility is fiscal-year and regime specific. }, nps80CCD1B: { type: number, minimum: 0, maximum: 50000, description: Legacy input name; eligibility is fiscal-year and regime specific. }, nps80CCD2: { type: number, minimum: 0 }, basicSalary: { type: number, minimum: 0 }, isGovtEmployee: { type: boolean }, section80D: { type: number, minimum: 0 }, section80D_self: { type: number, minimum: 0 }, section80D_parents: { type: number, minimum: 0 }, parents_senior: { type: boolean }, self_senior: { type: boolean }, hra: { type: number, minimum: 0 }, homeLoanInterest: { type: number, minimum: 0 }, section80EEA: { type: number, minimum: 0 }, savingsInterest: { type: number, minimum: 0 }, section80TTA: { type: number, minimum: 0 }, section80TTB: { type: number, minimum: 0 }, other: { type: number, minimum: 0, maximum: 0, description: Deprecated compatibility input; only zero is accepted. } } }
     TaxCalculationContextV2: { type: object, additionalProperties: false, required: [annualGrossIncome, incomeSource, regime, fiscalYear], properties: { fiscalYear: { type: string, pattern: '^FY\d{4}-\d{2}$' }, incomeSource: { type: string, enum: [salary, pension, family_pension, business, other] }, annualGrossIncome: { type: number, minimum: 0, maximum: 1000000000 }, regime: { type: string, enum: [new, old] }, userAge: { type: integer, minimum: 18, maximum: 120 }, deductions: { $ref: '#/components/schemas/TaxDeductionInputs' }, illustrativePrincipal: { type: number, exclusiveMinimum: 0, maximum: 1000000000 }, holdingPeriodMonths: { type: number, minimum: 0, maximum: 1200 }, acquisitionDate: { type: string, format: date }, redemptionDate: { type: string, format: date }, redemptionChannel: { type: string, enum: [RBI_REDEMPTION, MATURITY_REDEMPTION, SECONDARY_MARKET_SALE] }, acquiredAtOriginalIssue: { type: boolean }, heldContinuously: { type: boolean }, section112AExemptionUsed: { type: number, minimum: 0, maximum: 125000 } } }

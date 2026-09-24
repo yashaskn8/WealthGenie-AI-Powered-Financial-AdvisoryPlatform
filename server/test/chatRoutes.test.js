@@ -10,8 +10,10 @@ import Recommendation from '../models/Recommendation.js';
 import Goal from '../models/Goal.js';
 import ConversationHistory from '../models/ConversationHistory.js';
 import User from '../models/User.js';
+import { defaultChatSessionStore } from '../services/chatSessionStore.js';
 import { ProviderManager } from '../services/providerAbstraction.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
+import { installMockChatSessionStore } from './helpers/mockChatSessionStore.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret-wealthgenie-2026';
 process.env.JWT_SECRET = JWT_SECRET;
@@ -39,6 +41,7 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
   let originalGoalFind;
   let originalConvFindOne;
   let originalUserFindById;
+  let restoreChatStore;
 
   beforeEach(() => {
     process.env.GEMINI_API_KEY = 'mock-gemini-key';
@@ -76,6 +79,18 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
       messages: [],
       save: async () => true,
     });
+    restoreChatStore = installMockChatSessionStore(async ({ userId, sessionId }) => ({
+      userId,
+      profileId: mockProfile._id,
+      profileVersion: mockProfile.version || 1,
+      profileInputHash: null,
+      session_id: sessionId,
+      messages: [],
+      message_sequence: 0,
+      session_version: 1,
+      cumulative_tokens: 0,
+      reserved_tokens: 0,
+    }));
 
     User.findById = (id) => ({
       lean: async () => ({ name: 'Test User', email: 'test@example.com' }),
@@ -88,6 +103,7 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
     Goal.find = originalGoalFind;
     ConversationHistory.findOne = originalConvFindOne;
     User.findById = originalUserFindById;
+    restoreChatStore?.();
   });
 
   it('POST /api/chat/message rejects unauthenticated request with 401', async () => {
@@ -221,18 +237,28 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
   });
 
   it('DELETE /api/chat/session/:sessionId clears session idempotently', async () => {
-    ConversationHistory.findOneAndUpdate = async () => ({ session_id: 'sess-123', is_active: false });
+    const originalClose = defaultChatSessionStore.close;
+    let closedSession;
+    defaultChatSessionStore.close = async args => {
+      closedSession = args;
+      return { session_id: args.sessionId, is_active: false };
+    };
 
-    await withServer(buildApp(), async (baseUrl) => {
-      const res = await rawRequest(`${baseUrl}/api/chat/session/sess-123`, {
-        method: 'DELETE',
-        headers: {
-          authorization: `Bearer ${validToken}`,
-        },
+    try {
+      await withServer(buildApp(), async (baseUrl) => {
+        const res = await rawRequest(`${baseUrl}/api/chat/session/sess-123`, {
+          method: 'DELETE',
+          headers: {
+            authorization: `Bearer ${validToken}`,
+          },
+        });
+        assert.equal(res.status, 200);
+        const data = await res.json();
+        assert.equal(data.message, 'Session cleared.');
+        assert.deepEqual(closedSession, { userId: mockUserId, sessionId: 'sess-123' });
       });
-      assert.equal(res.status, 200);
-      const data = await res.json();
-      assert.equal(data.message, 'Session cleared.');
-    });
+    } finally {
+      defaultChatSessionStore.close = originalClose;
+    }
   });
 });

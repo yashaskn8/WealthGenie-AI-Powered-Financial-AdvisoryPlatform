@@ -150,6 +150,7 @@ const GoalCard = ({
     setIsUpdating(true);
     try {
       await onSaveUpdates(goalObj._id || goalObj.goalId, {
+        expectedVersion: goalObj.version ?? 1,
         target_amount: actualTarget,
         current_savings: actualSaved,
       });
@@ -458,7 +459,8 @@ const GoalTracker = ({ profile, onNavigate }) => {
   const handleDeleteGoal = async (goalId) => {
     if (!window.confirm("Are you sure you want to delete this goal? This will permanently remove it from your tracker.")) return;
     try {
-      const res = await api.deleteGoal(goalId);
+      const goal = dbGoals.find(item => String(item._id || item.goalId) === String(goalId));
+      const res = await api.deleteGoal(goalId, goal?.version ?? 1);
       if (res.deleted) {
         setDbGoals([]);
         const freshList = await api.getGoals();

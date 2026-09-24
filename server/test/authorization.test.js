@@ -227,7 +227,7 @@ test('Authorization: User B cannot UPDATE User A goal (PATCH /api/goals/:id)', a
         authorization: `Bearer ${tokenB}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ target_amount: 9999999 }),
+      body: JSON.stringify({ expectedVersion: goalA.version || 1, priority: 'High' }),
     });
     assert.equal(res.status, 404, `Expected 404, got ${res.status}`);
   });
@@ -238,7 +238,7 @@ test('Authorization: User B cannot DELETE User A goal (DELETE /api/goals/:id)', 
   await withServer(app, async (baseUrl) => {
     const res = await rawRequest(`${baseUrl}/api/goals/${goalA._id}`, {
       method: 'DELETE',
-      headers: { authorization: `Bearer ${tokenB}` },
+      headers: { authorization: `Bearer ${tokenB}`, 'If-Match': String(goalA.version || 1) },
     });
     assert.equal(res.status, 404, `Expected 404, got ${res.status}`);
   });
@@ -394,10 +394,23 @@ test('Authorization: User A CAN read, update, and delete own goal', async () => 
     assert.equal(body.goals.length, 1);
     assert.equal(body.goals[0]._id, goalA._id.toString());
 
-    // Delete
+    // Priority-only PATCH is a versioned resource mutation too.
+    const updateRes = await rawRequest(`${baseUrl}/api/goals/${goalA._id}`, {
+      method: 'PATCH',
+      headers: {
+        authorization: `Bearer ${tokenA}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ expectedVersion: goalA.version || 1, priority: 'High' }),
+    });
+    assert.equal(updateRes.status, 200);
+    const updated = await updateRes.json();
+    assert.equal(updated.goal.version, (goalA.version || 1) + 1);
+
+    // Delete must name the version just returned by PATCH.
     const delRes = await rawRequest(`${baseUrl}/api/goals/${goalA._id}`, {
       method: 'DELETE',
-      headers: { authorization: `Bearer ${tokenA}` },
+      headers: { authorization: `Bearer ${tokenA}`, 'If-Match': String(updated.goal.version) },
     });
     assert.equal(delRes.status, 200);
   });

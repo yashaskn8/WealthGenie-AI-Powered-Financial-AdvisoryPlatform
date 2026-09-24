@@ -157,6 +157,7 @@ const GoalPlanner = ({ profile, financialState: suppliedFinancialState = null })
   const [simulationError, setSimulationError] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
   const [deletingProfileKey, setDeletingProfileKey] = useState(null);
+  const [deletingVersion, setDeletingVersion] = useState(null);
   const goalsFetchGeneration = useRef(0);
 
   useLayoutEffect(() => {
@@ -350,13 +351,15 @@ const GoalPlanner = ({ profile, financialState: suppliedFinancialState = null })
   const handleDelete = async (goalId) => {
     setDeletingId(goalId);
     setDeletingProfileKey(profileKey);
+    const target = goals.find(goal => String(goal._id || goal.goalId) === String(goalId));
+    setDeletingVersion(target?.version ?? null);
   };
 
   const confirmDelete = async () => {
     if (!deletingId || deletingProfileKey !== profileKey) return;
     const operation = beginProfileOperation();
     try {
-      await api.deleteGoal(deletingId);
+      await api.deleteGoal(deletingId, deletingVersion);
       if (!isProfileOperationCurrent(operation)) return;
       const nextGoals = goals.filter(g => (g._id !== deletingId && g.goalId !== deletingId));
       setGoals(nextGoals);
@@ -370,6 +373,7 @@ const GoalPlanner = ({ profile, financialState: suppliedFinancialState = null })
       if (isProfileOperationCurrent(operation)) {
         setDeletingId(null);
         setDeletingProfileKey(null);
+        setDeletingVersion(null);
       }
     }
   };
@@ -379,7 +383,7 @@ const GoalPlanner = ({ profile, financialState: suppliedFinancialState = null })
     const gid = displayedSelectedGoal?._id || displayedSelectedGoal?.goalId;
     if (!gid) return;
     try {
-      const res = await api.updateGoal(gid, { priority: newPriority });
+      const res = await api.updateGoal(gid, { expectedVersion: displayedSelectedGoal.version ?? 1, priority: newPriority });
       if (!isProfileOperationCurrent(operation)) return;
       if (res.goal) {
         if (String(res.goal.profileId || '') !== currentProfileId) return;
@@ -407,6 +411,7 @@ const GoalPlanner = ({ profile, financialState: suppliedFinancialState = null })
     if (!gid) return;
     try {
       const res = await api.updateGoal(gid, {
+        expectedVersion: displayedSelectedGoal.version ?? 1,
         target_amount: updates.targetAmount,
         current_savings: updates.currentSavings
       });

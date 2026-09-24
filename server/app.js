@@ -28,6 +28,8 @@ import mcpRoutes from './routes/mcpRouter.js';
 import agentRoutes from './routes/agentRoutes.js';
 import { createHealthRouter } from './routes/health.js';
 import { createRuntimeState } from './services/runtimeState.js';
+import { getCurrentFiscalYear, getCurrentRegulatoryRuleVersion } from './services/taxEngine.js';
+import { PROJECTION_ASSUMPTION_VERSION } from './services/instrumentConstants.js';
 
 function corsPolicy(config) {
   const allowlist = new Set(config.allowedOrigins);
@@ -44,6 +46,19 @@ function corsPolicy(config) {
   };
 }
 
+export function buildHealthEngineMetadata(now = new Date()) {
+  const fiscalYear = getCurrentFiscalYear(now);
+  return {
+    tax: fiscalYear,
+    tax_policy_version: getCurrentRegulatoryRuleVersion(now),
+    monte_carlo: 'Halton QMC + variance reduction',
+    risk_profiler: '7-Factor Model',
+    projections: 'Real + Nominal',
+    projection_assumption_version: PROJECTION_ASSUMPTION_VERSION,
+    post_tax: `${fiscalYear} compliance`,
+  };
+}
+
 function detailedHealth(_req, res) {
   const memory = process.memoryUsage();
   res.json({
@@ -56,13 +71,7 @@ function detailedHealth(_req, res) {
       heap_used_mb: Math.round(memory.heapUsed / 1048576),
       heap_total_mb: Math.round(memory.heapTotal / 1048576),
     },
-    engines: {
-      tax: 'FY2025-26',
-      monte_carlo: 'Halton QMC + variance reduction',
-      risk_profiler: '7-Factor Model',
-      projections: 'Real + Nominal',
-      post_tax: 'FY2025-26 compliance',
-    },
+    engines: buildHealthEngineMetadata(),
   });
 }
 

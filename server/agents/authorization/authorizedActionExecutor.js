@@ -22,12 +22,18 @@ import { newExecutionClaim, reconcileAuthorizedExecution } from './executionReco
 
 async function resolve(value) { return typeof value?.lean === 'function' ? value.lean() : value; }
 
-function advisoryOperationId(userId, mandateId) {
-  return `advisory:${canonicalSha256({ operation: 'recommendation.create', userId: String(userId), key: `mandate:${mandateId}` })}`;
+function advisoryOperationIds(userId, mandateId) {
+  const key = `mandate:${mandateId}`;
+  return [
+    `advisory:${canonicalSha256({ operation: 'authorized_action.execute', userId: String(userId), key })}`,
+    // Read-only compatibility for operations committed before operation scopes
+    // were separated. New writes never use this legacy identity.
+    `advisory:${canonicalSha256({ operation: 'recommendation.create', userId: String(userId), key })}`,
+  ];
 }
 
 async function committedAdvisory(models, userId, mandateId, responseBuilder = buildCanonicalAdvisoryResponse) {
-  const recommendation = await resolve(models.recommendationModel.findOne({ idempotencyOperationId: advisoryOperationId(userId, mandateId) }));
+  const recommendation = await resolve(models.recommendationModel.findOne({ idempotencyOperationId: { $in: advisoryOperationIds(userId, mandateId) } }));
   if (!recommendation?.responseSnapshot) return null;
   const response = await responseBuilder({
     userId,
@@ -40,7 +46,7 @@ async function committedAdvisory(models, userId, mandateId, responseBuilder = bu
 
 async function committedOperationRecommendation(models, userId, profileId, mandateId) {
   const recommendation = await resolve(models.recommendationModel.findOne({
-    idempotencyOperationId: advisoryOperationId(userId, mandateId),
+    idempotencyOperationId: { $in: advisoryOperationIds(userId, mandateId) },
     userId,
     profileId,
   }));
@@ -295,6 +301,7 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
             userId,
             profileId: stored.profileId,
             payload: { mandateId, action: stored.action, snapshotHash: stored.financialSnapshotHash },
+            operation: 'authorized_action.execute',
           });
           try {
             if (idempotencyClaim.state === 'REPLAY') {

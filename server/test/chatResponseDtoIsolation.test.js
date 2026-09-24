@@ -9,6 +9,7 @@ import Recommendation from '../models/Recommendation.js';
 import ConversationHistory from '../models/ConversationHistory.js';
 import { ProviderManager } from '../services/providerAbstraction.js';
 import { processChat } from '../services/geminiChatService.js';
+import { installMockChatSessionStore } from './helpers/mockChatSessionStore.js';
 import { withServer, rawRequest } from '../test-utils/httpTestUtils.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
 
@@ -49,6 +50,7 @@ describe('grounded chat DTO and persistence isolation', () => {
   let originals;
   let env;
   let conversation;
+  let restoreChatStore;
 
   beforeEach(() => {
     originals = {
@@ -79,10 +81,12 @@ describe('grounded chat DTO and persistence isolation', () => {
       save: async function save() { return this; },
     };
     ConversationHistory.findOne = async () => conversation;
+    restoreChatStore = installMockChatSessionStore(async () => conversation);
     ProviderManager.gemini.generate = async () => validProviderResult();
   });
 
   afterEach(() => {
+    restoreChatStore?.();
     FinancialProfile.findOne = originals.profileFindOne;
     Recommendation.findOne = originals.recommendationFindOne;
     ConversationHistory.findOne = originals.conversationFindOne;

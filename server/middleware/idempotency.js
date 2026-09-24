@@ -1,48 +1,262 @@
-import { getCache, setCache, setCacheNX, delCache, redisAvailable } from '../config/redis.js';
+import { randomUUID } from 'node:crypto';
 import IdempotencyKey from '../models/IdempotencyKey.js';
 import Recommendation from '../models/Recommendation.js';
 import { canonicalSha256 } from '../utils/canonicalJson.js';
-import { sendError } from './errorHandler.js';
+import { createError, errorEnvelope, sendError } from './errorHandler.js';
 import { buildPostCommitAdvisoryResponse } from '../services/advisoryResponse.js';
+import { reachFinancialStateTestHook } from '../services/financialStateTestHooks.js';
 
-// ARCHITECTURE: No in-memory Map. All idempotency state lives in shared infra.
-// Primary: Redis (fast, atomic SET NX). Fallback: MongoDB IdempotencyKey collection.
-// When BOTH are unavailable, idempotency protection is bypassed (logged).
+const MUTATION_LEASE_MS = 30_000;
+const MUTATION_HEARTBEAT_MS = 8_000;
+const MUTATION_WAIT_MS = 5_000;
+const POLL_INTERVAL_MS = 40;
+const SAFE_KEY = /^[A-Za-z0-9._:-]{8,128}$/;
+let durableIdempotencyReady;
+
+async function ensureDurableIdempotencyReady() {
+  if (!durableIdempotencyReady) {
+    durableIdempotencyReady = (async () => {
+      let indexes = [];
+      try {
+        indexes = await IdempotencyKey.collection.indexes();
+      } catch (error) {
+        if (error.code !== 26 && error.codeName !== 'NamespaceNotFound') throw error;
+      }
+      for (const index of indexes) {
+        if (index.expireAfterSeconds !== undefined
+            && index.key?.createdAt === 1
+            && Object.keys(index.key).length === 1) {
+          await IdempotencyKey.collection.dropIndex(index.name);
+        }
+      }
+      await IdempotencyKey.init();
+    })().catch(error => {
+      durableIdempotencyReady = null;
+      throw error;
+    });
+  }
+  return durableIdempotencyReady;
+}
+
+function mutationError(status, message, code, details) {
+  return createError(status, message, message, { code, details });
+}
+
+export function assertValidIdempotencyKey(key) {
+  if (typeof key !== 'string' || !SAFE_KEY.test(key)) {
+    throw mutationError(400, 'A valid Idempotency-Key header (8-128 URL-safe characters) is required.', 'INVALID_IDEMPOTENCY_KEY');
+  }
+}
+
+function mutationOperationId({ operation, userId, key }) {
+  return `mutation:${canonicalSha256({ version: 1, operation, userId: String(userId), key })}`;
+}
+
+function mutationRequestHash(req, operation, userId) {
+  return canonicalSha256({
+    version: 1,
+    operation,
+    userId: String(userId),
+    method: String(req.method || '').toUpperCase(),
+    routePath: String(req.path || ''),
+    resourceScope: req.params || {},
+    query: req.query || {},
+    payload: req.body || {},
+  });
+}
+
+async function resolveMutationReplay(req, record, resolveReplay) {
+  if (typeof resolveReplay !== 'function' || !record.resourceId || !record.resourceType) {
+    throw mutationError(503, 'The committed operation cannot be safely reconciled.', 'IDEMPOTENCY_STATE_CORRUPT');
+  }
+  const body = await resolveReplay(req, record);
+  return { status: record.responseStatus || 200, body };
+}
+
+async function pollForMutationCompletion({ req, operationId, requestHash, resolveReplay, firstState }) {
+  const deadline = Date.now() + MUTATION_WAIT_MS;
+  let state = firstState;
+  while (Date.now() < deadline) {
+    if (state.requestHash !== requestHash) {
+      throw mutationError(409, 'This Idempotency-Key was already used for a different request.', 'IDEMPOTENCY_PAYLOAD_CONFLICT');
+    }
+    if (state.status === 'DONE') return resolveMutationReplay(req, state, resolveReplay);
+    if (state.leaseExpiresAt && new Date(state.leaseExpiresAt).getTime() <= Date.now()) return null;
+    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+    state = await IdempotencyKey.findById(operationId).lean();
+    if (!state) return null;
+  }
+  throw mutationError(409, 'The matching mutation is still in progress. Retry with the same Idempotency-Key.', 'IDEMPOTENCY_IN_PROGRESS');
+}
+
+async function claimMutation({ req, operation, userId, key, requestHash }) {
+  await ensureDurableIdempotencyReady();
+  const operationId = mutationOperationId({ operation, userId, key });
+  let ownerToken = randomUUID();
+  for (;;) {
+    const existing = await IdempotencyKey.findById(operationId).lean();
+    if (!existing) {
+      try {
+        await IdempotencyKey.create({
+          _id: operationId,
+          status: 'LOCK',
+          operation,
+          method: req.method.toUpperCase(),
+          userId,
+          requestHash,
+          lockOwnerId: ownerToken,
+          leaseExpiresAt: new Date(Date.now() + MUTATION_LEASE_MS),
+        });
+        return { operationId, operation, userId, requestHash, ownerToken, lost: false };
+      } catch (error) {
+        if (error.code !== 11000) throw error;
+        continue;
+      }
+    }
+    if (existing.requestHash !== requestHash) {
+      throw mutationError(409, 'This Idempotency-Key was already used for a different request.', 'IDEMPOTENCY_PAYLOAD_CONFLICT');
+    }
+    if (existing.status === 'DONE') return { replay: await resolveMutationReplay(req, existing, req.idempotencyResolveReplay) };
+
+    await reachFinancialStateTestHook('idempotency.mutation.lockObserved', {
+      operation,
+      operationId,
+      status: existing.status,
+      leaseExpiresAt: existing.leaseExpiresAt,
+    });
+
+    const replay = await pollForMutationCompletion({
+      req,
+      operationId,
+      requestHash,
+      resolveReplay: req.idempotencyResolveReplay,
+      firstState: existing,
+    });
+    if (replay) return { replay };
+
+    // A lease only permits a new worker to try. The business transaction must
+    // also complete this exact owner token, so an expired worker cannot commit.
+    ownerToken = randomUUID();
+    const now = new Date();
+    const recovered = await IdempotencyKey.findOneAndUpdate({
+      _id: operationId,
+      status: 'LOCK',
+      requestHash,
+      lockOwnerId: existing.lockOwnerId,
+      leaseExpiresAt: { $lte: now },
+    }, {
+      $set: { lockOwnerId: ownerToken, leaseExpiresAt: new Date(now.getTime() + MUTATION_LEASE_MS) },
+    }, { new: true, runValidators: true }).lean();
+    if (recovered) return { operationId, operation, userId, requestHash, ownerToken, lost: false };
+  }
+}
+
+/** Complete the operation in the same Mongo transaction as the durable create. */
+export async function completeMutationIdempotency(session, claim, { resourceType, resourceId, status = 201 } = {}) {
+  if (!claim?.operationId || !claim?.ownerToken || !['FinancialProfile', 'Goal'].includes(resourceType) || !resourceId) {
+    throw mutationError(503, 'Mutation idempotency completion is not bound to a durable resource.', 'IDEMPOTENCY_STATE_CORRUPT');
+  }
+  if (claim.lost) throw mutationError(503, 'The mutation idempotency lease was lost before commit.', 'IDEMPOTENCY_UNAVAILABLE');
+  const result = await IdempotencyKey.updateOne({
+    _id: claim.operationId,
+    status: 'LOCK',
+    requestHash: claim.requestHash,
+    lockOwnerId: claim.ownerToken,
+  }, {
+    $set: {
+      status: 'DONE', resourceType, resourceId, responseStatus: status, committedAt: new Date(),
+      lockOwnerId: null, leaseExpiresAt: null,
+    },
+  }, { session, runValidators: true });
+  if (result.matchedCount !== 1) throw mutationError(503, 'Mutation idempotency ownership changed before commit.', 'IDEMPOTENCY_UNAVAILABLE');
+}
+
+export async function releaseMutationIdempotency(claim) {
+  if (!claim?.operationId || !claim?.ownerToken) return;
+  clearInterval(claim.heartbeat);
+  await IdempotencyKey.deleteOne({
+    _id: claim.operationId,
+    status: 'LOCK',
+    requestHash: claim.requestHash,
+    lockOwnerId: claim.ownerToken,
+  });
+}
 
 /**
- * Idempotency Key middleware for preventing duplicate form submissions and double writes.
- * Supports a short TTL (5 minutes default) for successful responses.
- * Uses atomic SET NX (Redis) or findOneAndUpdate upsert (MongoDB) to prevent race conditions.
- *
- * STATELESS: All state is stored in shared Redis or MongoDB. No per-process fallback.
+ * Durable, operation-scoped idempotency middleware for create mutations.
+ * A committed result is replayed from its owned resource, never a short-lived
+ * Redis response cache. Route handlers must call completeMutationIdempotency
+ * inside the same transaction as the resource write and set
+ * req.idempotencyCommitted after withTransaction resolves.
  */
-export const idempotency = (ttlSeconds = 300, { resolveReplay = null } = {}) => {
+export const idempotency = ({ operation, resolveReplay } = {}) => {
+  if (typeof operation !== 'string' || !operation || typeof resolveReplay !== 'function') {
+    throw new TypeError('Durable idempotency requires an operation name and resource replay resolver.');
+  }
   return async (req, res, next) => {
-    const key = req.headers['idempotency-key'];
-    if (!key) {
-      return next();
-    }
-
-    // Standardize key by user (to prevent key collision between different users)
-    const userId = req.user?.userId || 'anonymous';
-    const cacheKey = `idemp:${userId}:${key}`;
-
     try {
-      if (redisAvailable) {
-        return await handleRedisIdempotency(req, res, next, cacheKey, ttlSeconds, resolveReplay);
+      const key = req.headers['idempotency-key'];
+      assertValidIdempotencyKey(key);
+      const userId = req.user?.userId;
+      if (!userId) throw mutationError(503, 'Authenticated mutation identity is unavailable.', 'IDEMPOTENCY_UNAVAILABLE');
+      const requestHash = mutationRequestHash(req, operation, userId);
+      req.idempotencyResolveReplay = resolveReplay;
+      const result = await claimMutation({ req, operation, userId, key, requestHash });
+      if (result.replay) {
+        res.setHeader('X-Cache-Lookup', 'HIT - Idempotent');
+        return res.status(result.replay.status).json(result.replay.body);
       }
-      // Fallback: MongoDB-backed idempotency
-      return await handleMongoIdempotency(req, res, next, cacheKey, ttlSeconds, resolveReplay);
-    } catch (err) {
-      console.warn('[Idempotency] Middleware failed (proceeding without safety):', err.message);
-      next();
+
+      req.idempotencyClaim = result;
+      req.idempotencyCommitted = false;
+      result.heartbeat = setInterval(async () => {
+        try {
+          const updated = await IdempotencyKey.updateOne({
+            _id: result.operationId, status: 'LOCK', requestHash, lockOwnerId: result.ownerToken,
+          }, { $set: { leaseExpiresAt: new Date(Date.now() + MUTATION_LEASE_MS) } });
+          if (updated.matchedCount !== 1) result.lost = true;
+        } catch {
+          // Commit remains guarded by the owner-token CAS. A heartbeat failure
+          // never authorizes an unprotected write.
+          result.lost = true;
+        }
+      }, MUTATION_HEARTBEAT_MS);
+      result.heartbeat.unref?.();
+
+      const originalJson = res.json.bind(res);
+      res.json = body => {
+        if (res.statusCode >= 200 && res.statusCode < 300 && !req.idempotencyCommitted) {
+          clearInterval(result.heartbeat);
+          res.statusCode = 503;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          return originalJson(errorEnvelope(req, 'Mutation did not record its durable idempotency commit.', 'IDEMPOTENCY_UNAVAILABLE'));
+        }
+        return originalJson(body);
+      };
+      res.once('finish', () => {
+        clearInterval(result.heartbeat);
+        if (!req.idempotencyCommitted) {
+          releaseMutationIdempotency(result).catch(error => {
+            console.warn('[Idempotency] Failed to release uncommitted mutation claim.', { operation, error: error.message });
+          });
+        }
+      });
+      return next();
+    } catch (error) {
+      if (error?.code === 'IDEMPOTENCY_PAYLOAD_CONFLICT') {
+        return sendError(req, res, 409, error.clientMessage, error.code);
+      }
+      if (error?.code === 'INVALID_IDEMPOTENCY_KEY' || error?.code === 'IDEMPOTENCY_KEY_REQUIRED') {
+        return sendError(req, res, 400, error.clientMessage, error.code);
+      }
+      if (error?.code === 'IDEMPOTENCY_IN_PROGRESS') return sendError(req, res, 409, error.clientMessage, error.code);
+      return next(mutationError(503, 'Durable mutation idempotency is temporarily unavailable.', 'IDEMPOTENCY_UNAVAILABLE'));
     }
   };
 };
 
 const ADVISORY_OPERATION = 'recommendation.create';
 const DEFAULT_WAIT_MS = 120000;
-const POLL_INTERVAL_MS = 40;
 
 function idempotencyError(status, message, code) {
   const error = new Error(message);
@@ -53,23 +267,21 @@ function idempotencyError(status, message, code) {
 }
 
 function validateAdvisoryKey(key) {
-  if (typeof key !== 'string' || key.length < 8 || key.length > 200
-      || !/^[A-Za-z0-9._:-]+$/.test(key)) {
-    throw idempotencyError(
-      400,
-      'A valid Idempotency-Key header (8-200 URL-safe characters) is required.',
-      'INVALID_IDEMPOTENCY_KEY',
-    );
+  try {
+    assertValidIdempotencyKey(key);
+  } catch (error) {
+    throw idempotencyError(error.status || 400, error.clientMessage, error.code || 'INVALID_IDEMPOTENCY_KEY');
   }
 }
 
-function advisoryIdentity({ userId, key }) {
-  return `advisory:${canonicalSha256({ operation: ADVISORY_OPERATION, userId: String(userId), key })}`;
+function advisoryIdentity({ operation, userId, key }) {
+  return `advisory:${canonicalSha256({ operation, userId: String(userId), key })}`;
 }
 
-function advisoryRequestHash({ userId, profileId, payload }) {
+function advisoryRequestHash({ operation, userId, profileId, payload }) {
   return canonicalSha256({
-    operation: ADVISORY_OPERATION,
+    operation,
+    method: 'POST',
     userId: String(userId),
     profileId: profileId === null || profileId === undefined ? null : String(profileId),
     payload,
@@ -143,6 +355,7 @@ async function waitForAdvisory(operationId, requestHash, waitMs) {
         }
       }
     }
+    if (state.leaseExpiresAt && new Date(state.leaseExpiresAt).getTime() <= Date.now()) return null;
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
   }
   if (committedWithoutReconciliation) {
@@ -166,161 +379,76 @@ export async function claimAdvisoryIdempotency({
   userId,
   profileId,
   payload,
+  operation = ADVISORY_OPERATION,
   waitMs = DEFAULT_WAIT_MS,
 }) {
   validateAdvisoryKey(key);
-  const operationId = advisoryIdentity({ userId, key });
-  const requestHash = advisoryRequestHash({ userId, profileId, payload });
+  const operationId = advisoryIdentity({ operation, userId, key });
+  const requestHash = advisoryRequestHash({ operation, userId, profileId, payload });
 
   const completed = await findCompletedAdvisory(operationId, requestHash);
   if (completed) return { state: 'REPLAY', operationId, requestHash, response: completed };
 
+  const ownerToken = randomUUID();
   try {
     await IdempotencyKey.create({
       _id: operationId,
       status: 'LOCK',
-      operation: ADVISORY_OPERATION,
+      operation,
+      method: 'POST',
       userId,
       profileId: profileId || null,
       requestHash,
-      response: null,
+      lockOwnerId: ownerToken,
+      leaseExpiresAt: new Date(Date.now() + MUTATION_LEASE_MS),
     });
-    return { state: 'CLAIMED', operationId, requestHash };
+    return startAdvisoryHeartbeat({ state: 'CLAIMED', operationId, operation, requestHash, ownerToken, lost: false });
   } catch (error) {
     if (error.code !== 11000) throw error;
+    const state = await IdempotencyKey.findById(operationId).lean();
+    if (state?.requestHash && state.requestHash !== requestHash) {
+      throw idempotencyError(409, 'This Idempotency-Key is already bound to a different operation payload.', 'IDEMPOTENCY_PAYLOAD_CONFLICT');
+    }
     const response = await waitForAdvisory(operationId, requestHash, waitMs);
     if (response) return { state: 'REPLAY', operationId, requestHash, response };
-
-    // A stale lock expired without a committed recommendation. One caller may
-    // safely attempt to claim it again; the unique recommendation operation ID
-    // remains the final duplicate barrier.
-    return claimAdvisoryIdempotency({ key, userId, profileId, payload, waitMs });
+    const reclaimedOwner = randomUUID();
+    const now = new Date();
+    const reclaimed = await IdempotencyKey.findOneAndUpdate({
+      _id: operationId,
+      status: 'LOCK',
+      requestHash,
+      lockOwnerId: state?.lockOwnerId ?? null,
+      leaseExpiresAt: { $lte: now },
+    }, {
+      $set: { operation, method: 'POST', userId, profileId: profileId || null, lockOwnerId: reclaimedOwner, leaseExpiresAt: new Date(now.getTime() + MUTATION_LEASE_MS) },
+    }, { new: true, runValidators: true }).lean();
+    if (reclaimed) return startAdvisoryHeartbeat({ state: 'CLAIMED', operationId, operation, requestHash, ownerToken: reclaimedOwner, lost: false });
+    throw idempotencyError(409, 'The matching advisory request is still in progress. Retry with the same Idempotency-Key.', 'IDEMPOTENCY_IN_PROGRESS');
   }
+}
+
+function startAdvisoryHeartbeat(claim) {
+  claim.heartbeat = setInterval(async () => {
+    try {
+      const result = await IdempotencyKey.updateOne({
+        _id: claim.operationId, status: 'LOCK', requestHash: claim.requestHash, lockOwnerId: claim.ownerToken,
+      }, { $set: { leaseExpiresAt: new Date(Date.now() + MUTATION_LEASE_MS) } });
+      if (result.matchedCount !== 1) claim.lost = true;
+    } catch {
+      claim.lost = true;
+    }
+  }, MUTATION_HEARTBEAT_MS);
+  claim.heartbeat.unref?.();
+  return claim;
 }
 
 export async function releaseAdvisoryIdempotency(claim) {
   if (!claim || claim.state !== 'CLAIMED') return;
+  clearInterval(claim.heartbeat);
   await IdempotencyKey.deleteOne({
     _id: claim.operationId,
     status: 'LOCK',
     requestHash: claim.requestHash,
+    lockOwnerId: claim.ownerToken,
   });
-}
-
-/**
- * Redis-backed idempotency using atomic SET NX.
- */
-async function sendCachedResponse(req, res, next, cached, resolveReplay) {
-  let replay = cached;
-  if (typeof resolveReplay === 'function') {
-    try {
-      replay = { ...cached, body: await resolveReplay(req, cached.body) };
-    } catch (error) {
-      next(error);
-      return false;
-    }
-  }
-  res.status(replay.status);
-  if (replay.headers) {
-    for (const [header, value] of Object.entries(replay.headers)) res.setHeader(header, value);
-  }
-  res.setHeader('X-Cache-Lookup', 'HIT - Idempotent');
-  res.send(replay.body);
-  return true;
-}
-
-async function handleRedisIdempotency(req, res, next, cacheKey, ttlSeconds, resolveReplay) {
-  // Attempt atomic lock: SET key "LOCK" NX EX 10
-  const acquired = await setCacheNX(cacheKey, 'LOCK', 10);
-
-  if (!acquired) {
-    const cached = await getCache(cacheKey);
-
-    if (!cached || cached === 'LOCK') {
-      return sendError(
-        req,
-        res,
-        409,
-        'A duplicate request is already in progress. Please wait.',
-        'IDEMPOTENCY_IN_PROGRESS',
-      );
-    }
-
-    return sendCachedResponse(req, res, next, cached, resolveReplay);
-  }
-
-  // Lock acquired — intercept res.send to save response
-  const originalSend = res.send;
-  res.send = function (body) {
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      const responseData = {
-        status: res.statusCode,
-        headers: { 'content-type': res.getHeader('content-type') },
-        body: body
-      };
-      setCache(cacheKey, responseData, ttlSeconds).catch(() => {});
-    } else {
-      delCache(cacheKey).catch(() => {});
-    }
-    return originalSend.apply(this, arguments);
-  };
-
-  next();
-}
-
-/**
- * MongoDB-backed idempotency fallback using findOneAndUpdate with upsert.
- * Uses the IdempotencyKey model with a TTL index for automatic cleanup.
- */
-async function handleMongoIdempotency(req, res, next, cacheKey, ttlSeconds, resolveReplay) {
-  try {
-    // Attempt atomic lock via insert — MongoDB E11000 duplicate key error = already exists
-    await IdempotencyKey.create({ _id: cacheKey, status: 'LOCK', response: null });
-
-    // Lock acquired — intercept res.send to save response in MongoDB BEFORE sending
-    const originalSend = res.send;
-    res.send = function (body) {
-      if (res.statusCode >= 200 && res.statusCode < 300) {
-        const responseData = {
-          status: res.statusCode,
-          headers: { 'content-type': res.getHeader('content-type') },
-          body: body
-        };
-        // Await write to MongoDB before sending response to ensure
-        // subsequent requests see the cached response (not LOCK).
-        IdempotencyKey.findByIdAndUpdate(cacheKey, {
-          status: 'DONE',
-          response: responseData
-        }).catch(() => {}).finally(() => {
-          originalSend.call(res, body);
-        });
-        return res;
-      } else {
-        IdempotencyKey.findByIdAndDelete(cacheKey).catch(() => {});
-        return originalSend.apply(this, arguments);
-      }
-    };
-
-    next();
-  } catch (err) {
-    if (err.code === 11000) {
-      // Document already exists — check if it has a cached response
-      const doc = await IdempotencyKey.findById(cacheKey).lean();
-
-      if (!doc || doc.status === 'LOCK') {
-        return sendError(
-          req,
-          res,
-          409,
-          'A duplicate request is already in progress. Please wait.',
-          'IDEMPOTENCY_IN_PROGRESS',
-        );
-      }
-
-      return sendCachedResponse(req, res, next, doc.response, resolveReplay);
-    }
-
-    console.warn('[Idempotency] MongoDB fallback failed (proceeding without safety):', err.message);
-    next();
-  }
 }

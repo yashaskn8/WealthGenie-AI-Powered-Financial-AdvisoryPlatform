@@ -17,7 +17,7 @@ import FinancialProfile from '../models/FinancialProfile.js';
 import { requireFreshRecommendationState } from '../services/recommendationState.js';
 import { calculateFinancialHealthScore } from '../services/financialHealthEngine.js';
 import { redisClient, redisAvailable } from '../config/redis.js';
-import { idempotency } from '../middleware/idempotency.js';
+import { completeMutationIdempotency, idempotency } from '../middleware/idempotency.js';
 import { persistAdvisoryAtomically } from '../services/advisoryPersistence.js';
 import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
 import { PrometheusMetrics } from '../services/metricsCollector.js';
@@ -39,6 +39,7 @@ import {
 import { claimAdvisoryIdempotency, releaseAdvisoryIdempotency } from '../middleware/idempotency.js';
 import { createEndpointRateLimiter, ipKeyGenerator } from '../middleware/rateLimiter.js';
 import { formatProfileResponse } from '../services/profileResponse.js';
+import { reachFinancialStateTestHook } from '../services/financialStateTestHooks.js';
 
 const router = Router();
 const PROFILE_RATE_LIMIT = 10;
@@ -84,6 +85,21 @@ async function checkProfileRateLimit(userId) {
 }
 
 export { formatProfileResponse };
+
+async function resolveProfileBuildReplay(req, operation) {
+  const profile = await FinancialProfile.findOne({
+    _id: operation.resourceId,
+    userId: req.user.userId,
+    idempotencyOperationId: operation._id,
+    idempotencyRequestHash: operation.requestHash,
+  }).lean();
+  if (!profile) {
+    throw createError(503, 'Committed profile operation has no matching owned profile.', 'Refresh your profile before continuing.', {
+      code: 'IDEMPOTENCY_STATE_CORRUPT',
+    });
+  }
+  return formatProfileResponse(profile);
+}
 
 router.post(
   '/precompute',
@@ -141,6 +157,7 @@ router.post(
       userId: req.user.userId,
       profileId: null,
       payload: req.body,
+      operation: 'profile.complete',
     });
     const idempotencyMs = performance.now() - idempotencyStart;
     if (idempotencyClaim.state === 'REPLAY') {
@@ -325,8 +342,8 @@ router.get('/:profileId/health-score', verifyJWT, asyncHandler(async (req, res) 
 router.post(
   '/build',
   verifyJWT,
-  idempotency(),
   validateStrict(financialProfileSchema),
+  idempotency({ operation: 'profile.build', resolveReplay: resolveProfileBuildReplay }),
   asyncHandler(async (req, res) => {
     if (process.env.DISABLE_RATE_LIMIT !== 'true' && !(await checkProfileRateLimit(req.user.userId))) {
       throw createError(429, 'Profile creation rate limit exceeded', `Maximum ${PROFILE_RATE_LIMIT} profile submissions per hour.`);
@@ -334,11 +351,44 @@ router.post(
 
     const canonical = buildRecommendationProfile(req.body);
     const suitability = assessSuitabilityRisk(canonical);
-    const profile = await FinancialProfile.create({
-      userId: req.user.userId,
-      ...toProfilePersistence(canonical, suitability),
-    });
+    const profileId = new mongoose.Types.ObjectId();
+    const session = await mongoose.startSession();
+    let profile;
+    let transactionCommitted = false;
+    try {
+      await session.withTransaction(async () => {
+        [profile] = await FinancialProfile.create([{
+          _id: profileId,
+          userId: req.user.userId,
+          idempotencyOperationId: req.idempotencyClaim.operationId,
+          idempotencyRequestHash: req.idempotencyClaim.requestHash,
+          ...toProfilePersistence(canonical, suitability),
+        }], { session });
+        await reachFinancialStateTestHook('profile.build.afterInsertBeforeCommit', {
+          userId: String(req.user.userId), profileId: String(profile._id), session,
+          transactionActive: session.inTransaction(),
+        });
+        await completeMutationIdempotency(session, req.idempotencyClaim, {
+          resourceType: 'FinancialProfile', resourceId: profileId, status: 201,
+        });
+      }, { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } });
+      transactionCommitted = true;
+      req.idempotencyCommitted = true;
+      clearInterval(req.idempotencyClaim.heartbeat);
+    } finally {
+      try {
+        await session.endSession();
+      } catch (error) {
+        if (!transactionCommitted) throw error;
+        console.warn('[Profile] Session cleanup failed after committed create.', { error: error.message });
+      }
+    }
 
+    await reachFinancialStateTestHook('profile.build.afterCommitBeforeResponse', {
+      userId: String(req.user.userId),
+      profileId: String(profile._id),
+      operationId: req.idempotencyClaim.operationId,
+    });
     res.status(201).json(formatProfileResponse(profile));
     void triggerPlanHealthCheck({ userId: req.user.userId, profileId: profile._id });
   }),

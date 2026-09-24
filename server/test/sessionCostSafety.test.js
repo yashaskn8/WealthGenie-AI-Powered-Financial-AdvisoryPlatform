@@ -6,6 +6,7 @@ import FinancialProfile from '../models/FinancialProfile.js';
 import ConversationHistory from '../models/ConversationHistory.js';
 import Recommendation from '../models/Recommendation.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
+import { installMockChatSessionStore } from './helpers/mockChatSessionStore.js';
 
 describe('grounded chat session-cost safety', () => {
   const userId = '64b0f0000000000000000001';
@@ -13,6 +14,7 @@ describe('grounded chat session-cost safety', () => {
   let env;
   let session;
   let providerCalls;
+  let restoreChatStore;
 
   beforeEach(() => {
     originals = {
@@ -45,6 +47,7 @@ describe('grounded chat session-cost safety', () => {
       save: async function save() { return this; },
     };
     ConversationHistory.findOne = async () => session;
+    restoreChatStore = installMockChatSessionStore(async () => session);
     providerCalls = 0;
     ProviderManager.gemini.generate = async () => {
       providerCalls += 1;
@@ -57,6 +60,7 @@ describe('grounded chat session-cost safety', () => {
   });
 
   afterEach(() => {
+    restoreChatStore?.();
     FinancialProfile.findOne = originals.profileFindOne;
     ConversationHistory.findOne = originals.conversationFindOne;
     Recommendation.findOne = originals.recommendationFindOne;

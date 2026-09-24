@@ -4,6 +4,19 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
+import Ajv2020 from 'ajv/dist/2020.js';
+import addFormats from 'ajv-formats';
+import express from 'express';
+import jwt from 'jsonwebtoken';
+import taxRoutes from '../routes/tax.js';
+import instrumentRoutes from '../routes/instruments.js';
+import chatRoutes from '../routes/chatRoutes.js';
+import recommendRoutes from '../routes/recommend.js';
+import marketRoutes from '../routes/market.js';
+import agentRoutes from '../routes/agentRoutes.js';
+import { errorHandler, sendError } from '../middleware/errorHandler.js';
+import Instrument from '../models/Instrument.js';
+import { withServer, rawRequest } from '../test-utils/httpTestUtils.js';
 
 const serverRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const appSource = fs.readFileSync(path.join(serverRoot, 'app.js'), 'utf8');
@@ -67,6 +80,54 @@ function contractOperations() {
 function resolveLocalRef(ref) {
   assert.match(ref, /^#\//, `Only local OpenAPI references are supported: ${ref}`);
   return ref.slice(2).split('/').reduce((value, key) => value[key], contract);
+}
+
+function inlineLocalRefs(value, activeRefs = new Set()) {
+  if (Array.isArray(value)) return value.map(item => inlineLocalRefs(item, activeRefs));
+  if (!value || typeof value !== 'object') return value;
+  if (typeof value.$ref === 'string') {
+    assert.equal(value.$ref.startsWith('#/'), true, `Only local refs are supported: ${value.$ref}`);
+    assert.equal(activeRefs.has(value.$ref), false, `Recursive response schema is not supported by this response validator: ${value.$ref}`);
+    const nextRefs = new Set(activeRefs);
+    nextRefs.add(value.$ref);
+    return inlineLocalRefs(resolveLocalRef(value.$ref), nextRefs);
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, inlineLocalRefs(child, activeRefs)]));
+}
+
+const responseAjv = new Ajv2020({ allErrors: true, strict: false });
+addFormats(responseAjv);
+
+function assertRuntimeResponseMatchesContract({ method, path: routePath, status, contentType, body }) {
+  const operation = contract.paths[routePath]?.[method.toLowerCase()];
+  assert.ok(operation, `OpenAPI operation missing: ${method} ${routePath}`);
+  const response = operation.responses[String(status)];
+  assert.ok(response, `Undocumented runtime status ${status}: ${method} ${routePath}`);
+  const resolvedResponse = inlineLocalRefs(response);
+  const jsonMedia = resolvedResponse.content?.['application/json'];
+  assert.ok(jsonMedia?.schema, `No application/json schema for ${method} ${routePath} ${status}`);
+  assert.match(contentType || '', /^application\/json\b/i, `${method} ${routePath} did not return JSON`);
+  const validateBody = responseAjv.compile(inlineLocalRefs(jsonMedia.schema));
+  assert.equal(validateBody(body), true, `${method} ${routePath} ${status} violates OpenAPI: ${JSON.stringify(validateBody.errors)}`);
+}
+
+function assertResponseMatchesSchemaRef(schemaRef, body, context) {
+  const validateBody = responseAjv.compile(inlineLocalRefs({ $ref: schemaRef }));
+  assert.equal(validateBody(body), true, `${context} violates OpenAPI: ${JSON.stringify(validateBody.errors)}`);
+}
+
+function buildContractTestApp() {
+  const app = express();
+  app.use(express.json());
+  app.use('/api/tax', taxRoutes);
+  app.use('/api/instruments', instrumentRoutes);
+  app.use('/api/chat', chatRoutes);
+  app.use('/api/recommend', recommendRoutes);
+  app.use('/api/market', marketRoutes);
+  app.use('/api/agent', agentRoutes);
+  app.use((req, res) => sendError(req, res, 404, 'Route not found.', 'ROUTE_NOT_FOUND'));
+  app.use(errorHandler);
+  return app;
 }
 
 function requestSchema(operation) {
@@ -142,8 +203,124 @@ test('OpenAPI preserves major runtime-required request fields', () => {
 test('advisory idempotency is required and profile/goal idempotency is documented', () => {
   const operations = new Map(contractOperations().map((entry) => [operationKey(entry), entry.operation]));
   assert.equal(operations.get('POST /api/recommend')['x-idempotency-key'], 'required');
-  assert.equal(operations.get('POST /api/profile/build')['x-idempotency-key'], 'optional');
-  assert.equal(operations.get('POST /api/goals/create')['x-idempotency-key'], 'optional');
+  assert.equal(operations.get('POST /api/profile/build')['x-idempotency-key'], 'required');
+  assert.equal(operations.get('POST /api/goals/create')['x-idempotency-key'], 'required');
+  assert.equal(operations.get('POST /api/profile/build').responses['503'].$ref, '#/components/responses/Unavailable');
+  assert.equal(operations.get('POST /api/goals/create').responses['503'].$ref, '#/components/responses/Unavailable');
+});
+
+test('goal-advice reconciliation contract distinguishes committed operation from current goal state', () => {
+  const operation = contract.paths['/api/goals/{goalId}/refresh-advice'].patch;
+  const response = resolveLocalRef(operation.responses['200'].$ref);
+  const responseSchema = response.content['application/json'].schema;
+  const schema = responseSchema.$ref ? resolveLocalRef(responseSchema.$ref) : responseSchema;
+  assert.ok(schema.required.includes('operation_result'));
+  assert.deepEqual(schema.properties.operation_result.required, ['committed', 'goal_version', 'response_state']);
+  assert.ok(['CURRENT', 'STALE'].every(value => schema.properties.operation_result.properties.response_state.enum.includes(value)));
+  assert.ok(operation.responses['503'], 'committed-but-unreconciled responses must be documented');
+});
+
+test('OpenAPI runtime contracts exercise real HTTP success and canonical error responses', async () => {
+  const oldSecret = process.env.JWT_SECRET;
+  const oldNodeEnv = process.env.NODE_ENV;
+  const oldFind = Instrument.find;
+  const oldCountDocuments = Instrument.countDocuments;
+  process.env.JWT_SECRET = 'openapi-runtime-contract-test-secret-at-least-32';
+  process.env.NODE_ENV = 'test';
+  Instrument.find = () => ({
+    sort() { return this; },
+    skip() { return this; },
+    limit() { return this; },
+    lean: async () => [{
+      id: 'catalog:fd:contract', name: 'Contract Bank Deposit', type: 'FD', interestRate: 6.5,
+      internalPersistenceFlag: 'must-not-escape',
+    }],
+  });
+  Instrument.countDocuments = async () => 1;
+
+  try {
+    await withServer(buildContractTestApp(), async baseUrl => {
+      const userId = '65b000000000000000000001';
+      const authToken = jwt.sign({ userId, jti: 'openapi-contract-jti' }, process.env.JWT_SECRET, { expiresIn: '5m' });
+      const authorization = { Authorization: `Bearer ${authToken}` };
+      const cases = [
+        {
+          method: 'GET', path: '/api/tax/compare', url: '/api/tax/compare?income=1200000&incomeSource=salary&fiscalYear=FY2026-27&age=30', status: 200,
+        },
+        { method: 'GET', path: '/api/instruments', url: '/api/instruments?page=1&limit=10', status: 200 },
+        { method: 'GET', path: '/api/tax/compare', url: '/api/tax/compare?income=bad&incomeSource=salary&fiscalYear=FY2026-27&age=30', status: 400 },
+        { method: 'GET', path: '/api/tax/compare', url: '/api/tax/compare?income=1200000&incomeSource=salary&fiscalYear=FY2099-00&age=30', status: 422 },
+        { method: 'GET', path: '/api/chat/history', url: '/api/chat/history', status: 401 },
+        { method: 'GET', path: '/api/instruments', url: '/api/instruments?notAFilter=x', status: 400 },
+      ];
+      for (const item of cases) {
+        const response = await rawRequest(`${baseUrl}${item.url}`, { method: item.method });
+        assert.equal(response.status, item.status, `${item.method} ${item.url}`);
+        assertRuntimeResponseMatchesContract({
+          ...item,
+          contentType: response.headers.get('content-type'),
+          body: await response.json(),
+        });
+      }
+
+      const authenticatedQueryCases = [
+        { method: 'GET', path: '/api/recommend/audit', url: '/api/recommend/audit?profileId=garbage' },
+        { method: 'GET', path: '/api/chat/history', url: '/api/chat/history?limit=20garbage' },
+        { method: 'GET', path: '/api/agent/plan-health', url: '/api/agent/plan-health?profileId=garbage' },
+      ];
+      for (const item of authenticatedQueryCases) {
+        const response = await rawRequest(`${baseUrl}${item.url}`, { method: item.method, headers: authorization });
+        assert.equal(response.status, 400, `${item.method} ${item.url}`);
+        assertRuntimeResponseMatchesContract({
+          ...item,
+          status: response.status,
+          contentType: response.headers.get('content-type'),
+          body: await response.json(),
+        });
+      }
+
+      const unknownMarketQuery = await rawRequest(`${baseUrl}/api/market/mutual-funds/nav?schemeCodes=1001&extra=unexpected`);
+      assert.equal(unknownMarketQuery.status, 400);
+      assertRuntimeResponseMatchesContract({
+        method: 'GET', path: '/api/market/mutual-funds/nav', status: unknownMarketQuery.status,
+        contentType: unknownMarketQuery.headers.get('content-type'), body: await unknownMarketQuery.json(),
+      });
+
+      const missingRoute = await rawRequest(`${baseUrl}/api/not-a-public-route`);
+      assert.equal(missingRoute.status, 404);
+      assert.match(missingRoute.headers.get('content-type') || '', /^application\/json\b/i);
+      assertResponseMatchesSchemaRef(
+        '#/components/schemas/Error',
+        await missingRoute.json(),
+        'Canonical 404 error envelope',
+      );
+
+      const priorFind = Instrument.find;
+      Instrument.find = () => ({
+        sort() { return this; },
+        skip() { return this; },
+        limit() { return this; },
+        lean: async () => [{ name: 'Broken catalog row', type: 'FD' }],
+      });
+      try {
+        const unavailable = await rawRequest(`${baseUrl}/api/instruments`);
+        assert.equal(unavailable.status, 503);
+        assertRuntimeResponseMatchesContract({
+          method: 'GET', path: '/api/instruments', status: unavailable.status,
+          contentType: unavailable.headers.get('content-type'), body: await unavailable.json(),
+        });
+      } finally {
+        Instrument.find = priorFind;
+      }
+    });
+  } finally {
+    Instrument.find = oldFind;
+    Instrument.countDocuments = oldCountDocuments;
+    if (oldSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = oldSecret;
+    if (oldNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = oldNodeEnv;
+  }
 });
 
 test('deferred advisory success contract requires exact allocation provenance', () => {

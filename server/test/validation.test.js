@@ -17,6 +17,7 @@ import { enforceJsonContentType } from '../middleware/contentType.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import { registerSchema } from '../validation/schemas.js';
 import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
+import { customGoalSchema } from '../validation/financialSchemas.js';
 
 process.env.JWT_SECRET = 'validation-test-secret';
 process.env.NODE_ENV = 'test';
@@ -42,6 +43,20 @@ test('registration schema accepts the non-deliverable CI identity domain', () =>
 
   assert.equal(error, undefined);
   assert.equal(value.email, `e2e-${unique}@example.com`);
+});
+
+test('goal create accepts strict date-only API dates and rejects impossible calendar dates', () => {
+  const base = {
+    goal_name: 'Leap year goal',
+    target_amount: 100000,
+    target_date: '2032-02-29',
+    current_savings: 10000,
+    profileId: '65b000000000000000000001',
+    priority: 'High',
+  };
+  assert.equal(customGoalSchema.validate(base, { convert: false }).error, undefined);
+  assert.ok(customGoalSchema.validate({ ...base, target_date: '2031-02-29' }, { convert: false }).error);
+  assert.ok(customGoalSchema.validate({ ...base, target_date: '2032-02-29T00:00:00.000Z' }, { convert: false }).error);
 });
 
 function buildApp() {
@@ -182,8 +197,10 @@ for (const tc of boundaryCases) {
       });
 
       assert.equal(response.status, 400, `Expected 400 Bad Request, got ${response.status} for ${tc.name}`);
-      assert.equal(body.error, 'Validation failed');
-      assert.ok(body.details && body.details.length > 0);
+      assert.equal(body.error, body.message);
+      assert.equal(body.code, 'VALIDATION_ERROR');
+      assert.ok(body.request_id);
+      assert.ok(body.details?.issues?.length > 0);
     });
   });
 }

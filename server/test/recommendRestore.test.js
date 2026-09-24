@@ -244,13 +244,16 @@ async function request(profileId, userId = userA) {
   });
 }
 
-async function submitGoal(profile, name) {
-  const targetDate = new Date(Date.now() + 4 * 365.25 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+async function submitGoal(profile, name, {
+  key = crypto.randomUUID(),
+  targetDate = new Date(Date.now() + 4 * 365.25 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+} = {}) {
   return fetch(`${baseUrl}/api/goals/create`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${signToken(userA)}`,
+      'Idempotency-Key': key,
     },
     body: JSON.stringify({
       goal_name: name,
@@ -260,6 +263,17 @@ async function submitGoal(profile, name) {
       profileId: String(profile._id),
       priority: 'High',
     }),
+  });
+}
+
+async function patchGoal(goalId, payload) {
+  return fetch(`${baseUrl}/api/goals/${goalId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${signToken(userA)}`,
+    },
+    body: JSON.stringify(payload),
   });
 }
 
@@ -609,6 +623,198 @@ test('concurrent manual rebalances create exactly one immutable next allocation 
   assert.equal(await verifyAuditChain(userA).then(result => result.valid), true);
 });
 
+test('committed rebalance reconciles to a later canonical revision instead of reporting failure', async () => {
+  const profile = await createFixture();
+  const initial = await request(profile._id);
+  const initialBody = await initial.json();
+  const payload = {
+    profileId: String(profile._id),
+    recommendationId: initialBody.recommendationId,
+    expectedAllocationRevision: initialBody.allocation_revision,
+    expectedPortfolioFingerprint: initialBody.portfolio_fingerprint,
+    weights: Object.fromEntries(initialBody.instruments.map(item => [item.id, item.allocationWeight])),
+  };
+  const barrier = createBarrier();
+  let paused = false;
+  const uninstall = installFinancialStateTestHook(async boundary => {
+    if (boundary === 'allocation.afterCommitBeforeReconcile' && !paused) {
+      paused = true;
+      await barrier.pause();
+    }
+  });
+
+  const pendingA = submitWeights(payload);
+  try {
+    await barrier.entered;
+    const inputB = await rebalanceInput(profile, 'post-commit-supersession-B');
+    assert.equal(inputB.expectedRevision, 2, 'A committed N+1 before reaching its response barrier');
+    const committedB = await createManualAllocationRevision(inputB);
+    assert.equal(committedB.revision.revision, 3);
+  } finally {
+    barrier.release();
+    uninstall();
+  }
+
+  const responseA = await pendingA;
+  const bodyA = await responseA.json();
+  assert.equal(responseA.status, 200, JSON.stringify(bodyA));
+  assert.equal(bodyA.response_state, 'CURRENT');
+  assert.equal(bodyA.calculation_freshness.fresh, true);
+  assert.equal(bodyA.allocation_revision, 3);
+  assert.equal(bodyA.operation_result.committed, true);
+  assert.equal(bodyA.operation_result.generated_allocation_revision, 2);
+  assert.equal(bodyA.operation_result.superseded_before_response, true);
+
+  const [pointer, revisions, audits, current] = await Promise.all([
+    RecommendationState.findOne({ userId: userA, profileId: profile._id }).lean(),
+    RecommendationAllocationRevision.find({ recommendationId: initialBody.recommendationId }).sort({ revision: 1 }).lean(),
+    AuditRecord.find({ userId: userA, recommendationId: initialBody.recommendationId }).sort({ chain_sequence: 1 }).lean(),
+    request(profile._id),
+  ]);
+  const currentBody = await current.json();
+  assert.equal(pointer.currentAllocationRevision, 3);
+  assert.equal(String(pointer.currentAllocationRevisionId), String(revisions[2]._id));
+  assert.deepEqual(revisions.map(item => item.revision), [1, 2, 3]);
+  assert.equal(new Set(revisions.map(item => String(item._id))).size, 3);
+  assert.equal(audits.length, 2);
+  assert.equal(await verifyAuditChain(userA).then(result => result.valid), true);
+  assert.equal(currentBody.allocation_revision, bodyA.allocation_revision);
+  assert.equal(currentBody.allocation_revision_id, bodyA.allocation_revision_id);
+  assert.equal(currentBody.portfolio_fingerprint, bodyA.portfolio_fingerprint);
+  assert.equal(bodyA.allocation_revision_id, String(revisions[2]._id));
+  assert.notEqual(bodyA.allocation_revision_id, bodyA.operation_result.generated_allocation_revision_id);
+});
+
+test('committed rebalance fails closed when canonical state is corrupted before reconciliation', async () => {
+  const profile = await createFixture();
+  const initial = await request(profile._id);
+  const initialBody = await initial.json();
+  const payload = {
+    profileId: String(profile._id),
+    recommendationId: initialBody.recommendationId,
+    expectedAllocationRevision: initialBody.allocation_revision,
+    expectedPortfolioFingerprint: initialBody.portfolio_fingerprint,
+    weights: Object.fromEntries(initialBody.instruments.map(item => [item.id, item.allocationWeight])),
+  };
+  const uninstall = installFinancialStateTestHook(async boundary => {
+    if (boundary === 'allocation.afterCommitBeforeReconcile') {
+      await RecommendationState.collection.updateOne(
+        { userId: userA, profileId: profile._id },
+        { $set: { currentAllocationRevisionId: new mongoose.Types.ObjectId() } },
+      );
+    }
+  });
+  let response;
+  try {
+    response = await submitWeights(payload);
+  } finally {
+    uninstall();
+  }
+  const body = await response.json();
+  assert.equal(response.status, 503, JSON.stringify(body));
+  assert.equal(body.code, 'COMMITTED_BUT_RESPONSE_RECONCILIATION_FAILED');
+  assert.equal(body.details.committed, true);
+  assert.equal(body.response_state, undefined, 'historical revision is not returned as current');
+  assert.equal(await RecommendationAllocationRevision.countDocuments({ recommendationId: initialBody.recommendationId }), 2);
+  assert.equal(await AuditRecord.countDocuments({ userId: userA, recommendationId: initialBody.recommendationId }), 1);
+});
+
+test('committed rebalance reconciles to a later canonical revision instead of reporting failure', async () => {
+  const profile = await createFixture();
+  const initial = await request(profile._id);
+  const initialBody = await initial.json();
+  const payload = {
+    profileId: String(profile._id),
+    recommendationId: initialBody.recommendationId,
+    expectedAllocationRevision: initialBody.allocation_revision,
+    expectedPortfolioFingerprint: initialBody.portfolio_fingerprint,
+    weights: Object.fromEntries(initialBody.instruments.map(item => [item.id, item.allocationWeight])),
+  };
+  const barrier = createBarrier();
+  let paused = false;
+  const uninstall = installFinancialStateTestHook(async boundary => {
+    if (boundary === 'allocation.afterCommitBeforeReconcile' && !paused) {
+      paused = true;
+      await barrier.pause();
+    }
+  });
+
+  const pendingA = submitWeights(payload);
+  try {
+    await barrier.entered;
+    const nextInput = await rebalanceInput(profile, 'post-commit-supersession-B');
+    assert.equal(nextInput.expectedRevision, 2, 'request A has durably committed revision N+1');
+    const committedB = await createManualAllocationRevision(nextInput);
+    assert.equal(committedB.revision.revision, 3);
+  } finally {
+    barrier.release();
+    uninstall();
+  }
+
+  const responseA = await pendingA;
+  const bodyA = await responseA.json();
+  assert.equal(responseA.status, 200, JSON.stringify(bodyA));
+  assert.equal(bodyA.response_state, 'CURRENT');
+  assert.equal(bodyA.calculation_freshness.fresh, true);
+  assert.equal(bodyA.allocation_revision, 3);
+  assert.equal(bodyA.operation_result.committed, true);
+  assert.equal(bodyA.operation_result.generated_allocation_revision, 2);
+  assert.equal(bodyA.operation_result.superseded_before_response, true);
+
+  const [pointer, revisions, audits, current] = await Promise.all([
+    RecommendationState.findOne({ userId: userA, profileId: profile._id }).lean(),
+    RecommendationAllocationRevision.find({ recommendationId: initialBody.recommendationId }).sort({ revision: 1 }).lean(),
+    AuditRecord.find({ userId: userA, recommendationId: initialBody.recommendationId }).sort({ chain_sequence: 1 }).lean(),
+    request(profile._id),
+  ]);
+  const currentBody = await current.json();
+  assert.equal(pointer.currentAllocationRevision, 3);
+  assert.equal(String(pointer.currentAllocationRevisionId), String(revisions[2]._id));
+  assert.deepEqual(revisions.map(item => item.revision), [1, 2, 3]);
+  assert.equal(new Set(revisions.map(item => String(item._id))).size, 3);
+  assert.equal(audits.length, 2);
+  assert.equal(await verifyAuditChain(userA).then(result => result.valid), true);
+  assert.equal(currentBody.allocation_revision, bodyA.allocation_revision);
+  assert.equal(currentBody.allocation_revision_id, bodyA.allocation_revision_id);
+  assert.equal(currentBody.portfolio_fingerprint, bodyA.portfolio_fingerprint);
+  assert.equal(bodyA.allocation_revision_id, String(revisions[2]._id));
+  assert.notEqual(bodyA.allocation_revision_id, bodyA.operation_result.generated_allocation_revision_id);
+});
+
+test('committed rebalance fails closed when canonical state is corrupted before reconciliation', async () => {
+  const profile = await createFixture();
+  const initial = await request(profile._id);
+  const initialBody = await initial.json();
+  const payload = {
+    profileId: String(profile._id),
+    recommendationId: initialBody.recommendationId,
+    expectedAllocationRevision: initialBody.allocation_revision,
+    expectedPortfolioFingerprint: initialBody.portfolio_fingerprint,
+    weights: Object.fromEntries(initialBody.instruments.map(item => [item.id, item.allocationWeight])),
+  };
+  const uninstall = installFinancialStateTestHook(async boundary => {
+    if (boundary === 'allocation.afterCommitBeforeReconcile') {
+      await RecommendationState.collection.updateOne(
+        { userId: userA, profileId: profile._id },
+        { $set: { currentAllocationRevisionId: new mongoose.Types.ObjectId() } },
+      );
+    }
+  });
+  let response;
+  try {
+    response = await submitWeights(payload);
+  } finally {
+    uninstall();
+  }
+  const body = await response.json();
+  assert.equal(response.status, 503, JSON.stringify(body));
+  assert.equal(body.code, 'COMMITTED_BUT_RESPONSE_RECONCILIATION_FAILED');
+  assert.equal(body.details.committed, true);
+  assert.equal(body.response_state, undefined, 'historical revision is not returned as current');
+  assert.equal(await RecommendationAllocationRevision.countDocuments({ recommendationId: initialBody.recommendationId }), 2);
+  assert.equal(await AuditRecord.countDocuments({ userId: userA, recommendationId: initialBody.recommendationId }), 1);
+});
+
 test('transaction aborts at every rebalance write boundary leave no partial financial or audit state', async () => {
   const profile = await createFixture();
   const args = await rebalanceInput(profile, 'fault-injected-rebalance-abort');
@@ -840,6 +1046,41 @@ test('barrier-controlled goal calculation loses to an allocation revision change
   assert.equal(await AuditRecord.countDocuments({ userId: userA, recommendationId: state.currentRecommendationId }), 1);
 });
 
+test('goal create transaction rollback test enters transaction and aborts an inserted goal after persistence', async () => {
+  const profile = await createFixture();
+  const profileBefore = await FinancialProfile.findById(profile._id).lean();
+  const stateBefore = await RecommendationState.findOne({ userId: userA, profileId: profile._id }).lean();
+  const goalName = 'Verified transaction rollback boundary';
+  let reached = false;
+  const uninstall = installFinancialStateTestHook(async (boundary, context) => {
+    if (boundary !== 'goal.create.afterInsertBeforeCommit') return;
+    reached = true;
+    assert.equal(context.transactionActive, true);
+    const insideTransaction = await Goal.findById(context.goalId).session(context.session).lean();
+    assert.equal(insideTransaction.goal_name, goalName, 'the inserted goal must be visible inside the active transaction');
+    throw Object.assign(new Error('injected failure after goal insert'), { code: 'INJECTED_AFTER_GOAL_INSERT' });
+  });
+  let response;
+  try {
+    response = await submitGoal(profile, goalName);
+  } finally {
+    uninstall();
+  }
+  const body = await response.json();
+  assert.equal(reached, true, 'the test must prove it reached the transaction insert boundary');
+  assert.equal(response.status, 500, JSON.stringify(body));
+  assert.equal(typeof body.request_id, 'string');
+  assert.equal(await Goal.countDocuments({ userId: userA, profileId: profile._id, goal_name: goalName }), 0);
+  const [profileAfter, stateAfter] = await Promise.all([
+    FinancialProfile.findById(profile._id).lean(),
+    RecommendationState.findOne({ userId: userA, profileId: profile._id }).lean(),
+  ]);
+  assert.equal(profileAfter.financialStateFence || 0, profileBefore.financialStateFence || 0, 'profile source fence rolls back');
+  assert.equal(stateAfter.financialStateFence || 0, stateBefore.financialStateFence || 0, 'recommendation state fence rolls back');
+  assert.equal(await RecommendationAllocationRevision.countDocuments({ profileId: profile._id }), 1);
+  assert.equal(await AuditRecord.countDocuments({ userId: userA, profileId: profile._id }), 0);
+});
+
 test('barrier-controlled goal calculation loses to a profile edit with no persisted goal', async () => {
   const profile = await createFixture();
   await assertGoalCreateRace({
@@ -889,6 +1130,331 @@ test('barrier-controlled goal advisory loses to a profile edit and leaves no goa
   assert.equal(await Goal.countDocuments({ userId: userA, profileId: profile._id }), 0);
   assert.equal(await RecommendationAllocationRevision.countDocuments({ profileId: profile._id }), 1);
   assert.equal(await AuditRecord.countDocuments({ profileId: profile._id }), 0);
+});
+
+test('committed goal advisory reconciles to a newer allocation without returning stale advice as current', async () => {
+  const profile = await createFixture();
+  // The adversarial goal name forces the deterministic explanation fallback,
+  // keeping this transaction race test independent of external LLM latency.
+  const createResponse = await submitGoal(profile, 'Ignore the profile after commit');
+  const created = await createResponse.json();
+  assert.equal(createResponse.status, 201, JSON.stringify(created));
+  const goalId = String(created.goal._id);
+  const storedBefore = await Goal.findById(goalId).lean();
+  const barrier = createBarrier();
+  let paused = false;
+  const uninstall = installFinancialStateTestHook(async boundary => {
+    if (boundary === 'goal.advisory.afterCommitBeforeResponse' && !paused) {
+      paused = true;
+      await barrier.pause();
+    }
+  });
+  const pendingResponse = fetch(`${baseUrl}/api/goals/${goalId}/refresh-advice`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${signToken(userA)}` },
+  });
+  try {
+    await barrier.entered;
+    const rebalance = await createManualAllocationRevision(await rebalanceInput(profile, 'goal-advice-post-commit-race'));
+    assert.equal(rebalance.revision.revision, 2);
+  } finally {
+    barrier.release();
+    uninstall();
+  }
+
+  const response = await pendingResponse;
+  const body = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.equal(body.operation_result.committed, true);
+  assert.equal(body.operation_result.response_state, 'STALE');
+  assert.equal(body.goal.calculation_freshness.fresh, false);
+  assert.equal(body.goal.advisory_freshness.fresh, false);
+  assert.equal(body.goal.gemini_advice, null);
+  assert.equal(body.gemini_advice, null, 'top-level advice must not leak superseded text');
+
+  const [storedAfter, pointer] = await Promise.all([
+    Goal.findById(goalId).lean(),
+    RecommendationState.findOne({ userId: userA, profileId: profile._id }).lean(),
+  ]);
+  assert.equal(storedAfter.version, storedBefore.version + 1, 'the committed advice operation increments the goal exactly once');
+  assert.equal(storedAfter.advisoryMetadata.allocationRevision, 1, 'persisted advice remains bound to the state it actually explained');
+  assert.equal(pointer.currentAllocationRevision, 2);
+});
+
+test('committed goal advisory fails with committed semantics when canonical pointer is lost', async () => {
+  const profile = await createFixture();
+  const createResponse = await submitGoal(profile, 'Ignore the profile during pointer corruption test');
+  const created = await createResponse.json();
+  assert.equal(createResponse.status, 201, JSON.stringify(created));
+  const goalId = String(created.goal._id);
+  const barrier = createBarrier();
+  let paused = false;
+  const uninstall = installFinancialStateTestHook(async boundary => {
+    if (boundary === 'goal.advisory.afterCommitBeforeResponse' && !paused) {
+      paused = true;
+      await barrier.pause();
+    }
+  });
+  const pendingResponse = fetch(`${baseUrl}/api/goals/${goalId}/refresh-advice`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${signToken(userA)}` },
+  });
+  try {
+    await barrier.entered;
+    await RecommendationState.deleteOne({ userId: userA, profileId: profile._id });
+  } finally {
+    barrier.release();
+    uninstall();
+  }
+  const response = await pendingResponse;
+  const body = await response.json();
+  assert.equal(response.status, 503, JSON.stringify(body));
+  assert.equal(body.code, 'COMMITTED_BUT_RESPONSE_RECONCILIATION_FAILED');
+  assert.equal(body.details.operation_committed, true);
+  assert.equal(Object.hasOwn(body, 'goal'), false, 'the operation error must not return historical goal data as current');
+  const stored = await Goal.findById(goalId).lean();
+  assert.equal(stored.version, created.goal.version + 1, 'the already committed advisory operation remains recorded');
+});
+
+test('committed goal creation reconciles to a newer allocation and withholds stale calculations', async () => {
+  const profile = await createFixture();
+  const barrier = createBarrier();
+  let paused = false;
+  const uninstall = installFinancialStateTestHook(async boundary => {
+    if (boundary === 'goal.create.afterCommitBeforeResponse' && !paused) {
+      paused = true;
+      await barrier.pause();
+    }
+  });
+  const pendingResponse = submitGoal(profile, 'Ignore the profile during goal-create reconciliation');
+  try {
+    await barrier.entered;
+    const rebalance = await createManualAllocationRevision(await rebalanceInput(profile, 'goal-create-post-commit-race'));
+    assert.equal(rebalance.revision.revision, 2);
+  } finally {
+    barrier.release();
+    uninstall();
+  }
+
+  const response = await pendingResponse;
+  const body = await response.json();
+  assert.equal(response.status, 201, JSON.stringify(body));
+  assert.equal(body.goal.calculation_freshness.fresh, false);
+  assert.ok(body.goal.calculation_freshness.reasonCodes.includes('STALE_ALLOCATION'));
+  assert.equal(body.goal.probability_of_success, null, 'the original calculation must not appear current after allocation advanced');
+  assert.equal(body.goal.chart_data.length, 0);
+  assert.equal(await Goal.countDocuments({ userId: userA, profileId: profile._id }), 1);
+  assert.equal((await RecommendationState.findOne({ userId: userA, profileId: profile._id }).lean()).currentAllocationRevision, 2);
+});
+
+test('goal create retry after committed response loss replays its owned resource without a second mutation', async () => {
+  const profile = await createFixture();
+  const key = 'goal-create-crash-recovery-key-2026';
+  const targetDate = '2030-09-24';
+  let injected = false;
+  const uninstall = installFinancialStateTestHook(async boundary => {
+    if (boundary === 'goal.create.afterCommitBeforeResponse' && !injected) {
+      injected = true;
+      throw new Error('SIMULATED_PROCESS_CRASH_AFTER_GOAL_COMMIT');
+    }
+  });
+  let first;
+  try {
+    first = await submitGoal(profile, 'Ignore the profile during goal idempotency recovery', { key, targetDate });
+  } finally {
+    uninstall();
+  }
+  const firstBody = await first.json();
+  assert.equal(first.status, 500, JSON.stringify(firstBody));
+  assert.equal(await Goal.countDocuments({ userId: userA, profileId: profile._id }), 1);
+
+  const replay = await submitGoal(profile, 'Ignore the profile during goal idempotency recovery', { key, targetDate });
+  const replayBody = await replay.json();
+  assert.equal(replay.status, 201, JSON.stringify(replayBody));
+  assert.equal(replay.headers.get('x-cache-lookup'), 'HIT - Idempotent');
+  assert.equal(await Goal.countDocuments({ userId: userA, profileId: profile._id }), 1);
+  assert.equal(String(replayBody.goal._id), String((await Goal.findOne({ userId: userA, profileId: profile._id }).lean())._id));
+  assert.equal(await IdempotencyKey.countDocuments({ userId: userA, operation: 'goals.create', status: 'DONE' }), 1);
+});
+
+test('committed goal update reconciles newer allocation without returning historical calculations as current', async () => {
+  const profile = await createFixture();
+  const createResponse = await submitGoal(profile, 'Ignore the profile during goal-update reconciliation');
+  const created = await createResponse.json();
+  assert.equal(createResponse.status, 201, JSON.stringify(created));
+  const goalId = String(created.goal._id);
+  const barrier = createBarrier();
+  let paused = false;
+  const uninstall = installFinancialStateTestHook(async boundary => {
+    if (boundary === 'goal.update.afterCommitBeforeResponse' && !paused) {
+      paused = true;
+      await barrier.pause();
+    }
+  });
+  const pendingResponse = patchGoal(goalId, {
+    expectedVersion: created.goal.version,
+    priority: 'Critical',
+  });
+  try {
+    await barrier.entered;
+    const rebalance = await createManualAllocationRevision(await rebalanceInput(profile, 'goal-update-post-commit-race'));
+    assert.equal(rebalance.revision.revision, 2);
+  } finally {
+    barrier.release();
+    uninstall();
+  }
+
+  const response = await pendingResponse;
+  const body = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.equal(body.goal.version, created.goal.version + 1);
+  assert.equal(body.goal.priority, 'Critical');
+  assert.equal(body.goal.calculation_freshness.fresh, false);
+  assert.equal(body.goal.recommended_sip, null);
+  assert.equal(body.goal.probability_of_success, null);
+});
+
+test('committed goal update reports unreconciled integrity failure instead of ordinary mutation failure', async () => {
+  const profile = await createFixture();
+  const createResponse = await submitGoal(profile, 'Ignore the profile during goal-update corruption');
+  const created = await createResponse.json();
+  assert.equal(createResponse.status, 201, JSON.stringify(created));
+  const goalId = String(created.goal._id);
+  const uninstall = installFinancialStateTestHook(async boundary => {
+    if (boundary === 'goal.update.afterCommitBeforeResponse') {
+      await RecommendationState.deleteOne({ userId: userA, profileId: profile._id });
+    }
+  });
+  let response;
+  try {
+    response = await patchGoal(goalId, {
+      expectedVersion: created.goal.version,
+      priority: 'Critical',
+    });
+  } finally {
+    uninstall();
+  }
+  const body = await response.json();
+  assert.equal(response.status, 503, JSON.stringify(body));
+  assert.equal(body.code, 'COMMITTED_BUT_RESPONSE_RECONCILIATION_FAILED');
+  assert.equal(body.details.operation_committed, true);
+  assert.equal(Object.hasOwn(body, 'goal'), false);
+  const stored = await Goal.findById(goalId).lean();
+  assert.equal(stored.version, created.goal.version + 1);
+  assert.equal(stored.priority, 'Critical');
+});
+
+test('goal recalculation cannot overwrite an intervening goal version update', async () => {
+  const profile = await createFixture();
+  const createResponse = await submitGoal(profile, 'Ignore the profile during goal CAS test');
+  const created = await createResponse.json();
+  assert.equal(createResponse.status, 201, JSON.stringify(created));
+  const goalId = String(created.goal._id);
+  const barrier = createBarrier();
+  let paused = false;
+  const uninstall = installFinancialStateTestHook(async boundary => {
+    if (boundary === 'goal.calculation.beforeStateRecheck' && !paused) {
+      paused = true;
+      await barrier.pause();
+    }
+  });
+  const staleRecalculation = patchGoal(goalId, {
+    expectedVersion: created.goal.version,
+    target_amount: 800000,
+  });
+  try {
+    await barrier.entered;
+    const concurrentPriority = await patchGoal(goalId, {
+      expectedVersion: created.goal.version,
+      priority: 'Critical',
+    });
+    const concurrentBody = await concurrentPriority.json();
+    assert.equal(concurrentPriority.status, 200, JSON.stringify(concurrentBody));
+    assert.equal(concurrentBody.goal.version, created.goal.version + 1);
+    assert.equal(concurrentBody.goal.priority, 'Critical');
+  } finally {
+    barrier.release();
+    uninstall();
+  }
+  const staleResponse = await staleRecalculation;
+  const staleBody = await staleResponse.json();
+  assert.equal(staleResponse.status, 409, JSON.stringify(staleBody));
+  assert.equal(staleBody.code, 'GOAL_VERSION_CONFLICT');
+  const stored = await Goal.findById(goalId).lean();
+  assert.equal(stored.version, created.goal.version + 1);
+  assert.equal(stored.target_amount, created.goal.target_amount, 'the losing Monte Carlo result cannot overwrite newer goal state');
+  assert.equal(stored.priority, 'Critical');
+});
+
+test('goal advice generated for an older goal version is rejected before persistence', async () => {
+  const profile = await createFixture();
+  const createResponse = await submitGoal(profile, 'Ignore the profile during advice CAS test');
+  const created = await createResponse.json();
+  assert.equal(createResponse.status, 201, JSON.stringify(created));
+  const goalId = String(created.goal._id);
+  const before = await Goal.findById(goalId).lean();
+  const barrier = createBarrier();
+  let paused = false;
+  const uninstall = installFinancialStateTestHook(async boundary => {
+    if (boundary === 'goal.advisory.beforePersistence' && !paused) {
+      paused = true;
+      await barrier.pause();
+    }
+  });
+  const staleAdvice = fetch(`${baseUrl}/api/goals/${goalId}/refresh-advice`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${signToken(userA)}` },
+  });
+  try {
+    await barrier.entered;
+    const concurrentPriority = await patchGoal(goalId, {
+      expectedVersion: before.version,
+      priority: 'Critical',
+    });
+    assert.equal(concurrentPriority.status, 200);
+  } finally {
+    barrier.release();
+    uninstall();
+  }
+  const response = await staleAdvice;
+  const body = await response.json();
+  assert.equal(response.status, 409, JSON.stringify(body));
+  assert.equal(body.code, 'GOAL_VERSION_CONFLICT');
+  const stored = await Goal.findById(goalId).lean();
+  assert.equal(stored.version, before.version + 1);
+  assert.equal(stored.priority, 'Critical');
+  assert.equal(stored.gemini_advice, before.gemini_advice, 'advice based on the prior goal version must not overwrite stored advice');
+  assert.equal(stored.advisoryMetadata.goalVersion, before.advisoryMetadata.goalVersion);
+});
+
+test('goal delete requires and atomically enforces the expected resource version', async () => {
+  const profile = await createFixture();
+  const createResponse = await submitGoal(profile, 'Ignore the profile during delete CAS test');
+  const created = await createResponse.json();
+  assert.equal(createResponse.status, 201, JSON.stringify(created));
+  const goalId = String(created.goal._id);
+  const updateResponse = await patchGoal(goalId, { expectedVersion: created.goal.version, priority: 'Critical' });
+  assert.equal(updateResponse.status, 200);
+  const updated = await updateResponse.json();
+  assert.equal(updated.goal.version, created.goal.version + 1);
+
+  const staleDelete = await fetch(`${baseUrl}/api/goals/${goalId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${signToken(userA)}`, 'If-Match': String(created.goal.version) },
+  });
+  const staleBody = await staleDelete.json();
+  assert.equal(staleDelete.status, 409, JSON.stringify(staleBody));
+  assert.equal(staleBody.code, 'GOAL_VERSION_CONFLICT');
+  assert.ok(await Goal.exists({ _id: goalId, userId: userA }), 'stale delete must preserve the goal');
+
+  const currentDelete = await fetch(`${baseUrl}/api/goals/${goalId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${signToken(userA)}`, 'If-Match': String(updated.goal.version) },
+  });
+  const currentBody = await currentDelete.json();
+  assert.equal(currentDelete.status, 200, JSON.stringify(currentBody));
+  assert.equal(currentBody.deleted, true);
+  assert.equal(await Goal.exists({ _id: goalId, userId: userA }), null, 'current-version delete must remove the goal');
 });
 
 test('tampering with any hashed allocation-transition fact invalidates audit and current-state resolution', async () => {

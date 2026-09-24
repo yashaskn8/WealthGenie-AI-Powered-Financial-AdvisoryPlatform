@@ -82,7 +82,9 @@ test('instruments route validates public query inputs', async () => {
     const { response, body } = await jsonFetch(`${baseUrl}/api/instruments?type=BadType`);
 
     assert.equal(response.status, 400);
-    assert.match(body.error, /Invalid instrument type/);
+    assert.equal(body.code, 'VALIDATION_ERROR');
+    assert.ok(body.request_id);
+    assert.ok(body.details.some(issue => /type.*one of/i.test(issue)));
   });
 });
 

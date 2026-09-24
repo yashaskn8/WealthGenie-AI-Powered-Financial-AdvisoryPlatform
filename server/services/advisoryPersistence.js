@@ -44,6 +44,22 @@ function historicalResponseSnapshot(response) {
 async function ensureAdvisoryPersistenceReady() {
   if (!advisoryPersistenceReady) {
     advisoryPersistenceReady = (async () => {
+      // Earlier versions attached a five-minute TTL to generic idempotency
+      // records. Such expiry would reopen committed create operations to
+      // duplicate execution, so remove only that obsolete TTL index before
+      // initializing the durable operation collection.
+      try {
+        const indexes = await IdempotencyKey.collection.indexes();
+        for (const index of indexes) {
+          if (index.expireAfterSeconds !== undefined
+              && index.key?.createdAt === 1
+              && Object.keys(index.key).length === 1) {
+            await IdempotencyKey.collection.dropIndex(index.name);
+          }
+        }
+      } catch (error) {
+        if (error.code !== 26 && error.codeName !== 'NamespaceNotFound') throw error;
+      }
       await Promise.all([
         FinancialProfile.init(),
         Recommendation.init(),
@@ -306,9 +322,13 @@ export async function persistAdvisoryAtomically({
         _id: idempotencyClaim.operationId,
         status: 'LOCK',
         requestHash: idempotencyClaim.requestHash,
+        lockOwnerId: idempotencyClaim.ownerToken,
       }, {
         $set: {
           status: 'DONE',
+          lockOwnerId: null,
+          leaseExpiresAt: null,
+          committedAt: new Date(),
           response: {
             status: 200,
             headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -326,6 +346,7 @@ export async function persistAdvisoryAtomically({
     });
 
     transactionCommitted = true;
+    clearInterval(idempotencyClaim?.heartbeat);
     await testHooks.afterCommitBeforeReconcile?.({
       recommendationId: committedRecommendationId,
       recommendationGeneration: committedRecommendationGeneration,

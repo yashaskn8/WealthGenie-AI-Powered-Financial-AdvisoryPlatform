@@ -14,6 +14,7 @@ import Goal from '../models/Goal.js';
 import User from '../models/User.js';
 import ConversationHistory from '../models/ConversationHistory.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
+import { installMockChatSessionStore } from './helpers/mockChatSessionStore.js';
 
 const mockUserId = '60d5ecb8b3b3a72d9c8e4a11';
 const mockSessionId = 'test-session-123';
@@ -66,6 +67,7 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
   let originalEnvNvidia;
   let originalPrimaryProvider;
   let savedMessages = [];
+  let restoreChatStore;
 
   beforeEach(() => {
     originalPost = axios.post;
@@ -120,9 +122,18 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
         return true;
       },
     });
+    restoreChatStore = installMockChatSessionStore(async () => ({
+      userId: mockUserId,
+      profileId: mockProfile._id,
+      profileVersion: 1,
+      profileInputHash: null,
+      messages: savedMessages,
+      cumulative_tokens: 0,
+    }));
   });
 
   afterEach(() => {
+    restoreChatStore?.();
     axios.post = originalPost;
     FinancialProfile.findOne = originalProfileFindOne;
     Recommendation.findOne = originalRecFindOne;

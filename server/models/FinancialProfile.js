@@ -1,11 +1,14 @@
 import mongoose from 'mongoose';
 import { assessSuitabilityRisk } from '../services/riskProfiler.js';
+import { optionalUniqueIndex } from '../config/mongoCompatibility.js';
 
 const CORE_GOALS = ['Retirement', 'Wealth Growth', 'Tax Saving', 'Emergency Fund'];
 const RISK_LEVELS = ['Conservative', 'Conservative-Moderate', 'Moderate', 'Moderate-Aggressive', 'Aggressive'];
 
 const financialProfileSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  idempotencyOperationId: { type: String, immutable: true },
+  idempotencyRequestHash: { type: String, immutable: true, match: /^[a-f0-9]{64}$/ },
 
   // Frozen canonical profile. Supplemental facts are stored as explicit nulls
   // when users leave them unknown; they are never imputed as zero.
@@ -90,5 +93,7 @@ financialProfileSchema.pre('validate', function validateFrozenRelationships(next
 });
 
 financialProfileSchema.index({ userId: 1, createdAt: -1 });
+const idempotencyIndex = optionalUniqueIndex('idempotencyOperationId', 'unique_profile_create_idempotency_operation');
+financialProfileSchema.index(idempotencyIndex.key, idempotencyIndex.options);
 
 export default mongoose.model('FinancialProfile', financialProfileSchema);

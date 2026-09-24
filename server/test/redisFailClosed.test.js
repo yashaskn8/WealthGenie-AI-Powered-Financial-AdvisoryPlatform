@@ -328,26 +328,23 @@ test('Redis fail-open: getCache/setCache/setCacheNX return gracefully when Redis
 // ══════════════════════════════════════════════════════════════════════
 // 8. Idempotency — falls back to MongoDB when Redis is down
 // ══════════════════════════════════════════════════════════════════════
-test('Redis fail-open: Idempotency middleware falls back gracefully', async () => {
+test('Mutation idempotency: missing key fails closed and never invokes the mutation', async () => {
   setRedisAvailable(false);
   setRedisClient(null);
 
   // Import and invoke the middleware directly
   const { idempotency } = await import('../middleware/idempotency.js');
-  const mw = idempotency();
-
-  // Without idempotency-key header, it just calls next()
+  const mw = idempotency({ operation: 'test.mutation', resolveReplay: async () => ({}) });
   const req = { headers: {}, user: { userId: 'test-user' } };
-  const res = {};
+  const res = {
+    statusCode: 200,
+    status(code) { this.statusCode = code; return this; },
+    setHeader() { return this; },
+    json(body) { this.body = body; return this; },
+  };
   let nextCalled = false;
-
-  await new Promise((resolve) => {
-    mw(req, res, () => {
-      nextCalled = true;
-      resolve();
-    });
-  });
-
-  console.log(`[REDIS-FC-8] Idempotency without key, Redis down: nextCalled=${nextCalled}`);
-  assert.ok(nextCalled, 'Idempotency middleware must proceed when no key provided');
+  await mw(req, res, () => { nextCalled = true; });
+  assert.equal(nextCalled, false, 'A durable mutation must not run without an idempotency key');
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.code, 'INVALID_IDEMPOTENCY_KEY');
 });

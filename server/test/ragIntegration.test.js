@@ -16,6 +16,7 @@ import Goal from '../models/Goal.js';
 import ConversationHistory from '../models/ConversationHistory.js';
 import User from '../models/User.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
+import { installMockChatSessionStore } from './helpers/mockChatSessionStore.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret-wealthgenie-2026';
 process.env.JWT_SECRET = JWT_SECRET;
@@ -44,6 +45,7 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
   let originalConvFindOne;
   let originalUserFindById;
   let originalEnvironment;
+  let restoreChatStore;
 
   beforeEach(() => {
     originalProfileFindOne = FinancialProfile.findOne;
@@ -84,6 +86,17 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
       messages: [],
       save: async () => true,
     });
+    restoreChatStore = installMockChatSessionStore(async ({ userId, sessionId }) => ({
+      userId,
+      profileId: mockProfile._id,
+      profileVersion: mockProfile.version || 1,
+      session_id: sessionId,
+      messages: [],
+      message_sequence: 0,
+      session_version: 1,
+      cumulative_tokens: 0,
+      reserved_tokens: 0,
+    }));
 
     User.findById = () => ({
       lean: async () => ({ name: 'Test User', email: 'test@example.com' }),
@@ -95,6 +108,7 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
     Recommendation.findOne = originalRecFindOne;
     Goal.find = originalGoalFind;
     ConversationHistory.findOne = originalConvFindOne;
+    restoreChatStore?.();
     User.findById = originalUserFindById;
     if (originalEnvironment.nvidia === undefined) delete process.env.NVIDIA_API_KEY; else process.env.NVIDIA_API_KEY = originalEnvironment.nvidia;
     if (originalEnvironment.gemini === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = originalEnvironment.gemini;
@@ -151,6 +165,8 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
       userId: mockUserId,
       profileId: new mongoose.Types.ObjectId(),
       session_id: 'rag-test-session-001',
+      profileVersion: 1,
+      profileInputHash: 'a'.repeat(64),
       messages: [
         {
           role: 'user',

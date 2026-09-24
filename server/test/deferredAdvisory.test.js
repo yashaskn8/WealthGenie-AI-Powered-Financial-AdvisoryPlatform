@@ -321,7 +321,9 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
 
     assert.equal(res.status, 409);
     const body = await res.json();
-    assert.equal(body.status, 'GENERATING');
+    assert.equal(body.code, 'ADVISORY_GENERATION_IN_PROGRESS');
+    assert.equal(body.details.status, 'GENERATING');
+    assert.ok(body.request_id);
   });
 
   await t.test('14. Retrying is permitted when advisory status is FAILED', async () => {

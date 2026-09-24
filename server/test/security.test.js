@@ -310,7 +310,7 @@ test('WG-003: PUT /api/profile/:profileId updates existing profile in-place', as
       const { response: postRes, body: postBody } = await jsonFetch(`${baseUrl}/api/profile/build`, {
         method: 'POST',
         body: JSON.stringify(VALID_PROFILE_BODY),
-        headers: { authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
       });
       assert.equal(postRes.status, 201);
       const profileId = postBody.profileId;
@@ -340,7 +340,7 @@ test('WG-007: POST /build and PUT /:profileId return identical key sets', async 
       const { body: postBody } = await jsonFetch(`${baseUrl}/api/profile/build`, {
         method: 'POST',
         body: JSON.stringify(VALID_PROFILE_BODY),
-        headers: { authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
       });
 
       const { body: putBody } = await jsonFetch(`${baseUrl}/api/profile/${postBody.profileId}`, {
@@ -368,7 +368,7 @@ test('WG-025: PUT /api/profile/:profileId requires version and returns 409 Confl
       const { body: postBody } = await jsonFetch(`${baseUrl}/api/profile/build`, {
         method: 'POST',
         body: JSON.stringify(VALID_PROFILE_BODY),
-        headers: { authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
       });
 
       // Omitting version should fail validation (400)

@@ -587,8 +587,13 @@ export async function simulateGoal(goalId, monthlyContribution, options = {}) {
   return request('POST', `/goals/${goalId}/simulate`, { monthly_contribution: monthlyContribution }, options);
 }
 
-export async function deleteGoal(goalId) {
-  return request('DELETE', `/goals/${goalId}`);
+export async function deleteGoal(goalId, expectedVersion) {
+  if (!Number.isSafeInteger(Number(expectedVersion)) || Number(expectedVersion) < 1) {
+    throw new TypeError('A current goal version is required to delete this goal.');
+  }
+  return request('DELETE', `/goals/${goalId}`, null, {
+    headers: { 'If-Match': `"${Number(expectedVersion)}"` },
+  });
 }
 
 // ─── HEALTH ──────────────────────────────────────────────

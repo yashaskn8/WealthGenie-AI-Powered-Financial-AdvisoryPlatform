@@ -63,7 +63,7 @@ function advisoryFreshness(goal, state, calculationFreshness) {
     'goalId', 'profileId', 'recommendationId', 'allocationRevision', 'allocationRevisionId',
     'portfolioFingerprint', 'recommendationFingerprint', 'profileInputHash',
     'recommendationPolicyVersion', 'regulatoryRuleVersion', 'returnAssumptionHash',
-    'profileVersion', 'goalCalculationFingerprint', 'generatedAt',
+    'profileVersion', 'goalVersion', 'goalCalculationFingerprint', 'generatedAt',
     'goalCalculationInputFingerprint', 'goalCalculationPolicyVersion',
   ];
   if (required.some(field => metadata[field] === null || metadata[field] === undefined || metadata[field] === '')) {
@@ -81,6 +81,7 @@ function advisoryFreshness(goal, state, calculationFreshness) {
     && metadata.regulatoryRuleVersion === state.recommendation.regulatoryRuleVersion
     && metadata.returnAssumptionHash === state.allocationRevision.returnAssumptionHash
     && Number(metadata.profileVersion) === Number(state.profileVersion)
+    && Number(metadata.goalVersion) === Number(goal.version ?? 1)
     && metadata.goalCalculationInputFingerprint === buildGoalCalculationInputFingerprint(goal)
     && metadata.goalCalculationPolicyVersion === GOAL_CALCULATION_POLICY_VERSION
     && metadata.goalCalculationFingerprint === buildGoalCalculationFingerprint(goal);
@@ -108,6 +109,23 @@ const DERIVED_FIELDS = Object.freeze([
   'inflation_assumption',
 ]);
 
+const GOAL_PUBLIC_FIELDS = Object.freeze([
+  'profileId', 'version', 'goal_name', 'target_amount', 'inflation_adjusted_target',
+  'target_date', 'current_savings', 'recommended_sip', 'simulated_monthly_contribution',
+  'recommended_instrument', 'probability_of_success', 'gap_amount', 'priority', 'status',
+  'monte_carlo_summary', 'chart_data', 'mc_computed_at', 'years_remaining',
+  'simulation_classification', 'return_basis', 'return_data_class',
+  'return_assumption_version', 'return_assumption_source', 'observed_market_fact',
+  'provider_forecast', 'inflation_assumption', 'sourceRecommendationId',
+  'sourceAllocationRevision', 'sourceAllocationRevisionId', 'sourceProfileInputHash',
+  'sourceProfileVersion', 'sourceModelVersion', 'sourceRecommendationPolicyVersion',
+  'sourceRegulatoryRuleVersion', 'sourceReturnAssumptionVersion',
+  'sourceReturnAssumptionHash', 'sourceReturnAssumptionSource',
+  'sourceRecommendationFingerprint', 'sourcePortfolioFingerprint',
+  'sourceGoalCalculationInputFingerprint', 'sourceGoalCalculationPolicyVersion',
+  'calculationFreshness', 'gemini_advice', 'createdAt', 'updatedAt',
+]);
+
 /**
  * Build every goal response from the current canonical financial state.
  * A stale or unavailable source never gets a warning-only response: all
@@ -120,9 +138,13 @@ export function buildCurrentGoalResponse(goal, { state = null } = {}) {
     : { fresh: false, reasonCodes: ['SOURCE_MISSING'] };
   const fresh = calculationFreshness.fresh === true;
   const advisory = advisoryFreshness(raw, state, calculationFreshness);
-  const response = {
-    ...raw,
-    goalId: raw._id ? String(raw._id) : raw.goalId,
+  const response = Object.fromEntries(GOAL_PUBLIC_FIELDS
+    .filter(field => raw[field] !== undefined)
+    .map(field => [field, raw[field]]));
+  Object.assign(response, {
+    _id: raw._id ? String(raw._id) : undefined,
+    goalId: raw._id ? String(raw._id) : String(raw.goalId || ''),
+    version: Number.isSafeInteger(raw.version) && raw.version > 0 ? raw.version : 1,
     chartData: fresh ? (raw.chart_data || []) : [],
     calculation_freshness: calculationFreshness,
     advisory_freshness: advisory,
@@ -144,7 +166,7 @@ export function buildCurrentGoalResponse(goal, { state = null } = {}) {
       goalCalculationPolicyVersion: raw.sourceGoalCalculationPolicyVersion || null,
     },
     gemini_advice: advisory.fresh === true ? raw.gemini_advice : null,
-  };
+  });
   if (!fresh) {
     for (const field of DERIVED_FIELDS) response[field] = field === 'chart_data' ? [] : null;
     response.chartData = [];
@@ -168,6 +190,7 @@ export function buildGoalAdvisoryMetadata({ goal, state, generatedAt = new Date(
     regulatoryRuleVersion: state.recommendation.regulatoryRuleVersion,
     returnAssumptionHash: state.allocationRevision.returnAssumptionHash,
     profileVersion: state.profileVersion,
+    goalVersion: Number(goal.version ?? 1),
     goalCalculationFingerprint: buildGoalCalculationFingerprint(goal),
     goalCalculationInputFingerprint: buildGoalCalculationInputFingerprint(goal),
     goalCalculationPolicyVersion: GOAL_CALCULATION_POLICY_VERSION,

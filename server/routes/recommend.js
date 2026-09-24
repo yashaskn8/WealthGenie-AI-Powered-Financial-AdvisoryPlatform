@@ -1,7 +1,12 @@
 import { Router } from 'express';
 import crypto from 'node:crypto';
 import { verifyJWT, isValidObjectId } from '../middleware/authMiddleware.js';
-import { asyncHandler, createError } from '../middleware/errorHandler.js';
+import { asyncHandler, createError, sendError } from '../middleware/errorHandler.js';
+import {
+  recommendationAuditQuerySchema,
+  recommendationCurrentQuerySchema,
+  validateQuery,
+} from '../validation/schemas.js';
 import {
   recommendationRequestSchema,
   recommendationWeightsSchema,
@@ -201,6 +206,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
     userId: req.user.userId,
     profileId: stored._id,
     payload: { profileId },
+    operation: 'recommendation.generate',
   });
   const tIdempotency = performance.now() - tIdempotencyStart;
   if (idempotencyClaim.state === 'REPLAY') {
@@ -257,7 +263,7 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
   }
 }));
 
-router.get('/current', verifyJWT, asyncHandler(async (req, res) => {
+router.get('/current', verifyJWT, validateQuery(recommendationCurrentQuerySchema), asyncHandler(async (req, res) => {
   const { profileId } = req.query;
   if (!isValidObjectId(profileId)) {
     throw createError(400, 'Invalid profile ID format', 'Invalid profile ID.');
@@ -470,9 +476,9 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
       }));
     }
 
-    return res.status(409).json({
-      error: 'Advisory generation already in progress',
+    return sendError(req, res, 409, 'Advisory generation already in progress.', 'ADVISORY_GENERATION_IN_PROGRESS', {
       status: 'GENERATING',
+      recommendationId: String(recommendation._id),
     });
   }
 
@@ -582,12 +588,12 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
   }
 }));
 
-router.get('/audit', verifyJWT, asyncHandler(async (req, res) => {
-  const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 20, 1), 100);
-  const skip = Math.max(Number.parseInt(req.query.skip, 10) || 0, 0);
+router.get('/audit', verifyJWT, validateQuery(recommendationAuditQuerySchema), asyncHandler(async (req, res) => {
+  const limit = req.query.limit === undefined ? 20 : Number(req.query.limit);
+  const skip = req.query.skip === undefined ? 0 : Number(req.query.skip);
   const query = { userId: req.user.userId };
   if (req.query.correlationId) query.correlationId = req.query.correlationId;
-  if (req.query.profileId && isValidObjectId(req.query.profileId)) query.profileId = req.query.profileId;
+  if (req.query.profileId) query.profileId = req.query.profileId;
   const [records, total] = await Promise.all([
     AuditRecord.find(query).sort({ timestamp: -1 }).skip(skip).limit(limit).lean(),
     AuditRecord.countDocuments(query),
@@ -694,14 +700,43 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
       allocationRevision: revisionResult.revision.revision,
     });
   });
-  const committedState = await requireFreshRecommendationState({
+  await reachFinancialStateTestHook('allocation.afterCommitBeforeReconcile', {
     userId: req.user.userId,
-    profileId: stored._id,
+    profileId: String(stored._id),
+    committedRecommendationId: String(recommendation._id),
+    committedAllocationRevisionId: String(revisionResult.revision._id),
   });
-  if (String(committedState.recommendation._id) !== String(recommendation._id)
-      || String(committedState.allocationRevision._id) !== String(revisionResult.revision._id)) {
-    throw createError(409, 'The allocation changed before the response could be reconciled.', 'Refresh the current portfolio before continuing.', {
-      code: 'ALLOCATION_STATE_CHANGED',
+  let committedState;
+  try {
+    // The write and audit chain have committed. Reconcile against the current
+    // canonical pointer; do not treat a valid later revision as a failed write.
+    committedState = await requireFreshRecommendationState({
+      userId: req.user.userId,
+      profileId: stored._id,
+    });
+  } catch (error) {
+    logger.error('Committed allocation revision could not be reconciled to verified current state', {
+      userId: String(req.user.userId),
+      profileId: String(stored._id),
+      committedRecommendationId: String(recommendation._id),
+      committedAllocationRevisionId: String(revisionResult.revision._id),
+      reasonCode: error.code || 'CURRENT_STATE_UNAVAILABLE',
+    });
+    throw createError(503, 'Allocation committed, but the current financial state could not be verified. Refresh before retrying.', 'The allocation was committed but could not be safely reconciled. Refresh the portfolio before retrying.', {
+      code: 'COMMITTED_BUT_RESPONSE_RECONCILIATION_FAILED',
+      details: { committed: true, reasonCode: error.code || 'CURRENT_STATE_UNAVAILABLE' },
+    });
+  }
+  const supersededBeforeResponse = String(committedState.recommendation._id) !== String(recommendation._id)
+    || String(committedState.allocationRevision._id) !== String(revisionResult.revision._id);
+  if (supersededBeforeResponse) {
+    logger.info('Committed allocation revision was superseded before response reconciliation', {
+      userId: String(req.user.userId),
+      profileId: String(stored._id),
+      committedRecommendationId: String(recommendation._id),
+      committedAllocationRevisionId: String(revisionResult.revision._id),
+      currentRecommendationId: String(committedState.recommendation._id),
+      currentAllocationRevisionId: String(committedState.allocationRevision._id),
     });
   }
   const currentResponse = buildCurrentRecommendationResponse({
@@ -719,6 +754,13 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
     ...currentResponse,
     status: 'success',
     message: 'Recommendation weights updated.',
+    operation_result: {
+      committed: true,
+      generated_recommendation_id: String(recommendation._id),
+      generated_allocation_revision: revisionResult.revision.revision,
+      generated_allocation_revision_id: String(revisionResult.revision._id),
+      superseded_before_response: supersededBeforeResponse,
+    },
   });
 }));
 

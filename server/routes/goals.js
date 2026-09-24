@@ -15,7 +15,7 @@ import {
   buildLlmFinancialContext,
 } from '../services/recommendationProfile.js';
 import { assessSuitabilityRisk } from '../services/riskProfiler.js';
-import { idempotency } from '../middleware/idempotency.js';
+import { completeMutationIdempotency, idempotency } from '../middleware/idempotency.js';
 import {
   PROJECTION_ASSUMPTION_DATA_CLASS,
   PROJECTION_ASSUMPTION_SOURCE,
@@ -169,6 +169,40 @@ function goalStateConflict() {
   );
 }
 
+function goalVersionConflict(expectedVersion) {
+  return createError(
+    409,
+    'The goal changed while this request was in progress.',
+    'This goal was updated elsewhere. Refresh it and retry your change.',
+    { code: 'GOAL_VERSION_CONFLICT', details: { expectedVersion } },
+  );
+}
+
+function goalVersionCondition(version) {
+  return version === 1
+    ? { $or: [{ version: 1 }, { version: { $exists: false } }] }
+    : { version };
+}
+
+async function updateGoalWithCAS(goal, { userId, expectedVersion, session = null } = {}) {
+  const update = goal.toObject({ depopulate: true, flattenMaps: true });
+  delete update._id;
+  delete update.__v;
+  delete update.version;
+  delete update.createdAt;
+  delete update.updatedAt;
+  const filter = { _id: goal._id, userId, ...goalVersionCondition(expectedVersion) };
+  let query = Goal.findOneAndUpdate(filter, { $set: { ...update, version: expectedVersion + 1 } }, {
+    new: true,
+    runValidators: true,
+    context: 'query',
+  });
+  if (session) query = query.session(session);
+  const updated = await query;
+  if (!updated) throw goalVersionConflict(expectedVersion);
+  return updated;
+}
+
 function plannedStateMatches(current, planned) {
   return Boolean(
     planned?.recommendation?._id
@@ -185,6 +219,39 @@ async function assertGoalPlanStateCurrent({ userId, profileId, profile, plannedS
   const current = await requireFreshRecommendationState({ userId, profileId, profile });
   if (!plannedStateMatches(current, plannedState)) throw goalStateConflict();
   return current;
+}
+
+function committedGoalReconciliationError(goal, cause) {
+  const error = createError(
+    503,
+    'The goal operation committed, but its current response could not be safely reconciled.',
+    'Your goal change was saved, but its current status could not be verified. Refresh before continuing.',
+    {
+      code: 'COMMITTED_BUT_RESPONSE_RECONCILIATION_FAILED',
+      details: { operation_committed: true, resource_type: 'Goal', goalId: String(goal._id) },
+    },
+  );
+  error.cause = cause;
+  return error;
+}
+
+async function resolveGoalResponseAfterCommit(goal, userId) {
+  let state;
+  try {
+    state = await resolveCurrentRecommendationState({
+      userId,
+      profileId: goal.profileId,
+      requireFresh: false,
+    });
+  } catch (error) {
+    throw committedGoalReconciliationError(goal, error);
+  }
+  if (state.provenance?.status !== 'PERSISTED_REVISION') {
+    throw committedGoalReconciliationError(goal, Object.assign(new Error('Canonical recommendation state integrity check failed.'), {
+      code: state.provenance?.reasonCode || state.provenance?.status || 'FINANCIAL_STATE_UNVERIFIABLE',
+    }));
+  }
+  return state;
 }
 
 async function holdGoalSourceState(session, { userId, profileId, state }) {
@@ -223,51 +290,70 @@ async function holdGoalSourceState(session, { userId, profileId, state }) {
   if (result.matchedCount !== 1) throw goalStateConflict();
 }
 
-async function persistGoalWithSourceState(goalData, { userId, profileId, sourceState, testHooks = {} } = {}) {
+async function persistGoalWithSourceState(goalData, { userId, profileId, sourceState, idempotencyClaim = null, testHooks = {} } = {}) {
   await Goal.init();
   const session = await mongoose.startSession();
   let created;
+  let transactionCommitted = false;
   try {
     await session.withTransaction(async () => {
       await holdGoalSourceState(session, { userId, profileId, state: sourceState });
       created = new Goal(goalData);
       await created.save({ session });
+      await reachFinancialStateTestHook('goal.create.afterInsertBeforeCommit', {
+        goalId: String(created._id),
+        session,
+        transactionActive: session.inTransaction(),
+      });
       await testHooks.afterGoalCreate?.(session, created);
+      if (idempotencyClaim) {
+        await completeMutationIdempotency(session, idempotencyClaim, {
+          resourceType: 'Goal', resourceId: created._id, status: 201,
+        });
+      }
     });
+    transactionCommitted = true;
   } finally {
-    await session.endSession();
+    try {
+      await session.endSession();
+    } catch (error) {
+      if (!transactionCommitted) throw error;
+      console.warn('[Goals] Session cleanup failed after committed create.', { error: error.message });
+    }
   }
   return created;
 }
 
-async function saveGoalWithSourceState(goal, { userId, profileId, sourceState } = {}) {
+async function saveGoalWithSourceState(goal, { userId, profileId, sourceState, expectedGoalVersion } = {}) {
   const session = await mongoose.startSession();
+  let updatedGoal;
+  let transactionCommitted = false;
   try {
     await session.withTransaction(async () => {
       await holdGoalSourceState(session, { userId, profileId, state: sourceState });
-      await goal.save({ session });
+      updatedGoal = await updateGoalWithCAS(goal, { userId, expectedVersion: expectedGoalVersion, session });
     });
+    transactionCommitted = true;
   } finally {
-    await session.endSession();
-  }
-  return goal;
-}
-
-async function resolveGoalCreateReplay(req, cachedBody) {
-  let cached = cachedBody;
-  if (Buffer.isBuffer(cached)) cached = cached.toString('utf8');
-  if (typeof cached === 'string') {
-    try { cached = JSON.parse(cached); } catch {
-      throw createError(503, 'Cached goal response cannot be reconciled.', 'Refresh your goals before continuing.', { code: 'IDEMPOTENCY_STATE_CORRUPT' });
+    try {
+      await session.endSession();
+    } catch (error) {
+      if (!transactionCommitted) throw error;
+      console.warn('[Goals] Session cleanup failed after committed update.', { error: error.message });
     }
   }
-  const goalId = cached?.goal?._id || cached?.goal?.goalId;
-  if (!isValidObjectId(goalId)) {
-    throw createError(503, 'Cached goal identity is unavailable.', 'Refresh your goals before continuing.', { code: 'IDEMPOTENCY_STATE_CORRUPT' });
-  }
-  const goal = await Goal.findOne({ _id: goalId, userId: req.user.userId }).lean();
+  return updatedGoal;
+}
+
+async function resolveGoalCreateReplay(req, operation) {
+  const goal = await Goal.findOne({
+    _id: operation.resourceId,
+    userId: req.user.userId,
+    idempotencyOperationId: operation._id,
+    idempotencyRequestHash: operation.requestHash,
+  }).lean();
   if (!goal) {
-    throw createError(409, 'The original goal is no longer available.', 'Refresh your goals before continuing.', { code: 'IDEMPOTENCY_RESOURCE_UNAVAILABLE' });
+    throw createError(503, 'Committed goal operation has no matching owned goal.', 'Refresh your goals before continuing.', { code: 'IDEMPOTENCY_STATE_CORRUPT' });
   }
   const state = await resolveCurrentRecommendationState({
     userId: req.user.userId,
@@ -312,7 +398,7 @@ async function calculateGoalPlan({ profile, profileId, userId, targetAmount, tar
   };
 }
 
-router.post('/create', verifyJWT, idempotency(300, { resolveReplay: resolveGoalCreateReplay }), validateStrict(customGoalSchema), asyncHandler(async (req, res) => {
+router.post('/create', verifyJWT, validateStrict(customGoalSchema), idempotency({ operation: 'goals.create', resolveReplay: resolveGoalCreateReplay }), asyncHandler(async (req, res) => {
   const { goal_name, target_amount, target_date, current_savings, profileId, priority } = req.body;
   const stored = await findOwnedProfile(profileId, req.user.userId);
   if (!stored) throw createError(404, 'Profile not found or access denied', 'Build a financial profile first.');
@@ -331,6 +417,9 @@ router.post('/create', verifyJWT, idempotency(300, { resolveReplay: resolveGoalC
   const data = {
     _id: new mongoose.Types.ObjectId(),
     userId: req.user.userId,
+    version: 1,
+    idempotencyOperationId: req.idempotencyClaim.operationId,
+    idempotencyRequestHash: req.idempotencyClaim.requestHash,
     profileId,
     goal_name,
     target_amount,
@@ -397,17 +486,21 @@ router.post('/create', verifyJWT, idempotency(300, { resolveReplay: resolveGoalC
       userId: req.user.userId,
       profileId,
       sourceState: currentState,
+      idempotencyClaim: req.idempotencyClaim,
     });
   } catch (error) {
     if (error.code === 11000) throw createError(409, `Duplicate goal name: ${goal_name}`, 'A goal with this name already exists.');
     throw error;
   }
-  void triggerPlanHealthCheck({ userId: req.user.userId, profileId });
-  const currentState = await resolveCurrentRecommendationState({
-    userId: req.user.userId,
-    profileId,
-    requireFresh: false,
+  req.idempotencyCommitted = true;
+  clearInterval(req.idempotencyClaim.heartbeat);
+  await reachFinancialStateTestHook('goal.create.afterCommitBeforeResponse', {
+    userId: String(req.user.userId),
+    goalId: String(goal._id),
+    operationId: req.idempotencyClaim.operationId,
   });
+  void triggerPlanHealthCheck({ userId: req.user.userId, profileId });
+  const currentState = await resolveGoalResponseAfterCommit(goal, req.user.userId);
   res.status(201).json({ goal: buildCurrentGoalResponse(goal, { state: currentState }) });
 }));
 
@@ -501,8 +594,9 @@ router.post('/:goalId/simulate', verifyJWT, validateStrict(goalSimulationSchema)
 
 router.patch('/:goalId/refresh-advice', verifyJWT, asyncHandler(async (req, res) => {
   if (!isValidObjectId(req.params.goalId)) throw createError(400, 'Invalid goalId', 'Invalid goal ID.');
-  const goal = await Goal.findOne({ _id: req.params.goalId, userId: req.user.userId });
+  let goal = await Goal.findOne({ _id: req.params.goalId, userId: req.user.userId });
   if (!goal) throw createError(404, 'Goal not found', 'Goal not found.');
+  const expectedGoalVersion = Number(goal.version ?? 1);
   const stored = await findOwnedProfile(goal.profileId, req.user.userId);
   if (!stored) throw createError(409, 'The goal profile is unavailable.', 'Financial profile unavailable.');
   const profile = buildRecommendationProfile(stored);
@@ -517,16 +611,28 @@ router.patch('/:goalId/refresh-advice', verifyJWT, asyncHandler(async (req, res)
   await reachFinancialStateTestHook('goal.advisory.beforePersistence', {
     userId: req.user.userId, profileId: goal.profileId, goalId: goal._id, sourceState: state,
   });
+  goal.version = expectedGoalVersion + 1;
   goal.advisoryMetadata = buildGoalAdvisoryMetadata({ goal, state });
-  await saveGoalWithSourceState(goal, {
+  goal = await saveGoalWithSourceState(goal, {
     userId: req.user.userId,
     profileId: goal.profileId,
     sourceState: state,
+    expectedGoalVersion,
   });
+  await reachFinancialStateTestHook('goal.advisory.afterCommitBeforeResponse', {
+    userId: String(req.user.userId), goalId: String(goal._id), sourceState: state,
+  });
+  const currentState = await resolveGoalResponseAfterCommit(goal, req.user.userId);
+  const currentGoal = buildCurrentGoalResponse(goal, { state: currentState.recommendation ? currentState : null });
   res.json({
-    goal: buildCurrentGoalResponse(goal, { state }),
+    goal: currentGoal,
     goalId: goal._id,
-    gemini_advice: goal.gemini_advice,
+    gemini_advice: currentGoal.gemini_advice,
+    operation_result: {
+      committed: true,
+      goal_version: Number(goal.version),
+      response_state: currentGoal.calculation_freshness?.fresh ? 'CURRENT' : 'STALE',
+    },
   });
 }));
 
@@ -534,6 +640,8 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
   if (!isValidObjectId(req.params.goalId)) throw createError(400, 'Invalid goalId', 'Invalid goal ID.');
   const goal = await Goal.findOne({ _id: req.params.goalId, userId: req.user.userId });
   if (!goal) throw createError(404, 'Goal not found', 'Goal not found.');
+  const expectedGoalVersion = req.body.expectedVersion;
+  if (Number(goal.version ?? 1) !== expectedGoalVersion) throw goalVersionConflict(expectedGoalVersion);
   const stored = await findOwnedProfile(goal.profileId, req.user.userId);
   if (!stored) throw createError(409, 'The goal profile is unavailable.', 'Financial profile unavailable.');
   const profile = buildRecommendationProfile(stored);
@@ -542,6 +650,7 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
   if (req.body.current_savings !== undefined) goal.current_savings = req.body.current_savings;
 
   let recalculationState = null;
+  let persistedGoal = goal;
   if (req.body.target_amount !== undefined || req.body.current_savings !== undefined) {
     const plan = await calculateGoalPlan({
       profile, profileId: goal.profileId, userId: req.user.userId,
@@ -603,30 +712,53 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
     await reachFinancialStateTestHook('goal.advisory.beforePersistence', {
       userId: req.user.userId, profileId: goal.profileId, goalId: goal._id, sourceState: currentState,
     });
+    goal.version = expectedGoalVersion + 1;
     goal.advisoryMetadata = buildGoalAdvisoryMetadata({ goal, state: currentState });
-    await saveGoalWithSourceState(goal, {
+    persistedGoal = await saveGoalWithSourceState(goal, {
       userId: req.user.userId,
       profileId: goal.profileId,
       sourceState: currentState,
+      expectedGoalVersion,
     });
   } else {
-    await goal.save();
+    goal.version = expectedGoalVersion + 1;
+    persistedGoal = await updateGoalWithCAS(goal, { userId: req.user.userId, expectedVersion: expectedGoalVersion });
   }
-  void triggerPlanHealthCheck({ userId: req.user.userId, profileId: goal.profileId });
-  const currentState = await resolveCurrentRecommendationState({
-    userId: req.user.userId,
-    profileId: goal.profileId,
-    requireFresh: false,
+  await reachFinancialStateTestHook('goal.update.afterCommitBeforeResponse', {
+    userId: String(req.user.userId), goalId: String(persistedGoal._id),
+    goalVersion: Number(persistedGoal.version),
   });
-  res.json({ success: true, goal: buildCurrentGoalResponse(goal, { state: currentState }) });
+  void triggerPlanHealthCheck({ userId: req.user.userId, profileId: goal.profileId });
+  const currentState = await resolveGoalResponseAfterCommit(persistedGoal, req.user.userId);
+  res.json({ success: true, goal: buildCurrentGoalResponse(persistedGoal, { state: currentState }) });
 }));
 
 router.delete('/:goalId', verifyJWT, asyncHandler(async (req, res) => {
   if (!isValidObjectId(req.params.goalId)) throw createError(400, 'Invalid goalId', 'Invalid goal ID.');
-  const goal = await Goal.findOneAndDelete({ _id: req.params.goalId, userId: req.user.userId });
-  if (!goal) throw createError(404, 'Goal not found', 'Goal not found.');
+  const expectedVersion = parseGoalIfMatch(req.get('If-Match'));
+  const current = await Goal.findOne({ _id: req.params.goalId, userId: req.user.userId });
+  if (!current) throw createError(404, 'Goal not found', 'Goal not found.');
+  if (Number(current.version ?? 1) !== expectedVersion) throw goalVersionConflict(expectedVersion);
+  const goal = await Goal.findOneAndDelete({
+    _id: req.params.goalId,
+    userId: req.user.userId,
+    ...goalVersionCondition(expectedVersion),
+  });
+  if (!goal) {
+    const stillOwned = await Goal.exists({ _id: req.params.goalId, userId: req.user.userId });
+    if (stillOwned) throw goalVersionConflict(expectedVersion);
+    throw createError(404, 'Goal not found', 'Goal not found.');
+  }
   void triggerPlanHealthCheck({ userId: req.user.userId, profileId: goal.profileId });
   res.json({ deleted: true, goalId: goal._id });
 }));
+
+function parseGoalIfMatch(value) {
+  const match = typeof value === 'string' ? value.match(/^(?:W\/)?"?([1-9]\d*)"?$/) : null;
+  if (!match || !Number.isSafeInteger(Number(match[1]))) {
+    throw createError(428, 'A valid If-Match goal version is required.', 'Refresh the goal before deleting it.', { code: 'GOAL_VERSION_REQUIRED' });
+  }
+  return Number(match[1]);
+}
 
 export default router;

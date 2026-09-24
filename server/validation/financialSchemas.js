@@ -1,4 +1,5 @@
 import Joi from 'joi';
+import { sendError } from '../middleware/errorHandler.js';
 import { taxCalculationContextSchema } from './taxSchemas.js';
 
 const objectId = Joi.string().pattern(/^[0-9a-fA-F]{24}$/).message('Invalid ID format');
@@ -24,7 +25,7 @@ export const recommendationWeightsSchema = Joi.object({
     : helpers.message({ custom: 'Recommendation weights must sum to exactly 1' });
 }).unknown(false);
 
-export const financialProfileSchema = Joi.object({
+export const financialProfileCreateSchema = Joi.object({
   monthly_take_home: Joi.number().greater(0).max(100000000).required(),
   monthly_savings: Joi.number().greater(0).max(100000000).required(),
   age: Joi.number().integer().min(18).max(80).required(),
@@ -48,7 +49,6 @@ export const financialProfileSchema = Joi.object({
     .items(Joi.string().valid(...investmentGoals))
     .min(1).max(investmentGoals.length).unique().required(),
   investment_horizon_years: Joi.number().integer().min(1).max(30).required(),
-  version: Joi.number().integer().min(1).optional(),
 }).custom((value, helpers) => {
   if (value.monthly_savings >= value.monthly_take_home) {
     return helpers.message({ custom: 'Monthly savings must be less than monthly take-home' });
@@ -56,11 +56,15 @@ export const financialProfileSchema = Joi.object({
   return value;
 }).unknown(false);
 
-export const financialProfileUpdateSchema = financialProfileSchema.keys({
+// Kept as a compatibility alias for the precompute route; this schema is also
+// strict and never accepts client-controlled version metadata.
+export const financialProfileSchema = financialProfileCreateSchema;
+
+export const financialProfileUpdateSchema = financialProfileCreateSchema.keys({
   version: Joi.number().integer().min(1).required(),
 });
 
-export const financialProfileCompletionSchema = financialProfileSchema.keys({
+export const financialProfileCompletionSchema = financialProfileCreateSchema.keys({
   candidateId: Joi.string().guid({ version: ['uuidv4'] }).optional(),
 });
 
@@ -169,17 +173,26 @@ export const personalizedRebalanceSchema = Joi.object({
 export const customGoalSchema = Joi.object({
   goal_name: Joi.string().trim().min(2).max(100).required(),
   target_amount: Joi.number().min(1000).max(10000000000).required(),
-  target_date: Joi.date().iso().required(),
+  // The public API and native date inputs use a date-only value. Keep parsing
+  // strict (convert:false) while rejecting impossible calendar dates.
+  target_date: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).custom((value, helpers) => {
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+      return helpers.error('date.format');
+    }
+    return value;
+  }).required(),
   current_savings: Joi.number().min(0).max(10000000000).required(),
   profileId: objectId.required(),
   priority: Joi.string().valid('Critical', 'High', 'Medium', 'Low').required(),
 }).unknown(false);
 
 export const customGoalUpdateSchema = Joi.object({
+  expectedVersion: Joi.number().integer().min(1).required(),
   target_amount: Joi.number().min(1000).max(10000000000).optional(),
   current_savings: Joi.number().min(0).max(10000000000).optional(),
   priority: Joi.string().valid('Critical', 'High', 'Medium', 'Low').optional(),
-}).min(1).unknown(false);
+}).min(2).unknown(false);
 
 export const goalSimulationSchema = Joi.object({
   monthly_contribution: Joi.number().greater(0).max(10000000).required(),
@@ -191,14 +204,11 @@ export function validateStrict(schema) {
       abortEarly: false,
       allowUnknown: false,
       stripUnknown: false,
-      convert: true,
+      convert: false,
     });
     if (error) {
-      return res.status(400).json({
-        success: false,
-        error: 'Validation failed',
-        code: 'VALIDATION_ERROR',
-        details: error.details.map(detail => detail.message),
+      return sendError(req, res, 400, 'Invalid request data.', 'VALIDATION_ERROR', {
+        issues: error.details.map(detail => ({ path: detail.path, type: detail.type })),
       });
     }
     req.body = value;

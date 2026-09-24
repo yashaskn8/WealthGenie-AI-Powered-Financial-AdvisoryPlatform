@@ -5,6 +5,7 @@
  */
 
 import logger from '../utils/logger.js';
+import { randomUUID } from 'node:crypto';
 
 const ERROR_CATEGORIES = {
   VALIDATION: 'VALIDATION_ERROR',
@@ -55,7 +56,11 @@ const CLIENT_MESSAGES = {
 };
 
 function requestId(req) {
-  return req?.correlationId || req?.headers?.['x-request-id'] || null;
+  if (req?.correlationId) return req.correlationId;
+  const provided = req?.headers?.['x-request-id'];
+  if (typeof provided === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(provided)) return provided;
+  if (req) req.correlationId = randomUUID();
+  return req?.correlationId || randomUUID();
 }
 
 /**

@@ -167,7 +167,7 @@ test('Chaos: MongoDB loss during a profile write returns 503 Service Unavailable
     const { response, body } = await jsonFetch(`${baseUrl}/api/profile/build`, {
       method: 'POST',
       body: JSON.stringify(VALID_PROFILE_BODY),
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
     });
 
     console.log(`[CHAOS-1] Response: status=${response.status}, body=${JSON.stringify(body)}`);
@@ -280,7 +280,7 @@ test('Chaos: ML service timeout / failure returns rule-based recommendations', a
     const { response: profileRes, body: profileBody } = await jsonFetch(`${baseUrl}/api/profile/build`, {
       method: 'POST',
       body: JSON.stringify(VALID_PROFILE_BODY),
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
     });
     console.log(`[CHAOS-3] Profile build: status=${profileRes.status}`);
     assert.equal(profileRes.status, 201, `Profile creation should succeed, got ${profileRes.status}`);
@@ -339,7 +339,7 @@ test('Chaos: all explanation providers offline returns grounded deterministic ad
     const { response: profileRes, body: profileBody } = await jsonFetch(`${baseUrl}/api/profile/build`, {
       method: 'POST',
       body: JSON.stringify(VALID_PROFILE_BODY),
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
     });
     console.log(`[CHAOS-4] Profile build: status=${profileRes.status}`);
     assert.equal(profileRes.status, 201);

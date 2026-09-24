@@ -2,6 +2,7 @@
   "test/advisoryPersistence.test.js",
   "test/auditChain.test.js",
   "test/auditTrail.test.js",
+  "test/chatSessionStore.integration.test.js",
   "test/authCookieSession.test.js",
   "test/authorization.test.js",
   "test/chaos.test.js",

@@ -1,8 +1,12 @@
 import mongoose from 'mongoose';
+import { optionalUniqueIndex } from '../config/mongoCompatibility.js';
 
 const GoalSchema = new mongoose.Schema({
-  userId:     { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  profileId:  { type: mongoose.Schema.Types.ObjectId, ref: 'FinancialProfile', required: true },
+  userId:     { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, immutable: true },
+  profileId:  { type: mongoose.Schema.Types.ObjectId, ref: 'FinancialProfile', required: true, immutable: true },
+  version: { type: Number, required: true, min: 1, default: 1, validate: Number.isInteger },
+  idempotencyOperationId: { type: String, immutable: true },
+  idempotencyRequestHash: { type: String, immutable: true, match: /^[a-f0-9]{64}$/ },
   goal_name:  { type: String, required: true, trim: true, maxlength: 100 },
   target_amount:  { type: Number, required: true, min: 1000 },
   inflation_adjusted_target: { type: Number },
@@ -70,10 +74,12 @@ const GoalSchema = new mongoose.Schema({
   },
   advisoryMetadata: { type: mongoose.Schema.Types.Mixed, default: null },
   gemini_advice: { type: String, maxlength: 2000 },
-}, { timestamps: true });
+}, { timestamps: true, optimisticConcurrency: true, strict: 'throw' });
 
 GoalSchema.index({ userId: 1, target_date: 1 });
 GoalSchema.index({ userId: 1, status: 1 });
+const idempotencyIndex = optionalUniqueIndex('idempotencyOperationId', 'unique_goal_create_idempotency_operation');
+GoalSchema.index(idempotencyIndex.key, idempotencyIndex.options);
 GoalSchema.index(
   { userId: 1, goal_name: 1 },
   { unique: true, collation: { locale: 'en', strength: 2 } }

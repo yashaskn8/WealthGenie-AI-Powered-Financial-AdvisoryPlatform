@@ -2,40 +2,31 @@ import { Router } from 'express';
 import { asyncHandler, sendError } from '../middleware/errorHandler.js';
 import { verifyJWT } from '../middleware/authMiddleware.js';
 import { rankWtiProfileSchema, validateStrict } from '../validation/financialSchemas.js';
+import { instrumentListQuerySchema, validateQuery } from '../validation/schemas.js';
 import Instrument from '../models/Instrument.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import { getCache, setCache } from '../config/redis.js';
 import { buildRecommendationProfile } from '../services/recommendationProfile.js';
+import { serializeCachedInstrumentPage, serializeInstrumentPage } from '../services/instrumentDto.js';
 
 const router = Router();
 
 // Allowed sort fields to prevent injection via sort parameter
 const ALLOWED_SORT_FIELDS = new Set(['name', 'interestRate', 'returns1yr', 'returns3yr', 'returns5yr', 'riskLevel', 'aumCr', 'expenseRatio']);
-const ALLOWED_TYPES = new Set(['FD', 'Mutual_Fund', 'ETF', 'Government', 'ELSS']);
 
 /**
  * GET /api/instruments [Public]
  * List instruments with filtering, sorting, and pagination.
  */
-router.get('/', asyncHandler(async (req, res) => {
+router.get('/', validateQuery(instrumentListQuerySchema), asyncHandler(async (req, res) => {
   const { type, sort, order, limit, page } = req.query;
 
-  // Validate type if provided
-  if (type && !ALLOWED_TYPES.has(type)) {
-    return sendError(
-      req,
-      res,
-      400,
-      `Invalid instrument type. Allowed: ${[...ALLOWED_TYPES].join(', ')}`,
-      'INSTRUMENT_TYPE_INVALID',
-    );
-  }
-
-  const cacheKey = `instruments:${type || 'all'}:${sort || 'name'}:${order || 'asc'}:${page || 1}:${limit || 20}`;
+  const cacheKey = `instruments:public-v2:${type || 'all'}:${sort || 'name'}:${order || 'asc'}:${page || 1}:${limit || 20}`;
 
   // Check Redis cache
   const cached = await getCache(cacheKey);
-  if (cached) return res.json({ ...cached, fromCache: true });
+  const cachedPage = serializeCachedInstrumentPage(cached);
+  if (cachedPage) return res.json(cachedPage);
 
   // Build query
   const query = {};
@@ -47,8 +38,8 @@ router.get('/', asyncHandler(async (req, res) => {
   const sortOrder = order === 'desc' ? -1 : 1;
 
   // Pagination with bounds
-  const pageSize = Math.min(Math.max(parseInt(limit) || 20, 1), 100);
-  const pageNum = Math.max(parseInt(page) || 1, 1);
+  const pageSize = limit === undefined ? 20 : Number(limit);
+  const pageNum = page === undefined ? 1 : Number(page);
   const skip = (pageNum - 1) * pageSize;
 
   const [instruments, total] = await Promise.all([
@@ -56,13 +47,7 @@ router.get('/', asyncHandler(async (req, res) => {
     Instrument.countDocuments(query),
   ]);
 
-  const result = {
-    instruments,
-    total,
-    page: pageNum,
-    pageSize,
-    totalPages: Math.ceil(total / pageSize),
-  };
+  const result = serializeInstrumentPage({ instruments, total, page: pageNum, pageSize });
 
   // Cache for 24 hours
   await setCache(cacheKey, result, 86400);

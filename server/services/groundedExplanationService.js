@@ -74,6 +74,13 @@ function userPrompt(question, evidencePacket) {
   });
 }
 
+// Counting UTF-8 bytes, not model-specific estimated tokens, intentionally
+// over-reserves bounded text input. The provider's output limit is 1,200.
+export function getGroundedExplanationTokenUpperBound({ question, evidencePacket }) {
+  const inputBytes = Buffer.byteLength(`${buildSystemPrompt()}\n${userPrompt(question, evidencePacket)}`, 'utf8');
+  return inputBytes + 1200 + 2048;
+}
+
 function citationFor(entry) {
   return {
     citation_id: entry.id,

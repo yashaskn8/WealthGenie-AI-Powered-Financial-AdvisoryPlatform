@@ -34,6 +34,14 @@ const MessageSchema = new mongoose.Schema({
     fallback_used: Boolean,
     prompt_injection_detected: Boolean,
     generated_at: Date,
+    message_sequence: { type: Number, min: 1 },
+    profileId: { type: mongoose.Schema.Types.ObjectId, ref: 'FinancialProfile' },
+    profileVersion: { type: Number, min: 1 },
+    profileInputHash: { type: String, match: /^[a-f0-9]{64}$/ },
+    recommendationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Recommendation' },
+    allocationRevisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'RecommendationAllocationRevision' },
+    recommendationFingerprint: { type: String, match: /^[a-f0-9]{64}$/ },
+    portfolioFingerprint: { type: String, match: /^[a-f0-9]{64}$/ },
   },
 });
 
@@ -48,12 +56,25 @@ const ConversationHistorySchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'FinancialProfile',
     required: true,
+    immutable: true,
   },
   session_id: {
     type: String,
     required: true,
-    index: true,
+    immutable: true,
+    maxlength: 100,
   },
+  profileVersion: { type: Number, min: 1, required: true, immutable: true },
+  profileInputHash: { type: String, required: true, match: /^[a-f0-9]{64}$/, immutable: true },
+  sourceRecommendationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Recommendation', default: null, immutable: true },
+  sourceAllocationRevisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'RecommendationAllocationRevision', default: null, immutable: true },
+  sourceRecommendationFingerprint: { type: String, match: /^[a-f0-9]{64}$/, default: null, immutable: true },
+  sourcePortfolioFingerprint: { type: String, match: /^[a-f0-9]{64}$/, default: null, immutable: true },
+  session_version: { type: Number, min: 1, default: 1 },
+  message_sequence: { type: Number, min: 0, default: 0 },
+  reserved_tokens: { type: Number, min: 0, default: 0 },
+  processing_owner_id: { type: String, default: null, select: false },
+  processing_lease_until: { type: Date, default: null, select: false },
   messages: [MessageSchema],
   created_at: { type: Date, default: Date.now },
   updated_at: { type: Date, default: Date.now },
@@ -78,5 +99,7 @@ ConversationHistorySchema.pre('save', function (next) {
 
 // Index for efficient session retrieval
 ConversationHistorySchema.index({ userId: 1, updated_at: -1 });
+ConversationHistorySchema.index({ userId: 1, session_id: 1 }, { unique: true, name: 'unique_user_chat_session' });
+ConversationHistorySchema.index({ userId: 1, is_active: 1, updated_at: -1 });
 
 export default mongoose.model('ConversationHistory', ConversationHistorySchema);

@@ -66,6 +66,21 @@ test('goal response suppresses derived values and advice when source freshness i
   assert.equal(response.advisory_freshness.fresh, false);
 });
 
+test('public goal DTO excludes owner and durable idempotency persistence fields', () => {
+  const response = buildCurrentGoalResponse({
+    ...goal(),
+    userId: 'private-user-id',
+    idempotencyOperationId: 'private-operation-id',
+    idempotencyRequestHash: 'e'.repeat(64),
+    internalReviewNotes: 'not part of the public contract',
+  });
+  assert.equal(response.userId, undefined);
+  assert.equal(response.idempotencyOperationId, undefined);
+  assert.equal(response.idempotencyRequestHash, undefined);
+  assert.equal(response.internalReviewNotes, undefined);
+  assert.equal(response.goalId, 'goal-1');
+});
+
 test('goal advisory metadata is accepted only for the exact current source state', () => {
   const currentGoal = goal();
   currentGoal.sourceGoalCalculationInputFingerprint = buildGoalCalculationInputFingerprint(currentGoal);
