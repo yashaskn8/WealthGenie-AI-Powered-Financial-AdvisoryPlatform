@@ -74,13 +74,11 @@ def test_soft_deleted_document_is_not_retrievable_or_served_from_response_cache(
     )
     embedder = DenseVectorEmbeddingProvider(dimension=64, enable_cache=False)
     ingestion = IngestionPipeline(embedder=embedder, vector_store=store, lifecycle_manager=manager)
-    ingestion.ingest_text(
-        text="Fixture evidence: SEBI provides mutual fund category guidance for investors.",
-        title="Cache lifecycle fixture",
-        source="https://www.sebi.gov.in/test/mutual-fund-guidance",
-        source_trust_tier="government_official",
-    )
-    query = RAGQueryRequest(question="What mutual fund category guidance does SEBI provide?")
+    from pathlib import Path
+
+    corpus_file = Path(__file__).parents[1] / "rag" / "data" / "corpus" / "income_tax_rules_2026_commencement.md"
+    ingestion.ingest_file(corpus_file)
+    query = RAGQueryRequest(question="When do the Income-tax Rules 2026 take effect?")
     retrieval = RAGPipeline(embedder=embedder, vector_store=store)
 
     first = retrieval.query(query)

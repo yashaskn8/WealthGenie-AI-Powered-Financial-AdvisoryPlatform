@@ -1,0 +1,39 @@
+{
+  "corpus_schema_version": "wealthgenie-rag-corpus-1.0.0",
+  "documents": [
+    {
+      "document_key": "income-tax-rules-2026-commencement",
+      "local_filename": "income_tax_rules_2026_commencement.md",
+      "content_sha256": "026b9c068c11f89bebd8451cbe7c6568cc2937b0ec19b4b18d327f70c7b78ab2",
+      "official_source_url": "https://www.incometax.gov.in/iec/foportal/sites/default/files/2026-03/En-Notified-IT-Rules-2026-20-03-2026.pdf",
+      "supporting_official_sources": [
+        "https://www.incometax.gov.in/iec/foportal/latest-news",
+        "https://www.incometax.gov.in/iec/foportal/help/all-topics/e-filing-services/objective-and-scope-new-act"
+      ],
+      "publishing_authority": "Central Board of Direct Taxes, Income Tax Department, Ministry of Finance, Government of India",
+      "jurisdiction": "IN",
+      "trust_tier": "government_official",
+      "publication_date": "2026-03-20",
+      "effective_from": "2026-04-01",
+      "effective_to": null,
+      "retrieved_at": "2026-09-24T17:54:34+05:30",
+      "document_version": "2026-03-20",
+      "supported_topics": [
+        "Income-tax Rules 2026 commencement",
+        "Tax Year 2026-27 statute identity",
+        "transition for earlier tax years"
+      ],
+      "excluded_topics": [
+        "tax slabs",
+        "tax rates",
+        "rebate",
+        "deductions",
+        "capital gains treatment",
+        "investment product tax classification"
+      ],
+      "supersedes": [],
+      "corpus_schema_version": "wealthgenie-rag-corpus-1.0.0"
+    }
+  ],
+  "manifest_sha256": "248ad8a8418f3e763b625625cc6746c93dc74783299f710bfcf58f08917bb1bf"
+}

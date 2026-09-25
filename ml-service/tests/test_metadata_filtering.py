@@ -4,6 +4,7 @@ Unit tests for document metadata schema, effective_date, source_trust_tier, and 
 
 import tempfile
 from pathlib import Path
+from rag.corpus_manifest import MANIFEST_FILENAME, load_corpus_manifest
 from rag.ingestion.pipeline import AdministrativeIngestionOverride, IngestionPipeline
 from rag.schema import DocumentMetadata
 from rag.vector_store.memory_vector_store import PersistentVectorStore
@@ -22,8 +23,8 @@ def test_document_metadata_schema_recency_fields():
     assert meta.source_trust_tier == "government_official"
 
 
-def test_ingestion_preserves_metadata_fields():
-    """Verifies IngestionPipeline retains effective_date and source_trust_tier on text chunks."""
+def test_unmanifested_official_claim_is_quarantined_not_promoted():
+    """A claimed official URL cannot create trusted regulatory evidence."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         index_file = Path(tmp_dir) / "test_meta_index.json"
         store = PersistentVectorStore(index_path=index_file, force_numpy=True)
@@ -36,12 +37,16 @@ def test_ingestion_preserves_metadata_fields():
             author="Income Tax Department",
             effective_date="2025-04-01",
             source_trust_tier="government_official",
+            administrative_override=AdministrativeIngestionOverride(
+                operator_id="metadata-test",
+                reason="Quarantine an unmanifested source claim for metadata testing.",
+            ),
         )
 
         assert len(store._chunks) > 0
         first_chunk = store._chunks[0]
         assert first_chunk.metadata.effective_date == "2025-04-01"
-        assert first_chunk.metadata.source_trust_tier == "government_official"
+        assert first_chunk.metadata.source_trust_tier == "administrative_override_untrusted"
 
 
 def test_metadata_filtering_by_trust_tier():
@@ -51,13 +56,9 @@ def test_metadata_filtering_by_trust_tier():
         store = PersistentVectorStore(index_path=index_file, force_numpy=True)
         pipeline = IngestionPipeline(vector_store=store)
 
-        pipeline.ingest_text(
-            text="Official CBDT Circular on Section 87A tax rebate threshold.",
-            title="Official Circular",
-            source="https://www.incometaxindia.gov.in/official/cbdt-circular",
-            effective_date="2025-04-01",
-            source_trust_tier="government_official",
-        )
+        corpus_dir = Path(__file__).parents[1] / "rag" / "data" / "corpus"
+        manifest = load_corpus_manifest(corpus_dir / MANIFEST_FILENAME, corpus_dir)
+        pipeline.ingest_file(corpus_dir / manifest["documents"][0]["local_filename"])
 
         pipeline.ingest_text(
             text="Third-party blog discussion on potential tax savings.",

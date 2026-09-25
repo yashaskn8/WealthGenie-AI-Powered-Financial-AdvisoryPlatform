@@ -13,6 +13,7 @@ Tests:
 
 import os
 import shutil
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -158,6 +159,33 @@ class TestModelRegistry:
         version_ids = {v["version_id"] for v in all_versions}
         assert v1_id in version_ids
         assert v2_id in version_ids
+
+    def test_sqlite_registry_rejects_two_active_models_for_one_architecture(
+        self, registry, fake_artifacts, sample_rigor_metrics
+    ):
+        first = registry.register_model(
+            model_architecture="active-unique-test",
+            artifact_path=fake_artifacts[0],
+            training_data_hash="hash-a",
+            training_timestamp="2026-01-01T00:00:00Z",
+            hyperparameters={},
+            metrics=sample_rigor_metrics["v1"],
+            set_active=True,
+        )
+        registry.register_model(
+            model_architecture="active-unique-test",
+            artifact_path=fake_artifacts[1],
+            training_data_hash="hash-b",
+            training_timestamp="2026-01-02T00:00:00Z",
+            hyperparameters={},
+            metrics=sample_rigor_metrics["v2"],
+            set_active=True,
+        )
+
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+            registry._get_conn().execute(
+                "UPDATE model_versions SET is_active = 1 WHERE version_id = ?", (first,)
+            )
 
     def test_rollback_blocks_on_tampered_artifact(
         self, registry, fake_artifacts, sample_rigor_metrics

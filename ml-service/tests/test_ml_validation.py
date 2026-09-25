@@ -139,12 +139,29 @@ def test_predict_endpoint_accepts_v4_and_rejects_v3(client, monkeypatch):
     assert client.post("/predict", json=stale, headers=headers).status_code == 422
 
 
-def test_random_forest_probability_indices_use_encoder_class_order():
+def test_random_forest_probability_indices_use_encoder_class_order(unqualified_bundle_factory):
     """Regression: sklearn's alphabetic encoder order must not be remapped to a hardcoded order."""
+    from model.artifacts.bundle import ArtifactBundleError
+
+    artifact_root = Path(__file__).parents[1] / "model"
+    bundle_dir, bundle_hash = unqualified_bundle_factory(
+        "RandomForest",
+        {
+            "model": artifact_root / "model.pkl",
+            "label_encoder": artifact_root / "label_encoder.pkl",
+            "metadata": artifact_root / "metadata.json",
+        },
+        bundle_id="rf-class-order",
+    )
     predictor = RandomForestPredictor()
-    predictor.load_artifacts()
-    if not predictor.is_loaded:
-        pytest.skip("RandomForest artifact is unavailable")
+    with pytest.raises(ArtifactBundleError, match="registry-pinned bundle manifest hash"):
+        RandomForestPredictor().load_artifacts()
+    predictor.load_artifacts(
+        bundle_dir=bundle_dir,
+        expected_bundle_hash=bundle_hash,
+        version_id="test-rf-class-order",
+        require_serving_qualified=False,
+    )
     request = PredictRequest.model_validate(canonical_payload())
     _, model_input = build_model_input(request)
     probabilities = predictor.predict_proba(model_input)[0]

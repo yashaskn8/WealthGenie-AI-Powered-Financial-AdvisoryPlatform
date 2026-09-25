@@ -111,3 +111,37 @@ def test_malformed_reference_histogram_is_unavailable(monkeypatch):
     assert result["reason"] == "DRIFT_REFERENCE_UNAVAILABLE"
     assert result["drift_detected"] is None
     assert result["retrain_triggered"] is False
+
+
+def test_production_drift_is_diagnostic_only_even_when_retrain_is_requested(monkeypatch):
+    reference = compute_reference_distributions(
+        generate_synthetic_feature_batch(n_samples=250, seed=71), FEATURE_NAMES
+    )
+    store = _Registry(reference)
+    observations = generate_synthetic_feature_batch(n_samples=150, seed=72)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setattr(
+        "model.registry.drift_monitor.run_drift_check",
+        lambda *_args, **_kwargs: {
+            "overall_verdict": "FAIL",
+            "drifted_features": [FEATURE_NAMES[0]],
+            "warned_features": [],
+            "per_feature": {FEATURE_NAMES[0]: {"psi": 0.5}},
+        },
+    )
+    monkeypatch.setattr(
+        "model.registry.drift_monitor.trigger_candidate_retrain",
+        lambda **kwargs: pytest.fail("production drift diagnostics must not train/register a candidate"),
+    )
+
+    result = check_drift_and_trigger_retrain(
+        architecture="RandomForest",
+        input_df=observations,
+        store=store,
+        force_retrain_on_drift=True,
+    )
+
+    assert result["drift_detected"] is True
+    assert result["retrain_triggered"] is False
+    assert result["candidate_version"] is None
+    assert result["retrain_suppressed_reason"] == "PRODUCTION_RETRAIN_DISABLED"

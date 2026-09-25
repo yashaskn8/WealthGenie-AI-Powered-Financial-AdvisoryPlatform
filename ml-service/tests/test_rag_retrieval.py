@@ -119,9 +119,14 @@ def test_get_retriever_factory(populated_vector_store):
 def test_rag_pipeline_hybrid_integration(populated_vector_store):
     store, embedder = populated_vector_store
     config = RAGConfig(retrieval_strategy="hybrid", fusion_mode="rrf")
+    from pathlib import Path
+    from rag.ingestion.pipeline import IngestionPipeline
+
+    corpus_file = Path(__file__).parents[1] / "rag" / "data" / "corpus" / "income_tax_rules_2026_commencement.md"
+    IngestionPipeline(embedder=embedder, vector_store=store).ingest_file(corpus_file)
 
     pipeline = RAGPipeline(embedder=embedder, vector_store=store, config=config)
-    req = RAGQueryRequest(question="What is the rebate under Section 87A?")
+    req = RAGQueryRequest(question="When do the Income-tax Rules 2026 take effect?")
     res = pipeline.query(req)
 
     assert res.grounded

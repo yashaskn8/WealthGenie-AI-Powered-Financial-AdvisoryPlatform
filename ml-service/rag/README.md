@@ -59,7 +59,7 @@ graph TD
 | **Context Management** | `rag/context/` | Semantic chunk deduplication (>85% similarity), adjacent chunk merging, and token/character budgeting. |
 | **Observability** | `rag/observability/` | Records per-stage execution latency, token counts, cache statistics, and exports JSON telemetry snapshots. |
 | **Caching Engine** | `rag/cache/` | Multi-tier TTL caching (response cache, retrieval cache, embedding cache) with tenant isolation. |
-| **Vector Store Hardening**| `rag/vector_store/` | Atomic `.tmp` file writes, SHA256 checksum integrity verification, `.bak` snapshot backups, and auto-recovery. |
+| **Vector Store Hardening**| `rag/vector_store/` | Local development uses the persistent file store; shared deployments use Mongo-backed chunks and a corpus revision check. Mongo indexes are migration-owned and verified read-only by the service. |
 | **Document Lifecycle** | `rag/lifecycle/` | Manages document versioning, soft deletion, hard deletion with vector chunk purging, and metadata updates. |
 | **Multi-Tenant Readiness** | `rag/schema.py`, `vector_store/`, `retrievers/` | Enforces strict `tenant_id` scope isolation across storage, retrieval, caching, and pipelines. |
 | **API Hardening** | `rag/router.py`, `main.py` | Sliding window rate limiting (60 req/min), HTTP security headers (`nosniff`, `DENY`), Pydantic validation, and standard error handling. |
@@ -132,6 +132,27 @@ All hyperparameters can be overridden via environment variables prefixed with `R
 ---
 
 ## 🧪 5. Testing & Verification
+
+### Shared-state database migration
+
+When `ML_STATE_BACKEND=mongodb` is selected, run the explicit Phase-3 migration
+once, after MongoDB is ready and before starting ML service replicas:
+
+```bash
+cd ml-service
+MONGODB_URI="$MONGODB_URI" python scripts/migrate_phase3_state.py
+```
+
+The migration installs the model-registry, vector-chunk, and GridFS indexes and
+records schema version `phase3_shared_state/1`. It refuses to create the
+one-active-model-per-architecture index when duplicate active records exist.
+Application startup only verifies the marker and index definitions; it does not
+create indexes or backfill registry state. The CI browser lifecycle and Kind
+deployment workflows run this one-shot migration before starting ML replicas.
+
+This migration does not, by itself, make document lifecycle state shared or
+make RAG ingestion transactional; those remain separate production-readiness
+work and must not be inferred from a successful index migration.
 
 Run the full platform test suite:
 ```bash

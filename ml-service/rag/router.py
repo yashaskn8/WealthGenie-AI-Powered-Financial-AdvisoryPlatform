@@ -4,13 +4,19 @@ Exposes enterprise RAG endpoints with rate-limiting, error handling, security he
 """
 
 import logging
+import os
 import threading
 import time
+from datetime import date
+from pathlib import Path
 from typing import Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from rag.config import RAGConfig
+from rag.corpus_manifest import MANIFEST_FILENAME, CorpusManifestError, current_documents, load_corpus_manifest
+from rag.embeddings.identity import EmbeddingIdentityError, normalize_embedding_identity
 from rag.ingestion.pipeline import IngestionPipeline, UntrustedSourceError
 from rag.lifecycle.manager import DocumentLifecycleManager
 from rag.retrieval.pipeline import RAGPipeline
@@ -84,6 +90,80 @@ def rag_health():
         "chunks_indexed": stats["total_chunks"],
         "documents_indexed": stats["unique_documents"],
     }
+
+
+def rag_readiness_snapshot() -> dict:
+    """Report only checks the current process can actually establish."""
+    checks = {
+        "corpus_manifest": False,
+        "current_documents": False,
+        "active_corpus_chunks": False,
+        "embedding_provider": False,
+        "vector_embedding_identity": False,
+        "shared_production_state": True,
+    }
+    manifest_hash = None
+    try:
+        corpus_dir = Path(__file__).resolve().parent / "data" / "corpus"
+        manifest = load_corpus_manifest(corpus_dir / MANIFEST_FILENAME, corpus_dir)
+        manifest_hash = manifest["manifest_sha256"]
+        entries = current_documents(manifest, as_of=date.today())
+        checks["corpus_manifest"] = True
+        checks["current_documents"] = bool(entries)
+        expected_keys = {entry["document_key"] for entry in entries}
+        active_keys = {
+            chunk.metadata.custom_metadata.get("document_key")
+            for chunk in ingestion_pipeline.vector_store.get_chunks()
+            if chunk.lifecycle_state == "ACTIVE"
+            and chunk.metadata.custom_metadata.get("corpus_manifest_sha256") == manifest_hash
+            and chunk.metadata.source_trust_tier == "government_official"
+        }
+        checks["active_corpus_chunks"] = bool(expected_keys) and expected_keys.issubset(active_keys)
+    except (CorpusManifestError, OSError, ValueError, RuntimeError):
+        checks["corpus_manifest"] = False
+
+    identity = getattr(ingestion_pipeline.embedder, "embedding_identity", {})
+    is_ready = getattr(ingestion_pipeline.embedder, "is_ready", True)
+    if callable(is_ready):
+        is_ready = is_ready()
+    checks["embedding_provider"] = bool(
+        is_ready
+        and identity.get("provider") not in {None, "unavailable"}
+        and identity.get("model_id")
+        and identity.get("model_revision")
+        and identity.get("dimension") == ingestion_pipeline.embedder.embedding_dimension
+        and identity.get("config_hash")
+    )
+    try:
+        vector_identity = normalize_embedding_identity(
+            ingestion_pipeline.vector_store.get_stats().get("embedding_identity")
+        )
+        checks["vector_embedding_identity"] = (
+            vector_identity == normalize_embedding_identity(identity)
+        )
+    except (EmbeddingIdentityError, TypeError, ValueError):
+        checks["vector_embedding_identity"] = False
+
+    environment = os.environ.get("ENVIRONMENT", "local").strip().lower()
+    if environment in {"production", "prod"}:
+        vector_is_shared = type(ingestion_pipeline.vector_store).__name__ == "MongoVectorStore"
+        lifecycle_is_shared = bool(getattr(lifecycle_manager, "is_shared", False))
+        checks["shared_production_state"] = vector_is_shared and lifecycle_is_shared
+        checks["embedding_provider"] = checks["embedding_provider"] and identity.get("provider") == "sentence_transformers"
+
+    ready = all(checks.values())
+    return {
+        "status": "READY" if ready else "NOT_READY",
+        "manifest_sha256": manifest_hash,
+        "embedding_identity": identity,
+        "checks": checks,
+    }
+
+
+@rag_router.get("/readyz")
+def rag_readyz():
+    snapshot = rag_readiness_snapshot()
+    return JSONResponse(status_code=200 if snapshot["status"] == "READY" else 503, content=snapshot)
 
 
 @rag_router.get("/status")

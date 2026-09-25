@@ -7,13 +7,14 @@ from rag.query_understanding.pipeline import QueryUnderstandingPipeline
 from rag.query_understanding.synonyms import SynonymExpander
 
 
-def test_synonym_expander_80c():
-    """Verifies expansion of '80C' with tax deduction synonyms."""
+def test_synonym_expander_80c_does_not_invent_current_tax_rules():
+    """Legacy section identifiers are expanded only into period-qualified terms."""
     expander = SynonymExpander()
     query = "What is the maximum limit under 80C?"
     result = expander.expand_synonyms(query)
     assert "80C" in result
-    assert "tax deduction section 80C ELSS PPF" in result or "deduction" in result
+    assert "historical" in result
+    assert "maximum deduction" not in result
 
 
 def test_synonym_expander_ltcg():
@@ -22,7 +23,8 @@ def test_synonym_expander_ltcg():
     query = "How is LTCG taxed on equity funds?"
     result = expander.expand_synonyms(query)
     assert "long term capital gains" in result
-    assert "12.5%" in result or "exemption" in result
+    assert "applicable period" in result
+    assert "12.5%" not in result
 
 
 def test_synonym_expander_dicgc():
@@ -30,8 +32,8 @@ def test_synonym_expander_dicgc():
     expander = SynonymExpander()
     query = "Is my savings account insured by DICGC?"
     result = expander.expand_synonyms(query)
-    assert "deposit insurance credit guarantee corporation" in result
-    assert "5 lakh limit" in result
+    assert "deposit insurance" in result.lower()
+    assert "5 lakh" not in result.lower()
 
 
 def test_synonym_expander_sgb():
@@ -39,8 +41,9 @@ def test_synonym_expander_sgb():
     expander = SynonymExpander()
     query = "What is the interest rate on SGB?"
     result = expander.expand_synonyms(query)
-    assert "sovereign gold bond" in result
-    assert "2.5% interest" in result or "RBI" in result
+    assert "sovereign gold bond" in result.lower()
+    assert "official" in result.lower()
+    assert "2.5%" not in result
 
 
 def test_query_understanding_pipeline_end_to_end_expansion():

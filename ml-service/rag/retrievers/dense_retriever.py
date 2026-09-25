@@ -6,6 +6,7 @@ Retrieves chunks by embedding the query and searching the vector store using Cos
 from typing import List, Optional
 from rag.embeddings.base import BaseEmbeddingProvider
 from rag.embeddings.dense_embedding import get_embedding_provider
+from rag.embeddings.identity import normalize_embedding_identity
 from rag.retrievers.base import BaseRetriever
 from rag.schema import RetrievedChunk
 from rag.vector_store.base import BaseVectorStore
@@ -33,6 +34,9 @@ class DenseRetriever(BaseRetriever):
         scope: Optional[str] = None,
     ) -> List[RetrievedChunk]:
         """Embeds query and searches vector store within tenant/user scope."""
+        embedding_identity = normalize_embedding_identity(
+            getattr(self.embedder, "embedding_identity", None)
+        )
         query_vector = self.embedder.embed_text(query)
         return self.vector_store.search(
             query_vector=query_vector,
@@ -41,6 +45,7 @@ class DenseRetriever(BaseRetriever):
             tenant_id=tenant_id,
             user_id=user_id,
             scope=scope,
+            embedding_identity=embedding_identity,
         )
 
     @property

@@ -42,7 +42,7 @@ model = None
 label_encoder = None
 model_accuracy: float | None = None
 confidence_threshold: float = 0.55
-git_commit_hash: str = "ffa37ba"
+git_commit_hash: str | None = None
 model_version: str = "4.0.0"
 dataset_version: str = "4.0.0"
 explainer_instance: ModelExplainer | None = None
@@ -58,6 +58,11 @@ def _seed_and_resolve_active_models(version_registry) -> None:
     or creates serving artifacts.
     """
     logger.info("[Registry Seeding] Starting _seed_and_resolve_active_models...")
+    # Legacy single-file records cannot establish a complete serving bundle or
+    # architecture-specific lineage. Registry records must be created by the
+    # explicit bundle registration workflow, never inferred from local files.
+    logger.warning("Legacy local-file model seeding is disabled; only bundle registration may change registry state.")
+    return
 
     try:
         import pandas as pd
@@ -253,7 +258,10 @@ async def lifespan(app: FastAPI):
     # artifacts remain unavailable and are surfaced through readiness; serving
     # must never manufacture a new model during application startup.
     rf_pred = RandomForestPredictor()
-    rf_pred.load_artifacts()
+    try:
+        rf_pred.load_artifacts()
+    except Exception as exc:
+        logger.error("RandomForest bundle was not loaded: %s", exc)
     if not rf_pred.is_loaded:
         logger.error("Qualified RandomForest serving artifacts are unavailable; prediction readiness will remain false.")
     model = rf_pred.model
@@ -262,14 +270,20 @@ async def lifespan(app: FastAPI):
     registry.register("rf", rf_pred)
 
     mlp_pred = MLPPredictor()
-    mlp_pred.load_artifacts()
+    try:
+        mlp_pred.load_artifacts()
+    except Exception as exc:
+        logger.error("MLP bundle was not loaded: %s", exc)
     if not mlp_pred.is_loaded:
         logger.error("Qualified PyTorch MLP serving artifacts are unavailable; the MLP endpoint will remain unavailable.")
     registry.register("mlp", mlp_pred)
     registry.register("pytorch", mlp_pred)
 
     ft_pred = FTTransformerPredictor()
-    ft_pred.load_artifacts()
+    try:
+        ft_pred.load_artifacts()
+    except Exception as exc:
+        logger.error("FT-Transformer bundle was not loaded: %s", exc)
     if not ft_pred.is_loaded:
         logger.error("Qualified FT-Transformer serving artifacts are unavailable; the FT endpoint will remain unavailable.")
     registry.register("ft_transformer", ft_pred)
@@ -280,8 +294,12 @@ async def lifespan(app: FastAPI):
     # 3. Resolve active versions from registry and reload predictors from registry-tracked paths
     active_rf = version_registry.get_active_model("RandomForest")
     active_rf_schema = (active_rf or {}).get("hyperparameters", {}).get("feature_schema_version")
-    if active_rf and Path(active_rf["artifact_path"]).exists() and active_rf_schema == FEATURE_SCHEMA_VERSION:
-        rf_pred.load_artifacts(artifact_path=Path(active_rf["artifact_path"]))
+    if active_rf and active_rf.get("bundle_path") and active_rf.get("bundle_manifest_sha256") and active_rf_schema == FEATURE_SCHEMA_VERSION:
+        rf_pred.load_artifacts(
+            bundle_dir=Path(active_rf["bundle_path"]),
+            expected_bundle_hash=active_rf["bundle_manifest_sha256"],
+            version_id=str(active_rf["version_id"]),
+        )
         if rf_pred.is_loaded:
             rf_pred.loaded_version_id = str(active_rf["version_id"])
             model_version = active_rf["version_id"]
@@ -294,16 +312,24 @@ async def lifespan(app: FastAPI):
 
     active_mlp = version_registry.get_active_model("PyTorch_MLP")
     active_mlp_schema = (active_mlp or {}).get("hyperparameters", {}).get("feature_schema_version")
-    if active_mlp and Path(active_mlp["artifact_path"]).exists() and active_mlp_schema == FEATURE_SCHEMA_VERSION:
-        mlp_pred.load_artifacts(artifact_path=Path(active_mlp["artifact_path"]))
+    if active_mlp and active_mlp.get("bundle_path") and active_mlp.get("bundle_manifest_sha256") and active_mlp_schema == FEATURE_SCHEMA_VERSION:
+        mlp_pred.load_artifacts(
+            bundle_dir=Path(active_mlp["bundle_path"]),
+            expected_bundle_hash=active_mlp["bundle_manifest_sha256"],
+            version_id=str(active_mlp["version_id"]),
+        )
         if mlp_pred.is_loaded:
             mlp_pred.loaded_version_id = str(active_mlp["version_id"])
         logger.info(f"PyTorch_MLP loaded from registry version {active_mlp['version_id']}")
 
     active_ft = version_registry.get_active_model("FT_Transformer")
     active_ft_schema = (active_ft or {}).get("hyperparameters", {}).get("feature_schema_version")
-    if active_ft and Path(active_ft["artifact_path"]).exists() and active_ft_schema == FEATURE_SCHEMA_VERSION:
-        ft_pred.load_artifacts(artifact_path=Path(active_ft["artifact_path"]))
+    if active_ft and active_ft.get("bundle_path") and active_ft.get("bundle_manifest_sha256") and active_ft_schema == FEATURE_SCHEMA_VERSION:
+        ft_pred.load_artifacts(
+            bundle_dir=Path(active_ft["bundle_path"]),
+            expected_bundle_hash=active_ft["bundle_manifest_sha256"],
+            version_id=str(active_ft["version_id"]),
+        )
         if ft_pred.is_loaded:
             ft_pred.loaded_version_id = str(active_ft["version_id"])
         logger.info(f"FT_Transformer loaded from registry version {active_ft['version_id']}")

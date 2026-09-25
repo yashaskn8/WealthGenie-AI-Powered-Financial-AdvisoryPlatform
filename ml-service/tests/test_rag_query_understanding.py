@@ -47,7 +47,8 @@ def test_query_intent_classifier():
 def test_query_rewriter():
     rewriter = QueryRewriter()
     res = rewriter.rewrite("What is the rebate slab?", intent="tax_regime")
-    assert "Indian Income Tax FY 2025-26" in res
+    assert res == "What is the rebate slab?"
+    assert "FY 2025-26" not in res
 
 
 def test_query_understanding_pipeline():

@@ -46,7 +46,7 @@ class ExperimentTracker:
         metrics: Dict[str, Any],
         history: Dict[str, Any],
         model_artifact_path: Optional[Path] = None,
-        git_commit_hash: str = "ffa37ba",
+        git_commit_hash: Optional[str] = None,
     ) -> Path:
         """
         Persists a complete experiment run as a JSON record in experiments_dir.

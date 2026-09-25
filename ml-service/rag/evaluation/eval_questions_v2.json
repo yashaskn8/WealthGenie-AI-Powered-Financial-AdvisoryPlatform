@@ -1,382 +1,47 @@
 [
   {
-    "question": "How much tax do I save if I put 50k in NPS every year?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_deduction"
-  },
-  {
-    "question": "What is the maximum I can claim under 80C?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_deduction"
-  },
-  {
-    "question": "I earn 15 lakhs a year, which tax regime should I pick?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_regime"
-  },
-  {
-    "question": "Is there any tax on selling equity mutual funds after 1 year?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "capital_gains"
-  },
-  {
-    "question": "What is the LTCG exemption limit on equity shares?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "capital_gains"
-  },
-  {
-    "question": "How are debt mutual fund gains taxed if I bought them after April 2023?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "capital_gains"
-  },
-  {
-    "question": "What is the standard deduction under the new tax regime?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_regime"
-  },
-  {
-    "question": "Do I get 80D deduction in the new tax regime?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_regime"
-  },
-  {
-    "question": "How much health insurance premium can I deduct for my parents who are senior citizens?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_deduction"
-  },
-  {
-    "question": "What is the surcharge rate if my income is above 1 crore?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_regime"
-  },
-  {
-    "question": "How is HRA exemption calculated?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_deduction"
-  },
-  {
-    "question": "What is the Section 87A rebate threshold under the new regime?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_regime"
-  },
-  {
-    "question": "If I earn 12.5 lakhs, will I get the full rebate under new regime?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_regime"
-  },
-  {
-    "question": "What is STCG tax rate on listed equity shares now?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "capital_gains"
-  },
-  {
-    "question": "Are gold ETF gains taxed differently from physical gold?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "capital_gains"
-  },
-  {
-    "question": "What deductions can I claim in the old tax regime that are not available in new?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_regime"
-  },
-  {
-    "question": "How much can I invest in ELSS for tax saving?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_deduction"
-  },
-  {
-    "question": "Is PPF interest taxable?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_deduction"
-  },
-  {
-    "question": "What is the tax slab for income between 8 to 12 lakhs under new regime?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_regime"
-  },
-  {
-    "question": "Can I claim both 80C and 80CCD(1B) deductions?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_deduction"
-  },
-  {
-    "question": "What is the lock-in period for ELSS mutual funds?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "What types of mutual funds does SEBI allow?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "What is the minimum equity allocation for a flexi cap fund?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "How does the risk-o-meter work for mutual funds?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "What are the six risk levels in the SEBI risk-o-meter?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "What is the difference between a large cap and mid cap fund?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "How much overlap is allowed between sectoral mutual fund schemes?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "What is a liquid fund and when should I use it?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "Which mutual fund category is best for emergency funds?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "What is the maximum number of stocks in a focused fund?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "How often is the risk-o-meter reviewed by fund houses?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "What is a balanced advantage fund?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "Is an arbitrage fund taxed like equity or debt?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "What is a corporate bond fund and what credit rating do its holdings need?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "What is the Macaulay Duration range for short duration debt funds?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "What is the minimum allocation to mid cap stocks in a multi cap fund?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "Are gilt funds safe from credit default?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "What is the equity allocation range for aggressive hybrid funds?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "How is small cap defined by AMFI market cap ranking?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "What is an overnight fund?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "If my bank fails, how much of my deposit is insured?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "dicgc"
-  },
-  {
-    "question": "Does DICGC insurance cover mutual fund investments?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "dicgc"
-  },
-  {
-    "question": "Is my FD in a cooperative bank covered by deposit insurance?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "dicgc"
-  },
-  {
-    "question": "If I have a joint account and a single account in the same bank, do I get separate DICGC coverage?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "dicgc"
-  },
-  {
-    "question": "Who pays for the DICGC insurance premium?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "dicgc"
-  },
-  {
-    "question": "Are government deposits covered under DICGC?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "dicgc"
-  },
-  {
-    "question": "What is the tenure of RBI floating rate savings bonds?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "rbi_bonds"
-  },
-  {
-    "question": "How is the interest rate on floating rate bonds calculated?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "rbi_bonds"
-  },
-  {
-    "question": "Can I sell RBI floating rate bonds in the stock market?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "rbi_bonds"
-  },
-  {
-    "question": "Is interest from floating rate savings bonds taxable?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "rbi_bonds"
-  },
-  {
-    "question": "Can senior citizens redeem floating rate bonds early?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "rbi_bonds"
-  },
-  {
-    "question": "What is the minimum investment in RBI floating rate bonds?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "rbi_bonds"
-  },
-  {
-    "question": "How often does the floating rate bond interest rate reset?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "rbi_bonds"
-  },
-  {
-    "question": "What is a sovereign gold bond and what interest does it pay?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "sgb"
-  },
-  {
-    "question": "Is there capital gains tax on gold bonds held to maturity?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "sgb"
-  },
-  {
-    "question": "What is the maximum amount of gold bonds I can buy in a year?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "sgb"
-  },
-  {
-    "question": "Can I pledge sovereign gold bonds as collateral for a loan?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "sgb"
-  },
-  {
-    "question": "What is the lock-in for sovereign gold bonds?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "sgb"
-  },
-  {
-    "question": "How does the DICGC 5 lakh limit work if I have savings and FD in the same bank?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "dicgc"
-  },
-  {
-    "question": "What is the difference between ELSS and PPF for tax saving?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_deduction"
-  },
-  {
-    "question": "What is the 4% cess charged on income tax?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_regime"
-  },
-  {
-    "question": "How is real estate capital gain taxed if I bought property before July 2024?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "capital_gains"
-  },
-  {
-    "question": "What is the preventive health check-up deduction limit under 80D?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_deduction"
-  },
-  {
-    "question": "Can I get deduction for rent if my employer does not give HRA?",
-    "expected_source": "income_tax_deductions_master_reference.md",
-    "category": "tax_deduction"
-  },
-  {
-    "question": "What is the 80TTA deduction for savings account interest?",
-    "expected_source": "income_tax_deductions_master_reference.md",
-    "category": "tax_deduction"
-  },
-  {
-    "question": "How much interest deduction do senior citizens get under 80TTB?",
-    "expected_source": "income_tax_deductions_master_reference.md",
-    "category": "tax_deduction"
-  },
-  {
-    "question": "What is the exit load on liquid fund redemption within 7 days?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "Are NBFCs covered under DICGC deposit insurance?",
-    "expected_source": "rbi_and_dicgc_guidelines.md",
-    "category": "dicgc"
-  },
-  {
-    "question": "What is the credit risk fund category in SEBI classification?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "mutual_fund"
-  },
-  {
-    "question": "What is the old tax regime slab for income above 10 lakhs?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "tax_regime"
-  },
-  {
-    "question": "What is the Section 80D deduction limit for health insurance of a person below 60?",
-    "expected_source": "income_tax_deductions_master_reference.md",
-    "category": "adversarial_near_miss",
-    "note": "Near-miss: should retrieve 80D from deductions doc, not 80C chunks"
-  },
-  {
-    "question": "What is the corporate tax rate for companies with turnover above 400 crore?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "adversarial_out_of_scope",
-    "note": "Out-of-scope: corpus covers personal income tax only, corporate tax is absent"
-  },
-  {
-    "question": "Is cryptocurrency trading profit taxable under the new tax regime?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "adversarial_out_of_scope",
-    "note": "Out-of-scope: crypto/VDA taxation (Section 115BBH) unlikely to be in corpus"
-  },
-  {
-    "question": "What is the minimum SIP amount for a SEBI-registered index fund?",
-    "expected_source": "sebi_mutual_fund_categorization_and_riskometer.md",
-    "category": "adversarial_near_miss",
-    "note": "Near-miss: SEBI doc covers fund categories not SIP minimums (AMC-specific)"
-  },
-  {
-    "question": "How much gratuity is tax exempt under Section 10(10)?",
-    "expected_source": "income_tax_act_fy2025_26.md",
-    "category": "adversarial_near_miss",
-    "note": "Near-miss: gratuity exemption is a specific provision unlikely in corpus"
+    "query": "When do the Income-tax Rules 2026 take effect?",
+    "category": "current_statutory_commencement",
+    "answerability": true,
+    "expected_abstention": false,
+    "relevant_document_keys": ["income-tax-rules-2026-commencement"],
+    "required_facts": ["The Rules take effect on 1 April 2026."],
+    "forbidden_claims": ["unsupported tax slab", "unsupported deduction", "investment recommendation"]
+  },
+  {
+    "query": "Which statute applies to Tax Year 2026-27?",
+    "category": "current_statutory_identity",
+    "answerability": true,
+    "expected_abstention": false,
+    "relevant_document_keys": ["income-tax-rules-2026-commencement"],
+    "required_facts": ["Tax Year 2026-27 begins on 1 April 2026 under the Income-tax Act, 2025."],
+    "forbidden_claims": ["Income-tax Act, 1961 governs Tax Year 2026-27"]
+  },
+  {
+    "query": "What are the exact Income-tax Act 2025 slabs and rebate thresholds for Tax Year 2026-27?",
+    "category": "unsupported_current_tax_detail",
+    "answerability": false,
+    "expected_abstention": true,
+    "relevant_document_keys": [],
+    "required_facts": [],
+    "forbidden_claims": ["any numeric slab", "any rebate threshold", "tax calculation"]
+  },
+  {
+    "query": "Are Sovereign Gold Bond maturity gains exempt for every investor?",
+    "category": "unsupported_product_tax_classification",
+    "answerability": false,
+    "expected_abstention": true,
+    "relevant_document_keys": [],
+    "required_facts": [],
+    "forbidden_claims": ["all maturity gains are tax-free", "unsupported acquisition-condition claim"]
+  },
+  {
+    "query": "Who won the most recent international cricket tournament?",
+    "category": "out_of_domain",
+    "answerability": false,
+    "expected_abstention": true,
+    "relevant_document_keys": [],
+    "required_facts": [],
+    "forbidden_claims": ["any sports result", "fabricated citation"]
   }
 ]

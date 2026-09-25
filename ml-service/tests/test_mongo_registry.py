@@ -8,6 +8,7 @@ Uses mongomock for deterministic in-process testing.
 
 import os
 import tempfile
+from contextlib import contextmanager
 import pytest
 from pathlib import Path
 from unittest.mock import patch
@@ -37,9 +38,18 @@ def mock_mongo_client():
 @pytest.fixture
 def registry(mock_mongo_client):
     """Create a MongoModelRegistry backed by the shared mongomock client."""
+    from model.migrations.phase3_state import migrate_phase3_state
     from model.registry.mongo_registry_store import MongoModelRegistry
+    migrate_phase3_state(mock_mongo_client[TEST_DB_NAME])
     with patch("model.registry.mongo_registry_store.MongoClient", return_value=mock_mongo_client):
         reg = MongoModelRegistry(mongo_uri=TEST_MONGO_URI, db_name=TEST_DB_NAME)
+        # mongomock has no transaction implementation. The replica-set
+        # integration test exercises the real transaction boundary in CI.
+        @contextmanager
+        def mongomock_transaction():
+            yield None
+
+        reg._transaction = mongomock_transaction
         yield reg
         reg.close()
 
@@ -100,6 +110,36 @@ class TestMongoModelRegistry:
         new_active = registry.get_active_model("mlp")
         assert old["is_active"] is False
         assert new_active["version_id"] == v2
+        os.unlink(artifact)
+
+    def test_activation_rejects_stale_expected_active_without_mutating_state(self, registry):
+        artifact = _create_temp_artifact("activation-cas")
+        current = registry.register_model(
+            model_architecture="activation_cas",
+            artifact_path=artifact,
+            training_data_hash="hash1",
+            training_timestamp="2025-01-01T00:00:00Z",
+            hyperparameters={},
+            metrics={},
+            set_active=True,
+            expected_active_version_id=None,
+        )
+
+        from model.registry.mongo_registry_store import ModelActivationConflict
+        with pytest.raises(ModelActivationConflict, match="active model changed"):
+            registry.register_model(
+                model_architecture="activation_cas",
+                artifact_path=artifact,
+                training_data_hash="hash2",
+                training_timestamp="2025-02-01T00:00:00Z",
+                hyperparameters={},
+                metrics={},
+                set_active=True,
+                expected_active_version_id="stale-version",
+            )
+
+        assert registry.get_active_model("activation_cas")["version_id"] == current
+        assert len(registry.list_versions("activation_cas")) == 1
         os.unlink(artifact)
 
     def test_list_versions(self, registry):
@@ -212,3 +252,16 @@ class TestMongoModelRegistry:
 
         replica2.close()
         os.unlink(artifact)
+
+    def test_startup_fails_closed_when_explicit_migration_was_not_run(self):
+        from model.migrations.phase3_state import Phase3MigrationError
+        from model.registry.mongo_registry_store import MongoModelRegistry
+
+        client = mongomock.MongoClient(TEST_MONGO_URI)
+        try:
+            with patch("model.registry.mongo_registry_store.MongoClient", return_value=client):
+                with pytest.raises(Phase3MigrationError, match="migration is missing"):
+                    MongoModelRegistry(mongo_uri=TEST_MONGO_URI, db_name=TEST_DB_NAME + "_unmigrated")
+            assert "version_id_1" not in client[TEST_DB_NAME + "_unmigrated"]["model_versions"].index_information()
+        finally:
+            client.close()

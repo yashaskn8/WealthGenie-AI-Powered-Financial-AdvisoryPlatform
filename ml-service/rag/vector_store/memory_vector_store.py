@@ -20,6 +20,7 @@ except ImportError:
     FAISS_AVAILABLE = False
 
 from rag.config import RAGConfig
+from rag.embeddings.identity import EmbeddingIdentityError, normalize_embedding_identity
 from rag.schema import TextChunk, RetrievedChunk, is_scope_accessible
 from rag.vector_store.base import BaseVectorStore
 
@@ -110,6 +111,7 @@ class PersistentVectorStore(BaseVectorStore):
         tenant_id: str = "default",
         user_id: Optional[str] = None,
         scope: Optional[str] = None,
+        embedding_identity: Optional[Dict[str, Any]] = None,
     ) -> List[RetrievedChunk]:
         """
         Executes tenant/scope-isolated similarity search using FAISS or NumPy fallback.
@@ -261,11 +263,21 @@ class PersistentVectorStore(BaseVectorStore):
         """Returns metadata stats for the vector store."""
         unique_docs = len({c.document_id for c in self._chunks})
         dimension = len(self._embeddings[0]) if self._embeddings else 0
+        embedding_identity = None
+        embedded_chunks = [chunk for chunk in self._chunks if chunk.embedding is not None]
+        if embedded_chunks:
+            try:
+                identities = [normalize_embedding_identity(chunk.embedding_identity) for chunk in embedded_chunks]
+                if all(identity == identities[0] for identity in identities[1:]):
+                    embedding_identity = identities[0]
+            except EmbeddingIdentityError:
+                pass
         return {
             "version": self.VERSION,
             "total_chunks": len(self._chunks),
             "unique_documents": unique_docs,
             "embedding_dimension": dimension,
+            "embedding_identity": embedding_identity,
             "index_path": str(self.index_path),
             "backup_exists": self.backup_path.exists(),
             "faiss_available": FAISS_AVAILABLE,

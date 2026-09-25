@@ -7,11 +7,19 @@ import logging
 import json
 import re
 import time
+from datetime import date
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from rag.citations.engine import CitationEngine
 from rag.cache.manager import MultiLevelCacheManager
 from rag.config import RAGConfig
+from rag.corpus_manifest import (
+    MANIFEST_FILENAME,
+    CorpusManifestError,
+    current_documents,
+    load_corpus_manifest,
+)
 from rag.embeddings.base import BaseEmbeddingProvider
 from rag.embeddings.dense_embedding import get_embedding_provider
 from rag.prompts.builder import PromptBuilder
@@ -41,6 +49,15 @@ ABSTENTION_MESSAGE = (
     "I cannot find sufficiently trustworthy, relevant evidence in the approved knowledge base. "
     "No financial or regulatory claim has been generated."
 )
+
+
+def _topic_terms(value: str) -> set[str]:
+    """Normalize manifest topic labels for a conservative coverage check."""
+    terms = {
+        token for token in re.findall(r"[a-z0-9]+", value.lower())
+        if len(token) > 2 and token not in _RELEVANCE_STOP_WORDS
+    }
+    return {term[:-1] if term.endswith("s") and len(term) > 4 else term for term in terms}
 
 # Registry of built-in reranker strategies
 _RERANKER_REGISTRY: Dict[str, type] = {
@@ -119,6 +136,17 @@ class RAGPipeline:
         """Return extractive evidence only when domain, trust, and relevance gates pass."""
         effective_scope = request.scope or (f"user:{request.user_id}" if request.user_id else request.tenant_id)
         top_k = request.top_k or self.config.top_k
+        try:
+            corpus_dir = Path(__file__).resolve().parents[1] / "data" / "corpus"
+            manifest = load_corpus_manifest(corpus_dir / MANIFEST_FILENAME, corpus_dir)
+            current_entries = {
+                entry["document_key"]: {**entry, "_manifest_sha256": manifest["manifest_sha256"]}
+                for entry in current_documents(manifest, as_of=date.today())
+            }
+        except (CorpusManifestError, OSError, ValueError) as exc:
+            logger.error("RAG current corpus manifest is unavailable or invalid: %s", exc)
+            qu_result = self.query_understanding.process(request.question)
+            return self._abstain("corpus_unavailable", qu_result, 0.0)
         embedding_identity = getattr(self.embedder, "embedding_identity", None)
         cache_identity = {
             "scope": effective_scope,
@@ -133,6 +161,7 @@ class RAGPipeline:
             "similarity_threshold": self.config.similarity_threshold,
             "embedding_identity": embedding_identity or {"provider_class": type(self.embedder).__qualname__},
             "corpus_revision": self.vector_store.get_corpus_revision(),
+            "corpus_manifest_sha256": manifest["manifest_sha256"],
         }
         response_cache_key = json.dumps(cache_identity, sort_keys=True, separators=(",", ":"), default=str)
         # Check Response Cache
@@ -179,7 +208,7 @@ class RAGPipeline:
         # influence the extractive response.
         trustworthy_chunks = [
             chunk for chunk in reranked_chunks
-            if self._is_trustworthy(chunk)
+            if self._is_trustworthy(chunk, current_entries)
             and self._has_sufficient_relevance(request.question, chunk)
         ]
         final_chunks = self._sanitize_chunks(trustworthy_chunks[:top_k])
@@ -271,23 +300,56 @@ class RAGPipeline:
         body = "\n\n".join(excerpts)
         return f"Extracts from verified financial or regulatory sources:\n\n{body}"
 
-    def _is_trustworthy(self, retrieved: RetrievedChunk) -> bool:
+    def _is_trustworthy(
+        self,
+        retrieved: RetrievedChunk,
+        current_entries: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> bool:
         metadata = retrieved.chunk.metadata
         scope = (retrieved.chunk.scope or metadata.scope or "").lower()
         tenant_id = (retrieved.chunk.tenant_id or metadata.tenant_id or "").lower()
-        return (
+        if not (
             metadata.source_trust_tier.lower() in TRUSTED_EVIDENCE_TIERS
             and scope in {"global", "public", "default"}
             and tenant_id in {"default", "global", ""}
-        )
+        ):
+            return False
+        try:
+            if current_entries is None:
+                corpus_dir = Path(__file__).resolve().parents[1] / "data" / "corpus"
+                manifest = load_corpus_manifest(corpus_dir / MANIFEST_FILENAME, corpus_dir)
+                current_entries = {
+                    entry["document_key"]: {**entry, "_manifest_sha256": manifest["manifest_sha256"]}
+                    for entry in current_documents(manifest, as_of=date.today())
+                }
+            custom = metadata.custom_metadata
+            entry = current_entries.get(custom.get("document_key"))
+            return bool(
+                entry
+                and custom.get("corpus_manifest_sha256") == entry["_manifest_sha256"]
+                and custom.get("content_sha256") == entry["content_sha256"]
+                and metadata.source == entry["official_source_url"]
+                and metadata.author == entry["publishing_authority"]
+                and metadata.publication_date == entry["publication_date"]
+                and metadata.effective_date == entry["effective_from"]
+                and custom.get("effective_to") == entry["effective_to"]
+                and custom.get("document_revision") == entry["document_version"]
+                and custom.get("supported_topics") == entry["supported_topics"]
+                and custom.get("excluded_topics") == entry["excluded_topics"]
+            )
+        except (CorpusManifestError, OSError, ValueError, TypeError):
+            return False
 
     def _has_sufficient_relevance(self, question: str, retrieved: RetrievedChunk) -> bool:
         if retrieved.score < self.config.similarity_threshold:
             return False
-        query_terms = {
-            token for token in re.findall(r"[a-z0-9]+", question.lower())
-            if len(token) > 2 and token not in _RELEVANCE_STOP_WORDS
-        }
+        query_terms = _topic_terms(question)
+        excluded_topics = retrieved.chunk.metadata.custom_metadata.get("excluded_topics", [])
+        if any(_topic_terms(topic) and _topic_terms(topic).issubset(query_terms) for topic in excluded_topics):
+            return False
+        supported_topics = retrieved.chunk.metadata.custom_metadata.get("supported_topics", [])
+        if supported_topics and not any(_topic_terms(topic).intersection(query_terms) for topic in supported_topics):
+            return False
         if not query_terms:
             return False
         evidence_text = f"{retrieved.chunk.metadata.title} {retrieved.chunk.content}".lower()

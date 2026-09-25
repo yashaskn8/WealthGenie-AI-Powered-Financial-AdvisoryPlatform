@@ -132,11 +132,14 @@ def test_user_scoped_vs_global_corpus_isolation(tmp_path):
     assert not res_owner_user.grounded
     assert res_owner_user.citations == []
 
-    # CASE C: Both users CAN retrieve global regulatory content
+    # CASE C: An official-looking source string is not sufficient to make a
+    # manually inserted global chunk current/manifest-verified evidence.
     req_global_999 = RAGQueryRequest(question="What is Section 80C deduction limit?", user_id="fake_user_999")
     res_global_999 = pipeline.query(req_global_999)
-    assert any(c.chunk.chunk_id == "global_80c" for c in res_global_999.retrieved_chunks)
+    assert not res_global_999.grounded
+    assert res_global_999.citations == []
 
     req_global_123 = RAGQueryRequest(question="What is Section 80C deduction limit?", user_id="fake_user_123")
     res_global_123 = pipeline.query(req_global_123)
-    assert any(c.chunk.chunk_id == "global_80c" for c in res_global_123.retrieved_chunks)
+    assert not res_global_123.grounded
+    assert res_global_123.citations == []

@@ -4,6 +4,8 @@ Verifies end-to-end flow from document ingestion, lifecycle management, multi-te
 reranking, prompt security, context management, observability logging, response caching, and recovery.
 """
 
+from pathlib import Path
+
 from rag.config import RAGConfig
 from rag.embeddings.dense_embedding import DenseVectorEmbeddingProvider
 from rag.ingestion.pipeline import IngestionPipeline
@@ -19,46 +21,41 @@ def test_full_rag_end_to_end_pipeline_workflow(tmp_path):
     embedder = DenseVectorEmbeddingProvider(dimension=64, enable_cache=False)
     vector_store = PersistentVectorStore(index_path=index_path)
 
-    ingestion_pipeline = IngestionPipeline(embedder=embedder, vector_store=vector_store)
+    lifecycle_manager = DocumentLifecycleManager(
+        vector_store=vector_store,
+        registry_path=tmp_path / "integration_documents.json",
+    )
+    ingestion_pipeline = IngestionPipeline(
+        embedder=embedder,
+        vector_store=vector_store,
+        lifecycle_manager=lifecycle_manager,
+    )
     query_pipeline = RAGPipeline(embedder=embedder, vector_store=vector_store, config=config)
-    lifecycle_manager = DocumentLifecycleManager(vector_store=vector_store)
 
-    # 1. Ingestion Phase for Tenant Alpha
-    tax_content = (
-        "Section 87A rebate of the Income Tax Act provides tax relief up to Rs 25,000 "
-        "for resident individuals with net taxable income up to Rs 7,00,000 under the new tax regime. "
-        "This rebate effectively makes income up to Rs 7 lakh tax-free for individual taxpayers."
-    )
-    ingest_res = ingestion_pipeline.ingest_text(
-        text=tax_content,
-        title="Income Tax Act Section 87A",
-        source="https://www.incometaxindia.gov.in/official/section-87a",
-        source_trust_tier="government_official",
-        author="CBDT India",
-        tenant_id="tenant_alpha",
-    )
+    # The end-to-end trusted path ingests a document only through its hash-pinned
+    # current-corpus manifest; a made-up "official" URL is not a trust credential.
+    corpus_file = Path(__file__).parents[1] / "rag" / "data" / "corpus" / "income_tax_rules_2026_commencement.md"
+    ingest_res = ingestion_pipeline.ingest_file(corpus_file)
     assert ingest_res["chunks_created"] > 0
     doc_id = ingest_res["document_id"]
 
-    # 2. Tenant-scoped content is not permitted to masquerade as global regulatory evidence.
+    # 2. Verified global official evidence is shared consistently across users.
     req_alpha = RAGQueryRequest(
-        question="Section 87A rebate limit for income tax",
+        question="When do the Income-tax Rules 2026 take effect?",
         tenant_id="tenant_alpha",
     )
     res_alpha = query_pipeline.query(req_alpha)
-    assert not res_alpha.grounded
-    assert len(res_alpha.retrieved_chunks) == 0
-    assert len(res_alpha.citations) == 0
-    assert res_alpha.metrics["chunks_retrieved"] > 0
+    assert res_alpha.grounded
+    assert res_alpha.citations
 
-    # 3. Multi-Tenant Query Phase for Tenant Beta -> Expect 0 retrieved chunks
+    # 3. A second user sees the same public evidence, not a tenant-specific variant.
     req_beta = RAGQueryRequest(
-        question="Section 87A rebate limit for income tax",
+        question="When do the Income-tax Rules 2026 take effect?",
         tenant_id="tenant_beta",
     )
     res_beta = query_pipeline.query(req_beta)
-    assert not res_beta.grounded
-    assert len(res_beta.retrieved_chunks) == 0
+    assert res_beta.grounded
+    assert [item.chunk.chunk_id for item in res_beta.retrieved_chunks] == [item.chunk.chunk_id for item in res_alpha.retrieved_chunks]
 
     # 4. Lifecycle Document Purging (Hard Delete) & Cache Invalidation
     deleted = lifecycle_manager.hard_delete_document(doc_id)
@@ -67,7 +64,7 @@ def test_full_rag_end_to_end_pipeline_workflow(tmp_path):
 
     # 5. Query post-purging -> Grounding should fail
     req_post_delete = RAGQueryRequest(
-        question="Section 87A rebate limit for income tax",
+        question="When do the Income-tax Rules 2026 take effect?",
         tenant_id="tenant_alpha",
     )
     res_post_delete = query_pipeline.query(req_post_delete)

@@ -13,7 +13,7 @@ import math
 import logging
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -25,6 +25,7 @@ if str(_ml_service_root) not in sys.path:
 
 from model.config import BASE_DIR
 from rag.config import RAGConfig
+from rag.corpus_manifest import MANIFEST_FILENAME, current_documents, load_corpus_manifest
 from rag.embeddings.dense_embedding import get_embedding_provider
 from rag.evaluation.evaluator import RAGEvaluator
 from rag.retrieval.pipeline import RAGPipeline
@@ -44,48 +45,75 @@ REPORT_FILE = REPORT_DIR / "real_corpus_evaluation_report.json"
 
 
 def load_questions(path: Path) -> List[Dict[str, Any]]:
-    """Loads evaluation questions from JSON file."""
+    """Load and validate the answerability-aware canonical evaluation set."""
     with open(path, "r", encoding="utf-8") as f:
         questions = json.load(f)
+    if not isinstance(questions, list) or not questions:
+        raise ValueError("RAG evaluation set must be a non-empty JSON array")
+    seen = set()
+    for index, item in enumerate(questions):
+        if not isinstance(item, dict):
+            raise ValueError(f"RAG evaluation item {index} must be an object")
+        required = {"query", "category", "answerability", "expected_abstention", "relevant_document_keys", "required_facts", "forbidden_claims"}
+        missing = required.difference(item)
+        if missing:
+            raise ValueError(f"RAG evaluation item {index} is missing {sorted(missing)}")
+        key = item["query"]
+        if not isinstance(key, str) or not key.strip() or key in seen:
+            raise ValueError(f"RAG evaluation item {index} has an empty or duplicate query")
+        seen.add(key)
+        if not isinstance(item["answerability"], bool) or item["expected_abstention"] is not (not item["answerability"]):
+            raise ValueError(f"RAG evaluation item {index} has inconsistent answerability")
+        if not isinstance(item["relevant_document_keys"], list) or not all(isinstance(value, str) for value in item["relevant_document_keys"]):
+            raise ValueError(f"RAG evaluation item {index} has invalid relevant_document_keys")
+        if item["expected_abstention"] and item["relevant_document_keys"]:
+            raise ValueError(f"Abstention control {index} must not claim relevant evidence")
+        if item["answerability"] and not item["relevant_document_keys"]:
+            raise ValueError(f"Answerable item {index} must identify relevant documents")
     logger.info(f"Loaded {len(questions)} evaluation questions from {path.name}")
     return questions
 
 
-def build_ground_truth_chunk_ids(vector_store, expected_source: str) -> set:
-    """Builds the set of chunk IDs belonging to the expected source document."""
-    expected_stem = Path(expected_source).stem.lower()
-    gt_ids = set()
-    for chunk in vector_store._chunks:
-        src = chunk.metadata.source.lower()
-        title = chunk.metadata.title.lower()
-        if expected_stem in src or expected_stem in title:
-            gt_ids.add(chunk.chunk_id)
-        elif hasattr(chunk.metadata, 'document_id'):
-            doc_id = chunk.metadata.document_id.lower()
-            if expected_stem.replace('_', ' ') in doc_id:
-                gt_ids.add(chunk.chunk_id)
-    return gt_ids
+def build_ground_truth_chunk_ids(
+    vector_store,
+    relevant_document_keys: List[str],
+    manifest_sha256: str,
+) -> set:
+    """Resolve ground truth by manifest document identity, never by filename/title guesses."""
+    if not relevant_document_keys:
+        return set()
+    chunks = vector_store.get_chunks()
+    return {
+        chunk.chunk_id
+        for chunk in chunks
+        if chunk.metadata.custom_metadata.get("document_key") in relevant_document_keys
+        and chunk.lifecycle_state == "ACTIVE"
+        and chunk.metadata.custom_metadata.get("corpus_manifest_sha256") == manifest_sha256
+    }
 
 
-def source_match(retrieved_chunks, expected_source: str) -> bool:
-    """Checks if any retrieved chunk comes from the expected source document."""
-    expected_stem = Path(expected_source).stem.lower()
-    for rc in retrieved_chunks:
-        chunk_source = rc.chunk.metadata.source.lower()
-        chunk_title = rc.chunk.metadata.title.lower()
-        if expected_stem in chunk_source or expected_stem in chunk_title:
-            return True
-        # Also check document_id-based matching
-        if hasattr(rc.chunk.metadata, 'document_id'):
-            doc_id = rc.chunk.metadata.document_id.lower()
-            if expected_stem.replace("_", " ") in doc_id:
-                return True
-    return False
+def source_match(retrieved_chunks, relevant_document_keys: List[str], manifest_sha256: str) -> bool:
+    """Checks provenance by canonical manifest key; abstention controls never earn a hit."""
+    return bool(relevant_document_keys) and any(
+        rc.chunk.metadata.custom_metadata.get("document_key") in relevant_document_keys
+        and rc.chunk.lifecycle_state == "ACTIVE"
+        and rc.chunk.metadata.custom_metadata.get("corpus_manifest_sha256") == manifest_sha256
+        for rc in retrieved_chunks
+    )
 
 
 def run_benchmark() -> Dict[str, Any]:
     """Runs the full evaluation benchmark and returns the report."""
     questions = load_questions(QUESTIONS_FILE)
+    corpus_dir = _ml_service_root / "rag" / "data" / "corpus"
+    manifest = load_corpus_manifest(corpus_dir / MANIFEST_FILENAME, corpus_dir)
+    current_keys = {item["document_key"] for item in current_documents(manifest, as_of=date.today())}
+    unknown_keys = {
+        key for item in questions for key in item["relevant_document_keys"]
+        if key not in current_keys
+    }
+    if unknown_keys:
+        raise ValueError(f"Evaluation set references documents not current in the verified corpus: {sorted(unknown_keys)}")
 
     # Initialize pipeline with real corpus vector store
     config = RAGConfig()
@@ -99,7 +127,7 @@ def run_benchmark() -> Dict[str, Any]:
     evaluator = RAGEvaluator()
 
     logger.info(
-        f"Pipeline initialized: {len(vector_store._chunks)} chunks in store, "
+        f"Pipeline initialized: {len(vector_store.get_chunks())} chunks in store, "
         f"strategy={config.retrieval_strategy}, reranker={config.reranker_strategy}"
     )
 
@@ -110,8 +138,8 @@ def run_benchmark() -> Dict[str, Any]:
     all_latencies: List[float] = []
 
     for idx, q_item in enumerate(questions, start=1):
-        question = q_item["question"]
-        expected_source = q_item["expected_source"]
+        question = q_item["query"]
+        relevant_document_keys = q_item["relevant_document_keys"]
         category = q_item.get("category", "unknown")
 
         logger.info(f"[{idx}/{total_queries}] Evaluating: {question[:60]}...")
@@ -126,18 +154,23 @@ def run_benchmark() -> Dict[str, Any]:
         pipeline.cache_manager.invalidate_all()
 
         # Build ground truth chunk IDs from expected source document
-        gt_chunk_ids = build_ground_truth_chunk_ids(vector_store, expected_source)
+        gt_chunk_ids = build_ground_truth_chunk_ids(
+            vector_store, relevant_document_keys, manifest["manifest_sha256"]
+        )
 
         # Evaluate retrieval quality against real ground truth
         eval_result = evaluator.evaluate_query_response(
             query=question,
             response=response,
             ground_truth_chunk_ids=gt_chunk_ids,
+            expected_abstention=q_item["expected_abstention"],
             k=4,
         )
 
         # Source provenance check: did we retrieve from the expected document?
-        hit = source_match(response.retrieved_chunks, expected_source)
+        hit = source_match(
+            response.retrieved_chunks, relevant_document_keys, manifest["manifest_sha256"]
+        )
         if hit:
             total_source_hits += 1
 
@@ -154,8 +187,14 @@ def run_benchmark() -> Dict[str, Any]:
             "question_index": idx,
             "question": question,
             "category": category,
-            "expected_source": expected_source,
+            "answerability": q_item["answerability"],
+            "expected_abstention": q_item["expected_abstention"],
+            "relevant_document_keys": relevant_document_keys,
+            "required_facts": q_item["required_facts"],
+            "forbidden_claims": q_item["forbidden_claims"],
             "source_hit": hit,
+            "abstention_correct": (not response.grounded and not response.citations) if q_item["expected_abstention"] else None,
+            "grounded": response.grounded,
             "metrics": eval_result["metrics"],
             "query_latency_ms": round(query_time_ms, 2),
             "chunks_retrieved": eval_result["retrieved_chunk_count"],
@@ -214,9 +253,11 @@ def run_benchmark() -> Dict[str, Any]:
         "report_id": f"rag_eval_v2_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "corpus_info": {
-            "total_chunks_in_store": len(vector_store._chunks),
+            "total_chunks_in_store": len(vector_store.get_chunks()),
             "questions_evaluated": total_queries,
             "questions_file": str(QUESTIONS_FILE.name),
+            "manifest_sha256": manifest["manifest_sha256"],
+            "current_document_keys": sorted(current_keys),
         },
         "pipeline_config": {
             "retrieval_strategy": config.retrieval_strategy,
@@ -230,6 +271,19 @@ def run_benchmark() -> Dict[str, Any]:
             "source_hit_count": total_source_hits,
             "total_questions": total_queries,
             "source_hit_rate": round(total_source_hits / total_queries, 4) if total_queries else 0.0,
+        },
+        "abstention_controls": {
+            "expected_count": sum(item["expected_abstention"] for item in per_question_results),
+            "correct_count": sum(
+                bool(item["abstention_correct"])
+                for item in per_question_results
+                if item["expected_abstention"]
+            ),
+            "unexpectedly_grounded_count": sum(
+                bool(item["grounded"])
+                for item in per_question_results
+                if item["expected_abstention"]
+            ),
         },
         "latency_summary": latency_summary,
         "category_breakdowns": category_summaries,

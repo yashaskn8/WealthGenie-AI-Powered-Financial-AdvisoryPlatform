@@ -11,6 +11,7 @@ and registers a new NOT-yet-active candidate model version in the registry.
 
 import collections
 import logging
+import os
 import threading
 import time
 import uuid
@@ -391,7 +392,13 @@ def check_drift_and_trigger_retrain(
     inference_buffer.last_drift_score = max_psi
 
     retrain_info = None
-    if drift_detected and force_retrain_on_drift:
+    environment = os.environ.get("ENVIRONMENT", "local").strip().lower()
+    production_retrain_blocked = environment in {"production", "prod"} and force_retrain_on_drift
+    if production_retrain_blocked:
+        logger.warning(
+            "Drift detected in production; candidate retraining is an explicit offline workflow and is disabled here."
+        )
+    if drift_detected and force_retrain_on_drift and not production_retrain_blocked:
         trigger_reason = (
             f"Auto-retrain triggered by PSI drift (verdict={overall_verdict}, "
             f"max_psi={max_psi:.4f}, drifted_features={drifted_features})"
@@ -415,6 +422,9 @@ def check_drift_and_trigger_retrain(
         "drifted_features": drifted_features,
         "warned_features": drift_report["warned_features"],
         "retrain_triggered": bool(retrain_info is not None),
+        "retrain_suppressed_reason": (
+            "PRODUCTION_RETRAIN_DISABLED" if production_retrain_blocked and drift_detected else None
+        ),
         "candidate_version": retrain_info,
         "drift_report": drift_report,
     }

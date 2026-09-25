@@ -13,7 +13,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Security, status
 from pydantic import BaseModel, Field
 
 from model.serving.registry import registry
-from model.data.feature_engineering import FEATURE_NAMES, FEATURE_SCHEMA_VERSION
 from store_factory import get_model_registry
 from security import operator_key_header, verify_api_key, verify_operator_key
 
@@ -144,24 +143,10 @@ def check_promotion_gate(
     }
 
 
-class RegisterModelRequest(BaseModel):
-    model_config = {"protected_namespaces": (), "extra": "forbid"}
-    model_architecture: str = Field(..., description="Model architecture identifier (e.g. RandomForest, PyTorch_MLP, FT_Transformer)")
-    artifact_path: str = Field(..., description="Path to serialized model artifact on disk")
-    training_data_hash: str = Field(..., min_length=64, max_length=64, pattern=r"^[0-9a-fA-F]{64}$", description="SHA-256 hash of training data")
-    training_timestamp: Optional[str] = Field(None, description="ISO timestamp of training completion")
-    hyperparameters: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Model hyperparameters")
-    metrics: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Evaluation metrics (accuracy, fidelity, F1)")
-    reference_distributions: Optional[Dict[str, Any]] = Field(None, description="Feature reference distributions for drift monitoring")
-    dataset_lineage: Optional[Dict[str, Any]] = Field(None, description="Reproducible dataset generation parameters (seed, N, distributions)")
-    notes: Optional[str] = Field(None, description="Optional version release notes")
-    set_active: bool = Field(False, description="Whether to immediately set this version as active")
-
-
 class DriftCheckRequest(BaseModel):
     model_config = {"protected_namespaces": (), "extra": "forbid"}
     architecture: str = Field("RandomForest", description="Model architecture to check drift for")
-    force_retrain: bool = Field(True, description="Whether to trigger retrain if drift is detected")
+    force_retrain: bool = Field(False, description="Whether to request candidate retraining (offline/non-production only)")
     use_buffer: bool = Field(True, description="Whether to evaluate real accumulated observations from InferenceBuffer")
     shift_feature: Optional[str] = Field(None, description="Feature to simulate drift on (for testing)")
     shift_multiplier: float = Field(1.0, description="Multiplicative shift to apply to the shifted feature")
@@ -176,7 +161,7 @@ class PromoteRequest(BaseModel):
 
 class ValidateRequest(BaseModel):
     model_config = {"protected_namespaces": (), "extra": "forbid"}
-    metrics: Dict[str, float] = Field(..., description="Complete tracked validation evidence")
+    evaluation_run_id: str = Field(..., min_length=1, max_length=128)
 
 
 @registry_router.get("/versions", dependencies=[Depends(verify_api_key)])
@@ -236,71 +221,21 @@ def verify_artifact_integrity(
 
 
 @registry_router.post("/register", status_code=status.HTTP_201_CREATED, dependencies=[Depends(verify_registry_operator)])
-def register_model_version(
-    payload: RegisterModelRequest,
-    store = Depends(get_version_store),
-):
+def register_model_version():
     """
     Registers a new CANDIDATE into the persistent version registry.
     API registration never activates a model directly.
     """
-    if payload.set_active:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="API registration always creates a CANDIDATE; direct activation is forbidden.")
-    artifact_path = Path(payload.artifact_path)
-    if not artifact_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Artifact file not found at path: {payload.artifact_path}"
-        )
-
-    from datetime import datetime, timezone
-    training_timestamp = payload.training_timestamp or datetime.now(timezone.utc).isoformat()
-
-    # Build hyperparameters with dataset lineage embedded
-    hparams = payload.hyperparameters or {}
-    if payload.dataset_lineage:
-        hparams["dataset_lineage"] = payload.dataset_lineage
-
-    if payload.model_architecture in {"RandomForest", "PyTorch_MLP", "FT_Transformer"}:
-        if hparams.get("feature_schema_version") != FEATURE_SCHEMA_VERSION:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"feature_schema_version must equal {FEATURE_SCHEMA_VERSION}",
-            )
-        if hparams.get("feature_names") != FEATURE_NAMES:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="feature_names must exactly match the ordered v4 feature allowlist",
-            )
-        if set(payload.reference_distributions or {}) != set(FEATURE_NAMES):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="reference_distributions must cover exactly the v4 feature allowlist",
-            )
-
-    try:
-        version_id = store.register_model(
-            model_architecture=payload.model_architecture,
-            artifact_path=artifact_path,
-            training_data_hash=payload.training_data_hash or "unknown",
-            training_timestamp=training_timestamp,
-            hyperparameters=hparams,
-            metrics=payload.metrics or {},
-            reference_distributions=payload.reference_distributions,
-            notes=payload.notes,
-            set_active=False,
-        )
-
-        return {
-            "status": "registered",
-            "version_id": version_id,
-            "model_architecture": payload.model_architecture,
-            "is_active": False,
-            "lifecycle_state": "CANDIDATE",
-        }
-    except Exception as e:
-        logger.error(f"Failed to register model: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    # The current registry adapters persist single-file paths and cannot bind a
+    # complete immutable bundle to shared storage. Accepting an operator-supplied
+    # path here would bypass pre-deserialization verification and replica safety.
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={
+            "code": "MODEL_BUNDLE_REGISTRATION_UNAVAILABLE",
+            "message": "Candidate registration is unavailable until the shared immutable artifact-bundle registry is configured.",
+        },
+    )
 
 
 @registry_router.post("/validate/{version_id}", dependencies=[Depends(verify_registry_operator)])
@@ -310,16 +245,26 @@ def validate_version(version_id: str, payload: ValidateRequest, store=Depends(ge
         raise HTTPException(status_code=404, detail="Model version not found")
     if candidate.get("lifecycle_state") != "SHADOW":
         raise HTTPException(status_code=409, detail="Only SHADOW models can become VALIDATED")
-    missing = [name for name in PROMOTION_TRACKED_METRICS if name not in payload.metrics]
-    if missing:
-        raise HTTPException(status_code=409, detail=f"Missing validation metrics: {', '.join(missing)}")
-    invalid = [
-        name for name in PROMOTION_TRACKED_METRICS
-        if not math.isfinite(payload.metrics[name]) or not 0.0 <= payload.metrics[name] <= 1.0
-    ]
-    if invalid:
-        raise HTTPException(status_code=422, detail=f"Validation metrics must be finite values in [0, 1]: {', '.join(invalid)}")
-    return store.update_lifecycle_state(version_id, "VALIDATED", metrics=payload.metrics)
+    get_evidence = getattr(store, "get_evaluation_evidence", None)
+    if not callable(get_evidence):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "VALIDATION_EVIDENCE_UNAVAILABLE",
+                "message": "The registry has no immutable evaluator-produced evidence store; operator-supplied metrics cannot validate a candidate.",
+            },
+        )
+    evidence = get_evidence(payload.evaluation_run_id)
+    if not evidence or evidence.get("candidate_bundle_hash") != candidate.get("bundle_manifest_sha256"):
+        raise HTTPException(status_code=409, detail="Evaluation evidence is absent or bound to a different candidate bundle.")
+    metrics = evidence.get("metrics")
+    if not isinstance(metrics, dict) or any(
+        name not in metrics or not isinstance(metrics[name], (int, float))
+        or not math.isfinite(metrics[name]) or not 0.0 <= metrics[name] <= 1.0
+        for name in PROMOTION_TRACKED_METRICS
+    ):
+        raise HTTPException(status_code=409, detail="Immutable evaluation evidence is incomplete or invalid.")
+    return store.update_lifecycle_state(version_id, "VALIDATED", metrics=metrics)
 
 
 @registry_router.post("/promote", status_code=status.HTTP_200_OK, dependencies=[Depends(verify_registry_operator)])
@@ -327,11 +272,7 @@ def promote_version(
     payload: PromoteRequest,
     store = Depends(get_version_store),
 ):
-    """
-    Promotes a registered candidate version to active after passing the promotion gate.
-    The candidate's metrics are compared against the currently active version's metrics.
-    If any tracked metric regresses by more than 2%, the promotion is REJECTED.
-    """
+    """Refuse activation until verified preload and atomic shared promotion exist."""
     candidate = store.get_version(payload.version_id)
     if not candidate:
         raise HTTPException(
@@ -339,51 +280,13 @@ def promote_version(
             detail=f"Candidate version '{payload.version_id}' not found in registry."
         )
 
-    if candidate.get("is_active"):
-        return {
-            "status": "already_active",
-            "version_id": payload.version_id,
-            "message": "This version is already the active model.",
-        }
-    if candidate.get("lifecycle_state") != "VALIDATED":
-        raise HTTPException(status_code=409, detail="Only VALIDATED models can be promoted to ACTIVE")
-
-    architecture = candidate["model_architecture"]
-    active_version = store.get_active_model(architecture)
-
-    if active_version:
-        gate_result = check_promotion_gate(
-            candidate_metrics=candidate.get("metrics", {}),
-            active_metrics=active_version["metrics"],
-        )
-        if not gate_result["gate_passed"]:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "error": "PROMOTION_GATE_FAILED",
-                    "message": "Candidate version does not meet promotion criteria.",
-                    "gate_result": gate_result,
-                    "candidate_version_id": payload.version_id,
-                    "active_version_id": active_version["version_id"],
-                },
-            )
-
-    # Promotion gate passed — activate via centrally persisted lifecycle state.
-    try:
-        store.rollback_to_version(payload.version_id)
-        registry.reload_active_model(architecture)
-        return {
-            "status": "promoted",
-            "version_id": payload.version_id,
-            "model_architecture": architecture,
-            "is_active": True,
-            "gate_result": check_promotion_gate(
-                candidate_metrics=candidate.get("metrics", {}),
-                active_metrics=active_version["metrics"] if active_version else {},
-            ) if active_version else {"gate_passed": True, "reason": "no_previous_active_version"},
-        }
-    except (ValueError, RuntimeError, FileNotFoundError) as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={
+            "code": "ATOMIC_BUNDLE_PROMOTION_UNAVAILABLE",
+            "message": "Promotion is disabled until the candidate bundle can be preloaded and activated through a shared transactional registry.",
+        },
+    )
 
 
 @registry_router.get("/drift/buffer", dependencies=[Depends(verify_api_key)])
@@ -468,24 +371,13 @@ def rollback_model_version(
     target = store.get_version(version_id)
     if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model version not found")
-    if target.get("lifecycle_state") not in {"ROLLED_BACK", "ACTIVE"}:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Rollback may only restore a previously ACTIVE/ROLLED_BACK model; it cannot bypass validation.",
-        )
-    try:
-        active_record = store.rollback_to_version(version_id)
-        registry.reload_active_model(active_record["model_architecture"])
-        return {
-            "status": "rolled_back",
-            "active_version": active_record,
-        }
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={
+            "code": "ATOMIC_BUNDLE_ROLLBACK_UNAVAILABLE",
+            "message": "Rollback is disabled until a previous verified bundle can be preloaded and activated through a shared transactional registry.",
+        },
+    )
 
 
 class ConfigureShadowRequest(BaseModel):
@@ -514,30 +406,45 @@ def configure_shadow_model(
     if version.get("lifecycle_state") != "CANDIDATE":
         raise HTTPException(status_code=409, detail="Only CANDIDATE models can enter SHADOW")
 
-    artifact_path = Path(version["artifact_path"])
-    if not artifact_path.exists():
+    bundle_path = version.get("bundle_path")
+    bundle_manifest_hash = version.get("bundle_manifest_sha256")
+    if not bundle_path or not bundle_manifest_hash:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Artifact file missing at {artifact_path}"
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "MODEL_BUNDLE_NOT_VERIFIED",
+                "message": "Candidate has no registry-pinned complete artifact bundle; it cannot enter shadow evaluation.",
+            },
+        )
+    bundle_path = Path(bundle_path)
+    if not bundle_path.is_dir():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "MODEL_BUNDLE_UNAVAILABLE", "message": "Candidate bundle is unavailable."},
         )
 
     arch = version["model_architecture"]
     if arch.lower() in ["randomforest", "rf", "random_forest"]:
         pred = RandomForestPredictor()
-        # Look for matching candidate label encoder, default model dir, or saved_models dir
-        base_model_dir = Path(__file__).resolve().parents[1]
-        le_path = artifact_path.parent / f"le_{payload.version_id[:8]}.pkl"
-        if not le_path.exists():
-            le_path = base_model_dir / "label_encoder.pkl"
-        if not le_path.exists():
-            le_path = artifact_path.parent / "label_encoder.pkl"
-        pred.load_artifacts(artifact_path=artifact_path, label_encoder_path=le_path)
+        pred.load_artifacts(
+            bundle_dir=bundle_path,
+            expected_bundle_hash=bundle_manifest_hash,
+            version_id=payload.version_id,
+        )
     elif arch.lower() in ["pytorch_mlp", "mlp"]:
         pred = MLPPredictor()
-        pred.load_artifacts(artifact_path=artifact_path)
+        pred.load_artifacts(
+            bundle_dir=bundle_path,
+            expected_bundle_hash=bundle_manifest_hash,
+            version_id=payload.version_id,
+        )
     elif arch.lower() in ["ft_transformer", "fttransformer"]:
         pred = FTTransformerPredictor()
-        pred.load_artifacts(artifact_path=artifact_path)
+        pred.load_artifacts(
+            bundle_dir=bundle_path,
+            expected_bundle_hash=bundle_manifest_hash,
+            version_id=payload.version_id,
+        )
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -578,4 +485,3 @@ def clear_shadow_model():
     from model.registry.shadow_evaluator import shadow_evaluator
     shadow_evaluator.clear_shadow()
     return {"status": "cleared", "message": "Shadow evaluation disabled."}
-

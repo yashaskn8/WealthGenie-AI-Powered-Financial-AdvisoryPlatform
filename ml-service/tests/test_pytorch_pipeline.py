@@ -14,7 +14,7 @@ from model.config import (
     set_random_seed,
 )
 from model.data.preprocessing import FeaturePreprocessor, prepare_synthetic_training_data
-from model.data.dataset import FinancialDataset, create_data_loaders
+from model.data.dataset import FinancialDataset, create_data_loaders, create_stratified_split_indices
 from model.architecture.model import FinancialMLP
 from model.training.train_pytorch import train_pytorch_model
 from model.serving.inference import PyTorchInferenceEngine
@@ -70,6 +70,12 @@ def test_financial_dataset_and_dataloaders(sample_data):
 
     preprocessor = FeaturePreprocessor()
     config = TrainingConfig(batch_size=32, test_split=0.2, val_split=0.2)
+    split_a = create_stratified_split_indices(y, config)
+    split_b = create_stratified_split_indices(y, config)
+    assert all(np.array_equal(a, b) for a, b in zip(split_a, split_b))
+    assert len(set(np.concatenate(split_a).tolist())) == len(y)
+    assert set(np.concatenate(split_a).tolist()) == set(range(len(y)))
+
     train_loader, val_loader, test_loader, fitted_pre = create_data_loaders(
         X, y, preprocessor, config
     )
@@ -108,10 +114,13 @@ def test_train_pytorch_model_loop(sample_data, tmp_artifact_paths):
     assert tmp_artifact_paths.model_weights.exists()
     assert tmp_artifact_paths.scaler_path.exists()
     assert tmp_artifact_paths.metadata_path.exists()
+    assert results["metadata"]["training_data_hash"] == results["dataset_hash"]
+    assert results["metadata"]["dataset_lineage"]["split_identity"] == results["dataset_lineage"]["split_identity"]
+    assert set(("training_metrics", "validation_metrics", "test_metrics")) <= set(results["evaluation_report"])
     assert len(results["history"]["train_loss"]) == 5
 
 
-def test_pytorch_inference_engine(sample_data, tmp_artifact_paths):
+def test_pytorch_inference_engine(sample_data, tmp_artifact_paths, unqualified_bundle_factory):
     X, y = sample_data
     train_pytorch_model(
         model_config=PyTorchModelConfig(input_dim=N_FEATURES, hidden_dims=[32, 16], output_dim=6),
@@ -121,8 +130,26 @@ def test_pytorch_inference_engine(sample_data, tmp_artifact_paths):
         y=y,
     )
 
+    from model.artifacts.bundle import ArtifactBundleError
+
     engine = PyTorchInferenceEngine(paths=tmp_artifact_paths)
-    engine.load_artifacts()
+    with pytest.raises(ArtifactBundleError, match="registry-pinned bundle manifest hash"):
+        PyTorchInferenceEngine(paths=tmp_artifact_paths).load_artifacts()
+    bundle_dir, bundle_hash = unqualified_bundle_factory(
+        "PyTorch_MLP",
+        {
+            "weights": tmp_artifact_paths.model_weights,
+            "scaler": tmp_artifact_paths.scaler_path,
+            "metadata": tmp_artifact_paths.metadata_path,
+        },
+        bundle_id="mlp-inference-test",
+    )
+    engine.load_artifacts(
+        bundle_dir=bundle_dir,
+        expected_bundle_hash=bundle_hash,
+        version_id="test-mlp-inference",
+        require_serving_qualified=False,
+    )
     assert engine.is_loaded
 
     single_x = X[:1]

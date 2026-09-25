@@ -85,6 +85,10 @@ class ModelRegistry:
                 value TEXT NOT NULL
             );
         """)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_active_model_per_architecture "
+            "ON model_versions(model_architecture) WHERE is_active = 1"
+        )
         columns = {row[1] for row in conn.execute("PRAGMA table_info(model_versions)").fetchall()}
         if "lifecycle_state" not in columns:
             conn.execute("ALTER TABLE model_versions ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'CANDIDATE'")

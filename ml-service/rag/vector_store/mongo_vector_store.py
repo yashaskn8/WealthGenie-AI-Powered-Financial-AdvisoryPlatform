@@ -22,10 +22,11 @@ except ImportError:
     FAISS_AVAILABLE = False
 
 from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure
 
 from rag.schema import TextChunk, RetrievedChunk, ChunkMetadata, is_scope_accessible
+from rag.embeddings.identity import EmbeddingIdentityError, normalize_embedding_identity
 from rag.vector_store.base import BaseVectorStore
+from model.migrations.phase3_state import verify_phase3_state
 
 logger = logging.getLogger("wealthgenie.rag.vector_store.mongo")
 
@@ -60,23 +61,16 @@ class MongoVectorStore(BaseVectorStore):
         self._chunks: List[TextChunk] = []
         self._embeddings: List[List[float]] = []
         self._stored_embedding_dim: int = 0
+        self._stored_embedding_identity: Optional[Dict[str, Any]] = None
         self._faiss_index: Any = None
         self._faiss_dirty: bool = True
 
-        self._init_indexes()
-        self.load()
-
-    def _init_indexes(self) -> None:
-        """Create MongoDB indexes for efficient querying."""
         try:
-            self._collection.create_index("chunk_id", unique=True)
-            self._collection.create_index("document_id")
-            self._collection.create_index("tenant_id")
-            self._collection.create_index("scope")
-            logger.info("MongoVectorStore indexes initialized")
-        except ConnectionFailure as e:
-            logger.error(f"Failed to connect to MongoDB for vector store: {e}")
+            verify_phase3_state(self._db, vector_collection=collection_name)
+        except Exception:
+            self._client.close()
             raise
+        self.load()
 
     @property
     def is_using_faiss(self) -> bool:
@@ -84,7 +78,8 @@ class MongoVectorStore(BaseVectorStore):
 
     def add_chunks(self, chunks: List[TextChunk]) -> int:
         """Adds embedded text chunks to MongoDB, avoiding duplicate chunk_ids."""
-        incoming = [chunk.embedding for chunk in chunks if chunk.embedding]
+        embedded_chunks = [chunk for chunk in chunks if chunk.embedding is not None]
+        incoming = [chunk.embedding for chunk in embedded_chunks]
         if any(
             not isinstance(vector, list)
             or not vector
@@ -95,10 +90,27 @@ class MongoVectorStore(BaseVectorStore):
         dimensions = {len(vector) for vector in incoming}
         if len(dimensions) > 1 or (self._stored_embedding_dim and dimensions and dimensions != {self._stored_embedding_dim}):
             raise ValueError("Cannot mix embedding dimensions in a Mongo vector-store generation.")
+        identities = [
+            normalize_embedding_identity(chunk.embedding_identity)
+            for chunk in embedded_chunks
+        ]
+        if any(identity["embedding_dimension"] != len(chunk.embedding) for identity, chunk in zip(identities, embedded_chunks)):
+            raise ValueError("Persisted vector dimension does not match its embedding identity.")
+        if identities and any(identity != identities[0] for identity in identities[1:]):
+            raise ValueError("Cannot mix embedding identities in a Mongo vector-store generation.")
+        incoming_identity = identities[0] if identities else None
+        if (
+            incoming_identity is not None
+            and self._stored_embedding_identity is not None
+            and incoming_identity != self._stored_embedding_identity
+        ):
+            raise ValueError("Cannot write a different embedding identity into the active Mongo vector-store generation.")
         added_count = 0
         for chunk in chunks:
-            if not chunk.embedding:
+            if chunk.embedding is None:
                 continue
+
+            identity = normalize_embedding_identity(chunk.embedding_identity)
 
             scope = getattr(chunk, "scope", None) or getattr(chunk.metadata, "scope", "global")
             doc = {
@@ -110,6 +122,7 @@ class MongoVectorStore(BaseVectorStore):
                 "scope": scope,
                 "lifecycle_state": chunk.lifecycle_state,
                 "embedding": chunk.embedding,
+                "embedding_identity": identity,
             }
 
             # Upsert: update if exists, insert if new
@@ -138,6 +151,7 @@ class MongoVectorStore(BaseVectorStore):
         tenant_id: str = "default",
         user_id: Optional[str] = None,
         scope: Optional[str] = None,
+        embedding_identity: Optional[Dict[str, Any]] = None,
     ) -> List[RetrievedChunk]:
         """
         Executes tenant/scope-isolated similarity vector search.
@@ -148,9 +162,15 @@ class MongoVectorStore(BaseVectorStore):
         if not self._chunks or not self._embeddings:
             return []
 
+        query_identity = normalize_embedding_identity(embedding_identity)
+        if query_identity != self._stored_embedding_identity:
+            raise ValueError("Query embedding identity does not match the active Mongo vector-store generation.")
+
         q_vec = np.array(query_vector, dtype=np.float32)
         if q_vec.ndim != 1 or not np.isfinite(q_vec).all():
             raise ValueError("Query embedding must be a finite one-dimensional vector.")
+        if len(q_vec) != query_identity["embedding_dimension"]:
+            raise ValueError("Query vector dimension does not match its declared embedding identity.")
         q_norm = np.linalg.norm(q_vec)
         if q_norm == 0:
             return []
@@ -310,6 +330,7 @@ class MongoVectorStore(BaseVectorStore):
             "total_chunks_in_memory": len(self._chunks),
             "unique_documents": unique_docs,
             "embedding_dimension": dimension,
+            "embedding_identity": self._stored_embedding_identity,
             "backend": "mongodb",
             "faiss_available": FAISS_AVAILABLE,
             "is_using_faiss": self.is_using_faiss,
@@ -392,6 +413,12 @@ class MongoVectorStore(BaseVectorStore):
             raise ValueError(f"Chunk {doc.get('chunk_id')} has no valid embedding.")
         if any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in embedding):
             raise ValueError(f"Chunk {doc.get('chunk_id')} has non-finite embedding values.")
+        try:
+            embedding_identity = normalize_embedding_identity(doc.get("embedding_identity"))
+        except EmbeddingIdentityError as exc:
+            raise ValueError(f"Chunk {doc.get('chunk_id')} has missing or invalid embedding identity.") from exc
+        if len(embedding) != embedding_identity["embedding_dimension"]:
+            raise ValueError(f"Chunk {doc.get('chunk_id')} embedding dimension does not match its identity.")
         metadata = dict(doc.get("metadata", {}))
         scope = doc.get("scope", metadata.get("scope", "global"))
         metadata["scope"] = scope
@@ -404,6 +431,7 @@ class MongoVectorStore(BaseVectorStore):
             scope=scope,
             lifecycle_state=doc.get("lifecycle_state", "QUARANTINED"),
             embedding=embedding,
+            embedding_identity=embedding_identity,
         )
 
     def _reload_in_memory(self) -> None:
@@ -413,6 +441,7 @@ class MongoVectorStore(BaseVectorStore):
         self._chunks = []
         self._embeddings = []
         self._stored_embedding_dim = 0
+        self._stored_embedding_identity = None
         self._faiss_index = None
         self._faiss_dirty = True
         revision_before = int(self.get_corpus_revision())
@@ -420,6 +449,7 @@ class MongoVectorStore(BaseVectorStore):
         chunks: List[TextChunk] = []
         embeddings: List[List[float]] = []
         expected_dimension: Optional[int] = None
+        expected_identity: Optional[Dict[str, Any]] = None
         for doc in cursor:
             chunk = self._chunk_from_document(doc)
             embedding = chunk.embedding
@@ -429,6 +459,10 @@ class MongoVectorStore(BaseVectorStore):
                 expected_dimension = len(embedding)
             elif len(embedding) != expected_dimension:
                 raise ValueError("Mongo vector store contains mixed embedding dimensions.")
+            if expected_identity is None:
+                expected_identity = chunk.embedding_identity
+            elif chunk.embedding_identity != expected_identity:
+                raise ValueError("Mongo vector store contains mixed embedding identities.")
             chunks.append(chunk)
             embeddings.append(embedding)
 
@@ -436,6 +470,7 @@ class MongoVectorStore(BaseVectorStore):
         self._chunks = chunks
         self._embeddings = embeddings
         self._stored_embedding_dim = expected_dimension or 0
+        self._stored_embedding_identity = expected_identity
         self._loaded_corpus_revision = int(self.get_corpus_revision())
         if self._loaded_corpus_revision != revision_before:
             self._loaded_corpus_revision = None

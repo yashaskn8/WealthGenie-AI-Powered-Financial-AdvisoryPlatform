@@ -42,6 +42,7 @@ class RAGEvaluator:
         response: RAGQueryResponse,
         ground_truth_chunk_ids: Optional[Set[str]] = None,
         k: int = 4,
+        expected_abstention: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Evaluate one response without treating citation validity as factual entailment.
@@ -55,7 +56,10 @@ class RAGEvaluator:
         # for every metric. When no ground truth is provided, skip chunk-level IR metrics.
         gt_ids = ground_truth_chunk_ids
         has_ground_truth = gt_ids is not None and len(gt_ids) > 0
-        expected_abstention = gt_ids is not None and len(gt_ids) == 0
+        expected_abstention = (
+            gt_ids is not None and len(gt_ids) == 0
+            if expected_abstention is None else expected_abstention
+        )
 
         if has_ground_truth:
             recall_k = compute_recall_at_k(retrieved_ids, gt_ids, k)
@@ -119,11 +123,18 @@ class RAGEvaluator:
         response: RAGQueryResponse,
         ground_truth_chunk_ids: Optional[Set[str]] = None,
         k: int = 4,
+        expected_abstention: Optional[bool] = None,
     ) -> Path:
         """
         Evaluates query response and persists structured JSON evaluation report to evals_dir.
         """
-        results = self.evaluate_query_response(query, response, ground_truth_chunk_ids, k)
+        results = self.evaluate_query_response(
+            query,
+            response,
+            ground_truth_chunk_ids,
+            k=k,
+            expected_abstention=expected_abstention,
+        )
 
         timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         eval_id = f"eval_rag_{timestamp_str}"

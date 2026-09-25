@@ -261,12 +261,24 @@ jobs:
           npm ci --prefix server
           npm ci --prefix reactapp
           pip install -r ml-service/requirements.txt
-          python ml-service/scripts/verify_serving_artifacts.py
           cd reactapp
           npx playwright install --with-deps chromium
 
       - name: Migrate Phase 2 persistence indexes
         run: MONGODB_MIGRATION_URI="$MONGODB_URI" npm run migrate:phase2-indexes --prefix server
+
+      - name: Migrate Phase 3 ML/RAG shared-state indexes
+        working-directory: ml-service
+        run: python scripts/migrate_phase3_state.py
+
+      - name: Verify transactional ML model activation
+        working-directory: ml-service
+        env:
+          ML_TEST_MONGODB_URI: ${{ env.MONGODB_URI }}
+        run: python -m pytest tests/test_mongo_registry_transactions.py -q
+
+      - name: Verify trusted serving artifact bundles
+        run: python ml-service/scripts/verify_serving_artifacts.py
 
       - name: Start real application services
         run: |

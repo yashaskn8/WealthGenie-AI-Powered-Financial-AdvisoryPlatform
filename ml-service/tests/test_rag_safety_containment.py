@@ -50,14 +50,14 @@ def _pipeline(retriever: BaseRetriever) -> RAGPipeline:
     )
 
 
-def test_in_domain_trusted_evidence_returns_extracts_and_valid_citations():
+def test_unmanifested_official_looking_evidence_is_rejected():
     evidence = _chunk("tax-1", "Section 80C permits eligible deductions up to the statutory limit.")
     response = _pipeline(StaticRetriever([evidence])).query(
         RAGQueryRequest(question="What deduction is available under Section 80C?")
     )
-    assert response.grounded is True
-    assert response.metrics["response_mode"] == "extractive_retrieval"
-    assert [citation.chunk_id for citation in response.citations] == ["tax-1"]
+    assert response.grounded is False
+    assert response.retrieved_chunks == []
+    assert response.citations == []
 
 
 def test_out_of_domain_query_abstains_without_retrieval_or_citations():
@@ -92,4 +92,3 @@ def test_rag_unavailable_returns_explicit_abstention_without_fake_citations():
     assert response.grounded is False
     assert response.citations == []
     assert response.metrics["abstention_reason"] == "retrieval_unavailable"
-

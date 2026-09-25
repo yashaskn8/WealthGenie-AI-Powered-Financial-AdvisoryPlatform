@@ -5,6 +5,7 @@ Tests document loading, text cleaning, chunking, embeddings, vector search, retr
 
 import pytest
 import numpy as np
+from pathlib import Path
 from fastapi.testclient import TestClient
 
 from rag.schema import RAGQueryRequest
@@ -86,6 +87,7 @@ def test_vector_store_search(tmp_path):
     embedder = DenseVectorEmbeddingProvider(dimension=64, enable_cache=False)
     for c in chunks:
         c.embedding = embedder.embed_text(c.content)
+        c.embedding_identity = embedder.embedding_identity
 
     store.add_chunks(chunks)
     assert store.get_stats()["total_chunks"] > 0
@@ -100,23 +102,52 @@ def test_ingestion_and_rag_pipeline(tmp_path):
     index_file = tmp_path / "rag_pipeline_index.json"
     embedder = DenseVectorEmbeddingProvider(dimension=64, enable_cache=False)
     pipeline = IngestionPipeline(embedder=embedder, vector_store=PersistentVectorStore(index_path=index_file))
-    res = pipeline.ingest_text(
-        text="Under FY 2025-26 New Tax Regime, income up to 12 Lakhs incurs zero tax due to Section 87A rebate.",
-        title="Tax Rebates 2025",
-        author="CBDT",
-        source="https://www.incometaxindia.gov.in/official/section-87a",
-        source_trust_tier="government_official",
-    )
+    corpus_file = Path(__file__).parents[1] / "rag" / "data" / "corpus" / "income_tax_rules_2026_commencement.md"
+    res = pipeline.ingest_file(corpus_file)
     assert res["status"] == "success"
+    stored_embedding_identity = pipeline.vector_store.get_stats()["embedding_identity"]
+    assert stored_embedding_identity["embedding_provider"] == embedder.embedding_identity["provider"]
+    assert stored_embedding_identity["embedding_model_revision"] == embedder.embedding_identity["model_revision"]
 
     query_pipe = RAGPipeline(embedder=embedder, vector_store=pipeline.vector_store)
-    req = RAGQueryRequest(question="What is the rebate limit under Section 87A for FY 2025-26?")
+    req = RAGQueryRequest(question="When do the Income-tax Rules 2026 take effect?")
     response = query_pipe.query(req)
 
     assert response.grounded
     assert len(response.retrieved_chunks) > 0
     assert len(response.citations) > 0
-    assert "Tax Rebates 2025" in response.citations[0].document_title
+    assert response.citations[0].document_title == "Income Tax Rules 2026 Commencement"
+
+    unsupported = query_pipe.query(RAGQueryRequest(question="What exact tax rebate amount applies today?"))
+    assert not unsupported.grounded
+
+
+def test_rag_readiness_rejects_same_dimension_wrong_embedding_revision(monkeypatch):
+    from rag import router as rag_router_module
+
+    embedder = DenseVectorEmbeddingProvider(dimension=64, enable_cache=False)
+    stale_vector_identity = {
+        "embedding_provider": embedder.embedding_identity["provider"],
+        "embedding_model_id": embedder.embedding_identity["model_id"],
+        "embedding_model_revision": "different-revision-same-dimension",
+        "embedding_dimension": embedder.embedding_dimension,
+        "embedding_config_hash": embedder.embedding_identity["config_hash"],
+    }
+
+    class VectorStoreWithStaleSpace:
+        def get_stats(self):
+            return {"embedding_identity": stale_vector_identity}
+
+        def get_chunks(self):
+            return []
+
+    monkeypatch.setattr(rag_router_module.ingestion_pipeline, "embedder", embedder)
+    monkeypatch.setattr(rag_router_module.ingestion_pipeline, "vector_store", VectorStoreWithStaleSpace())
+    monkeypatch.setenv("ENVIRONMENT", "test")
+
+    snapshot = rag_router_module.rag_readiness_snapshot()
+    assert snapshot["status"] == "NOT_READY"
+    assert snapshot["checks"]["vector_embedding_identity"] is False
 
 
 def test_fastapi_rag_endpoints(client):

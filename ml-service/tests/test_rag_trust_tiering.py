@@ -68,17 +68,17 @@ def test_casual_boolean_override_is_not_supported(tmp_path):
         )
 
 
-def test_trusted_government_domain_accepted(tmp_path):
+def test_official_domain_claim_without_manifest_is_rejected(tmp_path):
     index_file = tmp_path / "test_trust_gov_index.json"
     embedder = DenseVectorEmbeddingProvider(dimension=64, enable_cache=False)
     pipeline = IngestionPipeline(embedder=embedder, vector_store=PersistentVectorStore(index_path=index_file))
 
-    # Ingest from official SEBI domain
-    res = pipeline.ingest_text(
-        text="SEBI mutual fund categorization guidelines require 65% equity allocation for flexicap funds.",
-        title="SEBI Mutual Fund Circular",
-        source="https://www.sebi.gov.in/legal/circulars/feb-2026/categorization_99983.html",
-        source_trust_tier="government_official",
-    )
-    assert res["status"] == "success"
-    assert res["chunks_created"] > 0
+    # Domain identity and caller-supplied trust labels are not the trust root.
+    with pytest.raises(UntrustedSourceError):
+        pipeline.ingest_text(
+            text="SEBI mutual fund categorization guidelines require 65% equity allocation for flexicap funds.",
+            title="SEBI Mutual Fund Circular",
+            source="https://www.sebi.gov.in/legal/circulars/feb-2026/categorization_99983.html",
+            source_trust_tier="government_official",
+        )
+    assert pipeline.vector_store.get_stats()["total_chunks"] == 0

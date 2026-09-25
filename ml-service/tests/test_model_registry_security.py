@@ -64,7 +64,7 @@ def _register(store: ModelRegistry, artifact: Path, metrics: dict, *, active: bo
     )
 
 
-def test_operator_lifecycle_requires_shadow_validation_and_complete_evidence(tmp_path, monkeypatch):
+def test_operator_lifecycle_fails_closed_without_bundle_and_evaluation_evidence(tmp_path):
     artifact = tmp_path / "model.pkl"
     artifact.write_bytes(b"model-artifact")
     store = ModelRegistry(tmp_path / "registry.sqlite")
@@ -75,25 +75,22 @@ def test_operator_lifecycle_requires_shadow_validation_and_complete_evidence(tmp
 
     with pytest.raises(HTTPException) as direct_promotion:
         promote_version(PromoteRequest(version_id=candidate_id), store)
-    assert direct_promotion.value.status_code == 409
+    assert direct_promotion.value.status_code == 503
+    assert store.get_active_model("RandomForest")["version_id"] == active_id
+    assert store.get_version(candidate_id)["lifecycle_state"] == "CANDIDATE"
 
     store.update_lifecycle_state(candidate_id, "SHADOW")
+    with pytest.raises(ValidationError):
+        ValidateRequest(metrics={name: 0.9 for name in PROMOTION_TRACKED_METRICS})
     with pytest.raises(HTTPException) as missing_evidence:
         validate_version(
             candidate_id,
-            ValidateRequest(metrics={PROMOTION_TRACKED_METRICS[0]: 0.9}),
+            ValidateRequest(evaluation_run_id="operator-invented-eval"),
             store,
         )
-    assert missing_evidence.value.status_code == 409
-
-    validated = validate_version(candidate_id, ValidateRequest(metrics=metrics), store)
-    assert validated["lifecycle_state"] == "VALIDATED"
-
-    monkeypatch.setattr("model.registry.router.registry.reload_active_model", lambda architecture: None)
-    promoted = promote_version(PromoteRequest(version_id=candidate_id), store)
-    assert promoted["is_active"] is True
-    assert store.get_version(candidate_id)["lifecycle_state"] == "ACTIVE"
-    assert store.get_version(active_id)["lifecycle_state"] == "ROLLED_BACK"
+    assert missing_evidence.value.status_code == 503
+    assert store.get_version(candidate_id)["lifecycle_state"] == "SHADOW"
+    assert store.get_active_model("RandomForest")["version_id"] == active_id
 
 
 def test_lifecycle_store_rejects_invalid_transition(tmp_path):
@@ -109,4 +106,3 @@ def test_lifecycle_store_rejects_invalid_transition(tmp_path):
 def test_skip_gate_is_not_a_supported_promotion_input():
     with pytest.raises(ValidationError):
         PromoteRequest(version_id="candidate", skip_gate=True)
-

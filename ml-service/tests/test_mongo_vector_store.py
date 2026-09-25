@@ -8,6 +8,7 @@ readable from a second instance (cross-replica proof).
 
 import pytest
 import numpy as np
+import hashlib
 from unittest.mock import patch
 
 import mongomock
@@ -15,6 +16,13 @@ import mongomock
 TEST_MONGO_URI = "mongodb://localhost:27017"
 TEST_DB_NAME = "wealthgenie_test_vectorstore"
 TEST_COLLECTION = "test_vector_chunks"
+TEST_EMBEDDING_IDENTITY = {
+    "embedding_provider": "test-provider",
+    "embedding_model_id": "test-model",
+    "embedding_model_revision": "test-revision-a",
+    "embedding_dimension": 384,
+    "embedding_config_hash": hashlib.sha256(b"test-embedding-config").hexdigest(),
+}
 
 
 def _make_chunk(chunk_id, doc_id, content, embedding, tenant_id="default", scope="global"):
@@ -36,6 +44,10 @@ def _make_chunk(chunk_id, doc_id, content, embedding, tenant_id="default", scope
         tenant_id=tenant_id,
         scope=scope,
         embedding=embedding,
+        embedding_identity={
+            **TEST_EMBEDDING_IDENTITY,
+            "embedding_dimension": len(embedding),
+        },
     )
 
 
@@ -56,6 +68,8 @@ def mock_mongo_client():
 @pytest.fixture
 def store(mock_mongo_client):
     from rag.vector_store.mongo_vector_store import MongoVectorStore
+    from model.migrations.phase3_state import migrate_phase3_state
+    migrate_phase3_state(mock_mongo_client[TEST_DB_NAME], vector_collection=TEST_COLLECTION)
     with patch("rag.vector_store.mongo_vector_store.MongoClient", return_value=mock_mongo_client):
         s = MongoVectorStore(
             mongo_uri=TEST_MONGO_URI,
@@ -68,6 +82,24 @@ def store(mock_mongo_client):
 
 
 class TestMongoVectorStore:
+
+    def test_constructor_fails_closed_without_explicit_migration(self):
+        from model.migrations.phase3_state import Phase3MigrationError
+        from rag.vector_store.mongo_vector_store import MongoVectorStore
+
+        client = mongomock.MongoClient(TEST_MONGO_URI)
+        try:
+            with patch("rag.vector_store.mongo_vector_store.MongoClient", return_value=client):
+                with pytest.raises(Phase3MigrationError, match="migration is missing"):
+                    MongoVectorStore(
+                        mongo_uri=TEST_MONGO_URI,
+                        db_name=TEST_DB_NAME + "_unmigrated",
+                        collection_name=TEST_COLLECTION,
+                        force_numpy=True,
+                    )
+            assert "chunk_id_1" not in client[TEST_DB_NAME + "_unmigrated"][TEST_COLLECTION].index_information()
+        finally:
+            client.close()
 
     def test_add_chunks_and_stats(self, store):
         chunks = [
@@ -108,7 +140,7 @@ class TestMongoVectorStore:
         ]
         store.add_chunks(chunks)
 
-        results = store.search(query_vector=target_emb, top_k=2, threshold=0.0)
+        results = store.search(query_vector=target_emb, top_k=2, threshold=0.0, embedding_identity=TEST_EMBEDDING_IDENTITY)
         assert len(results) > 0
         assert results[0].chunk.chunk_id == "relevant"
         assert results[0].score >= 0.99
@@ -121,11 +153,11 @@ class TestMongoVectorStore:
         ]
         store.add_chunks(chunks)
 
-        results = store.search(query_vector=emb, top_k=5, tenant_id="tenant_1")
+        results = store.search(query_vector=emb, top_k=5, tenant_id="tenant_1", embedding_identity=TEST_EMBEDDING_IDENTITY)
         assert len(results) == 1
         assert results[0].chunk.tenant_id == "tenant_1"
 
-        results = store.search(query_vector=emb, top_k=5, tenant_id="tenant_2")
+        results = store.search(query_vector=emb, top_k=5, tenant_id="tenant_2", embedding_identity=TEST_EMBEDDING_IDENTITY)
         assert len(results) == 1
         assert results[0].chunk.tenant_id == "tenant_2"
 
@@ -139,21 +171,21 @@ class TestMongoVectorStore:
         store.add_chunks(chunks)
 
         # 1. User 123 searches -> Should retrieve public doc + user 123 doc, NEVER user 456 doc
-        res_u1 = store.search(query_vector=emb, top_k=5, user_id="user_123")
+        res_u1 = store.search(query_vector=emb, top_k=5, user_id="user_123", embedding_identity=TEST_EMBEDDING_IDENTITY)
         retrieved_ids_u1 = {r.chunk.chunk_id for r in res_u1}
         assert "glob1" in retrieved_ids_u1
         assert "u1c1" in retrieved_ids_u1
         assert "u2c1" not in retrieved_ids_u1, "User 123 leaked User 456 private chunk!"
 
         # 2. User 456 searches -> Should retrieve public doc + user 456 doc, NEVER user 123 doc
-        res_u2 = store.search(query_vector=emb, top_k=5, user_id="user_456")
+        res_u2 = store.search(query_vector=emb, top_k=5, user_id="user_456", embedding_identity=TEST_EMBEDDING_IDENTITY)
         retrieved_ids_u2 = {r.chunk.chunk_id for r in res_u2}
         assert "glob1" in retrieved_ids_u2
         assert "u2c1" in retrieved_ids_u2
         assert "u1c1" not in retrieved_ids_u2, "User 456 leaked User 123 private chunk!"
 
         # 3. Unauthenticated/anonymous search -> Should retrieve public doc only
-        res_anon = store.search(query_vector=emb, top_k=5, user_id=None)
+        res_anon = store.search(query_vector=emb, top_k=5, user_id=None, embedding_identity=TEST_EMBEDDING_IDENTITY)
         retrieved_ids_anon = {r.chunk.chunk_id for r in res_anon}
         assert "glob1" in retrieved_ids_anon
         assert "u1c1" not in retrieved_ids_anon
@@ -185,7 +217,7 @@ class TestMongoVectorStore:
         stats = replica2.get_stats()
         assert stats["total_chunks"] == 1
 
-        results = replica2.search(query_vector=target_emb, top_k=1)
+        results = replica2.search(query_vector=target_emb, top_k=1, embedding_identity=TEST_EMBEDDING_IDENTITY)
         assert len(results) == 1
         assert results[0].chunk.chunk_id == "cross1"
         assert results[0].score >= 0.99
@@ -199,13 +231,13 @@ class TestMongoVectorStore:
         assert stats["embedding_dimension"] == 0
 
     def test_search_empty_store_returns_empty(self, store):
-        results = store.search(query_vector=_random_embedding(), top_k=5)
+        results = store.search(query_vector=_random_embedding(), top_k=5, embedding_identity=TEST_EMBEDDING_IDENTITY)
         assert results == []
 
     def test_non_active_chunks_are_excluded_after_restart(self, store, mock_mongo_client):
         embedding = _random_embedding()
         store.add_chunks([_make_chunk("life-c1", "life-doc", "Lifecycle test", embedding)])
-        assert len(store.search(embedding, top_k=1)) == 1
+        assert len(store.search(embedding, top_k=1, embedding_identity=TEST_EMBEDDING_IDENTITY)) == 1
 
         assert store.set_document_state("life-doc", "SOFT_DELETED") == 1
         from rag.vector_store.mongo_vector_store import MongoVectorStore
@@ -216,7 +248,7 @@ class TestMongoVectorStore:
                 collection_name=TEST_COLLECTION,
                 force_numpy=True,
             )
-        assert restarted.search(embedding, top_k=1) == []
+        assert restarted.search(embedding, top_k=1, embedding_identity=TEST_EMBEDDING_IDENTITY) == []
 
         assert restarted.delete_document("life-doc") == 1
         with patch("rag.vector_store.mongo_vector_store.MongoClient", return_value=mock_mongo_client):
@@ -226,7 +258,7 @@ class TestMongoVectorStore:
                 collection_name=TEST_COLLECTION,
                 force_numpy=True,
             )
-        assert after_delete.search(embedding, top_k=1) == []
+        assert after_delete.search(embedding, top_k=1, embedding_identity=TEST_EMBEDDING_IDENTITY) == []
         assert after_delete.get_stats()["total_chunks"] == 0
         restarted.close()
         after_delete.close()
@@ -245,7 +277,7 @@ class TestMongoVectorStore:
                 force_numpy=True,
             )
         store.add_chunks([_make_chunk("replica-c2", "replica-d2", "second", second_vector)])
-        results = replica.search(second_vector, top_k=2)
+        results = replica.search(second_vector, top_k=2, embedding_identity=TEST_EMBEDDING_IDENTITY)
         assert any(item.chunk.chunk_id == "replica-c2" for item in results)
         replica.close()
 
@@ -262,9 +294,70 @@ class TestMongoVectorStore:
             "scope": bad.scope,
             "lifecycle_state": "ACTIVE",
             "embedding": bad.embedding,
+            "embedding_identity": {
+                **TEST_EMBEDDING_IDENTITY,
+                "embedding_dimension": len(bad.embedding),
+            },
         })
 
         with pytest.raises(ValueError, match="mixed embedding dimensions"):
+            store.load()
+        assert store._chunks == []
+        assert store._embeddings == []
+
+    def test_same_dimension_different_embedding_model_is_rejected(self, store):
+        vector = _random_embedding()
+        store.add_chunks([_make_chunk("space-c1", "space-d1", "embedding space", vector)])
+        incompatible_identity = dict(TEST_EMBEDDING_IDENTITY)
+        incompatible_identity["embedding_model_revision"] = "test-revision-b"
+
+        with pytest.raises(ValueError, match="does not match the active Mongo vector-store generation"):
+            store.search(vector, top_k=1, embedding_identity=incompatible_identity)
+
+        incompatible_chunk = _make_chunk("space-c2", "space-d2", "other space", vector)
+        incompatible_chunk.embedding_identity = incompatible_identity
+        with pytest.raises(ValueError, match="different embedding identity"):
+            store.add_chunks([incompatible_chunk])
+
+    def test_active_legacy_chunk_without_identity_fails_closed(self, store):
+        store._collection.insert_one({
+            "chunk_id": "legacy-c1",
+            "document_id": "legacy-d1",
+            "content": "legacy vector without model identity",
+            "metadata": {
+                "title": "Legacy",
+                "source": "legacy",
+                "chunk_id": "legacy-c1",
+                "document_id": "legacy-d1",
+                "chunk_index": 0,
+            },
+            "lifecycle_state": "ACTIVE",
+            "embedding": [1.0, 0.0],
+        })
+
+        with pytest.raises(ValueError, match="missing or invalid embedding identity"):
+            store.load()
+        assert store._chunks == []
+        assert store._embeddings == []
+
+    def test_same_dimension_mixed_active_generations_fail_closed_on_reload(self, store):
+        vector = _random_embedding()
+        store.add_chunks([_make_chunk("generation-a", "doc-a", "generation A", vector)])
+        other_identity = dict(TEST_EMBEDDING_IDENTITY)
+        other_identity["embedding_model_id"] = "different-model-same-dimension"
+        store._collection.insert_one({
+            "chunk_id": "generation-b",
+            "document_id": "doc-b",
+            "content": "generation B",
+            "metadata": _make_chunk("generation-b", "doc-b", "generation B", vector).metadata.model_dump(),
+            "tenant_id": "default",
+            "scope": "global",
+            "lifecycle_state": "ACTIVE",
+            "embedding": vector,
+            "embedding_identity": other_identity,
+        })
+
+        with pytest.raises(ValueError, match="mixed embedding identities"):
             store.load()
         assert store._chunks == []
         assert store._embeddings == []

@@ -25,6 +25,7 @@ class BaseVectorStore(ABC):
         tenant_id: str = "default",
         user_id: Optional[str] = None,
         scope: Optional[str] = None,
+        embedding_identity: Optional[Dict[str, Any]] = None,
     ) -> List[RetrievedChunk]:
         """Executes tenant-isolated similarity vector search and returns top-k ranked chunks with similarity scores."""
         pass

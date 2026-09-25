@@ -3,7 +3,6 @@ WealthGenie RAG Subsystem - Data Models & Schemas
 Defines Pydantic data contracts for documents, chunks, queries, citations, and metrics.
 """
 
-from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -67,11 +66,11 @@ class DocumentMetadata(BaseModel):
     """Metadata retained for every ingested document."""
     title: str = Field(..., description="Document title")
     source: str = Field(..., description="File path, URL, or authoritative source name")
-    publication_date: str = Field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d"), description="Publication date (YYYY-MM-DD)")
+    publication_date: Optional[str] = Field(None, description="Verified publication date (YYYY-MM-DD); never inferred from ingestion time")
     document_type: str = Field("markdown", description="pdf, markdown, text, html, or csv")
     version: str = Field("1.0", description="Document schema version")
     author: Optional[str] = Field(None, description="Authoring authority (e.g. Income Tax Dept, AMFI)")
-    effective_date: str = Field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d"), description="Effective date of regulations (YYYY-MM-DD)")
+    effective_date: Optional[str] = Field(None, description="Verified legal effective date (YYYY-MM-DD); never inferred from ingestion time")
     source_trust_tier: str = Field(
         "unverified_user_input",
         description="Evidence provenance tier; direct input is unverified unless independently authorized and verified.",
@@ -107,6 +106,7 @@ class TextChunk(BaseModel):
     scope: str = Field("global", description="Tenant isolation scope: 'global' or 'user:{user_id}'")
     lifecycle_state: Literal["PENDING", "ACTIVE", "SUPERSEDED", "SOFT_DELETED", "DELETED", "QUARANTINED", "FAILED"] = "ACTIVE"
     embedding: Optional[List[float]] = None
+    embedding_identity: Optional[Dict[str, Any]] = None
 
 
 class RetrievedChunk(BaseModel):

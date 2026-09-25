@@ -7,25 +7,26 @@ to boost vector and BM25 search recall.
 import re
 from typing import Dict, List
 
-# Authoritative financial synonym mappings
+# Retrieval-only vocabulary. Values intentionally contain no rates, thresholds,
+# exemptions, return assumptions, or statutory conclusions.
 FINANCIAL_SYNONYMS: Dict[str, str] = {
-    "80C": "tax deduction section 80C ELSS PPF EPF 1.5 lakh limit",
-    "80D": "health medical insurance premium deduction section 80D senior citizen 50k",
-    "80CCD": "national pension system NPS additional deduction section 80CCD(1B) 50k",
-    "80CCD(1B)": "national pension system NPS additional deduction section 80CCD(1B) 50k",
-    "LTCG": "long term capital gains tax equity mutual fund 1.25 lakh exemption 12.5%",
-    "STCG": "short term capital gains tax listed equity 20% rate",
-    "DICGC": "deposit insurance credit guarantee corporation bank deposit 5 lakh limit RBI",
-    "SGB": "sovereign gold bond RBI 2.5% interest capital gains exemption maturity",
-    "HRA": "house rent allowance exemption rent paid basic salary 10% 50% metro",
-    "ELSS": "equity linked savings scheme 3 year lock in tax saving 80C",
-    "NPS": "national pension system 80CCD tier 1 50k extra deduction",
-    "PPF": "public provident fund 15 year lock in tax free interest EEE status",
-    "RISKOMETER": "SEBI mutual fund risk o meter risk classification low high very high",
-    "REBATE": "section 87A tax rebate threshold 12.5 lakh new regime zero tax",
-    "87A": "section 87A tax rebate threshold 12.5 lakh new regime zero tax",
-    "SLAB": "income tax slabs tax rates FY 2025-26 new regime old regime",
-    "SLABS": "income tax slabs tax rates FY 2025-26 new regime old regime",
+    "80C": "tax statute section provision historical applicable tax period",
+    "80D": "health insurance tax statute provision historical applicable tax period",
+    "80CCD": "pension contribution tax statute provision historical applicable tax period",
+    "80CCD(1B)": "pension contribution tax statute provision historical applicable tax period",
+    "LTCG": "long term capital gains tax statutory treatment applicable period",
+    "STCG": "short term capital gains tax statutory treatment applicable period",
+    "DICGC": "deposit insurance Credit Guarantee Corporation official coverage rules",
+    "SGB": "Sovereign Gold Bond official issuance redemption and tax rules",
+    "HRA": "house rent allowance statutory tax treatment applicable period",
+    "ELSS": "equity linked savings scheme official regulatory classification",
+    "NPS": "National Pension System official statutory treatment applicable period",
+    "PPF": "Public Provident Fund official scheme rules and applicable period",
+    "RISKOMETER": "SEBI mutual fund riskometer official risk classification",
+    "REBATE": "income tax rebate statutory rule applicable period",
+    "87A": "income tax statute rule identifier historical or current law must be verified",
+    "SLAB": "income tax slabs statutory rates and applicable tax period",
+    "SLABS": "income tax slabs statutory rates and applicable tax period",
 }
 
 

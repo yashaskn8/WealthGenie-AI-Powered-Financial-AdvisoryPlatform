@@ -1,0 +1,50 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: wealthgenie-phase3-state-migration-
+  namespace: wealthgenie
+  labels:
+    app: wealthgenie-phase3-state-migration
+    app.kubernetes.io/name: wealthgenie-phase3-state-migration
+spec:
+  completions: 1
+  parallelism: 1
+  backoffLimit: 0
+  activeDeadlineSeconds: 240
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: wealthgenie-phase3-state-migration
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: phase3-state-migration
+          image: wealthgenie-ml-service:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "scripts/migrate_phase3_state.py"]
+          env:
+            - name: ENVIRONMENT
+              value: production
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: wealthgenie-secrets
+                  key: MONGODB_URI
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

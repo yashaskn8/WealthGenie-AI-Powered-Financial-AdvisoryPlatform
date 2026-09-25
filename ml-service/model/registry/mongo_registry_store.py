@@ -10,20 +10,26 @@ Preserves the same public interface and SHA-256 tamper-evident artifact hashing.
 import hashlib
 import uuid
 import logging
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pymongo import MongoClient, DESCENDING
-from pymongo.errors import ConnectionFailure
+from pymongo.errors import ConnectionFailure, DuplicateKeyError, OperationFailure
+from model.migrations.phase3_state import verify_phase3_state
 
 logger = logging.getLogger("wealthgenie.registry.mongo")
 
-_SCHEMA_VERSION = 1
 _ALLOWED_LIFECYCLE_TRANSITIONS = {
     "CANDIDATE": {"SHADOW"},
     "SHADOW": {"VALIDATED"},
 }
+_UNSET = object()
+
+
+class ModelActivationConflict(RuntimeError):
+    """The active model changed or the atomic activation lost a concurrent race."""
 
 
 def compute_file_hash(filepath: Path) -> str:
@@ -48,37 +54,15 @@ class MongoModelRegistry:
         self._client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
         self._db = self._client[db_name]
         self._collection = self._db["model_versions"]
-        self._init_indexes()
-
-    def _init_indexes(self) -> None:
-        """Create indexes for efficient queries."""
         try:
-            self._collection.create_index("version_id", unique=True)
-            self._collection.create_index("model_architecture")
-            self._collection.create_index(
-                [("model_architecture", 1), ("is_active", 1)]
-            )
-            self._collection.create_index(
-                [("registered_at", DESCENDING)]
-            )
-            # Store schema version in a meta collection
-            meta = self._db["registry_meta"]
-            meta.update_one(
-                {"key": "schema_version"},
-                {"$setOnInsert": {"key": "schema_version", "value": str(_SCHEMA_VERSION)}},
-                upsert=True,
-            )
-            self._collection.update_many(
-                {"lifecycle_state": {"$exists": False}, "is_active": True},
-                {"$set": {"lifecycle_state": "ACTIVE"}},
-            )
-            self._collection.update_many(
-                {"lifecycle_state": {"$exists": False}, "is_active": {"$ne": True}},
-                {"$set": {"lifecycle_state": "CANDIDATE"}},
-            )
-            logger.info("MongoModelRegistry initialized with indexes")
+            verify_phase3_state(self._db)
+            logger.info("MongoModelRegistry verified migrated indexes")
         except ConnectionFailure as e:
+            self._client.close()
             logger.error(f"Failed to connect to MongoDB for registry: {e}")
+            raise
+        except Exception:
+            self._client.close()
             raise
 
     def register_model(
@@ -92,6 +76,7 @@ class MongoModelRegistry:
         reference_distributions: Optional[Dict[str, Any]] = None,
         notes: Optional[str] = None,
         set_active: bool = False,
+        expected_active_version_id: Optional[str] | object = _UNSET,
     ) -> str:
         """
         Register a new model version in the registry.
@@ -104,13 +89,6 @@ class MongoModelRegistry:
         artifact_hash = compute_file_hash(artifact_path)
         version_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
-
-        if set_active:
-            # Deactivate all other versions of this architecture
-            self._collection.update_many(
-                {"model_architecture": model_architecture, "is_active": True},
-                {"$set": {"is_active": False, "lifecycle_state": "ROLLED_BACK"}},
-            )
 
         doc = {
             "version_id": version_id,
@@ -128,9 +106,47 @@ class MongoModelRegistry:
             "notes": notes,
         }
 
-        self._collection.insert_one(doc)
+        if set_active:
+            try:
+                with self._transaction() as session:
+                    current = self._collection.find_one(
+                        {"model_architecture": model_architecture, "is_active": True},
+                        {"_id": 0, "version_id": 1},
+                        session=session,
+                    )
+                    current_id = current.get("version_id") if current else None
+                    if expected_active_version_id is not _UNSET and current_id != expected_active_version_id:
+                        raise ModelActivationConflict(
+                            "active model changed before activation; refresh the expected active version"
+                        )
+
+                    self._collection.update_many(
+                        {"model_architecture": model_architecture, "is_active": True},
+                        {"$set": {"is_active": False, "lifecycle_state": "ROLLED_BACK"}},
+                        session=session,
+                    )
+                    self._collection.insert_one(doc, session=session)
+            except DuplicateKeyError as exc:
+                raise ModelActivationConflict(
+                    "another activation won the unique active-model race"
+                ) from exc
+            except OperationFailure as exc:
+                if exc.code == 112:
+                    raise ModelActivationConflict(
+                        "another activation changed the active model concurrently"
+                    ) from exc
+                raise
+        else:
+            self._collection.insert_one(doc)
         logger.info(f"Registered model version {version_id} ({model_architecture})")
         return version_id
+
+    @contextmanager
+    def _transaction(self):
+        """Open a required Mongo transaction; no standalone-server fallback."""
+        with self._client.start_session() as session:
+            with session.start_transaction():
+                yield session
 
     def update_lifecycle_state(self, version_id: str, lifecycle_state: str, metrics=None) -> Dict[str, Any]:
         current = self.get_version(version_id)
@@ -183,7 +199,11 @@ class MongoModelRegistry:
         )
         return self._clean_doc(doc) if doc else None
 
-    def rollback_to_version(self, version_id: str) -> Dict[str, Any]:
+    def rollback_to_version(
+        self,
+        version_id: str,
+        expected_active_version_id: Optional[str] | object = _UNSET,
+    ) -> Dict[str, Any]:
         """
         Roll back the active model to a specific registered version.
         Verifies artifact SHA-256 hash integrity before activation.
@@ -207,16 +227,41 @@ class MongoModelRegistry:
                 f"Current hash: {current_hash}. Rollback REFUSED."
             )
 
-        # Deactivate all versions of this architecture
-        self._collection.update_many(
-            {"model_architecture": version["model_architecture"]},
-            {"$set": {"is_active": False, "lifecycle_state": "ROLLED_BACK"}},
-        )
-        # Activate the target version
-        self._collection.update_one(
-            {"version_id": version_id},
-            {"$set": {"is_active": True, "lifecycle_state": "ACTIVE"}},
-        )
+        try:
+            with self._transaction() as session:
+                current = self._collection.find_one(
+                    {"model_architecture": version["model_architecture"], "is_active": True},
+                    {"_id": 0, "version_id": 1},
+                    session=session,
+                )
+                current_id = current.get("version_id") if current else None
+                if expected_active_version_id is not _UNSET and current_id != expected_active_version_id:
+                    raise ModelActivationConflict(
+                        "active model changed before rollback; refresh the expected active version"
+                    )
+
+                self._collection.update_many(
+                    {"model_architecture": version["model_architecture"], "is_active": True},
+                    {"$set": {"is_active": False, "lifecycle_state": "ROLLED_BACK"}},
+                    session=session,
+                )
+                result = self._collection.update_one(
+                    {"version_id": version_id, "model_architecture": version["model_architecture"]},
+                    {"$set": {"is_active": True, "lifecycle_state": "ACTIVE"}},
+                    session=session,
+                )
+                if result.matched_count != 1:
+                    raise ValueError("Rollback target disappeared before activation.")
+        except DuplicateKeyError as exc:
+            raise ModelActivationConflict(
+                "another activation won the unique active-model race"
+            ) from exc
+        except OperationFailure as exc:
+            if exc.code == 112:
+                raise ModelActivationConflict(
+                    "another activation changed the active model concurrently"
+                ) from exc
+            raise
 
         return self.get_version(version_id)  # type: ignore
 
