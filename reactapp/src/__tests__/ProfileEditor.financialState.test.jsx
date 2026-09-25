@@ -76,12 +76,46 @@ describe('ProfileEditor financial-state invalidation', () => {
     expect(onProfileChangeStart).toHaveBeenCalledOnce();
     expect(onProfileUpdate).not.toHaveBeenCalled();
 
-    await act(async () => resolveUpdate({ ...profile, monthly_savings: 27000, version: 5 }));
+    const recommendation = { recommendationId: 'rec-current-v5', response_state: 'CURRENT', profile_version: 5 };
+    await act(async () => resolveUpdate({
+      profile: { ...profile, monthly_savings: 27000, version: 5 },
+      recommendation,
+    }));
     await waitFor(() => expect(onProfileUpdate).toHaveBeenCalledOnce());
     expect(onProfileUpdate).toHaveBeenCalledWith(expect.objectContaining({
       profileId: profile.profileId,
       version: 5,
       monthly_savings: 27000,
-    }));
+    }), { recommendation });
+  });
+
+  it('reuses the same idempotency key when the same profile update is retried after a lost response', async () => {
+    vi.spyOn(api, 'updateProfile')
+      .mockRejectedValueOnce(new Error('response lost'))
+      .mockResolvedValueOnce({
+        profile: { ...profile, version: 5, monthly_savings: 27000 },
+        recommendation: { recommendationId: 'rec-current-v5', response_state: 'CURRENT', profile_version: 5 },
+      });
+    const onProfileChangeFailure = vi.fn();
+    vi.stubGlobal('alert', vi.fn());
+
+    render(
+      <ProfileEditor
+        userProfile={profile}
+        onProfileUpdate={vi.fn()}
+        onProfileChangeFailure={onProfileChangeFailure}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('profile-edit'));
+    fireEvent.change(screen.getByTestId('profile-input-monthly_savings'), { target: { value: '27000' } });
+    fireEvent.click(screen.getByTestId('profile-save'));
+    await waitFor(() => expect(onProfileChangeFailure).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByTestId('profile-save'));
+
+    await waitFor(() => expect(api.updateProfile).toHaveBeenCalledTimes(2));
+    const firstKey = api.updateProfile.mock.calls[0][2].headers['Idempotency-Key'];
+    const secondKey = api.updateProfile.mock.calls[1][2].headers['Idempotency-Key'];
+    expect(firstKey).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(secondKey).toBe(firstKey);
   });
 });

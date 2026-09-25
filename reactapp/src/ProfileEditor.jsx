@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Clock, Banknote, Wallet, Scale, Target, Telescope, Save, Pencil, X, Check, Users, CreditCard, ShieldCheck, PiggyBank } from 'lucide-react';
 import * as api from './services/api';
@@ -6,11 +6,25 @@ import { normalizeFinancialProfile, validateFinancialProfile } from './utils/fin
 
 const GOALS_OPTIONS = ['Retirement', 'Wealth Growth', 'Tax Saving', 'Emergency Fund'];
 
+function createProfileUpdateIdempotencyKey() {
+  const cryptoProvider = globalThis.crypto;
+  if (typeof cryptoProvider?.randomUUID === 'function') return cryptoProvider.randomUUID();
+  if (typeof cryptoProvider?.getRandomValues !== 'function') {
+    throw new Error('Secure request identity is unavailable. Please reload and try again.');
+  }
+  const bytes = cryptoProvider.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map(value => value.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 
 const ProfileEditor = ({ userProfile, onProfileUpdate, onProfileChangeStart, onProfileChangeFailure }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [showSaved, setShowSaved] = useState(false);
+  const updateOperationRef = useRef(null);
 
   const safeProfile = React.useMemo(() => normalizeFinancialProfile(userProfile || {}), [userProfile]);
 
@@ -66,15 +80,27 @@ const ProfileEditor = ({ userProfile, onProfileUpdate, onProfileChangeStart, onP
       const payload = { ...validation.profile, version: draft.version };
 
       if (profileId) {
-        response = await api.updateProfile(profileId, payload);
+        const requestFingerprint = JSON.stringify({ profileId: String(profileId), payload });
+        if (updateOperationRef.current?.fingerprint !== requestFingerprint) {
+          updateOperationRef.current = {
+            fingerprint: requestFingerprint,
+            key: createProfileUpdateIdempotencyKey(),
+          };
+        }
+        const idempotencyKey = updateOperationRef.current.key;
+        response = await api.updateProfile(profileId, payload, {
+          headers: { 'Idempotency-Key': idempotencyKey },
+        });
       } else {
         response = await api.buildProfile(payload);
       }
+      const savedProfile = response?.profile || response;
       onProfileUpdate(normalizeFinancialProfile({
-        ...response,
-        profileId: response?.profileId || profileId || null,
-        version: response?.version || draft.version,
-      }));
+        ...savedProfile,
+        profileId: savedProfile?.profileId || savedProfile?._id || profileId || null,
+        version: savedProfile?.version || draft.version,
+      }), { recommendation: response?.recommendation || null });
+      updateOperationRef.current = null;
       setIsEditing(false);
       setShowSaved(true);
       setTimeout(() => setShowSaved(false), 2500);

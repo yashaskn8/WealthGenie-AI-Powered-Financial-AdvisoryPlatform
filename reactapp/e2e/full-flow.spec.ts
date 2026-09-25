@@ -166,7 +166,6 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     await page.getByTestId('profile-edit').click();
     await page.getByTestId('profile-input-monthly_savings').fill('27000');
     const profileUpdatePromise = page.waitForResponse(apiResponse('PUT', `/api/profile/${profile.profileId}`));
-    const refreshedRecommendationPromise = page.waitForResponse(apiResponse('POST', '/api/recommend'), { timeout: 90_000 });
     await page.getByTestId('profile-save').click();
     const profileUpdate = await profileUpdatePromise;
     expect(profileUpdate.status()).toBe(200);
@@ -179,12 +178,9 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     expect(updatedProfile.monthly_savings).toBe(27000);
     expect(profileUpdateBody.recommendation.profile_version).toBe(updatedProfile.version);
     expect(profileUpdateBody.recommendation.response_state).toBe('CURRENT');
-    await expect(page.getByText('Profile updated successfully! Recommendations will recalculate.')).toBeVisible();
-    const refreshedRecommendation = await refreshedRecommendationPromise;
-    expect(refreshedRecommendation.status()).toBe(200);
-    const refreshedAdvisory = await refreshedRecommendation.json();
-    expect(String(refreshedAdvisory.recommendationId)).toMatch(/^[0-9a-f]{24}$/i);
-    expectCurrentFinancialBinding(refreshedAdvisory, {
+    await expect(page.getByTestId('profile-edit')).toBeVisible();
+    expect(String(profileUpdateBody.recommendation.recommendationId)).toMatch(/^[0-9a-f]{24}$/i);
+    expectCurrentFinancialBinding(profileUpdateBody.recommendation, {
       profileId: profile.profileId,
       profileVersion: Number(updatedProfile.version),
     });
@@ -241,11 +237,11 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     expect(adjustment.concentrationCapsRevalidated).toBe(true);
     expect(adjustment.actualTotalTiltPct).toBeLessThanOrEqual(adjustment.maxTotalTiltPct);
     expect(Object.keys(adjustment.adjustedWeights).sort()).toEqual(
-      refreshedAdvisory.instruments.map((item: { id: string }) => item.id).sort(),
+      profileUpdateBody.recommendation.instruments.map((item: { id: string }) => item.id).sort(),
     );
 
     const supportedInstrumentIds = [
-      ...new Set(refreshedAdvisory.instruments.map((item: { id: string }) => item.id)),
+      ...new Set(profileUpdateBody.recommendation.instruments.map((item: { id: string }) => item.id)),
     ];
     const projectionResponse = await page.request.post(apiUrl('/projection'), {
       data: {

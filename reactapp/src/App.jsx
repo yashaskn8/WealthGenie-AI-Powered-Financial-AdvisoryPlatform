@@ -497,7 +497,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
     }
   };
 
-  const handleAuthoritativeRecompute = async (profile = userProfile) => {
+  const handleAuthoritativeRecompute = async (profile = userProfile, committedRecommendation = null) => {
     const targetProfileId = profile?.profileId || profile?._id;
     if (!targetProfileId) return;
     const targetProfileVersion = Number(profile.version ?? 1);
@@ -513,7 +513,8 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
     writeBackendRecs(null);
     setBackendFallback(null);
     try {
-      const recResponse = await api.getRecommendations(targetProfileId, { retries: 0, signal: token.controller.signal });
+      const recResponse = committedRecommendation
+        || await api.getRecommendations(targetProfileId, { retries: 0, signal: token.controller.signal });
       if (!operationIsCurrent(token)) return;
       if (!matchesProfileState(recResponse, profile)
           || !isFinancialCalculationFresh(recResponse?.calculation_freshness)) {
@@ -573,7 +574,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
     }
   };
 
-  const handleCommittedProfileUpdate = (updatedProfile) => {
+  const handleCommittedProfileUpdate = (updatedProfile, { recommendation: committedRecommendation = null } = {}) => {
     const updatedProfileId = updatedProfile?.profileId || updatedProfile?._id;
     if (!updatedProfileId) {
       onProfileUpdate(updatedProfile);
@@ -586,7 +587,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
       profileKey,
     });
     onProfileUpdate(updatedProfile);
-    void handleAuthoritativeRecompute(updatedProfile);
+    void handleAuthoritativeRecompute(updatedProfile, committedRecommendation);
   };
 
   const handleProfileChangeStart = () => {

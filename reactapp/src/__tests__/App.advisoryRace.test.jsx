@@ -114,6 +114,31 @@ vi.mock('../ProfileEditor', async () => {
           });
         },
       }, 'Save next profile version'),
+      ReactModule.createElement('button', {
+        type: 'button',
+        onClick: () => {
+          onProfileChangeStart?.();
+          const updatedProfile = {
+            ...userProfile,
+            version: Number(userProfile.version) + 1,
+            monthly_savings: Number(userProfile.monthly_savings) + 1000,
+          };
+          onProfileUpdate(updatedProfile, {
+            recommendation: {
+              ...currentState(1, {
+                stateId: '64b000000000000000000051',
+                allocationRevisionId: '64b000000000000000000052',
+                recommendationId: '64b000000000000000000053',
+                profileVersion: updatedProfile.version,
+                profileInputHash: nextProfileInputHash,
+              }),
+              instruments: [],
+              advisory_text: 'Atomic update advisory',
+              advisory_explanation: { status: 'READY' },
+            },
+          });
+        },
+      }, 'Save atomically committed profile version'),
     ),
   };
 });
@@ -618,6 +643,19 @@ describe('profile edits trigger one authoritative recommendation recompute', () 
     });
     expect(appMocks.getCurrentRecommendation).not.toHaveBeenCalled();
     expect(appMocks.getRecommendations).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses the recommendation committed with an atomic profile update without generating a duplicate', async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Save atomically committed profile version' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Test home' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('dashboard-profile-version')).toHaveTextContent('2');
+      expect(screen.getByTestId('allocation-revision')).toHaveTextContent('1');
+      expect(screen.getByTestId('advisory-text')).toHaveTextContent('Atomic update advisory');
+    });
+    expect(appMocks.getRecommendations).not.toHaveBeenCalled();
   });
 
   it('keeps recommendations unavailable after recompute failure and supports an explicit retry', async () => {
