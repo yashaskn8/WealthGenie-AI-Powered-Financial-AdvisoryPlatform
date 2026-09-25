@@ -1,6 +1,6 @@
 """
-WealthGenie ML Microservice — Scheduled Drift Monitor
-Runs check_drift_and_trigger_retrain() on a configurable clock interval
+WealthGenie ML Microservice — Scheduled Drift Diagnostics
+Runs check_drift_and_trigger_retrain() in diagnostics-only mode on a configurable interval
 using an asyncio periodic task inside the FastAPI event loop.
 
 Every tick is logged — including skips due to insufficient buffer samples —

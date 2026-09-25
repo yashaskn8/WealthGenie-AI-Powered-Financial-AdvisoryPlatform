@@ -26,6 +26,7 @@ from pymongo import MongoClient
 
 from rag.schema import TextChunk, RetrievedChunk, ChunkMetadata, is_scope_accessible
 from rag.embeddings.identity import EmbeddingIdentityError, normalize_embedding_identity
+from rag.corpus_generation import canonical_member, generation_digest
 from rag.vector_store.base import BaseVectorStore
 from model.migrations.phase3_state import verify_phase3_state
 
@@ -55,11 +56,13 @@ class MongoVectorStore(BaseVectorStore):
         self._db = self._client[db_name]
         self._collection = self._db[collection_name]
         self._revision_collection = self._db["rag_state"]
+        self._corpus_state = self._db["rag_corpus_state"]
         from rag.lifecycle.mongo_store import MongoRAGLifecycleStore
         self.lifecycle_store = MongoRAGLifecycleStore(
             self._client, self._db, vector_collection=collection_name
         )
         self._loaded_corpus_revision: Optional[int] = None
+        self._loaded_generation_id: Optional[str] = None
         self.force_numpy = force_numpy
 
         # In-memory search state
@@ -414,8 +417,30 @@ class MongoVectorStore(BaseVectorStore):
         return result.modified_count
 
     def get_corpus_revision(self) -> str:
+        pointer = self._corpus_state.find_one({"_id": "active_corpus"})
+        if pointer:
+            return str(pointer.get("revision", 0))
         record = self._revision_collection.find_one({"_id": "active_corpus"}) or {}
         return str(record.get("revision", 0))
+
+    def get_active_generation(self) -> Optional[Dict[str, Any]]:
+        return self.lifecycle_store.get_active_generation()
+
+    def get_loaded_generation_id(self) -> Optional[str]:
+        return self._loaded_generation_id
+
+    def get_generation_snapshot(self) -> Dict[str, Any]:
+        self._refresh_if_changed()
+        active = self.get_active_generation()
+        if active is None:
+            return {"generation_id": None, "revision": int(self.get_corpus_revision())}
+        return {
+            "generation_id": active["generation_id"],
+            "revision": active["revision"],
+            "manifest_sha256": active["manifest_sha256"],
+            "embedding_identity": active["embedding_identity"],
+            "membership_sha256": active["membership_sha256"],
+        }
 
     def _advance_corpus_revision(self) -> None:
         self._revision_collection.update_one(
@@ -423,8 +448,10 @@ class MongoVectorStore(BaseVectorStore):
         )
 
     def _refresh_if_changed(self) -> None:
-        current = int(self.get_corpus_revision())
-        if self._loaded_corpus_revision != current:
+        pointer = self._corpus_state.find_one({"_id": "active_corpus"})
+        current = int((pointer or {}).get("revision", self.get_corpus_revision()))
+        generation_id = (pointer or {}).get("generation_id")
+        if self._loaded_corpus_revision != current or self._loaded_generation_id != generation_id:
             self._reload_in_memory()
 
     @staticmethod
@@ -464,9 +491,16 @@ class MongoVectorStore(BaseVectorStore):
         self._embeddings = []
         self._stored_embedding_dim = 0
         self._stored_embedding_identity = None
+        self._loaded_generation_id = None
         self._faiss_index = None
         self._faiss_dirty = True
         revision_before = int(self.get_corpus_revision())
+        pointer = self._corpus_state.find_one({"_id": "active_corpus"})
+        generation = self.get_active_generation() if pointer else None
+        if pointer and generation is None:
+            raise RuntimeError("active RAG corpus pointer has no immutable generation")
+        if not pointer and os.environ.get("ENVIRONMENT", "local").strip().lower() in {"production", "prod"}:
+            raise RuntimeError("production RAG corpus has not completed explicit generation bootstrap")
         active_revisions = list(self._db["rag_document_revisions"].find(
             {"lifecycle_state": "ACTIVE"}, {"_id": 0}
         ))
@@ -478,7 +512,16 @@ class MongoVectorStore(BaseVectorStore):
         if len(active_revision_by_id) != len(active_revisions):
             raise RuntimeError("RAG lifecycle contains duplicate active revision identities.")
         active_revision_ids = list(active_revision_by_id)
-        if active_revision_ids:
+        generation_members = {}
+        if generation:
+            members = list(self._db["rag_corpus_generation_members"].find(
+                {"generation_id": generation["generation_id"]}, {"_id": 0}
+            ))
+            generation_members = {row.get("document_revision_id"): row for row in members}
+            if len(generation_members) != len(members) or set(generation_members) != set(active_revision_ids):
+                raise RuntimeError("active RAG generation membership differs from active document revisions")
+            active_query = {"lifecycle_state": "ACTIVE"}
+        elif active_revision_ids:
             active_query = {
                 "lifecycle_state": "ACTIVE",
                 "document_revision_id": {"$in": active_revision_ids},
@@ -497,9 +540,13 @@ class MongoVectorStore(BaseVectorStore):
         expected_dimension: Optional[int] = None
         expected_identity: Optional[Dict[str, Any]] = None
         revision_chunk_counts: Dict[str, int] = {}
+        member_chunks: Dict[str, list[dict[str, Any]]] = {}
+        creator_generation_ids: set[str] = set()
         for doc in cursor:
             revision_id = doc.get("document_revision_id")
             revision = active_revision_by_id.get(revision_id)
+            if generation and (revision is None or revision_id not in generation_members):
+                raise RuntimeError("active RAG chunk is not a member of the canonical corpus generation")
             if revision is not None and (
                 doc.get("document_id") != revision.get("document_id")
                 or doc.get("scope", "global") != revision.get("scope", "global")
@@ -507,6 +554,10 @@ class MongoVectorStore(BaseVectorStore):
                 or doc.get("lifecycle_state") != "ACTIVE"
             ):
                 raise RuntimeError("Active RAG chunk identity does not match its document revision pointer.")
+            if generation and not doc.get("corpus_generation_id"):
+                raise RuntimeError("active RAG chunk has no immutable creator generation identity")
+            if generation:
+                creator_generation_ids.add(doc["corpus_generation_id"])
             chunk = self._chunk_from_document(doc)
             embedding = chunk.embedding
             if embedding is None:
@@ -519,10 +570,13 @@ class MongoVectorStore(BaseVectorStore):
                 expected_identity = chunk.embedding_identity
             elif chunk.embedding_identity != expected_identity:
                 raise ValueError("Mongo vector store contains mixed embedding identities.")
+            if generation and chunk.embedding_identity != generation.get("embedding_identity"):
+                raise RuntimeError("active RAG generation mixes incompatible embedding identities")
             chunks.append(chunk)
             embeddings.append(embedding)
             if revision is not None:
                 revision_chunk_counts[revision_id] = revision_chunk_counts.get(revision_id, 0) + 1
+                member_chunks.setdefault(revision_id, []).append(doc)
 
         for revision_id, revision in active_revision_by_id.items():
             expected_count = revision.get("chunk_count")
@@ -530,6 +584,26 @@ class MongoVectorStore(BaseVectorStore):
                 raise RuntimeError("Active RAG lifecycle revision has an invalid expected chunk count.")
             if revision_chunk_counts.get(revision_id, 0) != expected_count:
                 raise RuntimeError("Active RAG revision chunk set is incomplete or inconsistent.")
+            if generation:
+                recomputed = canonical_member(revision, member_chunks.get(revision_id, []))
+                stored = generation_members[revision_id]
+                if any(stored.get(field) != recomputed.get(field) for field in recomputed):
+                    raise RuntimeError("active RAG generation member digest does not match stored chunks")
+
+        if generation:
+            recomputed_members = [generation_members[key] for key in sorted(generation_members)]
+            if generation_digest(recomputed_members) != generation.get("membership_sha256"):
+                raise RuntimeError("active RAG generation membership digest is invalid")
+            if len(chunks) != generation.get("chunk_count") or len(active_revisions) != generation.get("document_count"):
+                raise RuntimeError("active RAG generation counts do not match its membership")
+            known_creators = {
+                row.get("generation_id") for row in self._db["rag_corpus_generations"].find(
+                    {"generation_id": {"$in": list(creator_generation_ids)}},
+                    {"_id": 0, "generation_id": 1},
+                )
+            }
+            if creator_generation_ids != known_creators:
+                raise RuntimeError("active RAG chunk references an unknown creator generation")
 
         # Publish only a fully validated generation: chunk/vector positions stay aligned.
         self._chunks = chunks
@@ -537,6 +611,7 @@ class MongoVectorStore(BaseVectorStore):
         self._stored_embedding_dim = expected_dimension or 0
         self._stored_embedding_identity = expected_identity
         self._loaded_corpus_revision = int(self.get_corpus_revision())
+        self._loaded_generation_id = generation.get("generation_id") if generation else None
         if self._loaded_corpus_revision != revision_before:
             self._loaded_corpus_revision = None
             raise RuntimeError("RAG corpus changed during vector index reload; retry required.")

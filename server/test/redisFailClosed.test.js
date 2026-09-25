@@ -1,5 +1,5 @@
 /**
- * Phase 3 — Redis Fail-Closed Guarantee: Full Audit & Real Disconnect Tests
+ * Redis dependency behavior: focused fail-closed and availability-fallback tests.
  *
  * REDIS USAGE AUDIT TABLE:
  * ┌────────────────────────────────────────┬───────────────────────┬──────────────┬────────────────────────────────────────────┐
@@ -12,14 +12,13 @@
  * │ rateLimiter.js:87-96 (authLimiter)     │ HybridStore + RL      │ FAIL CLOSED  │ CRITICAL: passOnStoreError=false, auth      │
  * │                                        │                       │              │ rate limiter propagates error → 500.         │
  * ├────────────────────────────────────────┼───────────────────────┼──────────────┼────────────────────────────────────────────┤
- * │ rateLimiter.js:100-107 (apiLimiter)    │ HybridStore + RL      │ FAIL OPEN    │ LOW: passOnStoreError=true, general API     │
- * │                                        │                       │              │ rate limiter degrades gracefully (intended).  │
+ * │ rateLimiter.js:100-107 (apiLimiter)    │ HybridStore + RL      │ DEGRADED     │ LOW: process-local fallback reduces         │
+ * │                                        │                       │              │ cluster-wide enforcement is reduced.         │
  * ├────────────────────────────────────────┼───────────────────────┼──────────────┼────────────────────────────────────────────┤
- * │ idempotency.js:27                      │ setCacheNX / getCache  │ FAIL OPEN    │ MEDIUM: Falls back to MongoDB, then         │
- * │                                        │                       │              │ proceeds without safety if both fail.        │
+ * │ idempotency.js (financial mutations)    │ durable Mongo claim   │ FAIL CLOSED  │ Unsafe coordination returns 503 before      │
+ * │                                        │ + transaction record  │              │ mutation; same-key recovery is durable.       │
  * ├────────────────────────────────────────┼───────────────────────┼──────────────┼────────────────────────────────────────────┤
- * │ profile.js:19-31 (checkProfileRateLimit│ redisClient.incr      │ FAIL OPEN    │ LOW: Skip throttle if Redis unavailable.    │
- * │                                        │                       │              │ Profile creation proceeds. Acceptable.       │
+ * │ profileRateLimit.js (profile build)     │ Redis atomic quota    │ FAIL CLOSED  │ 503 when quota enforcement is unavailable.   │
  * ├────────────────────────────────────────┼───────────────────────┼──────────────┼────────────────────────────────────────────┤
  * │ recommend.js:68 / setCache             │ getCache / setCache    │ FAIL OPEN    │ NONE: Caching only, returns null on fail.   │
  * ├────────────────────────────────────────┼───────────────────────┼──────────────┼────────────────────────────────────────────┤
@@ -31,13 +30,8 @@
  * ├────────────────────────────────────────┼───────────────────────┼──────────────┼────────────────────────────────────────────┤
  * │ dagStream.js:39/107/130/166            │ redisClient.xAdd/xRange│ FAIL OPEN    │ LOW: DAG streaming falls back to in-memory. │
  * ├────────────────────────────────────────┼───────────────────────┼──────────────┼────────────────────────────────────────────┤
- * │ auth.js:116 (blacklistToken)           │ blacklistToken         │ FAIL OPEN    │ MEDIUM: On logout, if Redis is down, the   │
- * │                                        │                       │              │ token isn't blacklisted. BUT isTokenBlack-  │
- * │                                        │                       │              │ listed fails CLOSED, so the token will be   │
- * │                                        │                       │              │ denied anyway on next use during outage.    │
- * │                                        │                       │              │ When Redis recovers, token was never added  │
- * │                                        │                       │              │ → it will be accepted until JWT expiry.     │
- * │                                        │                       │              │ Net: ACCEPTABLE with JWT short-lived tokens.│
+ * │ auth.js blacklistToken write            │ best-effort Redis set │ BEST EFFORT  │ Logout does not prove revocation was stored;│
+ * │                                        │                       │              │ after recovery the token may live until exp. │
  * ├────────────────────────────────────────┼───────────────────────┼──────────────┼────────────────────────────────────────────┤
  * │ instrumentConstants.js:62/71           │ setCache / getCache    │ FAIL OPEN    │ NONE: Instrument params cache.              │
  * ├────────────────────────────────────────┼───────────────────────┼──────────────┼────────────────────────────────────────────┤
@@ -46,13 +40,13 @@
  * │ montecarlo.js:9                        │ getCache / setCache    │ FAIL OPEN    │ NONE: Simulation result cache.              │
  * └────────────────────────────────────────┴───────────────────────┴──────────────┴────────────────────────────────────────────┘
  *
- * SECURITY-CRITICAL PATHS (must fail closed):
+ * SECURITY-CRITICAL CHECKS (must fail closed):
  *   1. Token blacklist check — ✅ Already fails closed (redis.js:131-133)
  *   2. Auth rate limiter — ✅ Already fails closed (passOnStoreError:false)
  *
- * VERDICT: Both security-critical Redis paths already fail closed correctly.
- * All other paths (caching, non-auth rate limiting, DAG streaming) correctly
- * fail open as they should for availability.
+ * Failure semantics are path-specific: mutation idempotency, profile-build quota,
+ * authentication limiting and revocation checks fail closed; general API/chat
+ * limiting, caches and DAG streaming have availability-oriented degradation.
  *
  * This test file verifies these guarantees with REAL Redis disconnection,
  * not mocked flags.
@@ -326,7 +320,7 @@ test('Redis fail-open: getCache/setCache/setCacheNX return gracefully when Redis
 });
 
 // ══════════════════════════════════════════════════════════════════════
-// 8. Idempotency — falls back to MongoDB when Redis is down
+// 8. Durable mutation idempotency rejects a missing operation key before mutation
 // ══════════════════════════════════════════════════════════════════════
 test('Mutation idempotency: missing key fails closed and never invokes the mutation', async () => {
   setRedisAvailable(false);

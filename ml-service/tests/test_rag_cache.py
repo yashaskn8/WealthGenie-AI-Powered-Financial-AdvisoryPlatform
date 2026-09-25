@@ -71,3 +71,36 @@ def test_rag_pipeline_response_caching_integration(tmp_path):
     res2 = pipeline.query(req)
     assert cache_mgr.stats["response_hits"] == 1
     assert res1.answer == res2.answer
+
+
+def test_response_cache_is_partitioned_by_shared_corpus_generation(tmp_path):
+    class GenerationStore:
+        generation = "generation-a"
+
+        def get_generation_snapshot(self):
+            return {
+                "generation_id": self.generation,
+                "revision": 1 if self.generation == "generation-a" else 2,
+                "manifest_sha256": "a" * 64,
+                "membership_sha256": ("b" if self.generation == "generation-a" else "c") * 64,
+            }
+
+        def get_corpus_revision(self):
+            return "1"
+
+    config = RAGConfig(embedding_dim=64)
+    embedder = DenseVectorEmbeddingProvider(dimension=64, enable_cache=False)
+    store = GenerationStore()
+    cache = MultiLevelCacheManager(cache_dir=tmp_path / "cache")
+    pipeline = RAGPipeline(embedder=embedder, vector_store=store, cache_manager=cache, config=config)
+    request = RAGQueryRequest(question="Tell me a recipe for chocolate cake.")
+
+    first = pipeline.query(request)
+    assert first.metrics["response_mode"] == "abstention"
+    assert cache.stats["response_misses"] == 1
+    store.generation = "generation-b"
+    pipeline.query(request)
+
+    assert cache.stats["response_misses"] == 2
+    assert cache.stats["response_hits"] == 0
+    assert len(cache._response_cache) == 2

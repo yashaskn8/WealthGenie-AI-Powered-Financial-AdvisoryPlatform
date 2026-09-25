@@ -11,7 +11,7 @@ from typing import Any
 
 
 MIGRATION_ID = "phase3_shared_state"
-MIGRATION_VERSION = 2
+MIGRATION_VERSION = 3
 DEFAULT_VECTOR_COLLECTION = "vector_chunks"
 DEFAULT_GRIDFS_BUCKET = "model_artifacts"
 
@@ -60,12 +60,24 @@ def _required_indexes(vector_collection: str, gridfs_bucket: str) -> dict[str, l
         ],
         "rag_corpus_generations": [
             {"name": "uniq_corpus_generation_id", "key": [("generation_id", 1)], "unique": True},
+            {"name": "uniq_corpus_generation_revision", "key": [("revision", 1)], "unique": True},
             {
                 "name": "uniq_active_corpus_generation",
                 "key": [("active_key", 1)],
                 "unique": True,
                 "partialFilterExpression": {"is_active": True},
             },
+        ],
+        # `rag_corpus_state` is an immutable-key singleton at _id=active_corpus;
+        # Mongo's mandatory _id index is its uniqueness boundary.
+        "rag_corpus_state": [],
+        "rag_corpus_generation_members": [
+            {
+                "name": "uniq_generation_document_revision",
+                "key": [("generation_id", 1), ("document_revision_id", 1)],
+                "unique": True,
+            },
+            {"name": "generation_members_lookup", "key": [("generation_id", 1), ("document_id", 1)]},
         ],
         vector_collection: [
             {"name": "chunk_id_1", "key": [("chunk_id", 1)], "unique": True},
@@ -168,6 +180,13 @@ def migrate_phase3_state(
         raise Phase3MigrationError("database Phase-3 schema is newer than this migration runner")
 
     _reject_duplicate_active_versions(database)
+
+    # v2 stored a mutable active marker on generation rows. v3 introduces a
+    # singleton pointer and marks those legacy rows untrusted history only.
+    database["rag_corpus_generations"].update_many(
+        {"is_active": True},
+        {"$set": {"legacy_untrusted": True}, "$unset": {"is_active": "", "active_key": ""}},
+    )
 
     versions = database["model_versions"]
     versions.update_many(

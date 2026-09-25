@@ -58,7 +58,7 @@ def test_migration_installs_required_indexes_and_is_idempotent():
     migrate_phase3_state(database)
 
     verify_phase3_state(database)
-    assert database["ml_schema_migrations"].find_one({"_id": "phase3_shared_state"})["version"] == 2
+    assert database["ml_schema_migrations"].find_one({"_id": "phase3_shared_state"})["version"] == 3
     assert first_indexes == {
         name: dict(info)
         for name, info in database["model_versions"].index_information().items()
@@ -67,6 +67,8 @@ def test_migration_installs_required_indexes_and_is_idempotent():
     assert active["unique"] is True
     assert active["partialFilterExpression"] == {"is_active": True}
     assert database["model_artifacts.files"].index_information()["uniq_immutable_model_bundle_id"]["unique"] is True
+    assert database["rag_corpus_generations"].index_information()["uniq_corpus_generation_revision"]["unique"] is True
+    assert database["rag_corpus_generation_members"].index_information()["uniq_generation_document_revision"]["unique"] is True
     database["model_versions"].insert_one(
         {"version_id": "active-a", "model_architecture": "rf", "is_active": True}
     )
@@ -112,3 +114,20 @@ def test_migration_only_backfills_missing_lifecycle_values():
     assert database["model_versions"].find_one({"version_id": "active"})["lifecycle_state"] == "ACTIVE"
     assert database["model_versions"].find_one({"version_id": "candidate"})["lifecycle_state"] == "CANDIDATE"
     assert database["model_versions"].find_one({"version_id": "preserved"})["lifecycle_state"] == "SHADOW"
+
+
+def test_migration_demotes_legacy_mutable_corpus_generation_markers():
+    database = mongomock.MongoClient()["phase3_legacy_rag_generation"]
+    database["rag_corpus_generations"].insert_one({
+        "generation_id": "legacy-generation",
+        "revision": 7,
+        "active_key": "active",
+        "is_active": True,
+    })
+
+    migrate_phase3_state(database)
+
+    legacy = database["rag_corpus_generations"].find_one({"generation_id": "legacy-generation"})
+    assert legacy["legacy_untrusted"] is True
+    assert "is_active" not in legacy
+    assert "active_key" not in legacy

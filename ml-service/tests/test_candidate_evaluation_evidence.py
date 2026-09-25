@@ -42,6 +42,27 @@ def test_sqlite_bundle_registration_uses_complete_verified_bundle(tmp_path):
     assert store.get_active_model("RandomForest") is None
 
 
+def test_sqlite_registry_rejects_metrics_from_substituted_report_path(tmp_path):
+    source = Path(__file__).resolve().parents[1] / "model" / "bundles" / "random_forest"
+    manifest = json.loads((source / "bundle.manifest.json").read_text(encoding="utf-8"))
+    verified = verify_bundle(source, manifest["bundle_manifest_sha256"])
+    verified["bundle_dir"] = source
+    substituted = tmp_path / "evaluation_report.json"
+    substituted.write_text(json.dumps({
+        "evaluation_run_id": manifest["evaluation_report_id"],
+        "architecture": "RandomForest",
+        "training_data_hash": manifest["training_data_hash"],
+        "metrics": {"balanced_accuracy": 0.999, "macro_f1": 0.999},
+    }), encoding="utf-8")
+    verified["members"]["evaluation_report"] = substituted
+    store = ModelRegistry(tmp_path / "registry.sqlite")
+
+    with pytest.raises(ValueError, match="evaluation report bytes do not match"):
+        store.register_verified_bundle(verified, LocalArtifactStore(tmp_path / "artifacts"))
+
+    assert store.list_versions("RandomForest") == []
+
+
 def test_random_forest_evaluator_measures_reproduced_holdout_and_binds_report(tmp_path):
     source = Path(__file__).resolve().parents[1] / "model" / "bundles" / "random_forest"
     manifest = json.loads((source / "bundle.manifest.json").read_text(encoding="utf-8"))

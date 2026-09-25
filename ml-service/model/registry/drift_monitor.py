@@ -1,12 +1,12 @@
 """
-WealthGenie ML Microservice - Automated Drift Monitor & Retrain Trigger
+WealthGenie ML Microservice - Drift Diagnostics and Explicit Offline Candidate Training
 Phase 5 MLOps Implementation.
 
 Monitors incoming inference distributions against registered active model
 reference distributions using Population Stability Index (PSI).
-When statistically significant feature drift is detected (PSI >= 0.20),
-automatically triggers a retraining pipeline, computes new model rigor metrics,
-and registers a new NOT-yet-active candidate model version in the registry.
+Drift observations are diagnostic. Production scheduled checks do not train
+models; candidate training is an explicit offline/operator action and registers
+only a complete immutable, non-serving-qualified bundle.
 """
 
 import collections
@@ -168,125 +168,208 @@ def trigger_candidate_retrain(
     trigger_reason: str = "Automated retrain triggered by feature drift detection",
     registered_by: str = "manual_api_call",
 ) -> Dict[str, Any]:
-    """
-    Executes a retrain job for the specified architecture and registers the new candidate
-    model version with is_active=False.
+    """Train an offline policy-approximation experiment and register a verified bundle.
+
+    The candidate is deliberately never serving-qualified: this synthetic target
+    approximates a policy label and is not evidence of investor outcomes.
     """
     import joblib
+    import json
+    import platform
+    import tempfile
+    import sklearn
+    from model.artifacts.bundle import (
+        MANIFEST_FILENAME,
+        build_bundle_manifest,
+        sha256_file,
+        verify_bundle,
+        write_json_lf,
+    )
+    from model.architecture.base import BasePredictor
+    from model.config import TrainingConfig
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
-    from sklearn.model_selection import train_test_split
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import StandardScaler, LabelEncoder
+    from model.training.lineage import build_dataset_lineage, current_training_git_sha
 
     candidate_id = f"candidate_{uuid.uuid4().hex[:8]}"
 
     if architecture.lower() in ["randomforest", "rf", "random_forest"]:
-        candidate_dir = _candidate_models_dir()
-        candidate_artifact_path = candidate_dir / f"rf_{candidate_id}.pkl"
-        candidate_le_path = candidate_dir / f"le_{candidate_id}.pkl"
+        if store is None:
+            from store_factory import get_model_registry
+            store = get_model_registry()
+        artifact_store = getattr(store, "artifact_store", None)
+        if artifact_store is None or not callable(getattr(store, "register_verified_bundle", None)):
+            raise RuntimeError("candidate registration requires the complete-bundle registry and ArtifactStore")
 
-        # Generate fresh training dataset
         seed = int(time.time()) % 100000
         num_samples = 2500
         X, y_indices = prepare_synthetic_training_data(num_samples=num_samples, seed=seed)
+        target_classes = list(BasePredictor.TARGET_CLASSES)
+        y = np.asarray(y_indices, dtype=np.int64)
+        training_config = TrainingConfig(random_seed=seed)
+        data_hash, dataset_lineage, (train_idx, validation_idx, test_idx) = build_dataset_lineage(
+            X, y, seed=seed, config=training_config, target_classes=target_classes
+        )
+        reproduced_hash = compute_dataset_hash_from_arrays(X, y)
+        if data_hash != reproduced_hash:
+            raise RuntimeError("candidate training data hash did not reproduce independently")
 
-        target_classes = ["Equity_MF", "ELSS", "ETF", "Debt_MF", "FD", "RBI_Bond"]
-        y_labels = [target_classes[idx] for idx in y_indices]
-
-        le = LabelEncoder()
-        y = le.fit_transform(y_labels)
-
+        label_encoder = LabelEncoder()
+        label_encoder.classes_ = np.asarray(target_classes, dtype=object)
         pipeline = Pipeline([
             ("scaler", StandardScaler()),
             ("clf", RandomForestClassifier(
-                n_estimators=100,
-                max_depth=12,
-                random_state=seed,
-                n_jobs=-1,
-                class_weight="balanced",
+                n_estimators=100, max_depth=12, random_state=seed,
+                n_jobs=-1, class_weight="balanced",
             )),
         ])
-        X_train, X_validation, y_train, y_validation = train_test_split(
-            X,
-            y,
-            test_size=0.2,
-            random_state=seed,
-            stratify=y,
-        )
-        pipeline.fit(X_train, y_train)
+        pipeline.fit(X[train_idx], y[train_idx])
 
-        training_predictions = pipeline.predict(X_train)
-        validation_predictions = pipeline.predict(X_validation)
-        training_metrics = {
-            "accuracy": float(accuracy_score(y_train, training_predictions)),
+        def measure(indices):
+            predictions = pipeline.predict(X[indices])
+            labels = y[indices]
+            return {
+                "accuracy": float(accuracy_score(labels, predictions)),
+                "balanced_accuracy": float(balanced_accuracy_score(labels, predictions)),
+                "macro_f1": float(f1_score(labels, predictions, average="macro", zero_division=0)),
+                "samples": int(len(indices)),
+            }
+
+        training_metrics = measure(train_idx)
+        validation_metrics = measure(validation_idx)
+        test_metrics = measure(test_idx)
+        registered_metrics = {
+            "accuracy": validation_metrics["accuracy"],
+            "balanced_accuracy": validation_metrics["balanced_accuracy"],
+            "macro_f1": validation_metrics["macro_f1"],
         }
-        validation_metrics = {
-            "accuracy": float(accuracy_score(y_validation, validation_predictions)),
-            "balanced_accuracy": float(balanced_accuracy_score(y_validation, validation_predictions)),
-            "macro_f1": float(f1_score(y_validation, validation_predictions, average="macro", zero_division=0)),
-        }
-
-        joblib.dump(pipeline, candidate_artifact_path)
-        joblib.dump(le, candidate_le_path)
-
-
-
-        data_hash = compute_dataset_hash_from_arrays(X, np.array(y_indices))
-        lineage_params = get_dataset_generation_params(num_samples=num_samples, seed=seed)
-
-        df_train = pd.DataFrame(X_train, columns=FEATURE_NAMES)
-        ref_dist = compute_reference_distributions(df_train, list(df_train.columns))
-
-        metrics = {
-            "rule_approximation_fidelity": round(validation_metrics["accuracy"], 4),
-            "balanced_accuracy": round(validation_metrics["balanced_accuracy"], 4),
-            "macro_f1": round(validation_metrics["macro_f1"], 4),
-            "training_metrics": training_metrics,
-            "validation_metrics": validation_metrics,
-            "holdout_metrics": None,
-            "metric_interpretation": "policy-approximation fidelity, not investment outcome accuracy",
-        }
-        hparams = {
-            "n_estimators": 100,
-            "max_depth": 12,
-            "seed": seed,
-            "num_samples": num_samples,
-            "model_type": "RandomForestClassifier",
-            "dataset_lineage": lineage_params,
-            "dataset_kind": "synthetic_policy_approximation",
-            "dataset_split": {"method": "stratified_train_validation", "validation_fraction": 0.2, "seed": seed},
-            "serving_qualified": False,
-            "registered_by": registered_by,
-            "feature_schema_version": FEATURE_SCHEMA_VERSION,
-            "feature_names": FEATURE_NAMES,
-        }
-
-        # Register in persistent store
-        if store is not None:
-            version_id = store.register_model(
-                model_architecture="RandomForest",
-                artifact_path=candidate_artifact_path,
-                training_data_hash=data_hash,
-                training_timestamp=datetime.now(timezone.utc).isoformat(),
-                hyperparameters=hparams,
-                metrics=metrics,
-                reference_distributions=ref_dist,
-                notes=f"[registered_by={registered_by}] {trigger_reason}",
-                set_active=False,  # MUST NOT be active until passing promotion gate
+        timestamp = datetime.now(timezone.utc).isoformat()
+        evaluation_id = f"drift-{candidate_id}-{uuid.uuid4().hex[:12]}"
+        training_git_sha = current_training_git_sha()
+        if not training_git_sha:
+            raise RuntimeError(
+                "drift candidate training requires a clean, versioned training-source Git SHA"
             )
-        else:
-            version_id = candidate_id
+        ref_dist = compute_reference_distributions(
+            pd.DataFrame(X[train_idx], columns=FEATURE_NAMES), list(FEATURE_NAMES)
+        )
+        lineage = {
+            **dataset_lineage,
+            "generation_parameters": {
+                **dataset_lineage["generation_parameters"],
+                "registered_by": registered_by,
+                "trigger_reason_sha256": __import__("hashlib").sha256(
+                    str(trigger_reason).encode("utf-8")
+                ).hexdigest(),
+            },
+        }
+        framework_versions = {
+            "numpy": np.__version__,
+            "scikit-learn": sklearn.__version__,
+            "joblib": joblib.__version__,
+        }
+        with tempfile.TemporaryDirectory(prefix="wealthgenie-drift-bundle-") as temporary_dir:
+            bundle_dir = Path(temporary_dir)
+            model_path = bundle_dir / "model.pkl"
+            encoder_path = bundle_dir / "label_encoder.pkl"
+            metadata_path = bundle_dir / "metadata.json"
+            report_path = bundle_dir / "evaluation_report.json"
+            joblib.dump(pipeline, model_path)
+            joblib.dump(label_encoder, encoder_path)
+            report = {
+                "evaluation_run_id": evaluation_id,
+                "architecture": "RandomForest",
+                "model_version": "4.0.0",
+                "training_data_hash": data_hash,
+                "training_code_git_sha": training_git_sha,
+                "split_identity": dataset_lineage["split_identity"],
+                "metric_definitions": {
+                    "accuracy": "fraction of split examples matching synthetic policy labels",
+                    "balanced_accuracy": "unweighted mean recall across target classes",
+                    "macro_f1": "unweighted mean class-wise F1 across target classes",
+                },
+                "evaluation_methodology": "stratified train/validation/test split; fit on train only; metrics measured from each split's predictions",
+                "training_metrics": training_metrics,
+                "validation_metrics": validation_metrics,
+                "test_metrics": test_metrics,
+                "metrics": registered_metrics,
+                "interpretation": "synthetic suitability-policy approximation; not investor outcomes or investment performance",
+                "evaluated_at": timestamp,
+            }
+            write_json_lf(report_path, report)
+            metadata = {
+                "model_name": "RandomForest",
+                "model_version": "4.0.0",
+                "version": "4.0.0",
+                "architecture": "RandomForest",
+                "git_commit_hash": training_git_sha,
+                "training_code_git_sha": training_git_sha,
+                "serving_qualified": False,
+                "feature_schema_version": FEATURE_SCHEMA_VERSION,
+                "feature_names": list(FEATURE_NAMES),
+                "target_classes": target_classes,
+                "training_data_hash": data_hash,
+                "dataset_lineage": lineage,
+                "training_timestamp": timestamp,
+                "trained_at": timestamp,
+                "python_version": platform.python_version(),
+                "framework_versions": framework_versions,
+                "random_seed": seed,
+                "hyperparameters": {"n_estimators": 100, "max_depth": 12, "random_state": seed, "class_weight": "balanced"},
+                "training_metrics": training_metrics,
+                "validation_metrics": validation_metrics,
+                "test_metrics": test_metrics,
+                "evaluation_run_id": evaluation_id,
+                "metric_interpretation": report["interpretation"],
+            }
+            write_json_lf(metadata_path, metadata)
+            report_hash = sha256_file(report_path)
+            manifest = build_bundle_manifest(
+                bundle_dir,
+                bundle_id=f"rf-{candidate_id}-{data_hash[:12]}",
+                architecture="RandomForest",
+                model_version="4.0.0",
+                feature_schema_version=FEATURE_SCHEMA_VERSION,
+                feature_names=list(FEATURE_NAMES),
+                target_classes=target_classes,
+                training_data_hash=data_hash,
+                training_code_git_sha=training_git_sha,
+                training_timestamp=timestamp,
+                dataset_lineage=lineage,
+                python_version=platform.python_version(),
+                framework_versions=framework_versions,
+                evaluation_report_id=evaluation_id,
+                evaluation_report_sha256=report_hash,
+                serving_qualified=False,
+            )
+            write_json_lf(bundle_dir / MANIFEST_FILENAME, manifest)
+            verified = verify_bundle(
+                bundle_dir, manifest["bundle_manifest_sha256"], require_serving_qualified=False
+            )
+            verified["bundle_dir"] = str(bundle_dir)
+            registered = store.register_verified_bundle(
+                verified, artifact_store, reference_distributions=ref_dist, activate_if_empty=False
+            )
 
-        logger.info(f"Successfully retrained and registered candidate model version '{version_id}' (is_active=False, registered_by={registered_by}).")
+        version_id = registered.get("version_id") if isinstance(registered, dict) else registered
+        if not version_id:
+            raise RuntimeError("verified candidate bundle registration returned no version identity")
+        logger.info("Registered an offline, non-serving-qualified model bundle candidate %s", version_id)
         return {
             "version_id": version_id,
             "model_architecture": "RandomForest",
-            "artifact_path": str(candidate_artifact_path),
-            "metrics": metrics,
+            "bundle_id": manifest["bundle_id"],
+            "bundle_manifest_sha256": manifest["bundle_manifest_sha256"],
+            "metrics": registered_metrics,
+            "training_metrics": training_metrics,
+            "validation_metrics": validation_metrics,
+            "test_metrics": test_metrics,
+            "serving_qualified": False,
             "is_active": False,
             "registered_by": registered_by,
-            "registered_at": datetime.now(timezone.utc).isoformat(),
+            "registered_at": timestamp,
         }
 
     else:
@@ -305,7 +388,8 @@ def check_drift_and_trigger_retrain(
     Core drift detector workflow:
     1. Loads reference distribution from currently active model version.
     2. Runs PSI drift detection on the provided/buffered observations.
-    3. If drift >= threshold, executes automated retrain and registers candidate version (is_active=False).
+    3. In production, records diagnostics only; explicit non-production offline
+       calls may create a non-serving-qualified bundle candidate.
     """
     if store is None:
         from store_factory import get_model_registry
@@ -403,7 +487,7 @@ def check_drift_and_trigger_retrain(
             f"Auto-retrain triggered by PSI drift (verdict={overall_verdict}, "
             f"max_psi={max_psi:.4f}, drifted_features={drifted_features})"
         )
-        logger.info(f"[DriftMonitor] {trigger_reason}. Initiating automated retraining...")
+        logger.info(f"[DriftMonitor] {trigger_reason}. Starting explicit offline candidate training.")
         retrain_info = trigger_candidate_retrain(
             architecture=architecture,
             store=store,

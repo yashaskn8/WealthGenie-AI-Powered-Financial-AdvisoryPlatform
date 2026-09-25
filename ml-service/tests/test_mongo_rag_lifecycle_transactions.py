@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from pymongo import MongoClient
@@ -68,12 +70,14 @@ def _chunks(document_id: str, content: str, vector=None):
 @pytest.fixture
 def mongo_vector_store():
     from model.migrations.phase3_state import migrate_phase3_state
+    from rag.lifecycle.mongo_store import MongoRAGLifecycleStore
     from rag.vector_store.mongo_vector_store import MongoVectorStore
 
     db_name = f"wealthgenie_rag_lifecycle_{uuid.uuid4().hex}"
     admin_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
     database = admin_client[db_name]
     migrate_phase3_state(database)
+    MongoRAGLifecycleStore(admin_client, database).initialize_corpus_generation(_identity())
     store = MongoVectorStore(MONGODB_URI, db_name=db_name, force_numpy=True)
     try:
         yield store, db_name
@@ -168,6 +172,81 @@ def test_incomplete_active_chunk_set_fails_closed(mongo_vector_store):
     store._collection.delete_one({"document_id": document_id})
 
     with pytest.raises(RuntimeError, match="chunk set is incomplete"):
+        store.load()
+    assert store._chunks == []
+    assert store._embeddings == []
+
+
+def test_generation_manifest_is_immutable_and_binds_exact_active_membership(mongo_vector_store):
+    store, _ = mongo_vector_store
+    lifecycle = store.lifecycle_store
+    store.commit_document_revision(_document("generation-bound", "first evidence"), _chunks("generation-bound", "first evidence"))
+    first_pointer = store._db["rag_corpus_state"].find_one({"_id": "active_corpus"})
+    first_generation = store._db["rag_corpus_generations"].find_one({"generation_id": first_pointer["generation_id"]})
+    first_member = store._db["rag_corpus_generation_members"].find_one(
+        {"generation_id": first_pointer["generation_id"], "document_id": "generation-bound"}
+    )
+    assert first_generation["manifest_sha256"]
+    assert first_generation["embedding_identity"] == _identity()
+    assert first_generation["membership_sha256"]
+    assert first_member["chunk_count"] == 1
+
+    lifecycle.soft_delete_document("generation-bound")
+    second_pointer = store._db["rag_corpus_state"].find_one({"_id": "active_corpus"})
+    assert second_pointer["revision"] == first_pointer["revision"] + 1
+    assert second_pointer["generation_id"] != first_pointer["generation_id"]
+    assert store._db["rag_corpus_generations"].find_one(
+        {"generation_id": first_pointer["generation_id"]}
+    ) == first_generation
+    assert store._db["rag_corpus_generation_members"].find_one(
+        {"generation_id": first_pointer["generation_id"], "document_id": "generation-bound"}
+    ) == first_member
+    assert store._db["rag_corpus_generation_members"].count_documents(
+        {"generation_id": second_pointer["generation_id"]}
+    ) == 0
+
+
+def test_competing_corpus_mutations_commit_one_monotonic_generation(mongo_vector_store):
+    store, _ = mongo_vector_store
+    lifecycle = store.lifecycle_store
+    original = store._db["rag_corpus_state"].find_one({"_id": "active_corpus"})
+    barrier = threading.Barrier(2)
+    lifecycle._before_generation_record_insert = lambda _generation_id: barrier.wait(timeout=30)
+
+    def ingest(name):
+        return store.commit_document_revision(_document(name, f"evidence for {name}"), _chunks(name, f"evidence for {name}"))
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(ingest, "race-a"), pool.submit(ingest, "race-b")]
+            results = []
+            for future in futures:
+                try:
+                    results.append(("committed", future.result(timeout=45)))
+                except Exception as exc:  # one transaction must lose the generation CAS/index race
+                    results.append(("rejected", exc))
+        assert sum(state == "committed" for state, _ in results) == 1
+        assert sum(state == "rejected" for state, _ in results) == 1
+        pointer = store._db["rag_corpus_state"].find_one({"_id": "active_corpus"})
+        assert pointer["revision"] == original["revision"] + 1
+        assert store._db["rag_corpus_generations"].count_documents({"revision": pointer["revision"]}) == 1
+        active_revisions = list(store._db["rag_document_revisions"].find({"lifecycle_state": "ACTIVE"}))
+        assert len(active_revisions) == 1
+        assert len(store.search([1.0, 0.0, 0.0, 0.0], embedding_identity=_identity())) == 1
+    finally:
+        lifecycle._before_generation_record_insert = None
+
+
+def test_tampered_generation_membership_rejects_reload_and_clears_old_index(mongo_vector_store):
+    store, _ = mongo_vector_store
+    store.commit_document_revision(_document("tampered-generation", "bound evidence"), _chunks("tampered-generation", "bound evidence"))
+    pointer = store._db["rag_corpus_state"].find_one({"_id": "active_corpus"})
+    assert store._chunks
+    store._db["rag_corpus_generation_members"].update_one(
+        {"generation_id": pointer["generation_id"]},
+        {"$set": {"chunk_set_sha256": "0" * 64}},
+    )
+    with pytest.raises(RuntimeError, match="member digest"):
         store.load()
     assert store._chunks == []
     assert store._embeddings == []

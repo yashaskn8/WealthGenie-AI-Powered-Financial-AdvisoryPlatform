@@ -375,6 +375,43 @@ def verify_bundle(
     return {"manifest": manifest, "manifest_sha256": computed_manifest_hash, "members": verified_paths}
 
 
+def read_verified_evaluation_report(verified_bundle: Mapping[str, Any]) -> dict[str, Any]:
+    """Read metrics only from the report bytes bound by a canonical manifest.
+
+    Registry callers receive Python mappings, which are not themselves a trust
+    boundary. Re-check the manifest anchor and report member hash before using
+    any reported metrics; this prevents a caller from substituting an unrelated
+    report path after bundle verification.
+    """
+    manifest = _validate_manifest(dict(verified_bundle.get("manifest", {})))
+    expected_manifest_hash = verified_bundle.get("manifest_sha256")
+    computed_manifest_hash = _sha256_bytes(_canonical_json(_manifest_payload(manifest)))
+    if expected_manifest_hash != computed_manifest_hash or manifest["bundle_manifest_sha256"] != computed_manifest_hash:
+        raise ArtifactBundleError("evaluation report bundle identity is not verified")
+
+    members = verified_bundle.get("members")
+    if not isinstance(members, Mapping):
+        raise ArtifactBundleError("verified evaluation report member is missing")
+    report_path = Path(members.get("evaluation_report", ""))
+    expected_file = next(item for item in manifest["artifact_files"] if item["role"] == "evaluation_report")
+    if report_path.name != expected_file["filename"] or report_path.is_symlink() or not report_path.is_file():
+        raise ArtifactBundleError("evaluation report member is missing or unsafe")
+    try:
+        report_bytes = report_path.read_bytes()
+        if len(report_bytes) != expected_file["size_bytes"] or _sha256_bytes(report_bytes) != manifest["evaluation_report_sha256"]:
+            raise ArtifactBundleError("evaluation report bytes do not match the immutable bundle manifest")
+        report = json.loads(report_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ArtifactBundleError("evaluation report is not valid UTF-8 JSON") from exc
+    if not isinstance(report, dict) or report.get("evaluation_run_id") != manifest["evaluation_report_id"]:
+        raise ArtifactBundleError("evaluation report identity does not match the immutable bundle manifest")
+    if report.get("architecture", manifest["architecture"]) != manifest["architecture"]:
+        raise ArtifactBundleError("evaluation report architecture does not match the bundle")
+    if report.get("training_data_hash", manifest["training_data_hash"]) != manifest["training_data_hash"]:
+        raise ArtifactBundleError("evaluation report dataset hash does not match the bundle")
+    return report
+
+
 def materialize_verified_bundle(verified_bundle: Mapping[str, Any]) -> Path:
     """Copy already-verified members into a private immutable temp directory.
 

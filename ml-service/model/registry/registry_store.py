@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from model.artifacts.bundle import canonical_json_bytes
+from model.artifacts.bundle import canonical_json_bytes, read_verified_evaluation_report
 
 _DEFAULT_DB_PATH = Path(__file__).resolve().parent / "model_registry.db"
 _SCHEMA_VERSION = 2
@@ -166,7 +166,7 @@ class ModelRegistry:
             materialized = artifact_store.get_bundle(manifest["bundle_id"], manifest_hash)
             role = {"RandomForest": "model", "PyTorch_MLP": "weights", "FT_Transformer": "weights"}[architecture]
             member = next(item for item in manifest["artifact_files"] if item["role"] == role)
-            report = json.loads((Path(verified["members"]["evaluation_report"])).read_text(encoding="utf-8"))
+            report = read_verified_evaluation_report(verified)
             if report.get("evaluation_run_id") != manifest["evaluation_report_id"]:
                 raise ValueError("evaluation report does not match trusted manifest")
             prepared.append((architecture, manifest, manifest_hash, materialized / member["filename"], member["sha256"], report))
@@ -256,8 +256,7 @@ class ModelRegistry:
         stored_path = artifact_store.get_bundle(manifest["bundle_id"], manifest_hash)
         role = {"RandomForest": "model", "PyTorch_MLP": "weights", "FT_Transformer": "weights"}[manifest["architecture"]]
         member = next(item for item in manifest["artifact_files"] if item["role"] == role)
-        report_path = Path(verified_bundle["members"]["evaluation_report"])
-        report = json.loads(report_path.read_text(encoding="utf-8"))
+        report = read_verified_evaluation_report(verified_bundle)
         if report.get("evaluation_run_id") != manifest["evaluation_report_id"]:
             raise ValueError("evaluation report ID does not match the bundle manifest")
         version_id = str(uuid.uuid4())

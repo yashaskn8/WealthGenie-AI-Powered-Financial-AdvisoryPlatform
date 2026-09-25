@@ -132,6 +132,19 @@ jobs:
             exit 1
           fi
 
+      - name: Bootstrap and verify the shared RAG corpus generation
+        run: |
+          set -euo pipefail
+          JOB_NAME=$(kubectl create -f k8s/phase3-rag-bootstrap/job.yaml -o jsonpath='{.metadata.name}')
+          echo "Waiting for RAG corpus bootstrap Job ${JOB_NAME} to complete..."
+          if kubectl wait --for=condition=complete "job/${JOB_NAME}" -n wealthgenie --timeout=900s; then
+            kubectl logs "job/${JOB_NAME}" -n wealthgenie
+          else
+            kubectl describe "job/${JOB_NAME}" -n wealthgenie || true
+            kubectl logs "job/${JOB_NAME}" -n wealthgenie --all-containers=true || true
+            exit 1
+          fi
+
       - name: Bootstrap trusted Phase 3 serving bundles
         run: |
           set -euo pipefail
@@ -158,6 +171,8 @@ jobs:
             kubectl logs -n wealthgenie -l app=wealthgenie-ml-service --tail=80
             exit 1
           }
+          ML_POD=$(kubectl get pods -n wealthgenie -l app=wealthgenie-ml-service -o jsonpath='{.items[0].metadata.name}')
+          kubectl exec "$ML_POD" -n wealthgenie -- python -c "import os,urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/rag/readyz',headers={'X-API-Key':os.environ['ML_SERVICE_API_KEY']}); print(urllib.request.urlopen(req,timeout=10).read().decode())"
 
           echo "Waiting for Express Server Deployment to be Ready..."
           kubectl rollout status deployment/wealthgenie-server -n wealthgenie --timeout=300s || {

@@ -100,9 +100,15 @@ def rag_readiness_snapshot() -> dict:
         "active_corpus_chunks": False,
         "embedding_provider": False,
         "vector_embedding_identity": False,
+        "corpus_generation": False,
+        "generation_manifest_current": False,
+        "lifecycle_reconciliation": False,
         "shared_production_state": True,
     }
     manifest_hash = None
+    active_generation_id = None
+    loaded_generation_id = None
+    corpus_revision = None
     try:
         corpus_dir = Path(__file__).resolve().parent / "data" / "corpus"
         manifest = load_corpus_manifest(corpus_dir / MANIFEST_FILENAME, corpus_dir)
@@ -119,7 +125,38 @@ def rag_readiness_snapshot() -> dict:
             and chunk.metadata.source_trust_tier == "government_official"
         }
         checks["active_corpus_chunks"] = bool(expected_keys) and expected_keys.issubset(active_keys)
-    except (CorpusManifestError, OSError, ValueError, RuntimeError):
+        store = ingestion_pipeline.vector_store
+        get_snapshot = getattr(store, "get_generation_snapshot", None)
+        get_active = getattr(store, "get_active_generation", None)
+        if callable(get_snapshot) and callable(get_active):
+            snapshot = get_snapshot()
+            generation = get_active()
+            active_generation_id = generation.get("generation_id") if generation else None
+            loaded_generation_id = getattr(store, "get_loaded_generation_id", lambda: None)()
+            corpus_revision = snapshot.get("revision")
+            checks["corpus_generation"] = bool(
+                generation
+                and snapshot.get("generation_id") == generation.get("generation_id")
+                and loaded_generation_id == generation.get("generation_id")
+            )
+            checks["generation_manifest_current"] = bool(
+                generation and generation.get("manifest_sha256") == manifest_hash
+            )
+            lifecycle_store = getattr(store, "lifecycle_store", None)
+            reconcile = getattr(lifecycle_store, "reconcile", None)
+            checks["lifecycle_reconciliation"] = bool(
+                callable(reconcile) and reconcile().get("status") == "CLEAN"
+            )
+        elif os.environ.get("ENVIRONMENT", "local").strip().lower() in {"production", "prod"}:
+            checks["corpus_generation"] = False
+            checks["generation_manifest_current"] = False
+            checks["lifecycle_reconciliation"] = False
+        else:
+            # Local memory/file stores do not use the Mongo generation pointer.
+            checks["corpus_generation"] = True
+            checks["generation_manifest_current"] = True
+            checks["lifecycle_reconciliation"] = True
+    except Exception:
         checks["corpus_manifest"] = False
 
     identity = getattr(ingestion_pipeline.embedder, "embedding_identity", {})
@@ -155,6 +192,9 @@ def rag_readiness_snapshot() -> dict:
     return {
         "status": "READY" if ready else "NOT_READY",
         "manifest_sha256": manifest_hash,
+        "active_generation_id": active_generation_id,
+        "loaded_generation_id": loaded_generation_id,
+        "corpus_revision": corpus_revision,
         "embedding_identity": identity,
         "checks": checks,
     }

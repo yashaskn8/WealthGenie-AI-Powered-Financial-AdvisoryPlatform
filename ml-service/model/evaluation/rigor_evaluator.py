@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -13,8 +14,11 @@ from sklearn.metrics import accuracy_score
 
 from model.data.feature_engineering import FEATURE_NAMES, FEATURE_SCHEMA_VERSION
 from model.data.preprocessing import prepare_synthetic_training_data
+from model.artifacts.bundle import materialize_verified_bundle
+from scripts.verify_serving_artifacts import verify_trusted_serving_bundles
 
 MODEL_DIR = Path(__file__).resolve().parents[1]
+ML_SERVICE_ROOT = MODEL_DIR.parent
 REPORT_OUTPUT = MODEL_DIR / "rigor_evaluation_report.json"
 FORBIDDEN_PROFILE_FEATURES = {
     "annual_income", "gross_income", "ctc", "basic_salary", "tax_regime",
@@ -95,35 +99,41 @@ def evaluate_noise_robustness(
 
 
 def run_full_rigor_audit() -> Dict[str, Any]:
-    metadata_path = MODEL_DIR / "metadata.json"
-    model_path = MODEL_DIR / "model.pkl"
-    encoder_path = MODEL_DIR / "label_encoder.pkl"
-    if not metadata_path.exists() or not model_path.exists() or not encoder_path.exists():
-        raise FileNotFoundError("v4 model, label encoder, or metadata artifact is missing")
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    if metadata.get("feature_schema_version") != FEATURE_SCHEMA_VERSION or metadata.get("feature_names") != FEATURE_NAMES:
+    # The repository-pinned bundle anchor and the shared verifier establish
+    # provenance before either executable pickle member is deserialized.
+    verified = verify_trusted_serving_bundles(ML_SERVICE_ROOT)["RandomForest"]
+    manifest = verified["manifest"]
+    if manifest["feature_schema_version"] != FEATURE_SCHEMA_VERSION or manifest["feature_names"] != FEATURE_NAMES:
         raise ValueError("stale or incompatible model metadata")
 
-    model = joblib.load(model_path)
-    label_encoder = joblib.load(encoder_path)
-    x_test, generator_targets = prepare_synthetic_training_data(num_samples=2_000, seed=20260907)
-    generator_class_order = np.asarray(["Equity_MF", "ELSS", "ETF", "Debt_MF", "FD", "RBI_Bond"])
-    y_test = label_encoder.transform(generator_class_order[generator_targets])
-    x_frame = pd.DataFrame(x_test, columns=FEATURE_NAMES)
-    baseline = float(accuracy_score(y_test, model.predict(x_test)))
-    report = {
-        "feature_contract_audit": audit_feature_overlap(),
-        "formula_logic_overlap_audit": audit_formula_logic_overlap(),
-        "metric_reframe": {
-            "reframed_metric_name": "Suitability-Policy Approximation Fidelity",
-            "policy_approximation_fidelity_random_forest": round(baseline, 4),
-            "outcome_accuracy_claimed": False,
-        },
-        "feature_ablation_impact": evaluate_feature_ablation(model, x_frame, y_test, baseline),
-        "noise_robustness": evaluate_noise_robustness(model, x_frame, y_test),
-    }
-    REPORT_OUTPUT.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    return report
+    materialized = materialize_verified_bundle(verified)
+    try:
+        metadata = json.loads((materialized / "metadata.json").read_text(encoding="utf-8"))
+        if metadata.get("feature_schema_version") != FEATURE_SCHEMA_VERSION or metadata.get("feature_names") != FEATURE_NAMES:
+            raise ValueError("stale or incompatible model metadata")
+
+        model = joblib.load(materialized / "model.pkl")
+        label_encoder = joblib.load(materialized / "label_encoder.pkl")
+        x_test, generator_targets = prepare_synthetic_training_data(num_samples=2_000, seed=20260907)
+        generator_class_order = np.asarray(["Equity_MF", "ELSS", "ETF", "Debt_MF", "FD", "RBI_Bond"])
+        y_test = label_encoder.transform(generator_class_order[generator_targets])
+        x_frame = pd.DataFrame(x_test, columns=FEATURE_NAMES)
+        baseline = float(accuracy_score(y_test, model.predict(x_test)))
+        report = {
+            "feature_contract_audit": audit_feature_overlap(),
+            "formula_logic_overlap_audit": audit_formula_logic_overlap(),
+            "metric_reframe": {
+                "reframed_metric_name": "Suitability-Policy Approximation Fidelity",
+                "policy_approximation_fidelity_random_forest": round(baseline, 4),
+                "outcome_accuracy_claimed": False,
+            },
+            "feature_ablation_impact": evaluate_feature_ablation(model, x_frame, y_test, baseline),
+            "noise_robustness": evaluate_noise_robustness(model, x_frame, y_test),
+        }
+        REPORT_OUTPUT.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return report
+    finally:
+        shutil.rmtree(materialized, ignore_errors=True)
 
 
 if __name__ == "__main__":

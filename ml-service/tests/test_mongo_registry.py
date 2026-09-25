@@ -1,35 +1,78 @@
-"""
-Integration tests for MongoModelRegistry.
+"""Mongo registry tests for bundle-only writes and fail-closed startup."""
 
-Verifies the MongoDB-backed model registry implements the same interface as
-the SQLite ModelRegistry and supports cross-replica shared state.
-Uses mongomock for deterministic in-process testing.
-"""
-
-import os
-import tempfile
+import hashlib
+import json
 from contextlib import contextmanager
-import pytest
 from pathlib import Path
 from unittest.mock import patch
+from uuid import uuid4
 
 import mongomock
+import pytest
 
 TEST_MONGO_URI = "mongodb://localhost:27017"
 TEST_DB_NAME = "wealthgenie_test_registry"
 
 
-def _create_temp_artifact(content: str = "model-weights-binary-data") -> Path:
-    """Create a temporary file to act as a model artifact."""
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pkl")
-    tmp.write(content.encode("utf-8"))
-    tmp.close()
-    return Path(tmp.name)
+def _verified_rf_bundle(bundle_dir: Path, bundle_id: str, *, serving_qualified: bool = True):
+    from model.architecture.base import BasePredictor
+    from model.artifacts.bundle import build_bundle_manifest, verify_bundle, write_json_lf
+    from model.data.feature_engineering import FEATURE_NAMES, FEATURE_SCHEMA_VERSION
+
+    bundle_dir.mkdir(parents=True)
+    (bundle_dir / "model.pkl").write_bytes(b"fixture-model-bytes")
+    (bundle_dir / "label_encoder.pkl").write_bytes(b"fixture-encoder-bytes")
+    training_hash = hashlib.sha256(b"mongo-registry-training-data").hexdigest()
+    git_sha = "a" * 40
+    timestamp = "2026-09-25T12:00:00+00:00"
+    lineage = {
+        "generator": "mongo-registry-test-fixture",
+        "generation_parameters": {"seed": 17, "rows": 60},
+        "split_identity": {
+            name: hashlib.sha256(name.encode()).hexdigest()
+            for name in ("train_indices_sha256", "validation_indices_sha256", "test_indices_sha256")
+        },
+    }
+    report = {"evaluation_run_id": f"eval-{bundle_id}", "metrics": {"macro_f1": 0.8}}
+    write_json_lf(bundle_dir / "evaluation_report.json", report)
+    report_hash = hashlib.sha256((bundle_dir / "evaluation_report.json").read_bytes()).hexdigest()
+    write_json_lf(bundle_dir / "metadata.json", {
+        "model_name": "RandomForest",
+        "model_version": bundle_id,
+        "feature_schema_version": FEATURE_SCHEMA_VERSION,
+        "feature_names": FEATURE_NAMES,
+        "target_classes": BasePredictor.TARGET_CLASSES,
+        "training_data_hash": training_hash,
+        "training_code_git_sha": git_sha,
+        "training_timestamp": timestamp,
+        "dataset_lineage": lineage,
+    })
+    manifest = build_bundle_manifest(
+        bundle_dir,
+        bundle_id=bundle_id,
+        architecture="RandomForest",
+        model_version=bundle_id,
+        feature_schema_version=FEATURE_SCHEMA_VERSION,
+        feature_names=FEATURE_NAMES,
+        target_classes=BasePredictor.TARGET_CLASSES,
+        training_data_hash=training_hash,
+        training_code_git_sha=git_sha,
+        training_timestamp=timestamp,
+        dataset_lineage=lineage,
+        python_version="3.12.3",
+        framework_versions={"scikit-learn": "test", "joblib": "test"},
+        evaluation_report_id=report["evaluation_run_id"],
+        evaluation_report_sha256=report_hash,
+        serving_qualified=serving_qualified,
+    )
+    write_json_lf(bundle_dir / "bundle.manifest.json", manifest)
+    verified = verify_bundle(bundle_dir, manifest["bundle_manifest_sha256"])
+    verified["bundle_dir"] = str(bundle_dir)
+    return verified
 
 
 @pytest.fixture
 def mock_mongo_client():
-    """Provides a shared in-memory MongoClient mock across registry instances."""
     client = mongomock.MongoClient(TEST_MONGO_URI)
     yield client
     client.close()
@@ -37,14 +80,13 @@ def mock_mongo_client():
 
 @pytest.fixture
 def registry(mock_mongo_client):
-    """Create a MongoModelRegistry backed by the shared mongomock client."""
     from model.migrations.phase3_state import migrate_phase3_state
     from model.registry.mongo_registry_store import MongoModelRegistry
+
     migrate_phase3_state(mock_mongo_client[TEST_DB_NAME])
     with patch("model.registry.mongo_registry_store.MongoClient", return_value=mock_mongo_client):
         reg = MongoModelRegistry(mongo_uri=TEST_MONGO_URI, db_name=TEST_DB_NAME)
-        # mongomock has no transaction implementation. The replica-set
-        # integration test exercises the real transaction boundary in CI.
+
         @contextmanager
         def mongomock_transaction():
             yield None
@@ -55,249 +97,101 @@ def registry(mock_mongo_client):
 
 
 class TestMongoModelRegistry:
-    """Tests for MongoModelRegistry CRUD operations."""
+    def test_unbundled_candidate_registration_is_rejected_in_shared_mongo(self, registry, tmp_path):
+        artifact = tmp_path / "raw-model.pkl"
+        artifact.write_bytes(b"raw model payload")
+        attempts = [
+            {},
+            {"set_active": True, "expected_active_version_id": None},
+            {
+                "bundle_id": "spoofed-bundle",
+                "bundle_path": tmp_path,
+                "bundle_manifest_sha256": "a" * 64,
+            },
+        ]
+        for options in attempts:
+            with pytest.raises(ValueError, match="raw model registration is disabled"):
+                registry.register_model(
+                    model_architecture="RandomForest",
+                    artifact_path=artifact,
+                    training_data_hash="b" * 64,
+                    training_timestamp="2026-09-25T12:00:00Z",
+                    hyperparameters={},
+                    metrics={"accuracy": 0.99},
+                    **options,
+                )
+        assert registry.list_versions() == []
+        assert registry.get_active_model() is None
 
-    def test_register_verified_bundle_persists_pinned_bundle_identity(self, registry, tmp_path):
-        artifact = tmp_path / "model.bin"
-        artifact.write_bytes(b"verified-model-artifact")
-        bundle_dir = tmp_path / "bundle"
-        bundle_dir.mkdir()
-        manifest_hash = "a" * 64
-
-        version_id = registry.register_model(
-            model_architecture="bundle_fixture",
-            artifact_path=artifact,
-            training_data_hash="b" * 64,
-            training_timestamp="2026-09-25T12:00:00+00:00",
-            hyperparameters={"feature_schema_version": "fixture-v1"},
-            metrics={},
-            set_active=True,
-            expected_active_version_id=None,
-            bundle_id="fixture-bundle-v1",
-            bundle_path=bundle_dir,
-            bundle_manifest_sha256=manifest_hash,
-        )
-
-        active = registry.get_active_model("bundle_fixture")
-        assert active["version_id"] == version_id
-        assert active["bundle_id"] == "fixture-bundle-v1"
-        assert active["bundle_path"] == str(bundle_dir.resolve())
-        assert active["bundle_manifest_sha256"] == manifest_hash
-
-    def test_bundle_identity_fields_must_be_complete(self, registry, tmp_path):
-        artifact = tmp_path / "model.bin"
-        artifact.write_bytes(b"verified-model-artifact")
-        bundle_dir = tmp_path / "bundle"
-        bundle_dir.mkdir()
-
-        with pytest.raises(ValueError, match="must be provided together"):
-            registry.register_model(
-                model_architecture="incomplete_bundle_fixture",
-                artifact_path=artifact,
-                training_data_hash="b" * 64,
-                training_timestamp="2026-09-25T12:00:00+00:00",
-                hyperparameters={},
-                metrics={},
-                bundle_id="fixture-bundle-v1",
-            )
-
-        assert registry.list_versions("incomplete_bundle_fixture") == []
-
-    def test_register_and_get_version(self, registry):
-        artifact = _create_temp_artifact()
-        version_id = registry.register_model(
-            model_architecture="random_forest",
-            artifact_path=artifact,
-            training_data_hash="abc123",
-            training_timestamp="2025-01-01T00:00:00Z",
-            hyperparameters={"n_estimators": 100, "max_depth": 10},
-            metrics={"accuracy": 0.92, "f1": 0.89},
-            notes="test registration",
-        )
-        assert version_id is not None
-
-        version = registry.get_version(version_id)
-        assert version is not None
-        assert version["model_architecture"] == "random_forest"
-        assert version["hyperparameters"]["n_estimators"] == 100
-        assert version["metrics"]["accuracy"] == 0.92
-        assert version["is_active"] is False
-        os.unlink(artifact)
-
-    def test_register_with_set_active(self, registry):
-        artifact = _create_temp_artifact()
-        v1 = registry.register_model(
-            model_architecture="mlp",
-            artifact_path=artifact,
-            training_data_hash="hash1",
-            training_timestamp="2025-01-01T00:00:00Z",
-            hyperparameters={},
-            metrics={"accuracy": 0.85},
-            set_active=True,
-        )
-
-        active = registry.get_active_model("mlp")
-        assert active is not None
-        assert active["version_id"] == v1
-        assert active["is_active"] is True
-
-        # Register a new active version — should deactivate the first
-        v2 = registry.register_model(
-            model_architecture="mlp",
-            artifact_path=artifact,
-            training_data_hash="hash2",
-            training_timestamp="2025-02-01T00:00:00Z",
-            hyperparameters={},
-            metrics={"accuracy": 0.90},
-            set_active=True,
-        )
-
-        old = registry.get_version(v1)
-        new_active = registry.get_active_model("mlp")
-        assert old["is_active"] is False
-        assert new_active["version_id"] == v2
-        os.unlink(artifact)
-
-    def test_activation_rejects_stale_expected_active_without_mutating_state(self, registry):
-        artifact = _create_temp_artifact("activation-cas")
-        current = registry.register_model(
-            model_architecture="activation_cas",
-            artifact_path=artifact,
-            training_data_hash="hash1",
-            training_timestamp="2025-01-01T00:00:00Z",
-            hyperparameters={},
-            metrics={},
-            set_active=True,
-            expected_active_version_id=None,
-        )
-
-        from model.registry.mongo_registry_store import ModelActivationConflict
-        with pytest.raises(ModelActivationConflict, match="active model changed"):
-            registry.register_model(
-                model_architecture="activation_cas",
-                artifact_path=artifact,
-                training_data_hash="hash2",
-                training_timestamp="2025-02-01T00:00:00Z",
-                hyperparameters={},
-                metrics={},
-                set_active=True,
-                expected_active_version_id="stale-version",
-            )
-
-        assert registry.get_active_model("activation_cas")["version_id"] == current
-        assert len(registry.list_versions("activation_cas")) == 1
-        os.unlink(artifact)
-
-    def test_list_versions(self, registry):
-        artifact = _create_temp_artifact()
-        for i in range(3):
-            registry.register_model(
-                model_architecture="rf",
-                artifact_path=artifact,
-                training_data_hash=f"hash{i}",
-                training_timestamp=f"2025-0{i+1}-01T00:00:00Z",
-                hyperparameters={"version": i},
-                metrics={"acc": 0.80 + i * 0.05},
-            )
-
-        versions = registry.list_versions("rf")
-        assert len(versions) == 3
-
-        all_versions = registry.list_versions()
-        assert len(all_versions) == 3
-        os.unlink(artifact)
-
-    def test_rollback_to_version(self, registry):
-        artifact = _create_temp_artifact("artifact-data-v1")
-        v1 = registry.register_model(
-            model_architecture="rf",
-            artifact_path=artifact,
-            training_data_hash="h1",
-            training_timestamp="2025-01-01T00:00:00Z",
-            hyperparameters={},
-            metrics={"acc": 0.8},
-            set_active=True,
-        )
-        v2 = registry.register_model(
-            model_architecture="rf",
-            artifact_path=artifact,
-            training_data_hash="h2",
-            training_timestamp="2025-02-01T00:00:00Z",
-            hyperparameters={},
-            metrics={"acc": 0.9},
-            set_active=True,
-        )
-
-        # v1 should now be inactive
-        assert registry.get_version(v1)["is_active"] is False
-
-        # Legacy single-file rows cannot be activated as trusted model bundles.
-        with pytest.raises(ValueError, match="complete verified immutable model bundle"):
-            registry.rollback_to_version(v1)
-
-        # A rejected rollback leaves the active pointer unchanged.
-        assert registry.get_active_model("rf")["version_id"] == v2
-        assert registry.get_version(v2)["is_active"] is True
-        os.unlink(artifact)
-
-    def test_verify_artifact_integrity(self, registry):
-        artifact = _create_temp_artifact("integrity-test-content")
-        vid = registry.register_model(
-            model_architecture="rf",
-            artifact_path=artifact,
-            training_data_hash="h1",
-            training_timestamp="2025-01-01T00:00:00Z",
-            hyperparameters={},
-            metrics={},
-        )
-
-        result = registry.verify_artifact_integrity(vid)
-        assert result["integrity"] == "VERIFIED"
-        assert result["match"] is True
-
-        # Tamper with the artifact
-        with open(artifact, "w") as f:
-            f.write("TAMPERED CONTENT")
-
-        tampered = registry.verify_artifact_integrity(vid)
-        assert tampered["integrity"] == "TAMPERED"
-        assert tampered["match"] is False
-        os.unlink(artifact)
-
-    def test_cross_replica_read(self, registry, mock_mongo_client):
-        """
-        CROSS-REPLICA PROOF: Write with one instance, create a second
-        MongoModelRegistry instance sharing the same MongoDB connection,
-        and verify it reads the same data.
-        """
-        artifact = _create_temp_artifact("cross-replica-test")
-        vid = registry.register_model(
-            model_architecture="cross_test",
-            artifact_path=artifact,
-            training_data_hash="cross_hash",
-            training_timestamp="2025-06-01T00:00:00Z",
-            hyperparameters={"replica": 1},
-            metrics={"accuracy": 0.95},
-            set_active=True,
-        )
-
-        # Create a SECOND registry instance (sharing the same database)
+    def test_complete_verified_bundle_registers_candidate_and_replays_across_registry(self, registry, mock_mongo_client, tmp_path):
+        from model.artifacts.store import LocalArtifactStore
         from model.registry.mongo_registry_store import MongoModelRegistry
+
+        verified = _verified_rf_bundle(tmp_path / "candidate", f"rf-candidate-{uuid4().hex}")
+        artifact_store = LocalArtifactStore(tmp_path / "artifact-store")
+        registry.artifact_store = artifact_store
+        candidate = registry.register_verified_bundle(verified, artifact_store)
+        assert candidate["bundle_id"] == verified["manifest"]["bundle_id"]
+        assert candidate["bundle_manifest_sha256"] == verified["manifest_sha256"]
+        assert candidate["artifact_path"] is None
+        assert candidate["artifact_store_backend"] == "local_filesystem"
+        assert candidate["lifecycle_state"] == "CANDIDATE"
+        assert candidate["is_active"] is False
+
         with patch("model.registry.mongo_registry_store.MongoClient", return_value=mock_mongo_client):
-            replica2 = MongoModelRegistry(mongo_uri=TEST_MONGO_URI, db_name=TEST_DB_NAME)
+            replica = MongoModelRegistry(mongo_uri=TEST_MONGO_URI, db_name=TEST_DB_NAME)
+        try:
+            recovered = replica.get_version(candidate["version_id"])
+            assert recovered["bundle_id"] == candidate["bundle_id"]
+            assert recovered["bundle_manifest_sha256"] == candidate["bundle_manifest_sha256"]
+            assert recovered["lifecycle_state"] == "CANDIDATE"
+        finally:
+            replica.close()
 
-        version = replica2.get_version(vid)
-        assert version is not None
-        assert version["model_architecture"] == "cross_test"
-        assert version["hyperparameters"]["replica"] == 1
-        assert version["is_active"] is True
+    def test_mongo_registry_rejects_metrics_from_substituted_report_path(self, registry, tmp_path):
+        from model.artifacts.store import LocalArtifactStore
 
-        active = replica2.get_active_model("cross_test")
-        assert active is not None
-        assert active["version_id"] == vid
+        verified = _verified_rf_bundle(tmp_path / "candidate", f"rf-report-tamper-{uuid4().hex}")
+        substituted = tmp_path / "evaluation_report.json"
+        substituted.write_text(
+            json.dumps({
+                "evaluation_run_id": verified["manifest"]["evaluation_report_id"],
+                "architecture": "RandomForest",
+                "training_data_hash": verified["manifest"]["training_data_hash"],
+                "metrics": {"macro_f1": 0.999},
+            }),
+            encoding="utf-8",
+        )
+        verified["members"]["evaluation_report"] = substituted
+        artifact_store = LocalArtifactStore(tmp_path / "report-tamper-artifacts")
 
-        replica2.close()
-        os.unlink(artifact)
+        with pytest.raises(ValueError, match="evaluation report bytes do not match"):
+            registry.register_verified_bundle(verified, artifact_store)
+
+        assert registry.list_versions("RandomForest") == []
+
+    def test_bundle_registry_lists_versions_and_detects_stored_member_tampering(self, registry, tmp_path):
+        from model.artifacts.store import LocalArtifactStore
+
+        artifact_store = LocalArtifactStore(tmp_path / "artifact-store")
+        registry.artifact_store = artifact_store
+        candidates = []
+        for index in range(3):
+            bundle = _verified_rf_bundle(
+                tmp_path / f"candidate-{index}", f"rf-list-{index}-{uuid4().hex}"
+            )
+            candidates.append(registry.register_verified_bundle(bundle, artifact_store))
+
+        listed = registry.list_versions("RandomForest")
+        assert {row["version_id"] for row in listed} == {row["version_id"] for row in candidates}
+        target = candidates[0]
+        bundle_dir = artifact_store.get_bundle(target["bundle_id"], target["bundle_manifest_sha256"])
+        assert registry.verify_artifact_integrity(target["version_id"])["match"] is True
+        model_path = bundle_dir / "model.pkl"
+        model_path.write_bytes(model_path.read_bytes() + b"tamper")
+        result = registry.verify_artifact_integrity(target["version_id"])
+        assert result["integrity"] == "MISSING_OR_TAMPERED"
+        assert result["match"] is False
 
     def test_startup_fails_closed_when_explicit_migration_was_not_run(self):
         from model.migrations.phase3_state import Phase3MigrationError

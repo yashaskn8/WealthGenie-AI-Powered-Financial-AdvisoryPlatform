@@ -271,6 +271,12 @@ jobs:
         working-directory: ml-service
         run: python scripts/migrate_phase3_state.py
 
+      - name: Bootstrap the shared RAG corpus generation
+        working-directory: ml-service
+        env:
+          WEALTHGENIE_RAG_BOOTSTRAP: "1"
+        run: python scripts/bootstrap_rag_corpus.py
+
       - name: Verify transactional ML model activation
         working-directory: ml-service
         env:
@@ -306,6 +312,11 @@ jobs:
           for attempt in $(seq 1 90); do
             if curl --fail --silent http://127.0.0.1:8000/readyz | grep --quiet '"status":"ready"'; then break; fi
             if [ "$attempt" -eq 90 ]; then cat ml-service-e2e.log; exit 1; fi
+            sleep 2
+          done
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent -H "X-API-Key: $ML_SERVICE_API_KEY" http://127.0.0.1:8000/rag/readyz | grep --quiet '"status":"READY"'; then break; fi
+            if [ "$attempt" -eq 60 ]; then cat ml-service-e2e.log; exit 1; fi
             sleep 2
           done
           for attempt in $(seq 1 60); do

@@ -43,6 +43,19 @@ class ArtifactStore(ABC):
     def verify_bundle(self, bundle_dir: Path, expected_manifest_sha256: str) -> dict[str, Any]:
         return verify_bundle(bundle_dir, expected_manifest_sha256)
 
+    def _verify_stored_bundle(self, bundle_dir: Path, expected_manifest_sha256: str) -> dict[str, Any]:
+        """Verify stored bytes without treating storage as serving authorization.
+
+        Candidate bundles may be integrity-verified and registered before they
+        qualify for serving. Deserialization and promotion still call the
+        public ``verify_bundle`` method, which requires serving qualification.
+        """
+        return verify_bundle(
+            bundle_dir,
+            expected_manifest_sha256,
+            require_serving_qualified=False,
+        )
+
 
 class LocalArtifactStore(ArtifactStore):
     """Filesystem store for local development and tests; writes are immutable."""
@@ -54,11 +67,11 @@ class LocalArtifactStore(ArtifactStore):
     def put_bundle(self, bundle_dir: Path, expected_manifest_sha256: str) -> dict[str, str]:
         from pymongo.errors import DuplicateKeyError
 
-        verified = self.verify_bundle(bundle_dir, expected_manifest_sha256)
+        verified = self._verify_stored_bundle(bundle_dir, expected_manifest_sha256)
         bundle_id = _validate_bundle_id(verified["manifest"]["bundle_id"])
         destination = self.root / bundle_id
         if destination.exists():
-            existing = self.verify_bundle(destination, expected_manifest_sha256)
+            existing = self._verify_stored_bundle(destination, expected_manifest_sha256)
             if existing["manifest"]["bundle_id"] != bundle_id:
                 raise ArtifactStoreError("existing local bundle identity mismatch")
             return {"bundle_id": bundle_id, "bundle_manifest_sha256": expected_manifest_sha256}
@@ -70,10 +83,10 @@ class LocalArtifactStore(ArtifactStore):
             try:
                 os.rename(staging, destination)
             except FileExistsError:
-                existing = self.verify_bundle(destination, expected_manifest_sha256)
+                existing = self._verify_stored_bundle(destination, expected_manifest_sha256)
                 if existing["manifest"]["bundle_id"] != bundle_id:
                     raise ArtifactStoreError("concurrent local bundle registration conflict")
-            self.verify_bundle(destination, expected_manifest_sha256)
+            self._verify_stored_bundle(destination, expected_manifest_sha256)
         finally:
             shutil.rmtree(isolated, ignore_errors=True)
             shutil.rmtree(staging, ignore_errors=True)
@@ -84,7 +97,7 @@ class LocalArtifactStore(ArtifactStore):
         path = (self.root / bundle_id).resolve(strict=True)
         if path.parent != self.root:
             raise ArtifactStoreError("bundle path escapes local artifact store")
-        self.verify_bundle(path, expected_manifest_sha256)
+        self._verify_stored_bundle(path, expected_manifest_sha256)
         return path
 
     def exists(self, bundle_id: str, expected_manifest_sha256: str) -> bool:
@@ -111,7 +124,7 @@ class MongoGridFSArtifactStore(ArtifactStore):
             raise ArtifactStoreError("required immutable GridFS bundle index is missing; run Phase-3 migration")
 
     def put_bundle(self, bundle_dir: Path, expected_manifest_sha256: str) -> dict[str, str]:
-        verified = self.verify_bundle(bundle_dir, expected_manifest_sha256)
+        verified = self._verify_stored_bundle(bundle_dir, expected_manifest_sha256)
         bundle_id = _validate_bundle_id(verified["manifest"]["bundle_id"])
         existing = self.database[f"{self.bucket_name}.files"].find_one(
             {"metadata.bundle_id": bundle_id}, {"_id": 1, "metadata": 1}
@@ -191,7 +204,7 @@ class MongoGridFSArtifactStore(ArtifactStore):
                     target = output / info.filename
                     with package.open(info, "r") as source, target.open("xb") as destination:
                         shutil.copyfileobj(source, destination, length=1024 * 1024)
-            verified = self.verify_bundle(output, expected_manifest_sha256)
+            verified = self._verify_stored_bundle(output, expected_manifest_sha256)
             if verified["manifest"]["bundle_id"] != bundle_id:
                 raise ArtifactStoreError("GridFS archive bundle ID does not match its immutable record")
             return output

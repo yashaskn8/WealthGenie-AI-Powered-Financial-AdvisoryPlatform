@@ -7,7 +7,6 @@ in CI. This suite intentionally skips rather than simulating transactions.
 from __future__ import annotations
 
 import os
-import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -25,14 +24,13 @@ from model.registry.mongo_registry_store import ModelActivationConflict, MongoMo
     not os.environ.get("ML_TEST_MONGODB_URI"),
     reason="requires a transaction-capable MongoDB replica set",
 )
-def test_concurrent_model_activation_is_atomic_and_expected_version_fenced():
+def test_concurrent_model_activation_is_atomic_and_expected_version_fenced(tmp_path):
+    from model.artifacts.store import MongoGridFSArtifactStore
+    from test_mongo_registry import _verified_rf_bundle
+
     uri = os.environ["ML_TEST_MONGODB_URI"]
     database_name = f"wealthgenie_phase3_activation_{uuid4().hex}"
     client = MongoClient(uri, serverSelectionTimeoutMS=5000)
-    artifact_file = tempfile.NamedTemporaryFile(delete=False)
-    artifact_file.write(b"transactional-fixture-model")
-    artifact_file.close()
-    architecture = f"transaction-race-{uuid4().hex}"
     registries: list[MongoModelRegistry] = []
     try:
         client.admin.command("ping")
@@ -41,52 +39,117 @@ def test_concurrent_model_activation_is_atomic_and_expected_version_fenced():
 
         first = MongoModelRegistry(uri, db_name=database_name)
         registries.append(first)
-        initial = first.register_model(
-            model_architecture=architecture,
-            artifact_path=Path(artifact_file.name),
-            training_data_hash="fixture",
-            training_timestamp="2026-01-01T00:00:00Z",
-            hyperparameters={},
-            metrics={},
-            set_active=True,
-            expected_active_version_id=None,
+        first.artifact_store = MongoGridFSArtifactStore(database)
+        initial_bundle = _verified_rf_bundle(tmp_path / "active", f"rf-active-{uuid4().hex}")
+        initial = first.register_verified_bundle(
+            initial_bundle, first.artifact_store, activate_if_empty=True
         )
+        candidates = []
+        for suffix in ("a", "b"):
+            bundle = _verified_rf_bundle(tmp_path / f"candidate-{suffix}", f"rf-candidate-{suffix}-{uuid4().hex}")
+            candidates.append(first.register_verified_bundle(bundle, first.artifact_store))
+            database["model_versions"].update_one(
+                {"version_id": candidates[-1]["version_id"], "lifecycle_state": "CANDIDATE"},
+                {"$set": {"lifecycle_state": "VALIDATED"}},
+            )
 
         barrier = Barrier(2)
 
-        def promote(candidate: str):
+        def promote(candidate: dict):
             registry = MongoModelRegistry(uri, db_name=database_name)
             registries.append(registry)
             barrier.wait(timeout=10)
             try:
-                return registry.register_model(
-                    model_architecture=architecture,
-                    artifact_path=Path(artifact_file.name),
-                    training_data_hash=candidate,
-                    training_timestamp="2026-01-02T00:00:00Z",
-                    hyperparameters={"candidate": candidate},
-                    metrics={},
-                    set_active=True,
-                    expected_active_version_id=initial,
+                return registry.activate_version(
+                    candidate["version_id"],
+                    expected_active_version_id=initial["version_id"],
+                    expected_activation_generation=initial["activation_generation"],
                 )
             except ModelActivationConflict:
                 return "CONFLICT"
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(promote, ("candidate-a", "candidate-b")))
+            results = list(pool.map(promote, candidates))
 
         assert sum(result != "CONFLICT" for result in results) == 1
         assert results.count("CONFLICT") == 1
-        active = list(database["model_versions"].find({"model_architecture": architecture, "is_active": True}))
+        active = list(database["model_versions"].find({"model_architecture": "RandomForest", "is_active": True}))
         assert len(active) == 1
-        assert active[0]["version_id"] in results
-        assert database["model_versions"].count_documents({"model_architecture": architecture}) == 2
+        assert active[0]["version_id"] in {candidate["version_id"] for candidate in candidates}
+        assert database["model_versions"].count_documents({"model_architecture": "RandomForest"}) == 3
     finally:
         for registry in registries:
             registry.close()
         client.drop_database(database_name)
         client.close()
-        os.unlink(artifact_file.name)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ML_TEST_MONGODB_URI"),
+    reason="requires a transaction-capable MongoDB replica set",
+)
+def test_unqualified_drift_candidate_bundle_survives_registry_restart_but_cannot_serve(tmp_path, monkeypatch):
+    """A durable drift candidate is shared across replicas but remains non-serving."""
+    import model.serving.inference
+    from model.artifacts.store import MongoGridFSArtifactStore
+    from model.registry.mongo_registry_store import MongoModelRegistry
+    from model.serving.control_plane import ModelReconciliationError, preload_registered_bundle
+    from test_mongo_registry import _verified_rf_bundle
+
+    uri = os.environ["ML_TEST_MONGODB_URI"]
+    database_name = f"wealthgenie_phase3_drift_candidate_{uuid4().hex}"
+    client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+    registries = []
+    try:
+        client.admin.command("ping")
+        database = client[database_name]
+        migrate_phase3_state(database)
+        bundle = _verified_rf_bundle(
+            tmp_path / "offline-drift-candidate",
+            f"rf-drift-candidate-{uuid4().hex}",
+            serving_qualified=False,
+        )
+
+        trainer_registry = MongoModelRegistry(uri, db_name=database_name)
+        registries.append(trainer_registry)
+        trainer_registry.artifact_store = MongoGridFSArtifactStore(database)
+        candidate = trainer_registry.register_verified_bundle(bundle, trainer_registry.artifact_store)
+        assert candidate["artifact_path"] is None
+        assert candidate["lifecycle_state"] == "CANDIDATE"
+
+        serving_registry = MongoModelRegistry(uri, db_name=database_name)
+        registries.append(serving_registry)
+        serving_registry.artifact_store = MongoGridFSArtifactStore(database)
+        recovered = serving_registry.get_version(candidate["version_id"])
+        stored = serving_registry.artifact_store.get_bundle(
+            recovered["bundle_id"], recovered["bundle_manifest_sha256"]
+        )
+        try:
+            from model.artifacts.bundle import ArtifactBundleError
+
+            with pytest.raises(ArtifactBundleError, match="not serving-qualified"):
+                serving_registry.artifact_store.verify_bundle(
+                    stored, recovered["bundle_manifest_sha256"]
+                )
+        finally:
+            import shutil
+
+            shutil.rmtree(stored.parent, ignore_errors=True)
+
+        monkeypatch.setattr(
+            model.serving.inference.joblib,
+            "load",
+            lambda *_args, **_kwargs: pytest.fail("unqualified candidate must never be deserialized"),
+        )
+        with pytest.raises(ModelReconciliationError):
+            preload_registered_bundle(recovered, serving_registry)
+        assert serving_registry.get_version(candidate["version_id"])["lifecycle_state"] == "CANDIDATE"
+        assert serving_registry.get_active_model("RandomForest") is None
+    finally:
+        for registry in registries:
+            registry.close()
+        client.drop_database(database_name)
+        client.close()
 
 
 @pytest.mark.skipif(

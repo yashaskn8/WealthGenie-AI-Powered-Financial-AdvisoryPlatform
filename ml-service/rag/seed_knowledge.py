@@ -18,11 +18,11 @@ logger = logging.getLogger("wealthgenie.rag.seed_knowledge")
 CORPUS_DIR = BASE_DIR / "rag" / "data" / "corpus"
 
 
-def seed_default_knowledge_base(force_reingest: bool = False) -> int:
+def seed_default_knowledge_base(force_reingest: bool = False, pipeline: IngestionPipeline | None = None) -> int:
     """Ingest verified documents effective today; never infer corpus health from count."""
     manifest = load_corpus_manifest(CORPUS_DIR / MANIFEST_FILENAME, CORPUS_DIR)
     current_entries = current_documents(manifest, as_of=date.today())
-    pipeline = IngestionPipeline()
+    pipeline = pipeline or IngestionPipeline()
     loader = DocumentLoader()
 
     for entry in current_entries:

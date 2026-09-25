@@ -102,13 +102,18 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"TreeSHAP Explainer initialization failed ({e}); serving without SHAP attributions.")
 
-    # 5. Initialize & Seed RAG Knowledge Base
-    try:
-        from rag.seed_knowledge import seed_default_knowledge_base
-        seed_default_knowledge_base()
-        logger.info("RAG Knowledge Base initialized & seeded successfully.")
-    except Exception as e:
-        logger.warning(f"RAG Knowledge Base initialization failed: {e}")
+    # Production corpus changes are an explicit pre-deployment operation. The
+    # API process verifies shared state and reports /rag/readyz; it never seeds
+    # or repairs the authoritative corpus during replica startup.
+    if os.environ.get("ENVIRONMENT", "local").strip().lower() not in {"production", "prod"}:
+        try:
+            from rag.seed_knowledge import seed_default_knowledge_base
+            seed_default_knowledge_base()
+            logger.info("RAG Knowledge Base initialized & seeded successfully.")
+        except Exception as e:
+            logger.warning(f"RAG Knowledge Base initialization failed: {e}")
+    else:
+        logger.info("Production RAG corpus mutations are disabled during application startup.")
 
     # 6. Start Scheduled Drift Monitor (asyncio periodic task)
     from model.registry.drift_scheduler import drift_scheduler

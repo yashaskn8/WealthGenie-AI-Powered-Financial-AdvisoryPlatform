@@ -145,7 +145,7 @@ MONGODB_URI="$MONGODB_URI" python scripts/migrate_phase3_state.py
 
 The migration installs model-registry, immutable GridFS bundle, RAG document-
 revision, corpus-generation, and vector-chunk indexes, and records schema
-version `phase3_shared_state/2`. Application startup verifies the marker and
+version `phase3_shared_state/3`. Application startup verifies the marker and
 index definitions read-only; it does not create or repair indexes.
 
 For Mongo-backed deployments, run the explicit serving-bundle bootstrap after
@@ -166,11 +166,36 @@ has no active version. Repeated runs do not replace an existing active model.
 Deployments run this as a controlled one-shot job after both schema migrations
 and before application replicas.
 
-Mongo document lifecycle state is shared in `rag_document_revisions` and
-`rag_corpus_generations`. Ingestion writes a complete pending revision and its
-chunks in a Mongo transaction, then activates the revision and corpus
-generation atomically. Retrieval refreshes against the shared corpus revision
-and includes only chunks bound to an active document revision and compatible
+The shared RAG corpus has a separate explicit bootstrap. The image carries the
+pinned Sentence Transformer revision; production startup is offline-only and
+does not seed or repair corpus state:
+
+```bash
+cd ml-service
+WEALTHGENIE_RAG_BOOTSTRAP=1 \
+ML_STATE_BACKEND=mongodb \
+ENVIRONMENT=production \
+MONGODB_URI="$MONGODB_URI" \
+python scripts/bootstrap_rag_corpus.py
+```
+
+This operation establishes/validates the embedding-space identity, seeds only
+hash-verified current manifest documents, and verifies readiness before API
+replicas start. A corpus generation is an immutable record containing the
+manifest hash, normalized embedding identity, active revision membership and
+membership digest. A singleton `rag_corpus_state` pointer is updated with a
+monotonic revision in the same Mongo transaction as ingestion, deletion, or
+metadata revision. Membership records are append-only; chunks are searchable
+only when they belong to the exact active generation membership. Startup
+verification is read-only, and `/rag/readyz` fails when the active generation,
+manifest, lifecycle state, or loaded vector index do not reconcile.
+
+Mongo document lifecycle state is shared in `rag_document_revisions`,
+`rag_corpus_generations`, `rag_corpus_generation_members`, and
+`rag_corpus_state`. Ingestion writes a complete pending revision, its chunks,
+the immutable generation membership, and the current pointer in a Mongo
+transaction. Retrieval refreshes against the shared generation identity and
+includes only chunks bound to active document revisions and compatible
 embedding identity. Local development continues to use the file-backed
 lifecycle and vector store. Mongo-backed production does not use
 `documents.json` as lifecycle authority.

@@ -250,9 +250,9 @@ Complete audit of all 14 Redis usage paths across the codebase:
 |------|-----------|-----------------|
 | `isTokenBlacklisted` (authMiddleware.js) | **FAIL CLOSED** ✅ | Returns `true` (deny access) when Redis unavailable |
 | `authLimiter` (rateLimiter.js) | **FAIL CLOSED** ✅ | `passOnStoreError: false` — propagates error |
-| `apiLimiter` (rateLimiter.js) | FAIL OPEN | Intended — general rate limit degrades gracefully |
-| `idempotency` (idempotency.js) | FAIL OPEN | Falls back to MongoDB, then proceeds without safety |
-| `blacklistToken` (auth.js) | FAIL OPEN | Mitigated: `isTokenBlacklisted` fails closed anyway |
+| `apiLimiter` (rateLimiter.js) | DEGRADED / BOUNDED | Availability-oriented in-memory fallback; limits are per process while Redis is unavailable, so cluster-wide enforcement is reduced |
+| `idempotency` (idempotency.js) | **FAIL CLOSED** ✅ | Durable financial mutations require Mongo-backed operation claims, request binding, lease fencing, and transaction-coupled completion; unavailable coordination returns `IDEMPOTENCY_UNAVAILABLE` before mutation |
+| `blacklistToken` (auth.js) | BEST EFFORT WRITE | Logout cannot confirm revocation persistence during Redis outage; the token may remain usable after recovery until its JWT expiry |
 | `getCache/setCache` (6 files) | FAIL OPEN | Caching only — returns null, never throws |
 | `dagStream` (dagStream.js) | FAIL OPEN | Falls back to in-memory step tracking |
 

@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 from pymongo import MongoClient, DESCENDING
 from pymongo.errors import ConnectionFailure, DuplicateKeyError, OperationFailure
 from model.migrations.phase3_state import verify_phase3_state
-from model.artifacts.bundle import canonical_json_bytes
+from model.artifacts.bundle import canonical_json_bytes, read_verified_evaluation_report
 
 logger = logging.getLogger("wealthgenie.registry.mongo")
 
@@ -125,11 +125,7 @@ class MongoModelRegistry:
             "FT_Transformer": "weights",
         }[manifest["architecture"]]
         member = next(item for item in manifest["artifact_files"] if item["role"] == role)
-        report_path = Path(verified_bundle["members"]["evaluation_report"])
-        report_bytes = report_path.read_bytes()
-        report = json.loads(report_bytes.decode("utf-8"))
-        if report.get("evaluation_run_id") != manifest["evaluation_report_id"]:
-            raise ValueError("evaluation report ID does not match the trusted bundle manifest")
+        report = read_verified_evaluation_report(verified_bundle)
         version_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         document = {
@@ -232,9 +228,7 @@ class MongoModelRegistry:
 
             role = {"RandomForest": "model", "PyTorch_MLP": "weights", "FT_Transformer": "weights"}[architecture]
             member = next(item for item in manifest["artifact_files"] if item["role"] == role)
-            report = json.loads(Path(verified["members"]["evaluation_report"]).read_text(encoding="utf-8"))
-            if report.get("evaluation_run_id") != manifest["evaluation_report_id"]:
-                raise ValueError(f"{architecture} evaluation report does not match its manifest")
+            report = read_verified_evaluation_report(verified)
             document = {
                 "version_id": str(uuid.uuid4()),
                 "model_architecture": architecture,
@@ -502,86 +496,31 @@ class MongoModelRegistry:
         bundle_path: Optional[str | Path] = None,
         bundle_manifest_sha256: Optional[str] = None,
     ) -> str:
+        """Reject legacy raw-path registration in the shared Mongo lifecycle.
+
+        Mongo-backed candidates must enter through ``register_verified_bundle``
+        so registry identity is bound to durable artifact bytes, sidecars,
+        lineage, and evaluator evidence. Local SQLite compatibility is kept in
+        ``ModelRegistry``; it is not available through this shared store.
         """
-        Register a new model version in the registry.
-        Returns the generated version_id (UUID).
-        """
-        artifact_path = Path(artifact_path)
-        if not artifact_path.exists():
-            raise FileNotFoundError(f"Artifact file not found: {artifact_path}")
-
-        bundle_fields = (bundle_id, bundle_path, bundle_manifest_sha256)
-        if any(value is not None for value in bundle_fields):
-            if not all(value is not None for value in bundle_fields):
-                raise ValueError("bundle_id, bundle_path, and bundle_manifest_sha256 must be provided together")
-            resolved_bundle_path = Path(bundle_path).resolve(strict=True)
-            if not resolved_bundle_path.is_dir():
-                raise ValueError("bundle_path must identify an existing bundle directory")
-            if not isinstance(bundle_id, str) or not bundle_id.strip():
-                raise ValueError("bundle_id must be a non-empty string")
-            if not isinstance(bundle_manifest_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", bundle_manifest_sha256):
-                raise ValueError("bundle_manifest_sha256 must be a lowercase SHA-256 digest")
-
-        artifact_hash = compute_file_hash(artifact_path)
-        version_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc).isoformat()
-
-        doc = {
-            "version_id": version_id,
-            "model_architecture": model_architecture,
-            "training_data_hash": training_data_hash,
-            "training_timestamp": training_timestamp,
-            "hyperparameters": hyperparameters,
-            "metrics": metrics,
-            "artifact_path": str(artifact_path),
-            "artifact_hash": artifact_hash,
-            "reference_distributions": reference_distributions,
-            "is_active": set_active,
-            "lifecycle_state": "ACTIVE" if set_active else "CANDIDATE",
-            "registered_at": now,
-            "notes": notes,
-        }
-        if bundle_id is not None:
-            doc.update({
-                "bundle_id": bundle_id,
-                "bundle_path": str(resolved_bundle_path),
-                "bundle_manifest_sha256": bundle_manifest_sha256,
-            })
-
-        if set_active:
-            try:
-                with self._transaction() as session:
-                    current = self._collection.find_one(
-                        {"model_architecture": model_architecture, "is_active": True},
-                        {"_id": 0, "version_id": 1},
-                        session=session,
-                    )
-                    current_id = current.get("version_id") if current else None
-                    if expected_active_version_id is not _UNSET and current_id != expected_active_version_id:
-                        raise ModelActivationConflict(
-                            "active model changed before activation; refresh the expected active version"
-                        )
-
-                    self._collection.update_many(
-                        {"model_architecture": model_architecture, "is_active": True},
-                        {"$set": {"is_active": False, "lifecycle_state": "ROLLED_BACK"}},
-                        session=session,
-                    )
-                    self._collection.insert_one(doc, session=session)
-            except DuplicateKeyError as exc:
-                raise ModelActivationConflict(
-                    "another activation won the unique active-model race"
-                ) from exc
-            except OperationFailure as exc:
-                if exc.code == 112:
-                    raise ModelActivationConflict(
-                        "another activation changed the active model concurrently"
-                    ) from exc
-                raise
-        else:
-            self._collection.insert_one(doc)
-        logger.info(f"Registered model version {version_id} ({model_architecture})")
-        return version_id
+        del (
+            model_architecture,
+            artifact_path,
+            training_data_hash,
+            training_timestamp,
+            hyperparameters,
+            metrics,
+            reference_distributions,
+            notes,
+            set_active,
+            expected_active_version_id,
+            bundle_id,
+            bundle_path,
+            bundle_manifest_sha256,
+        )
+        raise ValueError(
+            "raw model registration is disabled for Mongo; use register_verified_bundle"
+        )
 
     @contextmanager
     def _transaction(self):

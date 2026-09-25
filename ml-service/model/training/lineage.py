@@ -29,6 +29,7 @@ TRAINING_SOURCE_PATHS = (
     "ml-service/model/training/lineage.py",
     "ml-service/model/training/train_pytorch.py",
     "ml-service/model/training/train_rf.py",
+    "ml-service/model/registry/drift_monitor.py",
     "ml-service/model/artifacts/bundle.py",
     "ml-service/model/artifacts/provenance.py",
     "ml-service/scripts/requalify_model_bundles.py",

@@ -148,6 +148,17 @@ class RAGPipeline:
             qu_result = self.query_understanding.process(request.question)
             return self._abstain("corpus_unavailable", qu_result, 0.0)
         embedding_identity = getattr(self.embedder, "embedding_identity", None)
+        try:
+            generation_snapshot = (
+                self.vector_store.get_generation_snapshot()
+                if callable(getattr(self.vector_store, "get_generation_snapshot", None))
+                else {"generation_id": None, "revision": self.vector_store.get_corpus_revision()}
+            )
+        except Exception as exc:
+            logger.error("RAG corpus generation could not be verified before retrieval: %s", exc)
+            qu_result = self.query_understanding.process(request.question)
+            return self._abstain("corpus_unavailable", qu_result, 0.0)
+
         cache_identity = {
             "scope": effective_scope,
             "question": request.question,
@@ -160,7 +171,10 @@ class RAGPipeline:
             "reranker_strategy": self.config.reranker_strategy,
             "similarity_threshold": self.config.similarity_threshold,
             "embedding_identity": embedding_identity or {"provider_class": type(self.embedder).__qualname__},
-            "corpus_revision": self.vector_store.get_corpus_revision(),
+            "corpus_revision": generation_snapshot.get("revision"),
+            "corpus_generation_id": generation_snapshot.get("generation_id"),
+            "corpus_generation_manifest_sha256": generation_snapshot.get("manifest_sha256"),
+            "corpus_generation_membership_sha256": generation_snapshot.get("membership_sha256"),
             "corpus_manifest_sha256": manifest["manifest_sha256"],
         }
         response_cache_key = json.dumps(cache_identity, sort_keys=True, separators=(",", ":"), default=str)

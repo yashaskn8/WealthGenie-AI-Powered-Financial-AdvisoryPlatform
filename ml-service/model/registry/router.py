@@ -370,8 +370,9 @@ def run_drift_check_endpoint(
     Runs PSI drift detection against the active model's reference distributions.
     If shift_feature is provided, generates a synthetic shifted observation batch.
     Otherwise, if use_buffer=True, evaluates real accumulated observations from InferenceBuffer.
-    If drift is detected and force_retrain=true, triggers automated retraining and registers
-    the result as a new candidate version (is_active=false).
+    Drift checks are diagnostic in production. Explicit non-production offline
+    requests may create a non-serving-qualified candidate bundle; promotion is
+    never automatic.
     """
     from model.registry.drift_monitor import (
         check_drift_and_trigger_retrain,

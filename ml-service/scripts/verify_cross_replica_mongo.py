@@ -12,7 +12,6 @@ Usage:
 
 import os
 import sys
-import tempfile
 from unittest.mock import patch
 import numpy as np
 
@@ -35,57 +34,48 @@ def check_mongo_available():
 
 
 def verify_registry_cross_replica(mock_client=None):
-    """Test that MongoModelRegistry shares state across instances."""
-    from model.registry.mongo_registry_store import MongoModelRegistry
+    """Test shared reads using complete, verified model bundles only."""
+    from pathlib import Path
 
-    # Create a temp artifact file
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pkl")
-    tmp.write(b"model-weights-binary-data")
-    tmp.close()
-    artifact_path = tmp.name
+    from model.registry.mongo_registry_store import MongoModelRegistry
+    from model.artifacts.store import MongoGridFSArtifactStore
+    from model.migrations.phase3_state import migrate_phase3_state, verify_phase3_state
+    from scripts.verify_serving_artifacts import verify_trusted_serving_bundles
 
     patcher = None
     if mock_client:
         patcher = patch("model.registry.mongo_registry_store.MongoClient", return_value=mock_client)
         patcher.start()
 
+    replica1 = None
+    replica2 = None
     try:
-        # Instance 1 (Replica 1): Write a model version
+        if mock_client:
+            migrate_phase3_state(mock_client[DB_NAME])
         replica1 = MongoModelRegistry(mongo_uri=MONGO_URI, db_name=DB_NAME)
-        version_id = replica1.register_model(
-            model_architecture="random_forest",
-            artifact_path=artifact_path,
-            training_data_hash="verify_hash_123",
-            training_timestamp="2025-06-01T00:00:00Z",
-            hyperparameters={"n_estimators": 200},
-            metrics={"accuracy": 0.94, "f1": 0.91},
-            set_active=True,
-            notes="Written by Replica 1",
-        )
-        replica1.close()
+        verify_phase3_state(replica1.database)
+        replica1.artifact_store = MongoGridFSArtifactStore(replica1.database)
+        bundles = verify_trusted_serving_bundles(Path(__file__).resolve().parents[1])
+        registered = replica1.bootstrap_verified_bundles(bundles, replica1.artifact_store)
 
-        # Instance 2 (Replica 2): Read back — must see the same version
+        # Instance 2 reads the exact same immutable bundle and activation identity.
         replica2 = MongoModelRegistry(mongo_uri=MONGO_URI, db_name=DB_NAME)
-        version = replica2.get_version(version_id)
-
-        assert version is not None, f"FAIL: Replica 2 could not find version {version_id}"
-        assert version["model_architecture"] == "random_forest"
-        assert version["hyperparameters"]["n_estimators"] == 200
-        assert version["metrics"]["accuracy"] == 0.94
-        assert version["is_active"] is True
-        assert version["notes"] == "Written by Replica 1"
-
-        active = replica2.get_active_model("random_forest")
-        assert active is not None and active["version_id"] == version_id, \
-            "FAIL: Replica 2 does not see the active model set by Replica 1"
-
-        replica2.close()
+        for architecture, written in registered.items():
+            version = replica2.get_version(written["version_id"])
+            assert version is not None, f"FAIL: Replica 2 could not find {architecture} bundle"
+            assert version["bundle_id"] == written["bundle_id"]
+            assert version["bundle_manifest_sha256"] == written["bundle_manifest_sha256"]
+            assert version["is_active"] is True
+            active = replica2.get_active_model(architecture)
+            assert active is not None and active["version_id"] == written["version_id"]
         print("[PASS] MongoModelRegistry cross-replica verification PASSED")
     finally:
+        if replica1:
+            replica1.close()
+        if replica2:
+            replica2.close()
         if patcher:
             patcher.stop()
-        if os.path.exists(artifact_path):
-            os.unlink(artifact_path)
 
 
 def verify_vector_store_cross_replica(mock_client=None):
