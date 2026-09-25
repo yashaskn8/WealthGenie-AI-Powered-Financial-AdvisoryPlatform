@@ -170,8 +170,15 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     await page.getByTestId('profile-save').click();
     const profileUpdate = await profileUpdatePromise;
     expect(profileUpdate.status()).toBe(200);
-    const updatedProfile = await profileUpdate.json();
+    const profileUpdateBody = await profileUpdate.json();
+    expect(profileUpdateBody).toMatchObject({
+      profile: expect.any(Object),
+      recommendation: expect.any(Object),
+    });
+    const updatedProfile = profileUpdateBody.profile;
     expect(updatedProfile.monthly_savings).toBe(27000);
+    expect(profileUpdateBody.recommendation.profile_version).toBe(updatedProfile.version);
+    expect(profileUpdateBody.recommendation.response_state).toBe('CURRENT');
     await expect(page.getByText('Profile updated successfully! Recommendations will recalculate.')).toBeVisible();
     const refreshedRecommendation = await refreshedRecommendationPromise;
     expect(refreshedRecommendation.status()).toBe(200);

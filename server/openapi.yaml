@@ -88,9 +88,11 @@ paths:
       tags: [Profiles]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       x-csrf-protection: cookie-session
-      parameters: [{ $ref: '#/components/parameters/ProfileId' }]
+      x-idempotency-key: required
+      parameters: [{ $ref: '#/components/parameters/ProfileId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
       requestBody: { $ref: '#/components/requestBodies/ProfileUpdate' }
-      responses: { '200': { $ref: '#/components/responses/Profile' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' } }
+      description: Atomically commits the profile revision and its replacement canonical recommendation, allocation revision, pointer, audit entry, and idempotency result. Recommendation computation runs before the short commit transaction.
+      responses: { '200': { $ref: '#/components/responses/ProfileUpdate' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' }, '422': { $ref: '#/components/responses/Unprocessable' }, '502': { $ref: '#/components/responses/BadGateway' }, '503': { $ref: '#/components/responses/Unavailable' } }
 
   /api/recommend:
     post:
@@ -711,6 +713,7 @@ components:
     Message: { description: Successful operation, content: { application/json: { schema: { type: object, required: [message], properties: { message: { type: string } } } } } }
     AuthSession: { description: Authenticated session, content: { application/json: { schema: { $ref: '#/components/schemas/AuthSession' } } } }
     Profile: { description: Authoritative financial profile, content: { application/json: { schema: { $ref: '#/components/schemas/FinancialProfile' } } } }
+    ProfileUpdate: { description: Atomically committed profile and canonical current recommendation state, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileUpdateResponse' } } } }
     ProfileCandidate: { description: Short-lived non-authoritative precomputation handle, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileCandidate' } } } }
     ProfileCompletion: { description: Atomically committed profile and recommendation, content: { application/json: { schema: { $ref: '#/components/schemas/ProfileCompletion' } } } }
     Recommendation: { description: Recommendation and audit identifiers, content: { application/json: { schema: { $ref: '#/components/schemas/RecommendationResponse' } } } }
@@ -787,6 +790,7 @@ components:
     PreconditionRequired: { description: A version precondition is required, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     Unprocessable: { description: A well-formed request cannot be processed under current policy, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
     Unavailable: { description: Service or dependency unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+    BadGateway: { description: An upstream service could not provide valid output, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
   schemas:
     Error:
       type: object
@@ -866,6 +870,13 @@ components:
         profile: { $ref: '#/components/schemas/FinancialProfile' }
         recommendation: { $ref: '#/components/schemas/RecommendationResponse' }
         completion: { type: object, additionalProperties: true }
+        operation_result: { $ref: '#/components/schemas/CommittedOperationResult' }
+    ProfileUpdateResponse:
+      type: object
+      required: [profile, recommendation]
+      properties:
+        profile: { $ref: '#/components/schemas/FinancialProfile' }
+        recommendation: { $ref: '#/components/schemas/RecommendationResponse' }
         operation_result: { $ref: '#/components/schemas/CommittedOperationResult' }
     FinancialProfileUpdate:
       allOf: [{ $ref: '#/components/schemas/FinancialProfileFields' }, { type: object, required: [version], properties: { version: { type: integer, minimum: 1 } } }]
