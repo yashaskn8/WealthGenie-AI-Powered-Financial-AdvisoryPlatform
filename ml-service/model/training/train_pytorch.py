@@ -458,13 +458,13 @@ def train_ft_transformer_model(
 
     model.eval()
     training_metrics = evaluate_pytorch_model(
-        model, train_loader, device, classes=list(BasePredictor.TARGET_CLASSES)
+        model, train_loader, device, classes=list(BasePredictor.TARGET_CLASSES), model_name="FT_Transformer"
     )
     validation_metrics = evaluate_pytorch_model(
-        model, val_loader, device, classes=list(BasePredictor.TARGET_CLASSES)
+        model, val_loader, device, classes=list(BasePredictor.TARGET_CLASSES), model_name="FT_Transformer"
     )
     eval_metrics = evaluate_pytorch_model(
-        model, test_loader, device, classes=list(BasePredictor.TARGET_CLASSES)
+        model, test_loader, device, classes=list(BasePredictor.TARGET_CLASSES), model_name="FT_Transformer"
     )
 
     save_path.parent.mkdir(parents=True, exist_ok=True)

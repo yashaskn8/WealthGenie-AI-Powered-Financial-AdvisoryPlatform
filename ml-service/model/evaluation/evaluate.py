@@ -76,7 +76,8 @@ def evaluate_pytorch_model(
     model: torch.nn.Module,
     test_loader: torch.utils.data.DataLoader,
     device: torch.device = None,
-    classes: List[str] = None
+    classes: List[str] = None,
+    model_name: str = "PyTorch_FinancialMLP",
 ) -> Dict[str, Any]:
     """
     Evaluates a PyTorch neural network model on a DataLoader test set.
@@ -111,7 +112,7 @@ def evaluate_pytorch_model(
     avg_latency = float(np.mean(latencies))
 
     return evaluate_model_predictions(
-        all_targets, all_preds, all_probas, "PyTorch_FinancialMLP", avg_latency, classes
+        all_targets, all_preds, all_probas, model_name, avg_latency, classes
     )
 
 

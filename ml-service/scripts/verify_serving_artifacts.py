@@ -111,7 +111,7 @@ def verify_serving_artifacts(
         expected_bundle_id = anchor["bundle_id"]
         if expected_bundle_id and bundle["manifest"]["bundle_id"] != expected_bundle_id:
             raise ArtifactVerificationError(f"{architecture} bundle ID differs from its trusted anchor")
-        verified.append(f"model/bundles/{directory}/{bundle['manifest']['bundle_id']}")
+        verified.append(f"model/bundles/{directory}")
     return verified
 
 

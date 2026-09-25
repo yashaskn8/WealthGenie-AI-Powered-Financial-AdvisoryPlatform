@@ -6,6 +6,7 @@ Tests PyTorch preprocessing, dataset loading, MLP network forward pass, training
 import numpy as np
 import pytest
 import torch
+from torch.utils.data import DataLoader, TensorDataset
 
 from model.config import (
     PyTorchModelConfig,
@@ -19,6 +20,7 @@ from model.architecture.model import FinancialMLP
 from model.training.train_pytorch import train_pytorch_model
 from model.serving.inference import PyTorchInferenceEngine
 from model.data.feature_engineering import FEATURE_NAMES
+from model.evaluation.evaluate import evaluate_pytorch_model
 
 N_FEATURES = len(FEATURE_NAMES)
 
@@ -96,6 +98,30 @@ def test_financial_mlp_architecture():
     probs = model.predict_proba(batch_x)
     assert probs.shape == (8, 6)
     assert torch.allclose(probs.sum(dim=1), torch.ones(8), atol=1e-5)
+
+
+@pytest.mark.parametrize(
+    ("model_name", "expected_name"),
+    [("PyTorch_FinancialMLP", "PyTorch_FinancialMLP"), ("FT_Transformer", "FT_Transformer")],
+)
+def test_pytorch_evaluation_report_uses_actual_architecture(model_name, expected_name):
+    class FixedProbabilityModel(torch.nn.Module):
+        def predict_proba(self, inputs):
+            return torch.nn.functional.one_hot(
+                inputs[:, 0].long(),
+                num_classes=6,
+            ).float()
+
+    inputs = torch.zeros((6, N_FEATURES), dtype=torch.float32)
+    inputs[:, 0] = torch.arange(6, dtype=torch.float32)
+    targets = torch.arange(6, dtype=torch.long)
+    loader = DataLoader(TensorDataset(inputs, targets), batch_size=3)
+
+    result = evaluate_pytorch_model(
+        FixedProbabilityModel(), loader, classes=[f"class-{index}" for index in range(6)], model_name=model_name
+    )
+
+    assert result["model_name"] == expected_name
 
 
 def test_train_pytorch_model_loop(sample_data, tmp_artifact_paths):

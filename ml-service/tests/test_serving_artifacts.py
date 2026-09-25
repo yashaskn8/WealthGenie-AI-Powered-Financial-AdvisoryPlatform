@@ -114,7 +114,11 @@ def test_all_serving_bundles_use_canonical_verifier_without_deserialization(tmp_
     verified = verify_serving_artifacts(tmp_path, expected_bundle_hashes=hashes)
 
     assert len(verified) == len(ARCHITECTURE_FILES)
-    assert all("/bundles/" in entry for entry in verified)
+    assert set(verified) == {
+        "model/bundles/random_forest",
+        "model/bundles/pytorch_mlp",
+        "model/bundles/ft_transformer",
+    }
 
 
 def test_missing_external_hash_fails_before_any_deserialization(tmp_path, monkeypatch):
