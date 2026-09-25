@@ -1,0 +1,507 @@
+{
+  "architecture": "PyTorch_MLP",
+  "best_val_accuracy": 0.9567,
+  "best_val_loss": 0.1335,
+  "dataset_lineage": {
+    "feature_names": [
+      "age",
+      "monthly_take_home",
+      "monthly_savings",
+      "investment_horizon_years",
+      "liquid_savings",
+      "emi_burden_pct",
+      "financial_dependents",
+      "emergency_fund_months",
+      "deployable_lump_sum",
+      "risk_capacity_score",
+      "risk_tolerance_encoded",
+      "final_suitability_risk_encoded",
+      "savings_rate",
+      "liquidity_months",
+      "goal_retirement",
+      "goal_wealth_growth",
+      "goal_tax_saving",
+      "goal_emergency_fund",
+      "emergency_fund_gap_months"
+    ],
+    "feature_schema_version": "recommendation-features-4.0.0",
+    "generation_parameters": {
+      "age_range": [
+        18.0,
+        80.0
+      ],
+      "class_count": 6,
+      "feature_count": 19,
+      "feature_schema_version": "recommendation-features-4.0.0",
+      "generator_name": "prepare_synthetic_training_data",
+      "generator_version": "recommendation-policy-synthetic-v1",
+      "investment_horizon_years_range": [
+        1.0,
+        30.0
+      ],
+      "monthly_take_home_range": [
+        20000.0,
+        500000.0
+      ],
+      "num_samples": 2000,
+      "policy_config_version": "suitability-freeze-1.0.0",
+      "savings_rate_range": [
+        0.03,
+        0.7
+      ],
+      "seed": 42,
+      "split_fractions": {
+        "test": 0.15,
+        "train": 0.7,
+        "validation": 0.15
+      },
+      "split_seed": 42,
+      "stratified": true,
+      "target_classes": [
+        "Equity_MF",
+        "ELSS",
+        "ETF",
+        "Debt_MF",
+        "FD",
+        "RBI_Bond"
+      ]
+    },
+    "generator": "model.data.preprocessing.prepare_synthetic_training_data",
+    "split_identity": {
+      "split_seed": 42,
+      "stratified": true,
+      "test_fraction": 0.15,
+      "test_indices_sha256": "d708841c3f93e41eb984d76029235525725038bcac011c851cc19afe98082d37",
+      "train_fraction": 0.7,
+      "train_indices_sha256": "cdcda5d7e6a7dbf894078c491d2cf17cff901bc90601296c57d4701fdeaa3eaf",
+      "validation_fraction": 0.15,
+      "validation_indices_sha256": "7f91a5bfd00bc54c212d03125118e9ba8eb24190cde9a2c1189b15aef6d272fa"
+    },
+    "target_classes": [
+      "Equity_MF",
+      "ELSS",
+      "ETF",
+      "Debt_MF",
+      "FD",
+      "RBI_Bond"
+    ]
+  },
+  "device_used": "cpu",
+  "epochs_completed": 81,
+  "evaluation_run_id": "mlp-aad75b72a38c-1f7f27296e57",
+  "feature_names": [
+    "age",
+    "monthly_take_home",
+    "monthly_savings",
+    "investment_horizon_years",
+    "liquid_savings",
+    "emi_burden_pct",
+    "financial_dependents",
+    "emergency_fund_months",
+    "deployable_lump_sum",
+    "risk_capacity_score",
+    "risk_tolerance_encoded",
+    "final_suitability_risk_encoded",
+    "savings_rate",
+    "liquidity_months",
+    "goal_retirement",
+    "goal_wealth_growth",
+    "goal_tax_saving",
+    "goal_emergency_fund",
+    "emergency_fund_gap_months"
+  ],
+  "feature_schema_version": "recommendation-features-4.0.0",
+  "framework_versions": {
+    "joblib": "1.4.2",
+    "numpy": "1.26.4",
+    "scikit-learn": "1.5.2",
+    "torch": "2.6.0+cpu"
+  },
+  "git_commit_hash": "c3b27f38717f2493cc7b283dfd16f1931ca60f76",
+  "metric_interpretation": "synthetic suitability-policy approximation fidelity; not investor outcomes or investment performance",
+  "model_config": {
+    "activation": "relu",
+    "dropout_rate": 0.2,
+    "hidden_dims": [
+      64,
+      32
+    ],
+    "input_dim": 19,
+    "output_dim": 6,
+    "use_batch_norm": true
+  },
+  "model_type": "PyTorch_FinancialMLP",
+  "model_version": "4.0.0",
+  "python_version": "3.12.3",
+  "random_seed": 42,
+  "serving_qualified": true,
+  "target_classes": [
+    "Equity_MF",
+    "ELSS",
+    "ETF",
+    "Debt_MF",
+    "FD",
+    "RBI_Bond"
+  ],
+  "test_metrics": {
+    "accuracy": 0.9467,
+    "avg_latency_ms": 0.004,
+    "balanced_accuracy": 0.9521,
+    "classification_report": {
+      "0": {
+        "f1-score": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "support": 9.0
+      },
+      "1": {
+        "f1-score": 0.9672131147540983,
+        "precision": 0.9672131147540983,
+        "recall": 0.9672131147540983,
+        "support": 61.0
+      },
+      "2": {
+        "f1-score": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "support": 50.0
+      },
+      "3": {
+        "f1-score": 0.9494163424124513,
+        "precision": 0.9682539682539683,
+        "recall": 0.9312977099236641,
+        "support": 131.0
+      },
+      "4": {
+        "f1-score": 0.7659574468085106,
+        "precision": 0.6428571428571429,
+        "recall": 0.9473684210526315,
+        "support": 19.0
+      },
+      "5": {
+        "f1-score": 0.9285714285714286,
+        "precision": 1.0,
+        "recall": 0.8666666666666667,
+        "support": 30.0
+      },
+      "accuracy": 0.9466666666666667,
+      "macro avg": {
+        "f1-score": 0.9351930554244148,
+        "precision": 0.9297207043108683,
+        "recall": 0.9520909853995102,
+        "support": 300.0
+      },
+      "weighted avg": {
+        "f1-score": 0.9492795840084522,
+        "precision": 0.9568518518518518,
+        "recall": 0.9466666666666667,
+        "support": 300.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        9,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        59,
+        0,
+        2,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        50,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        2,
+        0,
+        122,
+        7,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        1,
+        18,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        1,
+        3,
+        26
+      ]
+    ],
+    "f1_score": 0.9493,
+    "matthews_corrcoef": 0.928,
+    "model_name": "PyTorch_FinancialMLP",
+    "precision": 0.9569,
+    "recall": 0.9467,
+    "throughput_queries_per_sec": 265178.1,
+    "top_2_accuracy": 0.9967,
+    "top_3_accuracy": 1.0
+  },
+  "trained_at": "2026-09-25T09:53:10.907948+00:00",
+  "training_code_git_sha": "c3b27f38717f2493cc7b283dfd16f1931ca60f76",
+  "training_config": {
+    "batch_size": 64,
+    "epochs": 100,
+    "learning_rate": 0.001,
+    "lr_scheduler_factor": 0.5,
+    "lr_scheduler_patience": 5,
+    "min_lr": 1e-06,
+    "patience": 15,
+    "random_seed": 42,
+    "test_split": 0.15,
+    "val_split": 0.15,
+    "weight_decay": 0.0001
+  },
+  "training_data_hash": "aad75b72a38c4d0ea5785daf356c0e5cae93c5dbac8b041cce80a46a762a5766",
+  "training_metrics": {
+    "accuracy": 0.9943,
+    "avg_latency_ms": 0.004,
+    "balanced_accuracy": 0.9975,
+    "classification_report": {
+      "0": {
+        "f1-score": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "support": 44.0
+      },
+      "1": {
+        "f1-score": 0.9982425307557118,
+        "precision": 1.0,
+        "recall": 0.9964912280701754,
+        "support": 285.0
+      },
+      "2": {
+        "f1-score": 0.9978401727861771,
+        "precision": 0.9956896551724138,
+        "recall": 1.0,
+        "support": 231.0
+      },
+      "3": {
+        "f1-score": 0.993431855500821,
+        "precision": 0.9983498349834984,
+        "recall": 0.988562091503268,
+        "support": 612.0
+      },
+      "4": {
+        "f1-score": 0.9662921348314607,
+        "precision": 0.9347826086956522,
+        "recall": 1.0,
+        "support": 86.0
+      },
+      "5": {
+        "f1-score": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "support": 142.0
+      },
+      "accuracy": 0.9942857142857143,
+      "macro avg": {
+        "f1-score": 0.9926344489790284,
+        "precision": 0.9881370164752608,
+        "recall": 0.997508886595574,
+        "support": 1400.0
+      },
+      "weighted avg": {
+        "f1-score": 0.9943440145292807,
+        "precision": 0.9945612240732532,
+        "recall": 0.9942857142857143,
+        "support": 1400.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        44,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        284,
+        0,
+        1,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        231,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        1,
+        605,
+        6,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        86,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        142
+      ]
+    ],
+    "f1_score": 0.9943,
+    "matthews_corrcoef": 0.9922,
+    "model_name": "PyTorch_FinancialMLP",
+    "precision": 0.9946,
+    "recall": 0.9943,
+    "throughput_queries_per_sec": 254630.3,
+    "top_2_accuracy": 1.0,
+    "top_3_accuracy": 1.0
+  },
+  "training_time_seconds": 5.2309,
+  "training_timestamp": "2026-09-25T09:53:10.907948+00:00",
+  "validation_metrics": {
+    "accuracy": 0.95,
+    "avg_latency_ms": 0.003,
+    "balanced_accuracy": 0.9535,
+    "classification_report": {
+      "0": {
+        "f1-score": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "support": 9.0
+      },
+      "1": {
+        "f1-score": 0.9838709677419355,
+        "precision": 0.9682539682539683,
+        "recall": 1.0,
+        "support": 61.0
+      },
+      "2": {
+        "f1-score": 0.9591836734693877,
+        "precision": 0.9591836734693877,
+        "recall": 0.9591836734693877,
+        "support": 49.0
+      },
+      "3": {
+        "f1-score": 0.9494163424124513,
+        "precision": 0.9682539682539683,
+        "recall": 0.9312977099236641,
+        "support": 131.0
+      },
+      "4": {
+        "f1-score": 0.7906976744186046,
+        "precision": 0.7083333333333334,
+        "recall": 0.8947368421052632,
+        "support": 19.0
+      },
+      "5": {
+        "f1-score": 0.9666666666666667,
+        "precision": 1.0,
+        "recall": 0.9354838709677419,
+        "support": 31.0
+      },
+      "accuracy": 0.95,
+      "macro avg": {
+        "f1-score": 0.941639220784841,
+        "precision": 0.934004157218443,
+        "recall": 0.9534503494110095,
+        "support": 300.0
+      },
+      "weighted avg": {
+        "f1-score": 0.9512653078963645,
+        "precision": 0.9545436507936508,
+        "recall": 0.95,
+        "support": 300.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        9,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        61,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        47,
+        2,
+        0,
+        0
+      ],
+      [
+        0,
+        2,
+        2,
+        122,
+        5,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        2,
+        17,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        2,
+        29
+      ]
+    ],
+    "f1_score": 0.9513,
+    "matthews_corrcoef": 0.9321,
+    "model_name": "PyTorch_FinancialMLP",
+    "precision": 0.9545,
+    "recall": 0.95,
+    "throughput_queries_per_sec": 295076.7,
+    "top_2_accuracy": 1.0,
+    "top_3_accuracy": 1.0
+  },
+  "version": "4.0.0"
+}

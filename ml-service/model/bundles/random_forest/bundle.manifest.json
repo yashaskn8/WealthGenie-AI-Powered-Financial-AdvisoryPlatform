@@ -1,0 +1,159 @@
+{
+  "architecture": "RandomForest",
+  "artifact_files": [
+    {
+      "filename": "evaluation_report.json",
+      "role": "evaluation_report",
+      "sha256": "cbc0af0caa92c0dbdd46865130227c540b5c143bec8f9bea7b5b34517877a71e",
+      "size_bytes": 2263
+    },
+    {
+      "filename": "label_encoder.pkl",
+      "role": "label_encoder",
+      "sha256": "b720df315732ddee9317488b593eeae9c1821da26da2f1704f689392ee4d787c",
+      "size_bytes": 593
+    },
+    {
+      "filename": "metadata.json",
+      "role": "metadata",
+      "sha256": "8fa79a0f0abb1980541d97c1be1e2432cdbdf8ef7426864a0d8c823d899b3121",
+      "size_bytes": 4547
+    },
+    {
+      "filename": "model.pkl",
+      "role": "model",
+      "sha256": "230eb824cb173a823be6a97fc470b0336d765e8bbcf4299210c4c22954827750",
+      "size_bytes": 2778095
+    }
+  ],
+  "bundle_id": "rf-aad75b72a38c-c3b27f38717f",
+  "bundle_manifest_sha256": "ec895a837393e57cb90e9cf00408ac0065126b18139a7c5f16a28da4c77e325e",
+  "bundle_schema_version": 1,
+  "dataset_lineage": {
+    "feature_names": [
+      "age",
+      "monthly_take_home",
+      "monthly_savings",
+      "investment_horizon_years",
+      "liquid_savings",
+      "emi_burden_pct",
+      "financial_dependents",
+      "emergency_fund_months",
+      "deployable_lump_sum",
+      "risk_capacity_score",
+      "risk_tolerance_encoded",
+      "final_suitability_risk_encoded",
+      "savings_rate",
+      "liquidity_months",
+      "goal_retirement",
+      "goal_wealth_growth",
+      "goal_tax_saving",
+      "goal_emergency_fund",
+      "emergency_fund_gap_months"
+    ],
+    "feature_schema_version": "recommendation-features-4.0.0",
+    "generation_parameters": {
+      "age_range": [
+        18.0,
+        80.0
+      ],
+      "class_count": 6,
+      "feature_count": 19,
+      "feature_schema_version": "recommendation-features-4.0.0",
+      "generator_name": "prepare_synthetic_training_data",
+      "generator_version": "recommendation-policy-synthetic-v1",
+      "investment_horizon_years_range": [
+        1.0,
+        30.0
+      ],
+      "monthly_take_home_range": [
+        20000.0,
+        500000.0
+      ],
+      "num_samples": 2000,
+      "policy_config_version": "suitability-freeze-1.0.0",
+      "savings_rate_range": [
+        0.03,
+        0.7
+      ],
+      "seed": 42,
+      "split_fractions": {
+        "test": 0.15,
+        "train": 0.7,
+        "validation": 0.15
+      },
+      "split_seed": 42,
+      "stratified": true,
+      "target_classes": [
+        "Equity_MF",
+        "ELSS",
+        "ETF",
+        "Debt_MF",
+        "FD",
+        "RBI_Bond"
+      ]
+    },
+    "generator": "model.data.preprocessing.prepare_synthetic_training_data",
+    "split_identity": {
+      "split_seed": 42,
+      "stratified": true,
+      "test_fraction": 0.15,
+      "test_indices_sha256": "d708841c3f93e41eb984d76029235525725038bcac011c851cc19afe98082d37",
+      "train_fraction": 0.7,
+      "train_indices_sha256": "cdcda5d7e6a7dbf894078c491d2cf17cff901bc90601296c57d4701fdeaa3eaf",
+      "validation_fraction": 0.15,
+      "validation_indices_sha256": "7f91a5bfd00bc54c212d03125118e9ba8eb24190cde9a2c1189b15aef6d272fa"
+    },
+    "target_classes": [
+      "Equity_MF",
+      "ELSS",
+      "ETF",
+      "Debt_MF",
+      "FD",
+      "RBI_Bond"
+    ]
+  },
+  "evaluation_report_id": "rf-aad75b72a38c-1b1bbbe85695",
+  "evaluation_report_sha256": "cbc0af0caa92c0dbdd46865130227c540b5c143bec8f9bea7b5b34517877a71e",
+  "feature_names": [
+    "age",
+    "monthly_take_home",
+    "monthly_savings",
+    "investment_horizon_years",
+    "liquid_savings",
+    "emi_burden_pct",
+    "financial_dependents",
+    "emergency_fund_months",
+    "deployable_lump_sum",
+    "risk_capacity_score",
+    "risk_tolerance_encoded",
+    "final_suitability_risk_encoded",
+    "savings_rate",
+    "liquidity_months",
+    "goal_retirement",
+    "goal_wealth_growth",
+    "goal_tax_saving",
+    "goal_emergency_fund",
+    "emergency_fund_gap_months"
+  ],
+  "feature_schema_version": "recommendation-features-4.0.0",
+  "framework_versions": {
+    "joblib": "1.4.2",
+    "numpy": "1.26.4",
+    "scikit-learn": "1.5.2"
+  },
+  "model_version": "4.0.0",
+  "python_version": "3.12.3",
+  "serving_qualified": true,
+  "target_classes": [
+    "Equity_MF",
+    "ELSS",
+    "ETF",
+    "Debt_MF",
+    "FD",
+    "RBI_Bond"
+  ],
+  "training_code_git_sha": "c3b27f38717f2493cc7b283dfd16f1931ca60f76",
+  "training_data_hash": "aad75b72a38c4d0ea5785daf356c0e5cae93c5dbac8b041cce80a46a762a5766",
+  "training_timestamp": "2026-09-25T09:53:02.611862+00:00"
+}

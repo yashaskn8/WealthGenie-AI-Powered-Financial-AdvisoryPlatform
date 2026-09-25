@@ -1,0 +1,18 @@
+{
+  "anchor_schema_version": 1,
+  "anchor_sha256": "e1f706c78c4dd101d06403274e88eebd60d21009321e10d398c44a2468c735b9",
+  "bundles": {
+    "FT_Transformer": {
+      "bundle_id": "ft-aad75b72a38c-c3b27f38717f",
+      "bundle_manifest_sha256": "317f520eddc4054dea4340692980fb4175e64a61cb460f925b088ffa1fcc3463"
+    },
+    "PyTorch_MLP": {
+      "bundle_id": "mlp-aad75b72a38c-c3b27f38717f",
+      "bundle_manifest_sha256": "bdb6b87ce1a616ec8fd80e2044ff1fb6769af1b6b39fabbd1be5f708c407844c"
+    },
+    "RandomForest": {
+      "bundle_id": "rf-aad75b72a38c-c3b27f38717f",
+      "bundle_manifest_sha256": "ec895a837393e57cb90e9cf00408ac0065126b18139a7c5f16a28da4c77e325e"
+    }
+  }
+}

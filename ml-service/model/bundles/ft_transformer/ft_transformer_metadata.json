@@ -1,0 +1,503 @@
+{
+  "architecture": "FT_Transformer",
+  "dataset_lineage": {
+    "feature_names": [
+      "age",
+      "monthly_take_home",
+      "monthly_savings",
+      "investment_horizon_years",
+      "liquid_savings",
+      "emi_burden_pct",
+      "financial_dependents",
+      "emergency_fund_months",
+      "deployable_lump_sum",
+      "risk_capacity_score",
+      "risk_tolerance_encoded",
+      "final_suitability_risk_encoded",
+      "savings_rate",
+      "liquidity_months",
+      "goal_retirement",
+      "goal_wealth_growth",
+      "goal_tax_saving",
+      "goal_emergency_fund",
+      "emergency_fund_gap_months"
+    ],
+    "feature_schema_version": "recommendation-features-4.0.0",
+    "generation_parameters": {
+      "age_range": [
+        18.0,
+        80.0
+      ],
+      "class_count": 6,
+      "feature_count": 19,
+      "feature_schema_version": "recommendation-features-4.0.0",
+      "generator_name": "prepare_synthetic_training_data",
+      "generator_version": "recommendation-policy-synthetic-v1",
+      "investment_horizon_years_range": [
+        1.0,
+        30.0
+      ],
+      "monthly_take_home_range": [
+        20000.0,
+        500000.0
+      ],
+      "num_samples": 2000,
+      "policy_config_version": "suitability-freeze-1.0.0",
+      "savings_rate_range": [
+        0.03,
+        0.7
+      ],
+      "seed": 42,
+      "split_fractions": {
+        "test": 0.15,
+        "train": 0.7,
+        "validation": 0.15
+      },
+      "split_seed": 42,
+      "stratified": true,
+      "target_classes": [
+        "Equity_MF",
+        "ELSS",
+        "ETF",
+        "Debt_MF",
+        "FD",
+        "RBI_Bond"
+      ]
+    },
+    "generator": "model.data.preprocessing.prepare_synthetic_training_data",
+    "split_identity": {
+      "split_seed": 42,
+      "stratified": true,
+      "test_fraction": 0.15,
+      "test_indices_sha256": "d708841c3f93e41eb984d76029235525725038bcac011c851cc19afe98082d37",
+      "train_fraction": 0.7,
+      "train_indices_sha256": "cdcda5d7e6a7dbf894078c491d2cf17cff901bc90601296c57d4701fdeaa3eaf",
+      "validation_fraction": 0.15,
+      "validation_indices_sha256": "7f91a5bfd00bc54c212d03125118e9ba8eb24190cde9a2c1189b15aef6d272fa"
+    },
+    "target_classes": [
+      "Equity_MF",
+      "ELSS",
+      "ETF",
+      "Debt_MF",
+      "FD",
+      "RBI_Bond"
+    ]
+  },
+  "device_used": "cpu",
+  "evaluation_run_id": "ft-aad75b72a38c-b63b60e8ab34",
+  "feature_names": [
+    "age",
+    "monthly_take_home",
+    "monthly_savings",
+    "investment_horizon_years",
+    "liquid_savings",
+    "emi_burden_pct",
+    "financial_dependents",
+    "emergency_fund_months",
+    "deployable_lump_sum",
+    "risk_capacity_score",
+    "risk_tolerance_encoded",
+    "final_suitability_risk_encoded",
+    "savings_rate",
+    "liquidity_months",
+    "goal_retirement",
+    "goal_wealth_growth",
+    "goal_tax_saving",
+    "goal_emergency_fund",
+    "emergency_fund_gap_months"
+  ],
+  "feature_schema_version": "recommendation-features-4.0.0",
+  "framework_versions": {
+    "joblib": "1.4.2",
+    "numpy": "1.26.4",
+    "scikit-learn": "1.5.2",
+    "torch": "2.6.0+cpu"
+  },
+  "git_commit_hash": "c3b27f38717f2493cc7b283dfd16f1931ca60f76",
+  "metric_interpretation": "synthetic suitability-policy approximation fidelity; not investor outcomes or investment performance",
+  "model_config": {
+    "activation": "gelu",
+    "attention_dropout": 0.1,
+    "d_ffn_factor": 2.0,
+    "d_token": 32,
+    "ffn_dropout": 0.1,
+    "input_dim": 19,
+    "n_blocks": 3,
+    "n_heads": 4,
+    "output_dim": 6,
+    "residual_dropout": 0.0
+  },
+  "model_version": "4.0.0",
+  "python_version": "3.12.3",
+  "random_seed": 42,
+  "serving_qualified": true,
+  "target_classes": [
+    "Equity_MF",
+    "ELSS",
+    "ETF",
+    "Debt_MF",
+    "FD",
+    "RBI_Bond"
+  ],
+  "test_metrics": {
+    "accuracy": 0.98,
+    "avg_latency_ms": 0.047,
+    "balanced_accuracy": 0.9699,
+    "classification_report": {
+      "0": {
+        "f1-score": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "support": 9.0
+      },
+      "1": {
+        "f1-score": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "support": 61.0
+      },
+      "2": {
+        "f1-score": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "support": 50.0
+      },
+      "3": {
+        "f1-score": 0.9884169884169884,
+        "precision": 1.0,
+        "recall": 0.9770992366412213,
+        "support": 131.0
+      },
+      "4": {
+        "f1-score": 0.8421052631578947,
+        "precision": 0.8421052631578947,
+        "recall": 0.8421052631578947,
+        "support": 19.0
+      },
+      "5": {
+        "f1-score": 0.9523809523809523,
+        "precision": 0.9090909090909091,
+        "recall": 1.0,
+        "support": 30.0
+      },
+      "accuracy": 0.98,
+      "macro avg": {
+        "f1-score": 0.9638172006593059,
+        "precision": 0.9585326953748007,
+        "recall": 0.969867416633186,
+        "support": 300.0
+      },
+      "weighted avg": {
+        "f1-score": 0.9801801801801802,
+        "precision": 0.9809090909090908,
+        "recall": 0.98,
+        "support": 300.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        9,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        61,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        50,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        128,
+        3,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        16,
+        3
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        30
+      ]
+    ],
+    "f1_score": 0.9802,
+    "matthews_corrcoef": 0.9727,
+    "model_name": "FT_Transformer",
+    "precision": 0.9809,
+    "recall": 0.98,
+    "throughput_queries_per_sec": 21246.6,
+    "top_2_accuracy": 1.0,
+    "top_3_accuracy": 1.0
+  },
+  "trained_at": "2026-09-25T09:53:56.409496+00:00",
+  "training_code_git_sha": "c3b27f38717f2493cc7b283dfd16f1931ca60f76",
+  "training_config": {
+    "batch_size": 64,
+    "epochs": 100,
+    "learning_rate": 0.001,
+    "lr_scheduler_factor": 0.5,
+    "lr_scheduler_patience": 5,
+    "min_lr": 1e-06,
+    "patience": 15,
+    "random_seed": 42,
+    "test_split": 0.15,
+    "val_split": 0.15,
+    "weight_decay": 0.0001
+  },
+  "training_data_hash": "aad75b72a38c4d0ea5785daf356c0e5cae93c5dbac8b041cce80a46a762a5766",
+  "training_metrics": {
+    "accuracy": 0.9993,
+    "avg_latency_ms": 0.043,
+    "balanced_accuracy": 0.9981,
+    "classification_report": {
+      "0": {
+        "f1-score": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "support": 44.0
+      },
+      "1": {
+        "f1-score": 0.9982486865148862,
+        "precision": 0.9965034965034965,
+        "recall": 1.0,
+        "support": 285.0
+      },
+      "2": {
+        "f1-score": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "support": 231.0
+      },
+      "3": {
+        "f1-score": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "support": 612.0
+      },
+      "4": {
+        "f1-score": 0.9941520467836257,
+        "precision": 1.0,
+        "recall": 0.9883720930232558,
+        "support": 86.0
+      },
+      "5": {
+        "f1-score": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "support": 142.0
+      },
+      "accuracy": 0.9992857142857143,
+      "macro avg": {
+        "f1-score": 0.9987334555497519,
+        "precision": 0.9994172494172494,
+        "recall": 0.998062015503876,
+        "support": 1400.0
+      },
+      "weighted avg": {
+        "f1-score": 0.9992842512000961,
+        "precision": 0.9992882117882118,
+        "recall": 0.9992857142857143,
+        "support": 1400.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        44,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        285,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        231,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        612,
+        0,
+        0
+      ],
+      [
+        0,
+        1,
+        0,
+        0,
+        85,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        142
+      ]
+    ],
+    "f1_score": 0.9993,
+    "matthews_corrcoef": 0.999,
+    "model_name": "FT_Transformer",
+    "precision": 0.9993,
+    "recall": 0.9993,
+    "throughput_queries_per_sec": 23077.8,
+    "top_2_accuracy": 1.0,
+    "top_3_accuracy": 1.0
+  },
+  "training_timestamp": "2026-09-25T09:53:56.409496+00:00",
+  "validation_metrics": {
+    "accuracy": 0.98,
+    "avg_latency_ms": 0.045,
+    "balanced_accuracy": 0.9774,
+    "classification_report": {
+      "0": {
+        "f1-score": 1.0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "support": 9.0
+      },
+      "1": {
+        "f1-score": 0.9838709677419355,
+        "precision": 0.9682539682539683,
+        "recall": 1.0,
+        "support": 61.0
+      },
+      "2": {
+        "f1-score": 0.98989898989899,
+        "precision": 0.98,
+        "recall": 1.0,
+        "support": 49.0
+      },
+      "3": {
+        "f1-score": 0.9844961240310077,
+        "precision": 1.0,
+        "recall": 0.9694656488549618,
+        "support": 131.0
+      },
+      "4": {
+        "f1-score": 0.918918918918919,
+        "precision": 0.9444444444444444,
+        "recall": 0.8947368421052632,
+        "support": 19.0
+      },
+      "5": {
+        "f1-score": 0.96875,
+        "precision": 0.9393939393939394,
+        "recall": 1.0,
+        "support": 31.0
+      },
+      "accuracy": 0.98,
+      "macro avg": {
+        "f1-score": 0.9743225000984754,
+        "precision": 0.972015392015392,
+        "recall": 0.9773670818267042,
+        "support": 300.0
+      },
+      "weighted avg": {
+        "f1-score": 0.9799362708161002,
+        "precision": 0.9804971620971621,
+        "recall": 0.98,
+        "support": 300.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        9,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        61,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        49,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        2,
+        1,
+        127,
+        1,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        17,
+        2
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        31
+      ]
+    ],
+    "f1_score": 0.9799,
+    "matthews_corrcoef": 0.9728,
+    "model_name": "FT_Transformer",
+    "precision": 0.9805,
+    "recall": 0.98,
+    "throughput_queries_per_sec": 22388.7,
+    "top_2_accuracy": 0.9967,
+    "top_3_accuracy": 1.0
+  },
+  "version": "4.0.0"
+}

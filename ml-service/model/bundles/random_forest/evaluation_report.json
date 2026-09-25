@@ -1,0 +1,55 @@
+{
+  "architecture": "RandomForest",
+  "artifact_identity": {
+    "label_encoder_sha256": "b720df315732ddee9317488b593eeae9c1821da26da2f1704f689392ee4d787c",
+    "model_sha256": "230eb824cb173a823be6a97fc470b0336d765e8bbcf4299210c4c22954827750"
+  },
+  "evaluated_at": "2026-09-25T09:53:02.611862+00:00",
+  "evaluation_code_git_sha": "c3b27f38717f2493cc7b283dfd16f1931ca60f76",
+  "evaluation_methodology": "fixed canonical hyperparameters; model fit only on the train partition; validation and test partitions were not used for fitting or selection",
+  "evaluation_run_id": "rf-aad75b72a38c-1b1bbbe85695",
+  "hyperparameters": {
+    "class_weight": "balanced",
+    "max_depth": 12,
+    "n_estimators": 100,
+    "n_jobs": -1,
+    "random_state": 42
+  },
+  "interpretation": "synthetic suitability-policy approximation fidelity; not investor outcomes or investment performance",
+  "metric_definitions": {
+    "accuracy": "fraction of split examples matching the synthetic policy label",
+    "balanced_accuracy": "unweighted mean recall across target classes",
+    "macro_f1": "unweighted mean class-wise F1 across target classes"
+  },
+  "model_version": "4.0.0",
+  "split_identity": {
+    "split_seed": 42,
+    "stratified": true,
+    "test_fraction": 0.15,
+    "test_indices_sha256": "d708841c3f93e41eb984d76029235525725038bcac011c851cc19afe98082d37",
+    "train_fraction": 0.7,
+    "train_indices_sha256": "cdcda5d7e6a7dbf894078c491d2cf17cff901bc90601296c57d4701fdeaa3eaf",
+    "validation_fraction": 0.15,
+    "validation_indices_sha256": "7f91a5bfd00bc54c212d03125118e9ba8eb24190cde9a2c1189b15aef6d272fa"
+  },
+  "test_metrics": {
+    "accuracy": 0.99,
+    "balanced_accuracy": 0.9769005847953216,
+    "macro_f1": 0.983922558922559,
+    "samples": 300
+  },
+  "training_code_git_sha": "c3b27f38717f2493cc7b283dfd16f1931ca60f76",
+  "training_data_hash": "aad75b72a38c4d0ea5785daf356c0e5cae93c5dbac8b041cce80a46a762a5766",
+  "training_metrics": {
+    "accuracy": 1.0,
+    "balanced_accuracy": 1.0,
+    "macro_f1": 1.0,
+    "samples": 1400
+  },
+  "validation_metrics": {
+    "accuracy": 0.9966666666666667,
+    "balanced_accuracy": 0.9912280701754387,
+    "macro_f1": 0.9928499928499929,
+    "samples": 300
+  }
+}
