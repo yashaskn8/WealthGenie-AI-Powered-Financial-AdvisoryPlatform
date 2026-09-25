@@ -29,6 +29,9 @@ spec:
           image: wealthgenie-ml-service:latest
           imagePullPolicy: IfNotPresent
           command: ["python", "scripts/bootstrap_rag_corpus.py"]
+          envFrom:
+            - configMapRef:
+                name: wealthgenie-config
           env:
             - name: ENVIRONMENT
               value: production
@@ -36,6 +39,8 @@ spec:
               value: mongodb
             - name: WEALTHGENIE_RAG_BOOTSTRAP
               value: "1"
+            - name: RAG_EMBEDDING_PROVIDER
+              value: sentence_transformer
             - name: MONGODB_URI
               valueFrom:
                 secretKeyRef:

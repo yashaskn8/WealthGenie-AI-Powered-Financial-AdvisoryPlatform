@@ -14,8 +14,10 @@ if str(ML_SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(ML_SERVICE_ROOT))
 
 from model.migrations.phase3_state import verify_phase3_state
+from mongo_database import resolve_mongo_database_name
 from rag.config import RAGConfig
 from rag.corpus_manifest import MANIFEST_FILENAME, current_documents, load_corpus_manifest
+from rag.chunking.fixed_chunker import FixedSizeChunker
 from rag.embeddings.dense_embedding import get_embedding_provider
 from rag.embeddings.identity import normalize_embedding_identity
 from rag.ingestion.pipeline import IngestionPipeline
@@ -34,7 +36,8 @@ def bootstrap() -> dict[str, object]:
         raise RuntimeError("RAG corpus bootstrap requires ML_STATE_BACKEND=mongodb")
 
     manifest = load_corpus_manifest(CORPUS_DIR / MANIFEST_FILENAME, CORPUS_DIR)
-    embedding_provider = get_embedding_provider(RAGConfig())
+    config = RAGConfig.from_env()
+    embedding_provider = get_embedding_provider(config)
     ready = getattr(embedding_provider, "is_ready", True)
     if callable(ready):
         ready = ready()
@@ -48,21 +51,30 @@ def bootstrap() -> dict[str, object]:
     client = MongoClient(uri, serverSelectionTimeoutMS=10000)
     try:
         client.admin.command("ping")
-        database = client["wealthgenie"]
+        database_name = resolve_mongo_database_name(uri)
+        database = client[database_name]
         verify_phase3_state(database)
         MongoRAGLifecycleStore(client, database).initialize_corpus_generation(identity)
     finally:
         client.close()
 
-    store = MongoVectorStore(uri, db_name="wealthgenie")
+    store = MongoVectorStore(uri, db_name=database_name)
     try:
-        pipeline = IngestionPipeline(embedder=embedding_provider, vector_store=store)
+        pipeline = IngestionPipeline(
+            chunker=FixedSizeChunker(chunk_size=config.chunk_size, chunk_overlap=config.chunk_overlap),
+            embedder=embedding_provider,
+            vector_store=store,
+        )
         seed_default_knowledge_base(pipeline=pipeline)
         generation = store.get_active_generation()
         if not generation or generation.get("manifest_sha256") != manifest["manifest_sha256"]:
             raise RuntimeError("active RAG generation does not match the checked-in corpus manifest")
         if generation.get("embedding_identity") != identity:
             raise RuntimeError("active RAG generation does not match the bootstrap embedding identity")
+        if store._loaded_generation_id != generation.get("generation_id"):
+            raise RuntimeError("loaded vector index does not match the active RAG corpus generation")
+        if store._loaded_corpus_revision != generation.get("revision"):
+            raise RuntimeError("loaded vector index revision does not match the active RAG corpus generation")
         expected = current_documents(manifest, as_of=date.today())
         active_keys = {
             chunk.metadata.custom_metadata.get("document_key")
@@ -71,8 +83,8 @@ def bootstrap() -> dict[str, object]:
             and chunk.metadata.custom_metadata.get("corpus_manifest_sha256") == manifest["manifest_sha256"]
         }
         expected_keys = {entry["document_key"] for entry in expected}
-        if not expected_keys or not expected_keys.issubset(active_keys):
-            raise RuntimeError("current manifest documents are not all active in the shared RAG corpus")
+        if not expected_keys or active_keys != expected_keys:
+            raise RuntimeError("active trusted global documents do not exactly match the checked-in corpus manifest")
         if store.lifecycle_store.reconcile().get("status") != "CLEAN":
             raise RuntimeError("shared RAG lifecycle reconciliation is not clean")
         return {
@@ -80,8 +92,12 @@ def bootstrap() -> dict[str, object]:
             "generation_id": generation["generation_id"],
             "revision": generation["revision"],
             "manifest_sha256": generation["manifest_sha256"],
+            "membership_sha256": generation["membership_sha256"],
             "document_count": generation["document_count"],
             "chunk_count": generation["chunk_count"],
+            "embedding_identity": identity,
+            "mongo_database": database_name,
+            "loaded_generation_id": store._loaded_generation_id,
         }
     finally:
         store.close()

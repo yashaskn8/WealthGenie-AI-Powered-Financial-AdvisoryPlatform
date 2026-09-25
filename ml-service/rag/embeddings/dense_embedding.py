@@ -273,7 +273,7 @@ def get_embedding_provider(config=None) -> BaseEmbeddingProvider:
     """
     if config is None:
         from rag.config import RAGConfig
-        config = RAGConfig()
+        config = RAGConfig.from_env()
 
     provider_name = config.embedding_provider
 
@@ -281,7 +281,7 @@ def get_embedding_provider(config=None) -> BaseEmbeddingProvider:
         try:
             return SentenceTransformerEmbeddingProvider()
         except Exception as e:
-            if os.environ.get("ENVIRONMENT", "local").strip().lower() == "production":
+            if os.environ.get("ENVIRONMENT", "local").strip().lower() in {"production", "prod"}:
                 logger.error("Pinned semantic embedding provider unavailable in production: %s", e)
                 return UnavailableEmbeddingProvider(config.embedding_dim, str(e))
             logger.warning(
@@ -290,6 +290,8 @@ def get_embedding_provider(config=None) -> BaseEmbeddingProvider:
             )
             return DenseVectorEmbeddingProvider(dimension=config.embedding_dim, enable_cache=True)
     elif provider_name == "tf_idf_dense":
+        if os.environ.get("ENVIRONMENT", "local").strip().lower() in {"production", "prod"}:
+            raise RuntimeError("production RAG requires the pinned semantic embedding provider")
         return DenseVectorEmbeddingProvider(dimension=config.embedding_dim, enable_cache=True)
     else:
         raise ValueError(

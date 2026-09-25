@@ -13,6 +13,7 @@ if str(ML_SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(ML_SERVICE_ROOT))
 
 from model.migrations.phase3_state import migrate_phase3_state
+from mongo_database import resolve_mongo_database_name
 
 
 def main() -> int:
@@ -21,9 +22,7 @@ def main() -> int:
         print("MONGODB_URI is required; Phase-3 migration was not run.", file=sys.stderr)
         return 2
 
-    # Keep this aligned with store_factory, which intentionally uses the same
-    # shared production database for the registry and vector store.
-    database_name = "wealthgenie"
+    database_name = resolve_mongo_database_name(uri)
 
     client = MongoClient(uri, serverSelectionTimeoutMS=10000)
     try:

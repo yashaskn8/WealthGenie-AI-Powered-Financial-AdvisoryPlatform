@@ -3,8 +3,8 @@ import bcrypt from 'bcryptjs';
 import User from '../models/User.js';
 import { validate, registerSchema, loginSchema } from '../validation/schemas.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
-import { verifyJWT } from '../middleware/authMiddleware.js';
-import { blacklistToken } from '../config/redis.js';
+import { verifyJWT, verifyJWTWithRevocationAvailability } from '../middleware/authMiddleware.js';
+import { blacklistToken, tokenRevocationMustFailClosed } from '../config/redis.js';
 import {
   clearAuthCookies,
   createSessionToken,
@@ -119,14 +119,21 @@ router.post('/login', validate(loginSchema), asyncHandler(async (req, res) => {
  * POST /api/auth/logout [Protected]
  * Revokes the current user's session JWT.
  */
-router.post('/logout', verifyJWT, asyncHandler(async (req, res) => {
+router.post('/logout', verifyJWTWithRevocationAvailability, asyncHandler(async (req, res) => {
   clearAuthCookies(res);
   const { jti, exp } = req.user;
-  if (jti && exp) {
-    const remainingTime = exp - Math.floor(Date.now() / 1000);
-    if (remainingTime > 0) {
-      await blacklistToken(jti, remainingTime);
-    }
+  const required = tokenRevocationMustFailClosed();
+  const remainingTime = Number.isFinite(exp) ? exp - Math.floor(Date.now() / 1000) : 0;
+  const revoked = jti && remainingTime > 0
+    ? await blacklistToken(jti, remainingTime)
+    : false;
+  if (required && !revoked) {
+    throw createError(
+      503,
+      'JWT revocation could not be durably confirmed.',
+      'Logout could not be completed securely. Please retry.',
+      { code: 'TOKEN_REVOCATION_UNAVAILABLE' },
+    );
   }
   res.json({ message: 'Logout successful.' });
 }));

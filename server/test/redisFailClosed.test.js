@@ -30,8 +30,8 @@
  * ├────────────────────────────────────────┼───────────────────────┼──────────────┼────────────────────────────────────────────┤
  * │ dagStream.js:39/107/130/166            │ redisClient.xAdd/xRange│ FAIL OPEN    │ LOW: DAG streaming falls back to in-memory. │
  * ├────────────────────────────────────────┼───────────────────────┼──────────────┼────────────────────────────────────────────┤
- * │ auth.js blacklistToken write            │ best-effort Redis set │ BEST EFFORT  │ Logout does not prove revocation was stored;│
- * │                                        │                       │              │ after recovery the token may live until exp. │
+ * │ auth.js blacklistToken write            │ confirmed Redis set   │ FAIL CLOSED  │ Production logout cannot report success     │
+ * │                                        │                       │              │ unless token revocation was persisted.       │
  * ├────────────────────────────────────────┼───────────────────────┼──────────────┼────────────────────────────────────────────┤
  * │ instrumentConstants.js:62/71           │ setCache / getCache    │ FAIL OPEN    │ NONE: Instrument params cache.              │
  * ├────────────────────────────────────────┼───────────────────────┼──────────────┼────────────────────────────────────────────┤
@@ -41,7 +41,7 @@
  * └────────────────────────────────────────┴───────────────────────┴──────────────┴────────────────────────────────────────────┘
  *
  * SECURITY-CRITICAL CHECKS (must fail closed):
- *   1. Token blacklist check — ✅ Already fails closed (redis.js:131-133)
+ *   1. Token blacklist check and production logout revocation — ✅ fail closed
  *   2. Auth rate limiter — ✅ Already fails closed (passOnStoreError:false)
  *
  * Failure semantics are path-specific: mutation idempotency, profile-build quota,
@@ -116,10 +116,11 @@ test('Redis fail-closed: Token blacklist check DENIES access when Redis is unava
   setRedisAvailable(false);
   setRedisClient(null);
 
-  const result = await isTokenBlacklisted('any-jti-during-outage');
-
-  console.log(`[REDIS-FC-1] isTokenBlacklisted with Redis down: ${result}`);
-  assert.equal(result, true, 'MUST return true (deny access) when Redis is unavailable');
+  await assert.rejects(
+    isTokenBlacklisted('any-jti-during-outage'),
+    { code: 'TOKEN_REVOCATION_UNAVAILABLE' },
+    'MUST deny access with explicit unavailable semantics when Redis is down',
+  );
 });
 
 test('Redis optional in development: token blacklist check allows access when Redis is unavailable', async () => {
@@ -152,9 +153,11 @@ test('Redis required in development: token blacklist check still fails closed', 
     setRedisAvailable(false);
     setRedisClient(null);
 
-    const result = await isTokenBlacklisted('required-development-jti-without-redis');
-
-    assert.equal(result, true, 'REQUIRE_REDIS=true must preserve fail-closed revocation behavior');
+    await assert.rejects(
+      isTokenBlacklisted('required-development-jti-without-redis'),
+      { code: 'TOKEN_REVOCATION_UNAVAILABLE' },
+      'REQUIRE_REDIS=true must preserve fail-closed revocation behavior',
+    );
   } finally {
     process.env.NODE_ENV = previousNodeEnv;
     if (previousRequireRedis === undefined) delete process.env.REQUIRE_REDIS;
@@ -175,10 +178,11 @@ test('Redis fail-closed: Token blacklist check DENIES access on Redis query exce
   setRedisAvailable(true);
   setRedisClient(breakableClient);
 
-  const result = await isTokenBlacklisted('some-jti-query-error');
-
-  console.log(`[REDIS-FC-2] isTokenBlacklisted with Redis query error: ${result}`);
-  assert.equal(result, true, 'MUST return true (deny access) on Redis query exception');
+  await assert.rejects(
+    isTokenBlacklisted('some-jti-query-error'),
+    { code: 'TOKEN_REVOCATION_UNAVAILABLE' },
+    'MUST deny access with explicit unavailable semantics on Redis query exception',
+  );
 });
 
 // ══════════════════════════════════════════════════════════════════════
@@ -202,6 +206,25 @@ test('Redis healthy: Token blacklist correctly allows non-blacklisted tokens', a
   assert.equal(validResult, false, 'Valid token must be allowed');
 });
 
+test('JWT revocation writes are idempotent and require Redis confirmation', async () => {
+  setForceFailClosedInTest(true);
+  const values = new Map();
+  let writes = 0;
+  setRedisAvailable(true);
+  setRedisClient({
+    setEx: async (key, _ttl, value) => { writes += 1; values.set(key, value); return 'OK'; },
+  });
+  assert.equal(await blacklistToken('duplicate-revocation-jti', 60), true);
+  assert.equal(await blacklistToken('duplicate-revocation-jti', 60), true);
+  assert.equal(writes, 2);
+  assert.equal(values.get('bl:duplicate-revocation-jti'), 'revoked');
+
+  setRedisClient({ setEx: async () => undefined });
+  assert.equal(await blacklistToken('unconfirmed-revocation-jti', 60), false);
+  assert.equal(await blacklistToken('zero-ttl-jti', 0), false);
+  assert.equal(await blacklistToken('', 60), false);
+});
+
 // ══════════════════════════════════════════════════════════════════════
 // 4. Token Blacklist — connected client that BREAKS mid-session
 // ══════════════════════════════════════════════════════════════════════
@@ -221,9 +244,11 @@ test('Redis mid-session break: Token blacklist fails CLOSED when connected clien
   client._break();
 
   // Second call MUST fail closed
-  const afterBreak = await isTokenBlacklisted('test-jti-post-break');
-  console.log(`[REDIS-FC-4] After break: ${afterBreak}`);
-  assert.equal(afterBreak, true, 'MUST deny access when Redis breaks mid-session');
+  await assert.rejects(
+    isTokenBlacklisted('test-jti-post-break'),
+    { code: 'TOKEN_REVOCATION_UNAVAILABLE' },
+    'MUST deny access when Redis breaks mid-session',
+  );
 });
 
 // ══════════════════════════════════════════════════════════════════════

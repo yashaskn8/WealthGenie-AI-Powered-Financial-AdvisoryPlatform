@@ -97,7 +97,8 @@ def test_unqualified_drift_candidate_bundle_survives_registry_restart_but_cannot
     from test_mongo_registry import _verified_rf_bundle
 
     uri = os.environ["ML_TEST_MONGODB_URI"]
-    database_name = f"wealthgenie_phase3_drift_candidate_{uuid4().hex}"
+    # Keep the isolated test database within MongoDB's 63-character namespace limit.
+    database_name = f"wg_drift_candidate_{uuid4().hex}"
     client = MongoClient(uri, serverSelectionTimeoutMS=5000)
     registries = []
     try:

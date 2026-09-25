@@ -29,6 +29,7 @@ from rag.embeddings.identity import EmbeddingIdentityError, normalize_embedding_
 from rag.corpus_generation import canonical_member, generation_digest
 from rag.vector_store.base import BaseVectorStore
 from model.migrations.phase3_state import verify_phase3_state
+from mongo_database import resolve_mongo_database_name
 
 logger = logging.getLogger("wealthgenie.rag.vector_store.mongo")
 
@@ -48,12 +49,12 @@ class MongoVectorStore(BaseVectorStore):
     def __init__(
         self,
         mongo_uri: str,
-        db_name: str = "wealthgenie",
+        db_name: Optional[str] = None,
         collection_name: str = "vector_chunks",
         force_numpy: bool = False,
     ):
         self._client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
-        self._db = self._client[db_name]
+        self._db = self._client[db_name or resolve_mongo_database_name(mongo_uri)]
         self._collection = self._db[collection_name]
         self._revision_collection = self._db["rag_state"]
         self._corpus_state = self._db["rag_corpus_state"]

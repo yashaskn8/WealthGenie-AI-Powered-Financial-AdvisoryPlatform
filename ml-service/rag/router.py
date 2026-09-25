@@ -15,9 +15,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from rag.config import RAGConfig
+from rag.chunking.fixed_chunker import FixedSizeChunker
 from rag.corpus_manifest import MANIFEST_FILENAME, CorpusManifestError, current_documents, load_corpus_manifest
 from rag.embeddings.identity import EmbeddingIdentityError, normalize_embedding_identity
 from rag.ingestion.pipeline import IngestionPipeline, UntrustedSourceError
+from rag.embeddings.dense_embedding import get_embedding_provider
 from rag.lifecycle.manager import DocumentLifecycleManager
 from rag.retrieval.pipeline import RAGPipeline
 from rag.schema import RAGQueryRequest, RAGQueryResponse
@@ -29,10 +31,12 @@ logger = logging.getLogger("wealthgenie.rag.router")
 rag_router = APIRouter(prefix="/rag", tags=["Retrieval-Augmented Generation"], dependencies=[Depends(verify_api_key)])
 
 # Instantiate RAG Subsystem instances with shared singleton lifecycle_manager
-rag_config = RAGConfig()
+rag_config = RAGConfig.from_env()
 vector_store = get_vector_store()
 lifecycle_manager = DocumentLifecycleManager(vector_store=vector_store)
 ingestion_pipeline = IngestionPipeline(
+    chunker=FixedSizeChunker(chunk_size=rag_config.chunk_size, chunk_overlap=rag_config.chunk_overlap),
+    embedder=get_embedding_provider(rag_config),
     vector_store=vector_store,
     lifecycle_manager=lifecycle_manager,
 )

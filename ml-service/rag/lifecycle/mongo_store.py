@@ -39,7 +39,7 @@ class MongoRAGLifecycleStore:
     def initialize_corpus_generation(self, embedding_identity: dict[str, Any]) -> dict[str, Any]:
         """Explicit one-shot bootstrap; never called as an application-startup repair."""
         identity = normalize_generation_identity(embedding_identity)
-        current = self.corpus_state.find_one({"_id": self.STATE_ID})
+        current = self._read_pointer()
         if current:
             if current.get("embedding_identity") != identity:
                 raise RuntimeError("active RAG generation uses a different embedding identity")
@@ -50,7 +50,7 @@ class MongoRAGLifecycleStore:
         try:
             with self.client.start_session() as session:
                 with session.start_transaction():
-                    if self.corpus_state.find_one({"_id": self.STATE_ID}, session=session):
+                    if self._read_pointer(session=session):
                         raise RuntimeError("RAG corpus generation was initialized concurrently")
                     active_revision_ids = {
                         item["document_revision_id"]
@@ -72,12 +72,13 @@ class MongoRAGLifecycleStore:
             if isinstance(exc, DuplicateKeyError) or getattr(exc, "code", None) == 112:
                 raise RuntimeError("RAG corpus bootstrap lost a concurrent state race") from exc
             raise
-        return self._clean_generation(self.corpus_state.find_one({"_id": self.STATE_ID}) or {})
+        return self._clean_generation(self._read_pointer() or {})
 
     def get_active_generation(self) -> Optional[dict[str, Any]]:
-        pointer = self.corpus_state.find_one({"_id": self.STATE_ID}, {"_id": 0})
+        pointer = self._read_pointer()
         if not pointer:
             return None
+        pointer = self._clean_generation(pointer)
         generation = self.generations.find_one(
             {"generation_id": pointer.get("generation_id")}, {"_id": 0}
         )
@@ -87,6 +88,16 @@ class MongoRAGLifecycleStore:
         ):
             raise RuntimeError("active RAG generation pointer does not match its immutable generation")
         return generation
+
+    def _read_pointer(self, session=None) -> Optional[dict[str, Any]]:
+        options = {"session": session} if session is not None else {}
+        pointer = self.corpus_state.find_one({"_id": self.STATE_ID}, **options)
+        count = self.corpus_state.count_documents({}, **options)
+        if count > (1 if pointer else 0):
+            raise RuntimeError("RAG corpus state contains malformed or duplicate active-generation pointers")
+        if count and pointer is None:
+            raise RuntimeError("RAG corpus state contains no valid singleton active-generation pointer")
+        return pointer
 
     def commit_document_revision(self, document: Document, chunks: list[TextChunk]) -> dict[str, Any]:
         scope = document.metadata.scope or "global"
@@ -280,7 +291,7 @@ class MongoRAGLifecycleStore:
             except EmbeddingIdentityError as exc:
                 raise RuntimeError("cannot publish RAG generation with invalid embedding identity") from exc
             members.append(canonical_member(revision, revision_chunks))
-        pointer = self.corpus_state.find_one({"_id": self.STATE_ID}, session=session)
+        pointer = self._read_pointer(session=session)
         identity = identities[0] if identities else (expected_identity or (pointer or {}).get("embedding_identity"))
         if identity is None:
             raise RuntimeError("RAG corpus generation requires an explicit embedding identity")
@@ -317,8 +328,10 @@ class MongoRAGLifecycleStore:
         barrier = self._before_generation_record_insert
         if callable(barrier):
             barrier(generation_id)
-        self.generations.insert_one(generation, session=session)
-        new_pointer = {"_id": self.STATE_ID, **generation}
+        # PyMongo adds a generated _id to the inserted document in place. Never
+        # let that mutate the canonical generation payload used for the pointer.
+        self.generations.insert_one(copy.deepcopy(generation), session=session)
+        new_pointer = {**generation, "_id": self.STATE_ID}
         if pointer:
             result = self.corpus_state.update_one(
                 {"_id": self.STATE_ID, "generation_id": pointer.get("generation_id"), "revision": pointer.get("revision")},
@@ -332,7 +345,7 @@ class MongoRAGLifecycleStore:
         return generation
 
     def _assert_identity_matches_current(self, identity: dict[str, Any], session) -> None:
-        pointer = self.corpus_state.find_one({"_id": self.STATE_ID}, session=session)
+        pointer = self._read_pointer(session=session)
         if pointer and pointer.get("embedding_identity") != identity:
             raise RuntimeError("RAG ingestion embedding identity differs from active corpus generation")
 

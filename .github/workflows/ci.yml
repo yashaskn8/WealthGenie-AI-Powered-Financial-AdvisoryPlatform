@@ -222,6 +222,7 @@ jobs:
       ML_OPERATOR_KEY: e2e-ml-operator-key
       ENVIRONMENT: test
       ML_STATE_BACKEND: mongodb
+      RAG_EMBEDDING_PROVIDER: tf_idf_dense
       LLM_DEFAULT_PROVIDER: mock
       HF_HUB_OFFLINE: '1'
       TRANSFORMERS_OFFLINE: '1'
@@ -275,6 +276,7 @@ jobs:
         working-directory: ml-service
         env:
           WEALTHGENIE_RAG_BOOTSTRAP: "1"
+          RAG_EMBEDDING_PROVIDER: tf_idf_dense
         run: python scripts/bootstrap_rag_corpus.py
 
       - name: Verify transactional ML model activation

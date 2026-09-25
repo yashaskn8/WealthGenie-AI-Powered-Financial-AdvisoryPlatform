@@ -22,6 +22,7 @@ from pymongo import MongoClient, DESCENDING
 from pymongo.errors import ConnectionFailure, DuplicateKeyError, OperationFailure
 from model.migrations.phase3_state import verify_phase3_state
 from model.artifacts.bundle import canonical_json_bytes, read_verified_evaluation_report
+from mongo_database import resolve_mongo_database_name
 
 logger = logging.getLogger("wealthgenie.registry.mongo")
 
@@ -53,9 +54,9 @@ class MongoModelRegistry:
     'model_versions' collection.
     """
 
-    def __init__(self, mongo_uri: str, db_name: str = "wealthgenie"):
+    def __init__(self, mongo_uri: str, db_name: Optional[str] = None):
         self._client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
-        self._db = self._client[db_name]
+        self._db = self._client[db_name or resolve_mongo_database_name(mongo_uri)]
         self.database = self._db
         self.artifact_store = None
         self._collection = self._db["model_versions"]

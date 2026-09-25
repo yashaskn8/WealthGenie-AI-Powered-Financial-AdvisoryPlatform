@@ -5,10 +5,22 @@ let redisClient = null;
 let redisAvailable = false;
 let forceFailClosedInTest = false;
 
+export class TokenRevocationUnavailableError extends Error {
+  constructor() {
+    super('JWT revocation state could not be verified.');
+    this.name = 'TokenRevocationUnavailableError';
+    this.code = 'TOKEN_REVOCATION_UNAVAILABLE';
+  }
+}
+
 function revocationCheckMustFailClosed() {
   return forceFailClosedInTest
     || process.env.NODE_ENV === 'production'
     || process.env.REQUIRE_REDIS === 'true';
+}
+
+export function tokenRevocationMustFailClosed() {
+  return revocationCheckMustFailClosed();
 }
 
 /**
@@ -146,16 +158,20 @@ const testBlacklist = new Set();
  * Add token JTI to blacklist with remaining expiration time as TTL
  */
 const blacklistToken = async (jti, ttlSeconds) => {
+  if (typeof jti !== 'string' || !jti.trim() || !Number.isFinite(ttlSeconds) || ttlSeconds <= 0) {
+    return false;
+  }
   if (process.env.NODE_ENV === 'test' && !forceFailClosedInTest) {
     testBlacklist.add(jti);
-    return;
+    return true;
   }
-  if (!redisAvailable || !redisClient) return;
+  if (!redisAvailable || !redisClient) return false;
   try {
-    if (ttlSeconds <= 0) return;
-    await redisClient.setEx(`bl:${jti}`, Math.ceil(ttlSeconds), 'revoked');
-  } catch (err) {
-    logger.warn('Failed to blacklist token in Redis', { message: err.message });
+    const result = await redisClient.setEx(`bl:${jti}`, Math.ceil(ttlSeconds), 'revoked');
+    return result === 'OK';
+  } catch {
+    logger.warn('Failed to persist JWT revocation in Redis');
+    return false;
   }
 };
 
@@ -176,8 +192,8 @@ const isTokenBlacklisted = async (jti) => {
       logger.warn('Redis unavailable during token blacklist check — skipping optional development revocation lookup', { jti });
       return false;
     }
-    logger.warn('Redis unavailable during token blacklist check — failing closed (denying access)', { jti });
-    return true; // FAIL CLOSED: Deny access if revocation status cannot be verified
+    logger.warn('Redis unavailable during token blacklist check — failing closed (denying access)');
+    throw new TokenRevocationUnavailableError();
   }
   try {
     const res = await redisClient.get(`bl:${jti}`);
@@ -190,8 +206,8 @@ const isTokenBlacklisted = async (jti) => {
       });
       return false;
     }
-    logger.error('Redis error during token blacklist check — failing closed', { message: err.message, jti });
-    return true; // FAIL CLOSED: on Redis query error
+    logger.error('Redis error during token blacklist check — failing closed');
+    throw new TokenRevocationUnavailableError();
   }
 };
 

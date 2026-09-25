@@ -14,6 +14,7 @@ from rag.corpus_manifest import (
     current_documents,
     load_corpus_manifest,
 )
+from rag.corpus_generation import current_manifest_sha256, generation_digest
 from rag.ingestion.loaders import DocumentLoader
 from rag.ingestion.pipeline import IngestionPipeline
 from rag.evaluation.run_benchmark import build_ground_truth_chunk_ids, load_questions
@@ -27,6 +28,21 @@ def test_committed_corpus_manifest_and_content_hash_are_valid():
     assert manifest["documents"]
     assert all(canonical_text_sha256(CORPUS_DIR / item["local_filename"]) == item["content_sha256"]
                for item in manifest["documents"])
+    assert manifest["manifest_sha256"] == current_manifest_sha256()
+
+
+def test_generation_digest_is_stable_across_mongo_storage_envelope():
+    member = {
+        "document_revision_id": "revision-a",
+        "document_id": "doc-a",
+        "version_number": 1,
+        "scope": "global",
+        "tenant_id": "default",
+        "chunk_count": 1,
+        "chunk_set_sha256": "a" * 64,
+    }
+    stored = {**member, "generation_id": "generation-a", "_id": "mongo-generated"}
+    assert generation_digest([member]) == generation_digest([stored])
 
 
 def test_current_documents_use_legal_effective_period_not_retrieval_date():

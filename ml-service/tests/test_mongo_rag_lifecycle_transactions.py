@@ -11,6 +11,7 @@ import os
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 from pymongo import MongoClient
@@ -204,6 +205,120 @@ def test_generation_manifest_is_immutable_and_binds_exact_active_membership(mong
     assert store._db["rag_corpus_generation_members"].count_documents(
         {"generation_id": second_pointer["generation_id"]}
     ) == 0
+
+
+def test_bootstrap_publishes_singleton_pointer_and_is_idempotent_on_restart(monkeypatch, tmp_path):
+    import shutil
+
+    from model.migrations.phase3_state import migrate_phase3_state
+    from mongo_database import resolve_mongo_database_name
+    from rag.config import RAGConfig
+    from rag.corpus_generation import current_manifest_sha256, generation_digest
+    from rag.corpus_manifest import CorpusManifestError, MANIFEST_FILENAME, load_corpus_manifest
+    from rag.embeddings.dense_embedding import get_embedding_provider
+    from rag.embeddings.identity import normalize_embedding_identity
+    from rag.seed_knowledge import CORPUS_DIR
+    from rag.lifecycle.mongo_store import MongoRAGLifecycleStore
+    from rag.vector_store.mongo_vector_store import MongoVectorStore
+    import scripts.bootstrap_rag_corpus as bootstrap_module
+    from scripts.bootstrap_rag_corpus import bootstrap
+
+    database_name = f"wealthgenie_rag_bootstrap_{uuid.uuid4().hex}"
+    parsed = urlsplit(MONGODB_URI)
+    database_uri = urlunsplit((parsed.scheme, parsed.netloc, f"/{database_name}", parsed.query, parsed.fragment))
+    client = MongoClient(database_uri, serverSelectionTimeoutMS=5000)
+    try:
+        migrate_phase3_state(client[resolve_mongo_database_name(database_uri)])
+        monkeypatch.setenv("MONGODB_URI", database_uri)
+        monkeypatch.setenv("ML_STATE_BACKEND", "mongodb")
+        monkeypatch.setenv("ENVIRONMENT", "test")
+        monkeypatch.setenv("RAG_EMBEDDING_PROVIDER", "tf_idf_dense")
+        monkeypatch.setenv("WEALTHGENIE_RAG_BOOTSTRAP", "1")
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+        monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+
+        first = bootstrap()
+        database = client[database_name]
+        pointer = database["rag_corpus_state"].find_one({"_id": "active_corpus"})
+        immutable_generation = database["rag_corpus_generations"].find_one(
+            {"generation_id": first["generation_id"]}, {"_id": 0}
+        )
+        generation_members = list(database["rag_corpus_generation_members"].find(
+            {"generation_id": first["generation_id"]}, {"_id": 0}
+        ))
+        active_revisions = list(database["rag_document_revisions"].find(
+            {"lifecycle_state": "ACTIVE"}, {"_id": 0, "document_revision_id": 1}
+        ))
+        manifest = load_corpus_manifest(CORPUS_DIR / MANIFEST_FILENAME, CORPUS_DIR)
+        runtime_identity = normalize_embedding_identity(
+            get_embedding_provider(RAGConfig.from_env()).embedding_identity
+        )
+        assert pointer is not None
+        assert database["rag_corpus_state"].count_documents({}) == 1
+        assert pointer["generation_id"] == first["generation_id"]
+        assert pointer["_id"] == "active_corpus"
+        for field in ("generation_id", "revision", "manifest_sha256", "membership_sha256", "embedding_identity"):
+            assert pointer[field] == immutable_generation[field]
+        assert first["manifest_sha256"] == manifest["manifest_sha256"] == current_manifest_sha256()
+        assert first["embedding_identity"] == runtime_identity == immutable_generation["embedding_identity"]
+        assert generation_digest(generation_members) == immutable_generation["membership_sha256"]
+        assert {row["document_revision_id"] for row in active_revisions} == {
+            row["document_revision_id"] for row in generation_members
+        }
+        assert database["vector_chunks"].count_documents({"lifecycle_state": "ACTIVE"}) == first["chunk_count"]
+        assert len(active_revisions) == first["document_count"]
+        assert first["mongo_database"] == database_name
+        assert first["loaded_generation_id"] == first["generation_id"]
+        assert first["membership_sha256"]
+
+        tampered_corpus = tmp_path / "tampered-corpus"
+        shutil.copytree(CORPUS_DIR, tampered_corpus)
+        manifest_entry = manifest["documents"][0]
+        target = tampered_corpus / manifest_entry["local_filename"]
+        target.write_text(target.read_text(encoding="utf-8") + "tampered", encoding="utf-8")
+        with monkeypatch.context() as patcher:
+            patcher.setattr(bootstrap_module, "CORPUS_DIR", tampered_corpus)
+            with pytest.raises(CorpusManifestError, match="content hash mismatch"):
+                bootstrap()
+
+        generation_collection = database["rag_corpus_generations"]
+        generation_collection.update_one(
+            {"generation_id": first["generation_id"]}, {"$set": {"manifest_sha256": "0" * 64}}
+        )
+        with pytest.raises(RuntimeError, match="pointer does not match"):
+            MongoRAGLifecycleStore(client, database).get_active_generation()
+        generation_collection.update_one(
+            {"generation_id": first["generation_id"]}, {"$set": {"manifest_sha256": immutable_generation["manifest_sha256"]}}
+        )
+
+        second = bootstrap()
+        assert second["generation_id"] == first["generation_id"]
+        assert second["revision"] == first["revision"]
+        assert database["rag_corpus_state"].count_documents({}) == 1
+
+        restarted = MongoVectorStore(database_uri, force_numpy=True)
+        try:
+            assert restarted.get_loaded_generation_id() == first["generation_id"]
+            assert restarted._loaded_corpus_revision == first["revision"]
+
+            database["rag_corpus_state"].delete_one({"_id": "active_corpus"})
+            monkeypatch.setenv("ENVIRONMENT", "production")
+            with pytest.raises(RuntimeError, match="production RAG corpus has not completed"):
+                restarted.load()
+            assert restarted._chunks == []
+            assert restarted._embeddings == []
+        finally:
+            restarted.close()
+    finally:
+        client.drop_database(database_name)
+        client.close()
+
+
+def test_malformed_corpus_state_pointer_fails_closed(mongo_vector_store):
+    store, _ = mongo_vector_store
+    store._db["rag_corpus_state"].insert_one({"_id": "unexpected-pointer", "generation_id": "unknown"})
+    with pytest.raises(RuntimeError, match="malformed or duplicate active-generation pointers"):
+        store.get_active_generation()
 
 
 def test_competing_corpus_mutations_commit_one_monotonic_generation(mongo_vector_store):

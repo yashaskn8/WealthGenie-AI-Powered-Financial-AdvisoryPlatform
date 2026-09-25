@@ -59,11 +59,12 @@ def get_vector_store(force_numpy: bool = False):
     backend = _state_backend()
     if backend == "mongodb":
         mongo_uri = _required_mongo_uri()
+        from mongo_database import resolve_mongo_database_name
         try:
             from rag.vector_store.mongo_vector_store import MongoVectorStore
             store = MongoVectorStore(
                 mongo_uri=mongo_uri,
-                db_name="wealthgenie",
+                db_name=resolve_mongo_database_name(mongo_uri),
                 collection_name="vector_chunks",
                 force_numpy=force_numpy,
             )
@@ -89,11 +90,12 @@ def get_model_registry(db_path=None):
     backend = _state_backend()
     if backend == "mongodb":
         mongo_uri = _required_mongo_uri()
+        from mongo_database import resolve_mongo_database_name
         try:
             from model.registry.mongo_registry_store import MongoModelRegistry
             registry = MongoModelRegistry(
                 mongo_uri=mongo_uri,
-                db_name="wealthgenie",
+                db_name=resolve_mongo_database_name(mongo_uri),
             )
             registry.artifact_store = get_artifact_store_for_registry(registry)
             logger.info("Using MongoModelRegistry (backend=mongodb)")

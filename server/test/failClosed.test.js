@@ -21,13 +21,10 @@ describe('CLAIM 3 (Step 3) — Fail-Closed Security & Resilient Degrade Suite', 
     setRedisClient(null);
     setForceFailClosedInTest(true);
 
-    const revokedAttempt = await isTokenBlacklisted('some-user-jti-during-outage');
-
-    // SECURITY INVARIANT: Must return true (deny token) when verification is impossible
-    assert.equal(
-      revokedAttempt,
-      true,
-      'Token blacklist check MUST return true (fail closed) during Redis outage'
+    await assert.rejects(
+      isTokenBlacklisted('some-user-jti-during-outage'),
+      { code: 'TOKEN_REVOCATION_UNAVAILABLE' },
+      'Token blacklist check MUST fail closed with an explicit unavailable result',
     );
   });
 
@@ -61,8 +58,11 @@ describe('CLAIM 3 (Step 3) — Fail-Closed Security & Resilient Degrade Suite', 
     setRedisClient(brokenClient);
     setForceFailClosedInTest(true);
 
-    const isBlocked = await isTokenBlacklisted('any-jti-under-error');
-    assert.equal(isBlocked, true, 'Must fail closed on Redis query exception');
+    await assert.rejects(
+      isTokenBlacklisted('any-jti-under-error'),
+      { code: 'TOKEN_REVOCATION_UNAVAILABLE' },
+      'Must fail closed on Redis query exception',
+    );
   });
 
   it('4. authLimiter enforces passOnStoreError: false (fails closed on store errors)', async () => {

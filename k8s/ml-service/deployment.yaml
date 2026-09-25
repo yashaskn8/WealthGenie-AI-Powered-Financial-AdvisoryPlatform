@@ -32,6 +32,8 @@ spec:
               value: "/app/traces.jsonl"
             - name: ENVIRONMENT
               value: "production"
+            - name: RAG_EMBEDDING_PROVIDER
+              value: sentence_transformer
             - name: MONGODB_URI
               valueFrom:
                 secretKeyRef:

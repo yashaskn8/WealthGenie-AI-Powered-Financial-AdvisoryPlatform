@@ -188,6 +188,12 @@ def test_factory_returns_hashing_for_tf_idf_dense():
     assert provider.embedding_dimension == 64
 
 
+def test_production_rejects_explicit_lexical_embedding_provider(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    with pytest.raises(RuntimeError, match="requires the pinned semantic embedding provider"):
+        get_embedding_provider(RAGConfig(embedding_provider="tf_idf_dense", embedding_dim=64))
+
+
 def test_factory_raises_for_unknown_provider():
     from pydantic import ValidationError
     with pytest.raises(ValidationError):

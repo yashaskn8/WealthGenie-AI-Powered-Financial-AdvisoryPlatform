@@ -66,7 +66,11 @@ def _verified_rf_bundle(bundle_dir: Path, bundle_id: str, *, serving_qualified: 
         serving_qualified=serving_qualified,
     )
     write_json_lf(bundle_dir / "bundle.manifest.json", manifest)
-    verified = verify_bundle(bundle_dir, manifest["bundle_manifest_sha256"])
+    verified = verify_bundle(
+        bundle_dir,
+        manifest["bundle_manifest_sha256"],
+        require_serving_qualified=serving_qualified,
+    )
     verified["bundle_dir"] = str(bundle_dir)
     return verified
 

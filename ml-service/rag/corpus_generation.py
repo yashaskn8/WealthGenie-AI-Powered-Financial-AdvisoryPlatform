@@ -58,7 +58,14 @@ def canonical_member(
 
 
 def generation_digest(members: list[Mapping[str, Any]]) -> str:
-    ordered = sorted(members, key=lambda item: str(item["document_revision_id"]))
+    # `generation_id` and Mongo's `_id` are storage-envelope fields, not corpus
+    # membership. Hash only the canonical member contract so a digest computed
+    # before insertion equals the same members read back from Mongo.
+    canonical_members = [
+        {key: value for key, value in member.items() if key not in {"_id", "generation_id"}}
+        for member in members
+    ]
+    ordered = sorted(canonical_members, key=lambda item: str(item["document_revision_id"]))
     return sha256_canonical(ordered)
 
 

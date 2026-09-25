@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
-import { isTokenBlacklisted } from '../config/redis.js';
+import { isTokenBlacklisted, TokenRevocationUnavailableError } from '../config/redis.js';
 import { clearAuthCookies, readSessionCookie } from '../services/authSession.js';
 import { sendError } from './errorHandler.js';
 
@@ -8,7 +8,11 @@ import { sendError } from './errorHandler.js';
  * JWT verification middleware.
  * Attaches decoded token payload to req.user.
  */
-export async function verifyJWT(req, res, next) {
+export function verifyJWTWithRevocationAvailability(req, res, next) {
+  return verifyJWT(req, res, next, { revocationUnavailableStatus: 503 });
+}
+
+export async function verifyJWT(req, res, next, { revocationUnavailableStatus = null } = {}) {
   const authHeader = req.headers.authorization;
   if (authHeader && !authHeader.startsWith('Bearer ')) {
     return sendError(req, res, 401, 'Access denied. Invalid authorization scheme.', 'AUTH_SCHEME_INVALID');
@@ -46,6 +50,18 @@ export async function verifyJWT(req, res, next) {
     next();
   } catch (err) {
     if (usingCookie) clearAuthCookies(res);
+    if (
+      revocationUnavailableStatus === 503
+      && (err instanceof TokenRevocationUnavailableError || err?.code === 'TOKEN_REVOCATION_UNAVAILABLE')
+    ) {
+      return sendError(
+        req,
+        res,
+        503,
+        'Authentication session status is temporarily unavailable.',
+        'TOKEN_REVOCATION_UNAVAILABLE',
+      );
+    }
     if (err.name === 'TokenExpiredError') {
       return sendError(req, res, 401, 'Token expired. Please log in again.', 'AUTH_TOKEN_EXPIRED');
     }
