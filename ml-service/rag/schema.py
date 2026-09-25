@@ -105,6 +105,7 @@ class TextChunk(BaseModel):
     tenant_id: str = Field("default", description="Tenant isolation scope identifier")
     scope: str = Field("global", description="Tenant isolation scope: 'global' or 'user:{user_id}'")
     lifecycle_state: Literal["PENDING", "ACTIVE", "SUPERSEDED", "SOFT_DELETED", "DELETED", "QUARANTINED", "FAILED"] = "ACTIVE"
+    document_revision_id: Optional[str] = None
     embedding: Optional[List[float]] = None
     embedding_identity: Optional[Dict[str, Any]] = None
 

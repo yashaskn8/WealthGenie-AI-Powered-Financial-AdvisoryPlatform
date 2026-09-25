@@ -277,8 +277,20 @@ jobs:
           ML_TEST_MONGODB_URI: ${{ env.MONGODB_URI }}
         run: python -m pytest tests/test_mongo_registry_transactions.py -q
 
+      - name: Verify transactional shared RAG lifecycle
+        working-directory: ml-service
+        env:
+          ML_TEST_MONGODB_URI: ${{ env.MONGODB_URI }}
+        run: python -m pytest tests/test_mongo_rag_lifecycle_transactions.py -q
+
       - name: Verify trusted serving artifact bundles
         run: python ml-service/scripts/verify_serving_artifacts.py
+
+      - name: Register verified serving bundles in MongoDB
+        working-directory: ml-service
+        env:
+          WEALTHGENIE_PHASE3_BOOTSTRAP: "1"
+        run: python scripts/register_trusted_bundles.py
 
       - name: Start real application services
         run: |

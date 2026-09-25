@@ -57,6 +57,52 @@ def registry(mock_mongo_client):
 class TestMongoModelRegistry:
     """Tests for MongoModelRegistry CRUD operations."""
 
+    def test_register_verified_bundle_persists_pinned_bundle_identity(self, registry, tmp_path):
+        artifact = tmp_path / "model.bin"
+        artifact.write_bytes(b"verified-model-artifact")
+        bundle_dir = tmp_path / "bundle"
+        bundle_dir.mkdir()
+        manifest_hash = "a" * 64
+
+        version_id = registry.register_model(
+            model_architecture="bundle_fixture",
+            artifact_path=artifact,
+            training_data_hash="b" * 64,
+            training_timestamp="2026-09-25T12:00:00+00:00",
+            hyperparameters={"feature_schema_version": "fixture-v1"},
+            metrics={},
+            set_active=True,
+            expected_active_version_id=None,
+            bundle_id="fixture-bundle-v1",
+            bundle_path=bundle_dir,
+            bundle_manifest_sha256=manifest_hash,
+        )
+
+        active = registry.get_active_model("bundle_fixture")
+        assert active["version_id"] == version_id
+        assert active["bundle_id"] == "fixture-bundle-v1"
+        assert active["bundle_path"] == str(bundle_dir.resolve())
+        assert active["bundle_manifest_sha256"] == manifest_hash
+
+    def test_bundle_identity_fields_must_be_complete(self, registry, tmp_path):
+        artifact = tmp_path / "model.bin"
+        artifact.write_bytes(b"verified-model-artifact")
+        bundle_dir = tmp_path / "bundle"
+        bundle_dir.mkdir()
+
+        with pytest.raises(ValueError, match="must be provided together"):
+            registry.register_model(
+                model_architecture="incomplete_bundle_fixture",
+                artifact_path=artifact,
+                training_data_hash="b" * 64,
+                training_timestamp="2026-09-25T12:00:00+00:00",
+                hyperparameters={},
+                metrics={},
+                bundle_id="fixture-bundle-v1",
+            )
+
+        assert registry.list_versions("incomplete_bundle_fixture") == []
+
     def test_register_and_get_version(self, registry):
         artifact = _create_temp_artifact()
         version_id = registry.register_model(
@@ -185,13 +231,13 @@ class TestMongoModelRegistry:
         # v1 should now be inactive
         assert registry.get_version(v1)["is_active"] is False
 
-        # Rollback to v1
-        rolled_back = registry.rollback_to_version(v1)
-        assert rolled_back["is_active"] is True
-        assert rolled_back["version_id"] == v1
+        # Legacy single-file rows cannot be activated as trusted model bundles.
+        with pytest.raises(ValueError, match="complete verified immutable model bundle"):
+            registry.rollback_to_version(v1)
 
-        # v2 should be deactivated
-        assert registry.get_version(v2)["is_active"] is False
+        # A rejected rollback leaves the active pointer unchanged.
+        assert registry.get_active_model("rf")["version_id"] == v2
+        assert registry.get_version(v2)["is_active"] is True
         os.unlink(artifact)
 
     def test_verify_artifact_integrity(self, registry):

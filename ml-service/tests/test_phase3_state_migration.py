@@ -58,7 +58,7 @@ def test_migration_installs_required_indexes_and_is_idempotent():
     migrate_phase3_state(database)
 
     verify_phase3_state(database)
-    assert database["ml_schema_migrations"].find_one({"_id": "phase3_shared_state"})["version"] == 1
+    assert database["ml_schema_migrations"].find_one({"_id": "phase3_shared_state"})["version"] == 2
     assert first_indexes == {
         name: dict(info)
         for name, info in database["model_versions"].index_information().items()

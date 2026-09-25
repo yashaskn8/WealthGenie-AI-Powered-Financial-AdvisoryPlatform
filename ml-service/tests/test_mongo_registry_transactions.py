@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import pytest
 from pymongo import MongoClient
+from bson import Binary
 
 from model.migrations.phase3_state import migrate_phase3_state
 from model.registry.mongo_registry_store import ModelActivationConflict, MongoModelRegistry
@@ -86,3 +87,102 @@ def test_concurrent_model_activation_is_atomic_and_expected_version_fenced():
         client.drop_database(database_name)
         client.close()
         os.unlink(artifact_file.name)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ML_TEST_MONGODB_URI"),
+    reason="requires a transaction-capable MongoDB replica set",
+)
+def test_trusted_gridfs_bootstrap_is_idempotent_and_survives_replica_restart(monkeypatch):
+    """Cold start, restart, and corruption checks use shared Mongo/GridFS state."""
+    from model.artifacts.store import MongoGridFSArtifactStore
+    from model.migrations.phase3_state import migrate_phase3_state
+    from model.serving.control_plane import ModelReconciliationError, ensure_active_model_loaded
+    from model.serving import registry as serving_registry
+    from scripts.verify_serving_artifacts import verify_trusted_serving_bundles
+
+    uri = os.environ["ML_TEST_MONGODB_URI"]
+    database_name = f"wealthgenie_phase3_bootstrap_{uuid4().hex}"
+    client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+    registries: list[MongoModelRegistry] = []
+    original_predictors = dict(serving_registry.registry._registry)
+    try:
+        client.admin.command("ping")
+        database = client[database_name]
+        migrate_phase3_state(database)
+        trusted_bundles = verify_trusted_serving_bundles(Path(__file__).resolve().parents[1])
+
+        first_replica = MongoModelRegistry(uri, db_name=database_name)
+        registries.append(first_replica)
+        first_replica.artifact_store = MongoGridFSArtifactStore(first_replica.database)
+        initial = first_replica.bootstrap_verified_bundles(trusted_bundles, first_replica.artifact_store)
+
+        assert set(initial) == {"RandomForest", "PyTorch_MLP", "FT_Transformer"}
+        for architecture, record in initial.items():
+            assert record["artifact_path"] is None
+            assert record["artifact_store_backend"] == "mongodb_gridfs"
+            assert record["activation_generation"] == 1
+            assert database["model_versions"].count_documents({"model_architecture": architecture}) == 1
+
+        repeated = first_replica.bootstrap_verified_bundles(trusted_bundles, first_replica.artifact_store)
+        assert {
+            name: (row["version_id"], row["bundle_id"], row["bundle_manifest_sha256"], row["activation_generation"])
+            for name, row in repeated.items()
+        } == {
+            name: (row["version_id"], row["bundle_id"], row["bundle_manifest_sha256"], row["activation_generation"])
+            for name, row in initial.items()
+        }
+        assert database["model_versions"].count_documents({}) == 3
+        assert database["model_artifacts.files"].count_documents({}) == 3
+
+        monkeypatch.setattr(serving_registry.registry, "_registry", {})
+        monkeypatch.setattr(serving_registry.registry, "_version_registry", first_replica)
+        first_loaded = ensure_active_model_loaded("RandomForest")
+        rf_record = initial["RandomForest"]
+        assert first_loaded.loaded_version_id == rf_record["version_id"]
+        assert first_loaded.loaded_bundle_id == rf_record["bundle_id"]
+        assert first_loaded.loaded_bundle_hash == rf_record["bundle_manifest_sha256"]
+        assert first_loaded.is_loaded
+
+        # Simulate a fresh process: no in-memory predictor, a separate registry
+        # client, and the same shared database/GridFS objects.
+        serving_registry.registry._registry.clear()
+        second_replica = MongoModelRegistry(uri, db_name=database_name)
+        registries.append(second_replica)
+        second_replica.artifact_store = MongoGridFSArtifactStore(second_replica.database)
+        monkeypatch.setattr(serving_registry.registry, "_version_registry", second_replica)
+        restarted = ensure_active_model_loaded("RandomForest")
+        assert restarted.loaded_version_id == first_loaded.loaded_version_id
+        assert restarted.loaded_bundle_id == first_loaded.loaded_bundle_id
+        assert restarted.loaded_bundle_hash == first_loaded.loaded_bundle_hash
+        assert restarted.loaded_activation_generation == first_loaded.loaded_activation_generation
+
+        # Corrupt the shared archive after clearing process-local model state.
+        # Bundle verification must fail before executable pickle deserialization.
+        serving_registry.registry._registry.clear()
+        rf_bundle_id = rf_record["bundle_id"]
+        file_record = database["model_artifacts.files"].find_one({"metadata.bundle_id": rf_bundle_id})
+        assert file_record is not None
+        chunk = database["model_artifacts.chunks"].find_one({"files_id": file_record["_id"]})
+        assert chunk is not None
+        corrupted = bytes(chunk["data"])
+        database["model_artifacts.chunks"].update_one(
+            {"_id": chunk["_id"]},
+            {"$set": {"data": Binary(bytes([corrupted[0] ^ 1]) + corrupted[1:])}},
+        )
+        import model.serving.inference
+        monkeypatch.setattr(
+            model.serving.inference.joblib,
+            "load",
+            lambda *_args, **_kwargs: pytest.fail("corrupt GridFS bundle must not be deserialized"),
+        )
+        with pytest.raises(ModelReconciliationError):
+            ensure_active_model_loaded("RandomForest")
+        assert serving_registry.registry.get("random_forest") is None
+    finally:
+        serving_registry.registry._registry.clear()
+        serving_registry.registry._registry.update(original_predictors)
+        for registry in registries:
+            registry.close()
+        client.drop_database(database_name)
+        client.close()

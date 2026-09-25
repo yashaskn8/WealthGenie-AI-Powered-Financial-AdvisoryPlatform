@@ -95,6 +95,7 @@ def get_model_registry(db_path=None):
                 mongo_uri=mongo_uri,
                 db_name="wealthgenie",
             )
+            registry.artifact_store = get_artifact_store_for_registry(registry)
             logger.info("Using MongoModelRegistry (backend=mongodb)")
             return registry
         except Exception as e:
@@ -107,5 +108,23 @@ def get_model_registry(db_path=None):
     configured_local_path = os.environ.get("ML_REGISTRY_DB_PATH", "").strip()
     resolved_db_path = db_path or (configured_local_path if configured_local_path else None)
     registry = ModelRegistry(db_path=resolved_db_path)
+    registry.artifact_store = get_artifact_store_for_registry(registry)
     logger.info("Using SQLite ModelRegistry (backend=local_disk)")
     return registry
+
+
+def get_artifact_store_for_registry(model_registry):
+    """Return the artifact store paired with the selected registry backend.
+
+    Mongo-backed registry state must use the same shared database for GridFS;
+    it is never allowed to fall back to a pod-local directory.
+    """
+    from model.artifacts.store import get_artifact_store
+
+    database = getattr(model_registry, "database", None)
+    backend = "mongodb" if database is not None else "local"
+    return get_artifact_store(
+        _environment(),
+        database=database,
+        state_backend=backend,
+    )

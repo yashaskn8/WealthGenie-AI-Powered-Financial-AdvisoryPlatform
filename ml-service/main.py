@@ -49,195 +49,8 @@ explainer_instance: ModelExplainer | None = None
 
 
 def _seed_and_resolve_active_models(version_registry) -> None:
-    """
-    Seeds baseline models into the persistent version registry if empty or paths invalid,
-    ensuring tamper-evident lineage is maintained across restarts and replicas.
-
-    MUST be called AFTER serving artifacts have been loaded, not before, or it
-    will correctly skip seeding and log the reason. This function never trains
-    or creates serving artifacts.
-    """
-    logger.info("[Registry Seeding] Starting _seed_and_resolve_active_models...")
-    # Legacy single-file records cannot establish a complete serving bundle or
-    # architecture-specific lineage. Registry records must be created by the
-    # explicit bundle registration workflow, never inferred from local files.
-    logger.warning("Legacy local-file model seeding is disabled; only bundle registration may change registry state.")
-    return
-
-    try:
-        import pandas as pd
-        from model.data.preprocessing import (
-            compute_dataset_hash_from_arrays,
-            prepare_synthetic_training_data,
-        )
-        from model.registry.drift_detection import compute_reference_distributions
-        reference_x, reference_y = prepare_synthetic_training_data(num_samples=2_000, seed=42)
-        data_hash = compute_dataset_hash_from_arrays(reference_x, reference_y)
-        ref_dist = compute_reference_distributions(
-            pd.DataFrame(reference_x, columns=FEATURE_NAMES), FEATURE_NAMES
-        )
-        logger.info(
-            f"[Registry Seeding] Computed {FEATURE_SCHEMA_VERSION} training data hash: {data_hash[:16]}..."
-        )
-    except Exception as e:
-        raise RuntimeError("Unable to build the versioned v4 registry baseline") from e
-
-    seeded_count = 0
-
-    # --- 1. Seed RandomForest ---
-    rf_artifact = MODEL_DIR / "model.pkl"
-    if rf_artifact.exists():
-        active_rf = version_registry.get_active_model("RandomForest")
-        active_schema = (active_rf or {}).get("hyperparameters", {}).get("feature_schema_version")
-        active_reference_features = set((active_rf or {}).get("reference_distributions") or {})
-        if (active_rf is not None and Path(active_rf["artifact_path"]).exists()
-                and active_schema == FEATURE_SCHEMA_VERSION
-                and active_reference_features == set(FEATURE_NAMES)):
-            logger.info(f"[Registry Seeding] RandomForest already registered and active: {active_rf['version_id']}")
-        else:
-            reason = "no active version" if active_rf is None else f"artifact path invalid ({active_rf.get('artifact_path')})"
-            logger.info(f"[Registry Seeding] Seeding RandomForest baseline ({reason})...")
-            meta = {}
-            metadata_path = MODEL_DIR / "metadata.json"
-            if metadata_path.exists():
-                try:
-                    with open(metadata_path, "r", encoding="utf-8") as f:
-                        meta = json.load(f)
-                except Exception as e:
-                    logger.warning(f"[Registry Seeding] Failed to read metadata.json: {e}")
-
-            from model.data.preprocessing import get_dataset_generation_params
-            lineage_params = meta.get("dataset_lineage") or get_dataset_generation_params(num_samples=2000, seed=42)
-
-            if meta.get("feature_schema_version") != FEATURE_SCHEMA_VERSION or meta.get("feature_names") != FEATURE_NAMES:
-                raise ValueError("RandomForest metadata does not match the v4 feature contract")
-            missing_metrics = [
-                name for name in ("rule_approximation_fidelity", "balanced_accuracy", "macro_f1")
-                if meta.get(name) is None
-            ]
-            if missing_metrics:
-                raise ValueError(f"RandomForest metadata lacks promotion evidence: {', '.join(missing_metrics)}")
-            fidelity = meta["rule_approximation_fidelity"]
-            training_timestamp = meta.get("trained_at", "2026-07-23T19:28:42Z")
-            data_hash = meta.get("training_data_hash", data_hash)
-            hparams = {
-                "n_estimators": 100,
-                "max_depth": 12,
-                "model_type": "RandomForestClassifier",
-                "dataset_lineage": lineage_params,
-                "feature_schema_version": FEATURE_SCHEMA_VERSION,
-                "feature_names": FEATURE_NAMES,
-            }
-            metrics = {
-                "rule_approximation_fidelity": fidelity,
-                "balanced_accuracy": meta["balanced_accuracy"],
-                "macro_f1": meta["macro_f1"],
-                "metric_interpretation": "policy-approximation fidelity, not investment outcome accuracy",
-            }
-            try:
-                vid = version_registry.register_model(
-                    model_architecture="RandomForest",
-                    artifact_path=rf_artifact,
-                    training_data_hash=data_hash,
-                    training_timestamp=training_timestamp,
-                    hyperparameters=hparams,
-                    metrics=metrics,
-                    reference_distributions=ref_dist,
-                    notes="Baseline RandomForest model seeded at application startup",
-                    set_active=True,
-                )
-                logger.info(f"[Registry Seeding] ✓ Seeded active RandomForest version {vid}")
-                seeded_count += 1
-            except Exception as e:
-                logger.error(f"[Registry Seeding] ✗ FAILED to seed RandomForest: {type(e).__name__}: {e}", exc_info=True)
-    else:
-        logger.warning(f"[Registry Seeding] RandomForest artifact NOT FOUND at {rf_artifact} — skipping seed.")
-
-    # --- 2. Seed PyTorch MLP ---
-    mlp_artifact = MODEL_DIR / "saved_models" / "mlp_model.pt"
-    if mlp_artifact.exists():
-        active_mlp = version_registry.get_active_model("PyTorch_MLP")
-        active_schema = (active_mlp or {}).get("hyperparameters", {}).get("feature_schema_version")
-        active_reference_features = set((active_mlp or {}).get("reference_distributions") or {})
-        if (active_mlp is not None and Path(active_mlp["artifact_path"]).exists()
-                and active_schema == FEATURE_SCHEMA_VERSION
-                and active_reference_features == set(FEATURE_NAMES)):
-            logger.info(f"[Registry Seeding] PyTorch_MLP already registered and active: {active_mlp['version_id']}")
-        else:
-            reason = "no active version" if active_mlp is None else f"artifact path invalid ({active_mlp.get('artifact_path')})"
-            logger.info(f"[Registry Seeding] Seeding PyTorch_MLP baseline ({reason})...")
-            try:
-                vid = version_registry.register_model(
-                    model_architecture="PyTorch_MLP",
-                    artifact_path=mlp_artifact,
-                    training_data_hash=data_hash,
-                    training_timestamp="2026-07-30T15:57:00Z",
-                    hyperparameters={
-                        "input_dim": len(FEATURE_NAMES),
-                        "hidden_dims": [64, 32],
-                        "output_dim": 6,
-                        "feature_schema_version": FEATURE_SCHEMA_VERSION,
-                        "feature_names": FEATURE_NAMES,
-                    },
-                    metrics={"metric_interpretation": "policy-approximation fidelity, not investment outcome accuracy"},
-                    reference_distributions=ref_dist,
-                    notes="Baseline PyTorch MLP model seeded at application startup",
-                    set_active=True,
-                )
-                logger.info(f"[Registry Seeding] ✓ Seeded active PyTorch_MLP version {vid}")
-                seeded_count += 1
-            except Exception as e:
-                logger.error(f"[Registry Seeding] ✗ FAILED to seed PyTorch_MLP: {type(e).__name__}: {e}", exc_info=True)
-    else:
-        logger.warning(f"[Registry Seeding] PyTorch_MLP artifact NOT FOUND at {mlp_artifact} — skipping seed.")
-
-    # --- 3. Seed FT-Transformer ---
-    ft_artifact = MODEL_DIR / "saved_models" / "ft_transformer.pt"
-    if ft_artifact.exists():
-        active_ft = version_registry.get_active_model("FT_Transformer")
-        active_schema = (active_ft or {}).get("hyperparameters", {}).get("feature_schema_version")
-        active_reference_features = set((active_ft or {}).get("reference_distributions") or {})
-        if (active_ft is not None and Path(active_ft["artifact_path"]).exists()
-                and active_schema == FEATURE_SCHEMA_VERSION
-                and active_reference_features == set(FEATURE_NAMES)):
-            logger.info(f"[Registry Seeding] FT_Transformer already registered and active: {active_ft['version_id']}")
-        else:
-            reason = "no active version" if active_ft is None else f"artifact path invalid ({active_ft.get('artifact_path')})"
-            logger.info(f"[Registry Seeding] Seeding FT_Transformer baseline ({reason})...")
-            try:
-                vid = version_registry.register_model(
-                    model_architecture="FT_Transformer",
-                    artifact_path=ft_artifact,
-                    training_data_hash=data_hash,
-                    training_timestamp="2026-07-30T16:05:00Z",
-                    hyperparameters={
-                        "input_dim": len(FEATURE_NAMES),
-                        "d_token": 64,
-                        "n_blocks": 3,
-                        "n_heads": 4,
-                        "feature_schema_version": FEATURE_SCHEMA_VERSION,
-                        "feature_names": FEATURE_NAMES,
-                    },
-                    metrics={"metric_interpretation": "policy-approximation fidelity, not investment outcome accuracy"},
-                    reference_distributions=ref_dist,
-                    notes="Baseline FT-Transformer model seeded at application startup",
-                    set_active=True,
-                )
-                logger.info(f"[Registry Seeding] ✓ Seeded active FT_Transformer version {vid}")
-                seeded_count += 1
-            except Exception as e:
-                logger.error(f"[Registry Seeding] ✗ FAILED to seed FT_Transformer: {type(e).__name__}: {e}", exc_info=True)
-    else:
-        logger.warning(f"[Registry Seeding] FT_Transformer artifact NOT FOUND at {ft_artifact} — skipping seed.")
-
-    # --- Summary ---
-    total_versions = version_registry.list_versions()
-    active_versions = [v for v in total_versions if v.get("is_active")]
-    logger.info(
-        f"[Registry Seeding] Complete. Seeded {seeded_count} new version(s). "
-        f"Registry now has {len(total_versions)} total version(s), {len(active_versions)} active."
-    )
-
+    """Reject legacy startup seeding; trusted bundles use the explicit bootstrap command."""
+    raise RuntimeError("Legacy local-file model seeding is disabled; run the explicit trusted-bundle bootstrap.")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -254,85 +67,32 @@ async def lifespan(app: FastAPI):
     app.state.version_registry = version_registry
     logger.info(f"Version registry initialized: {type(version_registry).__name__}")
 
-    # 1. Load only pre-generated, qualified serving artifacts. Missing
-    # artifacts remain unavailable and are surfaced through readiness; serving
-    # must never manufacture a new model during application startup.
+    # Serving identity comes only from the shared active registry record and
+    # its immutable ArtifactStore object. No unpinned local-file load or
+    # startup model seeding is allowed.
     rf_pred = RandomForestPredictor()
-    try:
-        rf_pred.load_artifacts()
-    except Exception as exc:
-        logger.error("RandomForest bundle was not loaded: %s", exc)
-    if not rf_pred.is_loaded:
-        logger.error("Qualified RandomForest serving artifacts are unavailable; prediction readiness will remain false.")
-    model = rf_pred.model
-    label_encoder = rf_pred.label_encoder
+    mlp_pred = MLPPredictor()
+    ft_pred = FTTransformerPredictor()
     registry.register("random_forest", rf_pred)
     registry.register("rf", rf_pred)
-
-    mlp_pred = MLPPredictor()
-    try:
-        mlp_pred.load_artifacts()
-    except Exception as exc:
-        logger.error("MLP bundle was not loaded: %s", exc)
-    if not mlp_pred.is_loaded:
-        logger.error("Qualified PyTorch MLP serving artifacts are unavailable; the MLP endpoint will remain unavailable.")
     registry.register("mlp", mlp_pred)
     registry.register("pytorch", mlp_pred)
-
-    ft_pred = FTTransformerPredictor()
-    try:
-        ft_pred.load_artifacts()
-    except Exception as exc:
-        logger.error("FT-Transformer bundle was not loaded: %s", exc)
-    if not ft_pred.is_loaded:
-        logger.error("Qualified FT-Transformer serving artifacts are unavailable; the FT endpoint will remain unavailable.")
     registry.register("ft_transformer", ft_pred)
 
-    # 2. Seed the version registry only from artifacts that loaded successfully
-    _seed_and_resolve_active_models(version_registry)
+    from model.serving.control_plane import ModelReconciliationError, ensure_active_model_loaded
+    for architecture in ("RandomForest", "PyTorch_MLP", "FT_Transformer"):
+        try:
+            ensure_active_model_loaded(architecture)
+        except ModelReconciliationError as exc:
+            logger.error("%s active bundle is not ready: %s", architecture, exc)
 
-    # 3. Resolve active versions from registry and reload predictors from registry-tracked paths
-    active_rf = version_registry.get_active_model("RandomForest")
-    active_rf_schema = (active_rf or {}).get("hyperparameters", {}).get("feature_schema_version")
-    if active_rf and active_rf.get("bundle_path") and active_rf.get("bundle_manifest_sha256") and active_rf_schema == FEATURE_SCHEMA_VERSION:
-        rf_pred.load_artifacts(
-            bundle_dir=Path(active_rf["bundle_path"]),
-            expected_bundle_hash=active_rf["bundle_manifest_sha256"],
-            version_id=str(active_rf["version_id"]),
-        )
-        if rf_pred.is_loaded:
-            rf_pred.loaded_version_id = str(active_rf["version_id"])
-            model_version = active_rf["version_id"]
-            model_accuracy = active_rf.get("metrics", {}).get("rule_approximation_fidelity")
-            model = rf_pred.model
-            label_encoder = rf_pred.label_encoder
-            logger.info(f"RandomForest loaded from registry version {active_rf['version_id']}")
-    else:
-        logger.info("RandomForest loaded from default path (no active registry version).")
-
-    active_mlp = version_registry.get_active_model("PyTorch_MLP")
-    active_mlp_schema = (active_mlp or {}).get("hyperparameters", {}).get("feature_schema_version")
-    if active_mlp and active_mlp.get("bundle_path") and active_mlp.get("bundle_manifest_sha256") and active_mlp_schema == FEATURE_SCHEMA_VERSION:
-        mlp_pred.load_artifacts(
-            bundle_dir=Path(active_mlp["bundle_path"]),
-            expected_bundle_hash=active_mlp["bundle_manifest_sha256"],
-            version_id=str(active_mlp["version_id"]),
-        )
-        if mlp_pred.is_loaded:
-            mlp_pred.loaded_version_id = str(active_mlp["version_id"])
-        logger.info(f"PyTorch_MLP loaded from registry version {active_mlp['version_id']}")
-
-    active_ft = version_registry.get_active_model("FT_Transformer")
-    active_ft_schema = (active_ft or {}).get("hyperparameters", {}).get("feature_schema_version")
-    if active_ft and active_ft.get("bundle_path") and active_ft.get("bundle_manifest_sha256") and active_ft_schema == FEATURE_SCHEMA_VERSION:
-        ft_pred.load_artifacts(
-            bundle_dir=Path(active_ft["bundle_path"]),
-            expected_bundle_hash=active_ft["bundle_manifest_sha256"],
-            version_id=str(active_ft["version_id"]),
-        )
-        if ft_pred.is_loaded:
-            ft_pred.loaded_version_id = str(active_ft["version_id"])
-        logger.info(f"FT_Transformer loaded from registry version {active_ft['version_id']}")
+    rf_pred = registry.get("random_forest")
+    if rf_pred and rf_pred.is_loaded:
+        model = rf_pred.model
+        label_encoder = rf_pred.label_encoder
+        model_version = rf_pred.loaded_version_id or model_version
+        active_rf = version_registry.get_active_model("RandomForest")
+        model_accuracy = (active_rf or {}).get("metrics", {}).get("rule_approximation_fidelity")
 
     # 4. Load TreeSHAP Explainer from RF model
     if rf_pred.is_loaded and rf_pred.model is not None and rf_pred.label_encoder is not None:
@@ -459,17 +219,23 @@ def health():
     status_str = "ok" if (rf and rf.is_loaded) else "model_not_loaded"
 
     # Report the version corresponding to bytes actually loaded in this process.
-    live_version = getattr(rf, "loaded_version_id", None) or model_version
+    live_version = (getattr(rf, "loaded_version_id", None) if rf else None) or "unavailable"
     live_accuracy = model_accuracy
     version_store = registry.get_version_registry()
-    if version_store is not None:
+    if version_store is None:
+        status_str = "model_registry_unavailable"
+    else:
         try:
             active = version_store.get_active_model("RandomForest")
-            if active:
-                if str(active["version_id"]) != str(live_version):
-                    status_str = "model_version_reconciliation_required"
-                else:
-                    live_accuracy = active.get("metrics", {}).get("rule_approximation_fidelity", live_accuracy)
+            if not active or not rf or not rf.is_loaded or (
+                str(active.get("version_id")) != str(live_version)
+                or getattr(rf, "loaded_bundle_id", None) != active.get("bundle_id")
+                or getattr(rf, "loaded_bundle_hash", None) != active.get("bundle_manifest_sha256")
+                or int(getattr(rf, "loaded_activation_generation", -1)) != int(active.get("activation_generation", -2))
+            ):
+                status_str = "model_version_reconciliation_required"
+            else:
+                live_accuracy = active.get("metrics", {}).get("rule_approximation_fidelity", live_accuracy)
         except Exception:
             status_str = "model_registry_unavailable"
 
@@ -491,9 +257,22 @@ def readiness():
     required RandomForest predictor has loaded a qualified artifact; this
     prevents a partially initialized process from advertising readiness.
     """
+    from model.serving.control_plane import ModelReconciliationError, ensure_active_model_loaded
+    reconciliation_error = False
+    try:
+        ensure_active_model_loaded("RandomForest")
+    except ModelReconciliationError:
+        reconciliation_error = True
     loaded_models = registry.get_loaded_predictors()
     random_forest = registry.get("random_forest")
-    required_model_ready = bool(random_forest and random_forest.is_loaded)
+    required_model_ready = bool(
+        not reconciliation_error
+        and random_forest
+        and random_forest.is_loaded
+        and getattr(random_forest, "loaded_version_id", None)
+        and getattr(random_forest, "loaded_bundle_id", None)
+        and getattr(random_forest, "loaded_bundle_hash", None)
+    )
     return {
         "status": "ready" if required_model_ready else "not_ready",
         "loaded_models_count": len(loaded_models),
@@ -509,31 +288,51 @@ def list_registered_models():
     return {"registered_models": registry.list_models()}
 
 
-def get_live_model_version(architecture: str, predictor, default_version: str) -> str:
+def get_live_model_version(architecture: str, predictor, _default_version: str) -> str:
     """Return the loaded artifact identity, failing closed if registry has moved."""
     loaded_version = getattr(predictor, "loaded_version_id", None)
     version_store = registry.get_version_registry()
-    if version_store is not None:
-        try:
-            active = version_store.get_active_model(architecture)
-            if active and "version_id" in active:
-                active_version = str(active["version_id"])
-                if loaded_version is None or str(loaded_version) != active_version:
-                    raise HTTPException(
-                        status_code=503,
-                        detail={
-                            "code": "MODEL_VERSION_RECONCILIATION_REQUIRED",
-                            "message": "The active model changed and this replica has not loaded that version.",
-                        },
-                    )
-        except HTTPException:
-            raise
-        except Exception as exc:
+    if version_store is None or not loaded_version:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "MODEL_VERSION_RECONCILIATION_REQUIRED", "message": "A registry-bound loaded model version is unavailable."},
+        )
+    try:
+        active = version_store.get_active_model(architecture)
+        if not active or (
+            str(loaded_version) != str(active.get("version_id"))
+            or getattr(predictor, "loaded_bundle_id", None) != active.get("bundle_id")
+            or getattr(predictor, "loaded_bundle_hash", None) != active.get("bundle_manifest_sha256")
+            or getattr(predictor, "loaded_feature_schema_version", None) != active.get("feature_schema_version")
+            or int(getattr(predictor, "loaded_activation_generation", -1)) != int(active.get("activation_generation", -2))
+        ):
             raise HTTPException(
                 status_code=503,
-                detail={"code": "MODEL_VERSION_RECONCILIATION_REQUIRED", "message": "The active model version could not be verified."},
-            ) from exc
-    return str(loaded_version or default_version)
+                detail={"code": "MODEL_VERSION_RECONCILIATION_REQUIRED", "message": "The loaded model does not match the current active registry identity."},
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "MODEL_VERSION_RECONCILIATION_REQUIRED", "message": "The active model version could not be verified."},
+        ) from exc
+    return str(loaded_version)
+
+
+def _ensure_serving_model(architecture: str):
+    from model.serving.control_plane import ModelReconciliationError, ensure_active_model_loaded
+
+    try:
+        return ensure_active_model_loaded(architecture)
+    except ModelReconciliationError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MODEL_VERSION_RECONCILIATION_REQUIRED",
+                "message": "The active model bundle is not loaded and verified on this replica.",
+            },
+        ) from exc
 
 
 def record_inference_features(features: dict) -> None:
@@ -557,7 +356,7 @@ async def predict_enriched(data: PredictRequest):
     # 1. Buffer for continuous drift monitoring
     record_inference_features(features)
 
-    predictor = registry.get("random_forest")
+    predictor = _ensure_serving_model("RandomForest")
     if predictor is None or not predictor.is_loaded:
         raise HTTPException(status_code=503, detail="RandomForest model not loaded.")
 
@@ -600,7 +399,7 @@ async def predict_pytorch(data: PredictRequest):
     """
     Prediction endpoint serving recommendations from the PyTorch Multi-Layer Perceptron (MLP).
     """
-    predictor = registry.get("mlp")
+    predictor = _ensure_serving_model("PyTorch_MLP")
     if predictor is None or not predictor.is_loaded:
         raise HTTPException(status_code=503, detail="PyTorch MLP model not loaded.")
 
@@ -633,7 +432,7 @@ async def predict_ft_transformer(data: PredictRequest):
     """
     Prediction endpoint serving recommendations from the PyTorch FT-Transformer model.
     """
-    predictor = registry.get("ft_transformer")
+    predictor = _ensure_serving_model("FT_Transformer")
     if predictor is None or not predictor.is_loaded:
         raise HTTPException(status_code=503, detail="FT-Transformer model not loaded.")
 
@@ -671,19 +470,36 @@ async def predict_compare(data: PredictRequest):
     # Buffer for continuous drift monitoring
     record_inference_features(features)
 
+    from model.serving.control_plane import ModelReconciliationError, ensure_active_model_loaded
+    serving_architectures = {
+        "random_forest": "RandomForest",
+        "mlp": "PyTorch_MLP",
+        "ft_transformer": "FT_Transformer",
+    }
     loaded_models = registry.get_loaded_predictors()
     if not loaded_models:
         raise HTTPException(status_code=503, detail="No models loaded in registry.")
 
+    current_models = {}
+    for name, architecture in serving_architectures.items():
+        if name not in loaded_models:
+            continue
+        try:
+            current_models[name] = ensure_active_model_loaded(architecture)
+        except ModelReconciliationError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "MODEL_VERSION_RECONCILIATION_REQUIRED", "message": "A comparison model could not be reconciled to the active bundle."},
+            ) from exc
+
     comparison_results = {}
     primary_predictions = []
 
-    for name, pred in loaded_models.items():
-        if name in ["rf", "pytorch"]:
-            continue  # Skip redundant alias keys in comparison output
+    for name, pred in current_models.items():
         res = pred.predict(model_input)
         comparison_results[name] = {
             "model_name": pred.model_name,
+            "model_version": get_live_model_version(serving_architectures[name], pred, ""),
             "primary": res["primary"],
             "secondary": res["secondary"],
             "confidence_scores": res["confidence_scores"],

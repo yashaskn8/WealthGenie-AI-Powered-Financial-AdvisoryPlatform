@@ -74,12 +74,19 @@ def test_operator_lifecycle_fails_closed_without_bundle_and_evaluation_evidence(
     candidate_id = _register(store, artifact, metrics)
 
     with pytest.raises(HTTPException) as direct_promotion:
-        promote_version(PromoteRequest(version_id=candidate_id), store)
-    assert direct_promotion.value.status_code == 503
+        promote_version(PromoteRequest(
+            version_id=candidate_id,
+            expected_active_version_id=active_id,
+            expected_activation_generation=1,
+        ), store)
+    assert direct_promotion.value.status_code == 409
+    assert direct_promotion.value.detail["code"] == "MODEL_NOT_VALIDATED"
     assert store.get_active_model("RandomForest")["version_id"] == active_id
     assert store.get_version(candidate_id)["lifecycle_state"] == "CANDIDATE"
 
     store.update_lifecycle_state(candidate_id, "SHADOW")
+    with pytest.raises(ValueError, match="SHADOW -> VALIDATED"):
+        store.update_lifecycle_state(candidate_id, "VALIDATED")
     with pytest.raises(ValidationError):
         ValidateRequest(metrics={name: 0.9 for name in PROMOTION_TRACKED_METRICS})
     with pytest.raises(HTTPException) as missing_evidence:
@@ -88,7 +95,7 @@ def test_operator_lifecycle_fails_closed_without_bundle_and_evaluation_evidence(
             ValidateRequest(evaluation_run_id="operator-invented-eval"),
             store,
         )
-    assert missing_evidence.value.status_code == 503
+    assert missing_evidence.value.status_code == 409
     assert store.get_version(candidate_id)["lifecycle_state"] == "SHADOW"
     assert store.get_active_model("RandomForest")["version_id"] == active_id
 

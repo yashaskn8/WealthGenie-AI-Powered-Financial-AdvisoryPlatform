@@ -76,7 +76,7 @@ Executes trust-gated extractive search over authoritative knowledge-base chunks.
 - **Request Payload**:
   ```json
   {
-    "question": "What is the Section 87A rebate limit?",
+    "question": "What does the currently effective tax source say about this rule?",
     "top_k": 4,
     "tenant_id": "default"
   }
@@ -86,7 +86,7 @@ Executes trust-gated extractive search over authoritative knowledge-base chunks.
   {
     "answer": "Extracts from verified financial or regulatory sources...",
     "citations": [
-      { "citation_id": 1, "document_title": "Income Tax Act", "relevance_score": 1.0 }
+      { "citation_id": 1, "document_title": "Manifest-verified source", "relevance_score": 1.0 }
     ],
     "retrieved_chunks": [...],
     "metrics": { "response_mode": "extractive_retrieval", "chunks_retrieved": 2 },
@@ -99,8 +99,8 @@ Direct user text is rejected as authoritative advisory evidence. Verified corpus
 - **Request Payload**:
   ```json
   {
-    "title": "Income Tax Act Section 87A",
-    "content": "Section 87A rebate of the Income Tax Act provides tax relief...",
+    "title": "Manifest-verified source title",
+    "content": "Direct user text is not accepted as verified regulatory evidence...",
     "source": "tax_code.pdf",
     "tenant_id": "default"
   }
@@ -143,16 +143,37 @@ cd ml-service
 MONGODB_URI="$MONGODB_URI" python scripts/migrate_phase3_state.py
 ```
 
-The migration installs the model-registry, vector-chunk, and GridFS indexes and
-records schema version `phase3_shared_state/1`. It refuses to create the
-one-active-model-per-architecture index when duplicate active records exist.
-Application startup only verifies the marker and index definitions; it does not
-create indexes or backfill registry state. The CI browser lifecycle and Kind
-deployment workflows run this one-shot migration before starting ML replicas.
+The migration installs model-registry, immutable GridFS bundle, RAG document-
+revision, corpus-generation, and vector-chunk indexes, and records schema
+version `phase3_shared_state/2`. Application startup verifies the marker and
+index definitions read-only; it does not create or repair indexes.
 
-This migration does not, by itself, make document lifecycle state shared or
-make RAG ingestion transactional; those remain separate production-readiness
-work and must not be inferred from a successful index migration.
+For Mongo-backed deployments, run the explicit serving-bundle bootstrap after
+the migration and before starting ML replicas:
+
+```bash
+cd ml-service
+WEALTHGENIE_PHASE3_BOOTSTRAP=1 \
+ML_STATE_BACKEND=mongodb \
+ENVIRONMENT=production \
+MONGODB_URI="$MONGODB_URI" \
+python scripts/register_trusted_bundles.py
+```
+
+The bootstrap verifies external trust anchors, stores complete bundles in
+shared GridFS, and establishes a trusted baseline only when an architecture
+has no active version. Repeated runs do not replace an existing active model.
+Deployments run this as a controlled one-shot job after both schema migrations
+and before application replicas.
+
+Mongo document lifecycle state is shared in `rag_document_revisions` and
+`rag_corpus_generations`. Ingestion writes a complete pending revision and its
+chunks in a Mongo transaction, then activates the revision and corpus
+generation atomically. Retrieval refreshes against the shared corpus revision
+and includes only chunks bound to an active document revision and compatible
+embedding identity. Local development continues to use the file-backed
+lifecycle and vector store. Mongo-backed production does not use
+`documents.json` as lifecycle authority.
 
 Run the full platform test suite:
 ```bash

@@ -323,11 +323,13 @@ test('WG-003: PUT /api/profile/:profileId updates existing profile in-place', as
       const { response: putRes, body: putBody } = await jsonFetch(`${baseUrl}/api/profile/${profileId}`, {
         method: 'PUT',
         body: JSON.stringify({ ...VALID_PROFILE_BODY, monthly_take_home: 95000, version: postBody.version || 1 }),
-        headers: { authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
       });
       assert.equal(putRes.status, 200, 'PUT /api/profile/:profileId should succeed with valid version');
-      assert.equal(putBody.profileId, profileId, 'profileId must remain unchanged');
-      assert.equal(putBody.version, (postBody.version || 1) + 1, 'version must increment by 1');
+      assert.equal(putBody.profile.profileId, profileId, 'profileId must remain unchanged');
+      assert.equal(putBody.profile.version, (postBody.version || 1) + 1, 'version must increment by 1');
+      assert.equal(putBody.recommendation.profile_version, putBody.profile.version);
+      assert.equal(putBody.recommendation.response_state, 'CURRENT');
 
       const count = await FinancialProfile.countDocuments({ userId: USER_A_ID });
       assert.equal(count, 1, 'Should update existing profile in-place without creating a new document');
@@ -337,7 +339,7 @@ test('WG-003: PUT /api/profile/:profileId updates existing profile in-place', as
   }
 });
 
-test('WG-007: POST /build and PUT /:profileId return identical key sets', async () => {
+test('WG-007: PUT wraps the unchanged profile DTO with current recommendation state', async () => {
   await ensureDb();
   try {
     const token = signToken(USER_A_ID);
@@ -348,15 +350,18 @@ test('WG-007: POST /build and PUT /:profileId return identical key sets', async 
         headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
       });
 
-      const { body: putBody } = await jsonFetch(`${baseUrl}/api/profile/${postBody.profileId}`, {
+      const { response: putRes, body: putBody } = await jsonFetch(`${baseUrl}/api/profile/${postBody.profileId}`, {
         method: 'PUT',
         body: JSON.stringify({ ...VALID_PROFILE_BODY, version: postBody.version }),
-        headers: { authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
       });
 
+      assert.equal(putRes.status, 200);
+      assert.deepEqual(Object.keys(putBody).sort(), ['profile', 'recommendation']);
       const postKeys = Object.keys(postBody).sort();
-      const putKeys = Object.keys(putBody).sort();
-      assert.deepEqual(postKeys, putKeys, 'POST and PUT response shapes must match key-for-key');
+      const putKeys = Object.keys(putBody.profile).sort();
+      assert.deepEqual(postKeys, putKeys, 'Profile DTO fields remain stable inside the atomic PUT response');
+      assert.equal(putBody.recommendation.response_state, 'CURRENT');
       assert.equal(postBody.final_suitability_risk, 'Moderate');
       assert.ok(postBody.final_suitability_level <= 3, 'final suitability must not exceed Moderate preference');
     });
@@ -388,7 +393,7 @@ test('WG-025: PUT /api/profile/:profileId requires version and returns 409 Confl
       const { response: mismatchRes } = await jsonFetch(`${baseUrl}/api/profile/${postBody.profileId}`, {
         method: 'PUT',
         body: JSON.stringify({ ...VALID_PROFILE_BODY, version: 999 }),
-        headers: { authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
       });
       assert.equal(mismatchRes.status, 409, 'Version mismatch must return 409 Conflict');
     });

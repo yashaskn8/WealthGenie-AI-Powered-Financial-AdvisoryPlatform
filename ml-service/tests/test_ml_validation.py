@@ -195,14 +195,26 @@ def test_health_exposes_feature_schema_version(client):
 
 
 def test_prediction_version_comes_from_loaded_predictor_and_rejects_registry_drift(monkeypatch):
-    predictor = SimpleNamespace(loaded_version_id="version-A")
+    predictor = SimpleNamespace(
+        loaded_version_id="version-A",
+        loaded_bundle_id="bundle-A",
+        loaded_bundle_hash="a" * 64,
+        loaded_feature_schema_version=FEATURE_SCHEMA_VERSION,
+        loaded_activation_generation=3,
+    )
 
     class VersionStore:
         def __init__(self, active_id):
             self.active_id = active_id
 
         def get_active_model(self, _architecture):
-            return {"version_id": self.active_id}
+            return {
+                "version_id": self.active_id,
+                "bundle_id": "bundle-A",
+                "bundle_manifest_sha256": "a" * 64,
+                "feature_schema_version": FEATURE_SCHEMA_VERSION,
+                "activation_generation": 3,
+            }
 
     monkeypatch.setattr(registry, "get_version_registry", lambda: VersionStore("version-A"))
     assert get_live_model_version("RandomForest", predictor, "baseline") == "version-A"

@@ -157,6 +157,20 @@ class DriftCheckRequest(BaseModel):
 class PromoteRequest(BaseModel):
     model_config = {"protected_namespaces": (), "extra": "forbid"}
     version_id: str = Field(..., description="Version ID of the candidate to promote to active")
+    expected_active_version_id: Optional[str] = Field(None, description="Expected current active version for CAS")
+    expected_activation_generation: int = Field(..., ge=0, description="Expected shared activation generation")
+
+
+class RegisterBundleRequest(BaseModel):
+    model_config = {"protected_namespaces": (), "extra": "forbid"}
+    bundle_id: str = Field(..., min_length=1, max_length=128)
+    bundle_manifest_sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+
+
+class RollbackRequest(BaseModel):
+    model_config = {"protected_namespaces": (), "extra": "forbid"}
+    expected_active_version_id: str = Field(..., min_length=1)
+    expected_activation_generation: int = Field(..., ge=1)
 
 
 class ValidateRequest(BaseModel):
@@ -221,21 +235,33 @@ def verify_artifact_integrity(
 
 
 @registry_router.post("/register", status_code=status.HTTP_201_CREATED, dependencies=[Depends(verify_registry_operator)])
-def register_model_version():
+def register_model_version(payload: RegisterBundleRequest, store=Depends(get_version_store)):
     """
     Registers a new CANDIDATE into the persistent version registry.
     API registration never activates a model directly.
     """
-    # The current registry adapters persist single-file paths and cannot bind a
-    # complete immutable bundle to shared storage. Accepting an operator-supplied
-    # path here would bypass pre-deserialization verification and replica safety.
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail={
-            "code": "MODEL_BUNDLE_REGISTRATION_UNAVAILABLE",
-            "message": "Candidate registration is unavailable until the shared immutable artifact-bundle registry is configured.",
-        },
-    )
+    artifact_store = getattr(store, "artifact_store", None)
+    if artifact_store is None:
+        raise HTTPException(status_code=503, detail={"code": "MODEL_ARTIFACT_STORE_UNAVAILABLE", "message": "Shared immutable model storage is unavailable."})
+    bundle_dir = None
+    try:
+        bundle_dir = artifact_store.get_bundle(payload.bundle_id, payload.bundle_manifest_sha256)
+        verified = artifact_store.verify_bundle(bundle_dir, payload.bundle_manifest_sha256)
+        verified["bundle_dir"] = bundle_dir
+        register_verified = getattr(store, "register_verified_bundle", None)
+        if not callable(register_verified):
+            raise HTTPException(status_code=503, detail={"code": "MODEL_BUNDLE_REGISTRATION_UNAVAILABLE", "message": "This registry backend cannot register complete immutable bundles."})
+        version = register_verified(verified, artifact_store, activate_if_empty=False)
+        return {"version": version, "lifecycle_state": version.get("lifecycle_state", "CANDIDATE")}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Candidate bundle registration rejected: %s", type(exc).__name__)
+        raise HTTPException(status_code=409, detail={"code": "MODEL_BUNDLE_REGISTRATION_REJECTED", "message": "The candidate bundle could not be verified or registered."}) from exc
+    finally:
+        if bundle_dir is not None and hasattr(artifact_store, "database"):
+            import shutil
+            shutil.rmtree(bundle_dir.parent, ignore_errors=True)
 
 
 @registry_router.post("/validate/{version_id}", dependencies=[Depends(verify_registry_operator)])
@@ -264,7 +290,13 @@ def validate_version(version_id: str, payload: ValidateRequest, store=Depends(ge
         for name in PROMOTION_TRACKED_METRICS
     ):
         raise HTTPException(status_code=409, detail="Immutable evaluation evidence is incomplete or invalid.")
-    return store.update_lifecycle_state(version_id, "VALIDATED", metrics=metrics)
+    validate = getattr(store, "validate_version_with_evidence", None)
+    if not callable(validate):
+        raise HTTPException(status_code=503, detail={"code": "VALIDATION_EVIDENCE_UNAVAILABLE", "message": "This registry cannot persist evidence-bound validation."})
+    try:
+        return validate(version_id, payload.evaluation_run_id)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail="Candidate validation evidence changed or lifecycle state is stale.") from exc
 
 
 @registry_router.post("/promote", status_code=status.HTTP_200_OK, dependencies=[Depends(verify_registry_operator)])
@@ -272,7 +304,7 @@ def promote_version(
     payload: PromoteRequest,
     store = Depends(get_version_store),
 ):
-    """Refuse activation until verified preload and atomic shared promotion exist."""
+    """Preload and smoke-validate the exact candidate before atomic activation."""
     candidate = store.get_version(payload.version_id)
     if not candidate:
         raise HTTPException(
@@ -280,13 +312,29 @@ def promote_version(
             detail=f"Candidate version '{payload.version_id}' not found in registry."
         )
 
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail={
-            "code": "ATOMIC_BUNDLE_PROMOTION_UNAVAILABLE",
-            "message": "Promotion is disabled until the candidate bundle can be preloaded and activated through a shared transactional registry.",
-        },
-    )
+    if candidate.get("lifecycle_state") != "VALIDATED":
+        raise HTTPException(status_code=409, detail={"code": "MODEL_NOT_VALIDATED", "message": "Only evidence-validated bundles may be promoted."})
+    current = store.get_active_model(candidate["model_architecture"])
+    current_id = current.get("version_id") if current else None
+    current_generation = int(current.get("activation_generation", 0)) if current else 0
+    if current_id != payload.expected_active_version_id or current_generation != payload.expected_activation_generation:
+        raise HTTPException(status_code=409, detail={"code": "MODEL_ACTIVATION_CONFLICT", "message": "Active model changed; refresh and retry with the current generation."})
+    from model.serving.control_plane import ModelReconciliationError, preload_registered_bundle
+    try:
+        preloaded = preload_registered_bundle(candidate, store)
+        active = store.activate_version(
+            payload.version_id,
+            expected_active_version_id=current_id,
+            expected_activation_generation=current_generation,
+        )
+        preloaded.loaded_activation_generation = int(active["activation_generation"])
+        aliases = {"RandomForest": ["random_forest", "rf"], "PyTorch_MLP": ["mlp", "pytorch"], "FT_Transformer": ["ft_transformer"]}[candidate["model_architecture"]]
+        registry.replace_aliases(aliases, preloaded)
+        return {"status": "promoted", "active_model": active}
+    except ModelReconciliationError as exc:
+        raise HTTPException(status_code=409, detail={"code": "MODEL_PRELOAD_FAILED", "message": "Candidate bundle failed preload and remained inactive."}) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail={"code": "MODEL_ACTIVATION_CONFLICT", "message": "Candidate activation failed; the prior active model remains authoritative."}) from exc
 
 
 @registry_router.get("/drift/buffer", dependencies=[Depends(verify_api_key)])
@@ -365,19 +413,34 @@ def run_drift_check_endpoint(
 @registry_router.post("/rollback/{version_id}", dependencies=[Depends(verify_registry_operator)])
 def rollback_model_version(
     version_id: str,
+    payload: RollbackRequest,
     store = Depends(get_version_store),
 ):
     """Rolls back the active model to a specific registered version with tamper-evident verification."""
     target = store.get_version(version_id)
     if not target:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model version not found")
-    raise HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail={
-            "code": "ATOMIC_BUNDLE_ROLLBACK_UNAVAILABLE",
-            "message": "Rollback is disabled until a previous verified bundle can be preloaded and activated through a shared transactional registry.",
-        },
-    )
+    current = store.get_active_model(target["model_architecture"])
+    current_id = current.get("version_id") if current else None
+    generation = int(current.get("activation_generation", 0)) if current else 0
+    if current_id != payload.expected_active_version_id or generation != payload.expected_activation_generation:
+        raise HTTPException(status_code=409, detail={"code": "MODEL_ACTIVATION_CONFLICT", "message": "Active model changed; refresh and retry with the current generation."})
+    from model.serving.control_plane import ModelReconciliationError, preload_registered_bundle
+    try:
+        preloaded = preload_registered_bundle(target, store)
+        active = store.activate_version(
+            version_id,
+            expected_active_version_id=current_id,
+            expected_activation_generation=generation,
+        )
+        preloaded.loaded_activation_generation = int(active["activation_generation"])
+        aliases = {"RandomForest": ["random_forest", "rf"], "PyTorch_MLP": ["mlp", "pytorch"], "FT_Transformer": ["ft_transformer"]}[target["model_architecture"]]
+        registry.replace_aliases(aliases, preloaded)
+        return {"status": "rolled_back", "active_model": active}
+    except ModelReconciliationError as exc:
+        raise HTTPException(status_code=409, detail={"code": "MODEL_PRELOAD_FAILED", "message": "Rollback target bundle failed verification; current model remains active."}) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail={"code": "MODEL_ACTIVATION_CONFLICT", "message": "Rollback activation failed; current model remains authoritative."}) from exc
 
 
 class ConfigureShadowRequest(BaseModel):
@@ -406,9 +469,8 @@ def configure_shadow_model(
     if version.get("lifecycle_state") != "CANDIDATE":
         raise HTTPException(status_code=409, detail="Only CANDIDATE models can enter SHADOW")
 
-    bundle_path = version.get("bundle_path")
     bundle_manifest_hash = version.get("bundle_manifest_sha256")
-    if not bundle_path or not bundle_manifest_hash:
+    if not version.get("bundle_id") or not bundle_manifest_hash:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -416,40 +478,12 @@ def configure_shadow_model(
                 "message": "Candidate has no registry-pinned complete artifact bundle; it cannot enter shadow evaluation.",
             },
         )
-    bundle_path = Path(bundle_path)
-    if not bundle_path.is_dir():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"code": "MODEL_BUNDLE_UNAVAILABLE", "message": "Candidate bundle is unavailable."},
-        )
-
     arch = version["model_architecture"]
-    if arch.lower() in ["randomforest", "rf", "random_forest"]:
-        pred = RandomForestPredictor()
-        pred.load_artifacts(
-            bundle_dir=bundle_path,
-            expected_bundle_hash=bundle_manifest_hash,
-            version_id=payload.version_id,
-        )
-    elif arch.lower() in ["pytorch_mlp", "mlp"]:
-        pred = MLPPredictor()
-        pred.load_artifacts(
-            bundle_dir=bundle_path,
-            expected_bundle_hash=bundle_manifest_hash,
-            version_id=payload.version_id,
-        )
-    elif arch.lower() in ["ft_transformer", "fttransformer"]:
-        pred = FTTransformerPredictor()
-        pred.load_artifacts(
-            bundle_dir=bundle_path,
-            expected_bundle_hash=bundle_manifest_hash,
-            version_id=payload.version_id,
-        )
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported architecture '{arch}' for shadow evaluation."
-        )
+    from model.serving.control_plane import ModelReconciliationError, preload_registered_bundle
+    try:
+        pred = preload_registered_bundle(version, store)
+    except ModelReconciliationError as exc:
+        raise HTTPException(status_code=409, detail={"code": "MODEL_BUNDLE_UNAVAILABLE", "message": "Candidate bundle failed verification or preload."}) from exc
 
     if not pred.is_loaded:
         raise HTTPException(

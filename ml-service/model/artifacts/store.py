@@ -52,6 +52,8 @@ class LocalArtifactStore(ArtifactStore):
         self.root.mkdir(parents=True, exist_ok=True)
 
     def put_bundle(self, bundle_dir: Path, expected_manifest_sha256: str) -> dict[str, str]:
+        from pymongo.errors import DuplicateKeyError
+
         verified = self.verify_bundle(bundle_dir, expected_manifest_sha256)
         bundle_id = _validate_bundle_id(verified["manifest"]["bundle_id"])
         destination = self.root / bundle_id
@@ -117,6 +119,8 @@ class MongoGridFSArtifactStore(ArtifactStore):
         if existing:
             if existing.get("metadata", {}).get("bundle_manifest_sha256") != expected_manifest_sha256:
                 raise ArtifactStoreError("immutable bundle ID already exists with a different manifest hash")
+            materialized = self.get_bundle(bundle_id, expected_manifest_sha256)
+            shutil.rmtree(materialized.parent, ignore_errors=True)
             return {"bundle_id": bundle_id, "bundle_manifest_sha256": expected_manifest_sha256}
 
         isolated = materialize_verified_bundle(verified)
@@ -129,15 +133,24 @@ class MongoGridFSArtifactStore(ArtifactStore):
             if size <= 0 or size > _MAX_BUNDLE_BYTES:
                 raise ArtifactStoreError("model bundle archive exceeds storage size limits")
             archive.seek(0)
-            self._bucket.upload_from_stream(
-                f"{bundle_id}.zip",
-                archive,
-                metadata={
-                    "bundle_id": bundle_id,
-                    "bundle_manifest_sha256": expected_manifest_sha256,
-                    "immutable": True,
-                },
-            )
+            try:
+                self._bucket.upload_from_stream(
+                    f"{bundle_id}.zip",
+                    archive,
+                    metadata={
+                        "bundle_id": bundle_id,
+                        "bundle_manifest_sha256": expected_manifest_sha256,
+                        "immutable": True,
+                    },
+                )
+            except DuplicateKeyError as exc:
+                existing = self.database[f"{self.bucket_name}.files"].find_one(
+                    {"metadata.bundle_id": bundle_id}, {"metadata": 1}
+                )
+                if not existing or existing.get("metadata", {}).get("bundle_manifest_sha256") != expected_manifest_sha256:
+                    raise ArtifactStoreError("concurrent immutable bundle registration conflict") from exc
+                materialized = self.get_bundle(bundle_id, expected_manifest_sha256)
+                shutil.rmtree(materialized.parent, ignore_errors=True)
         finally:
             archive.close()
             shutil.rmtree(isolated, ignore_errors=True)
@@ -197,16 +210,28 @@ class MongoGridFSArtifactStore(ArtifactStore):
             return False
 
 
-def get_artifact_store(environment: str, database: Any = None, local_root: Path | None = None) -> ArtifactStore:
+def get_artifact_store(
+    environment: str,
+    database: Any = None,
+    local_root: Path | None = None,
+    *,
+    state_backend: str | None = None,
+) -> ArtifactStore:
     """Select a store without allowing production to silently use pod-local files."""
     normalized = str(environment).strip().lower()
-    if normalized in {"production", "prod"}:
+    backend = str(state_backend or os.environ.get("ML_STATE_BACKEND", "auto")).strip().lower()
+    if normalized in {"production", "prod"} or backend == "mongodb":
         if database is None:
-            raise ArtifactStoreError("production model state requires shared Mongo/GridFS artifact storage")
+            raise ArtifactStoreError("Mongo-backed model state requires shared Mongo/GridFS artifact storage")
         return MongoGridFSArtifactStore(database)
     if normalized not in {"local", "development", "test", "testing"}:
         raise ArtifactStoreError(f"unsupported artifact storage environment: {environment}")
-    root = local_root or (Path(tempfile.gettempdir()) / "wealthgenie-model-artifacts")
+    configured_root = os.environ.get("ML_ARTIFACT_STORE_PATH", "").strip()
+    root = local_root or (
+        Path(configured_root)
+        if configured_root
+        else Path(tempfile.gettempdir()) / "wealthgenie-model-artifacts"
+    )
     return LocalArtifactStore(root)
 
 

@@ -11,7 +11,7 @@ from typing import Any
 
 
 MIGRATION_ID = "phase3_shared_state"
-MIGRATION_VERSION = 1
+MIGRATION_VERSION = 2
 DEFAULT_VECTOR_COLLECTION = "vector_chunks"
 DEFAULT_GRIDFS_BUCKET = "model_artifacts"
 
@@ -32,12 +32,49 @@ def _required_indexes(vector_collection: str, gridfs_bucket: str) -> dict[str, l
                 "partialFilterExpression": {"is_active": True},
             },
             {"name": "registered_at_-1", "key": [("registered_at", -1)]},
+            {
+                "name": "uniq_architecture_bundle_identity",
+                "key": [("model_architecture", 1), ("bundle_id", 1)],
+                "unique": True,
+                "partialFilterExpression": {"bundle_id": {"$type": "string"}},
+            },
+        ],
+        "model_evaluation_evidence": [
+            {"name": "uniq_evaluation_run_id", "key": [("evaluation_run_id", 1)], "unique": True},
+            {"name": "candidate_bundle_hash_1", "key": [("candidate_bundle_hash", 1)]},
+        ],
+        "rag_document_revisions": [
+            {"name": "uniq_document_revision_id", "key": [("document_revision_id", 1)], "unique": True},
+            {
+                "name": "uniq_document_scope_version",
+                "key": [("document_id", 1), ("scope", 1), ("version_number", 1)],
+                "unique": True,
+            },
+            {"name": "document_scope_revision_1", "key": [("document_id", 1), ("scope", 1), ("created_at_utc", -1)]},
+            {
+                "name": "uniq_active_document_revision",
+                "key": [("document_id", 1), ("scope", 1)],
+                "unique": True,
+                "partialFilterExpression": {"lifecycle_state": "ACTIVE"},
+            },
+        ],
+        "rag_corpus_generations": [
+            {"name": "uniq_corpus_generation_id", "key": [("generation_id", 1)], "unique": True},
+            {
+                "name": "uniq_active_corpus_generation",
+                "key": [("active_key", 1)],
+                "unique": True,
+                "partialFilterExpression": {"is_active": True},
+            },
         ],
         vector_collection: [
             {"name": "chunk_id_1", "key": [("chunk_id", 1)], "unique": True},
             {"name": "document_id_1", "key": [("document_id", 1)]},
             {"name": "tenant_id_1", "key": [("tenant_id", 1)]},
             {"name": "scope_1", "key": [("scope", 1)]},
+            {"name": "document_revision_id_1", "key": [("document_revision_id", 1)]},
+            {"name": "corpus_generation_id_1", "key": [("corpus_generation_id", 1)]},
+            {"name": "embedding_identity.model_revision_1", "key": [("embedding_identity.model_revision", 1)]},
         ],
         f"{gridfs_bucket}.files": [
             {
@@ -136,6 +173,14 @@ def migrate_phase3_state(
     versions.update_many(
         {"lifecycle_state": {"$exists": False}, "is_active": True},
         {"$set": {"lifecycle_state": "ACTIVE"}},
+    )
+    versions.update_many(
+        {"is_active": True, "activation_generation": {"$exists": False}},
+        {"$set": {"activation_generation": 1}},
+    )
+    versions.update_many(
+        {"is_active": {"$ne": True}, "activation_generation": {"$exists": False}},
+        {"$set": {"activation_generation": 0}},
     )
     versions.update_many(
         {"lifecycle_state": {"$exists": False}, "is_active": {"$ne": True}},

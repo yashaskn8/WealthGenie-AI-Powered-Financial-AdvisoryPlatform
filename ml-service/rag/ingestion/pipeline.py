@@ -246,12 +246,15 @@ class IngestionPipeline:
             # this generation out of retrieval.
             chunk.lifecycle_state = "PENDING"
 
-        # 4. Store Chunks in Vector Store
-        added_count = self.vector_store.add_chunks(chunks)
-
-        # 5. Register Document Metadata in DocumentLifecycleManager
-        lifecycle_mgr = self.lifecycle_manager or DocumentLifecycleManager(vector_store=self.vector_store)
-        lifecycle_mgr.register_document(document, len(chunks))
+        # Mongo production commits lifecycle metadata, all chunks and corpus
+        # revision in one transaction. Local disk keeps pending-then-active
+        # publication semantics.
+        if callable(getattr(self.vector_store, "commit_document_revision", None)):
+            added_count = self.vector_store.commit_document_revision(document, chunks)
+        else:
+            added_count = self.vector_store.add_chunks(chunks)
+            lifecycle_mgr = self.lifecycle_manager or DocumentLifecycleManager(vector_store=self.vector_store)
+            lifecycle_mgr.register_document(document, len(chunks))
 
         return {
             "status": "success",

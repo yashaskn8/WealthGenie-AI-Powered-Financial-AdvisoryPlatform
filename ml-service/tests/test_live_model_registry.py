@@ -93,7 +93,7 @@ def test_get_version_by_id_and_integrity(client):
     assert client.get(f"/model/registry/integrity/{version_id}").status_code == 404
 
 
-def test_raw_single_file_registration_is_rejected(client, tmp_path):
+def test_raw_single_file_registration_is_rejected_by_strict_bundle_contract(client, tmp_path):
     artifact = tmp_path / "raw-model.pkl"
     artifact.write_bytes(b"untrusted-pickle")
     before = client.get("/model/registry/versions").json()["count"]
@@ -102,6 +102,6 @@ def test_raw_single_file_registration_is_rejected(client, tmp_path):
         "artifact_path": str(artifact),
         "training_data_hash": "a" * 64,
     })
-    assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "MODEL_BUNDLE_REGISTRATION_UNAVAILABLE"
+    assert response.status_code == 422
+    assert any(issue["loc"][-1] == "bundle_id" for issue in response.json()["detail"])
     assert client.get("/model/registry/versions").json()["count"] == before

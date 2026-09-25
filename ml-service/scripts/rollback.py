@@ -15,7 +15,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from model.registry.registry_store import ModelRegistry
+from store_factory import get_model_registry
 
 
 def main():
@@ -26,12 +26,12 @@ def main():
     args = parser.parse_args()
 
     db_path = Path(args.db_path) if args.db_path else None
-    registry = ModelRegistry(db_path=db_path)
+    registry = get_model_registry(db_path=db_path)
     try:
         version = registry.rollback_to_version(args.to_version)
         print(f"[OK] Rolled back to version {args.to_version}")
         print(f"  Architecture: {version['model_architecture']}")
-        print(f"  Artifact:     {version['artifact_path']}")
+        print(f"  Bundle:       {version['bundle_id']}")
         print(f"  Active:       {version['is_active']}")
     except FileNotFoundError as e:
         print(f"ROLLBACK BLOCKED: {e}")

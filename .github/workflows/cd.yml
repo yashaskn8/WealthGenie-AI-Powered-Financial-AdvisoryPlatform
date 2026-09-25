@@ -132,6 +132,19 @@ jobs:
             exit 1
           fi
 
+      - name: Bootstrap trusted Phase 3 serving bundles
+        run: |
+          set -euo pipefail
+          JOB_NAME=$(kubectl create -f k8s/phase3-serving-bootstrap/job.yaml -o jsonpath='{.metadata.name}')
+          echo "Waiting for serving-bundle bootstrap Job ${JOB_NAME} to complete..."
+          if kubectl wait --for=condition=complete "job/${JOB_NAME}" -n wealthgenie --timeout=360s; then
+            kubectl logs "job/${JOB_NAME}" -n wealthgenie
+          else
+            kubectl describe "job/${JOB_NAME}" -n wealthgenie || true
+            kubectl logs "job/${JOB_NAME}" -n wealthgenie --all-containers=true || true
+            exit 1
+          fi
+
       - name: Apply application manifests after database migrations
         run: kubectl apply -k k8s/
 

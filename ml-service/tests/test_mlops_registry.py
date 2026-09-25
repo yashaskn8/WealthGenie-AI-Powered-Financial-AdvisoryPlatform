@@ -224,8 +224,8 @@ class TestModelRegistry:
             "Test setup failure: corruption didn't change the hash"
         )
 
-        # Attempt rollback — must be REFUSED with RuntimeError
-        with pytest.raises(RuntimeError, match="TAMPER DETECTED"):
+        # Legacy single-file artifacts can never be rollback targets.
+        with pytest.raises(ValueError, match="complete verified immutable model bundle"):
             registry.rollback_to_version(v_id)
 
     def test_rollback_blocks_on_missing_artifact(
@@ -248,7 +248,7 @@ class TestModelRegistry:
         art1.unlink()
         assert not art1.exists()
 
-        with pytest.raises(FileNotFoundError, match="Artifact file missing"):
+        with pytest.raises(ValueError, match="complete verified immutable model bundle"):
             registry.rollback_to_version(v_id)
 
     def test_successful_rollback_updates_active_pointer(
@@ -284,18 +284,17 @@ class TestModelRegistry:
         active = registry.get_active_model(architecture="RandomForest")
         assert active["version_id"] == v2_id
 
-        # Roll back to v1
-        rolled_back = registry.rollback_to_version(v1_id)
-        assert rolled_back["is_active"] is True
-        assert rolled_back["version_id"] == v1_id
+        # Legacy single-file registry rows cannot be activated as trusted bundles.
+        with pytest.raises(ValueError, match="complete verified immutable model bundle"):
+            registry.rollback_to_version(v1_id)
 
-        # Confirm active pointer now returns v1
+        # The current active pointer remains unchanged after the rejected request.
         active_after = registry.get_active_model(architecture="RandomForest")
-        assert active_after["version_id"] == v1_id
+        assert active_after["version_id"] == v2_id
 
-        # Confirm v2 is no longer active
+        # No state changed on the rejected rollback.
         v2_record = registry.get_version(v2_id)
-        assert v2_record["is_active"] is False
+        assert v2_record["is_active"] is True
 
 
 # =====================================================================

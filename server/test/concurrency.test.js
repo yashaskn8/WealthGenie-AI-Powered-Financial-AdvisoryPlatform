@@ -133,7 +133,7 @@ test('OCC: PUT /api/profile/:id with stale version returns 409 Conflict', async 
       {
         method: 'PUT',
         body: JSON.stringify({ ...VALID_PROFILE_BODY, monthly_take_home: 90000, monthly_savings: 25000, version: createBody.version }),
-        headers: { authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
       }
     );
 
@@ -144,7 +144,10 @@ test('OCC: PUT /api/profile/:id with stale version returns 409 Conflict', async 
     });
     const updatedProfile = await FinancialProfile.findById(profileId).lean();
     assert.equal(updatedProfile.version, createBody.version + 1);
-    assert.equal(updatedProfile.financialStateFence, 1, 'profile update must perform a real transactional fence write');
+    assert.equal(updatedProfile.financialStateFence, 1, 'profile update must advance its fence in the recommendation transaction');
+    assert.equal(update1Body.profile.version, createBody.version + 1);
+    assert.equal(update1Body.recommendation.profile_version, update1Body.profile.version);
+    assert.equal(update1Body.recommendation.response_state, 'CURRENT');
 
     // 3. Second update with STALE version (version 1) — should get 409
     const { response: update2Res, body: update2Body } = await jsonFetch(
@@ -152,7 +155,7 @@ test('OCC: PUT /api/profile/:id with stale version returns 409 Conflict', async 
       {
         method: 'PUT',
         body: JSON.stringify({ ...VALID_PROFILE_BODY, monthly_take_home: 100000, monthly_savings: 30000, version: createBody.version }),
-        headers: { authorization: `Bearer ${token}` },
+        headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
       }
     );
 

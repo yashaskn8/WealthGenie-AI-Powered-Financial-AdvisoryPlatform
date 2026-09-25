@@ -51,12 +51,15 @@ class DocumentLifecycleManager:
         registry_path: Path = REGISTRY_PATH,
     ):
         self.vector_store = vector_store or PersistentVectorStore()
+        self._shared_store = getattr(self.vector_store, "lifecycle_store", None)
+        self.is_shared = self._shared_store is not None
         self.registry_path = Path(registry_path)
         self.backup_path = self.registry_path.with_suffix(".json.bak")
         self._lock = _get_registry_lock(self.registry_path)
         self._registry: Dict[str, Dict[str, Any]] = {}
-        self.load_registry()
-        self.reconcile_registry_and_vector_store()
+        if not self.is_shared:
+            self.load_registry()
+            self.reconcile_registry_and_vector_store()
 
     def _sync_registry_unlocked(self) -> None:
         """Reloads registry from disk if file exists with checksum validation and backup recovery under lock."""
@@ -69,6 +72,8 @@ class DocumentLifecycleManager:
         owner_user_id: Optional[str] = None,
     ) -> None:
         """Registers or updates document entry in the document registry with scope and owner tracking."""
+        if self.is_shared:
+            raise RuntimeError("Mongo lifecycle records must commit with their complete chunk set")
         with self._lock:
             self._sync_registry_unlocked()
             doc_id = document.document_id
@@ -107,6 +112,8 @@ class DocumentLifecycleManager:
 
     def soft_delete_document(self, document_id: str, requesting_user_id: Optional[str] = None) -> bool:
         """Soft deletes document by marking it inactive in registry with ownership check."""
+        if self.is_shared:
+            return self._shared_store.soft_delete_document(document_id, requesting_user_id)
         with self._lock:
             self._sync_registry_unlocked()
             if document_id not in self._registry:
@@ -149,6 +156,8 @@ class DocumentLifecycleManager:
         metadata entry (search fails safely with 0 results and is flagged by reconciliation).
         Thus, vector store purging MUST always precede registry deletion.
         """
+        if self.is_shared:
+            return self._shared_store.hard_delete_document(document_id, requesting_user_id)
         with self._lock:
             self._sync_registry_unlocked()
             found_in_registry = document_id in self._registry
@@ -216,6 +225,8 @@ class DocumentLifecycleManager:
         occurs before the registry save, retrieval citations remain correct while registry
         reconciliation flags the drift.
         """
+        if self.is_shared:
+            return self._shared_store.update_metadata(document_id, new_title, new_author, requesting_user_id)
         with self._lock:
             self._sync_registry_unlocked()
             found_in_reg = document_id in self._registry
@@ -282,6 +293,8 @@ class DocumentLifecycleManager:
         Returns list of registered documents filtered by tenant/user scope.
         Uses is_scope_accessible() to guarantee users only see global documents + their own user-scoped documents.
         """
+        if self.is_shared:
+            return self._shared_store.list_documents(include_inactive, requesting_user_id, requesting_scope)
         with self._lock:
             self._sync_registry_unlocked()
             docs = list(self._registry.values())
@@ -303,6 +316,8 @@ class DocumentLifecycleManager:
 
     def save_registry(self) -> None:
         """Persists registry to JSON file atomically with SHA256 checksum and backup snapshot."""
+        if self.is_shared:
+            return
         with self._lock:
             self._save_registry_unlocked()
 
@@ -340,6 +355,8 @@ class DocumentLifecycleManager:
 
     def load_registry(self) -> None:
         """Loads registry from JSON file with checksum verification and backup snapshot recovery."""
+        if self.is_shared:
+            return
         with self._lock:
             self._load_registry_unlocked()
 
@@ -436,6 +453,8 @@ class DocumentLifecycleManager:
         When requesting_user_id is provided, scopes the reconciliation view strictly to accessible documents
         (caller's user:{user_id} scope + global documents) to prevent cross-tenant enumeration.
         """
+        if self.is_shared:
+            return self._shared_store.reconcile(requesting_user_id)
         with self._lock:
             self._sync_registry_unlocked()
             # Filter registry documents accessible to requesting identity

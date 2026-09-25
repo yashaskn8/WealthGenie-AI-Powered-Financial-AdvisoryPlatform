@@ -11,6 +11,7 @@ For very large corpora this will not scale well memory-wise per replica.
 
 import logging
 import math
+import os
 from typing import Dict, List, Any, Optional
 import numpy as np
 
@@ -54,6 +55,10 @@ class MongoVectorStore(BaseVectorStore):
         self._db = self._client[db_name]
         self._collection = self._db[collection_name]
         self._revision_collection = self._db["rag_state"]
+        from rag.lifecycle.mongo_store import MongoRAGLifecycleStore
+        self.lifecycle_store = MongoRAGLifecycleStore(
+            self._client, self._db, vector_collection=collection_name
+        )
         self._loaded_corpus_revision: Optional[int] = None
         self.force_numpy = force_numpy
 
@@ -78,6 +83,8 @@ class MongoVectorStore(BaseVectorStore):
 
     def add_chunks(self, chunks: List[TextChunk]) -> int:
         """Adds embedded text chunks to MongoDB, avoiding duplicate chunk_ids."""
+        if os.environ.get("ENVIRONMENT", "local").strip().lower() in {"production", "prod"}:
+            raise RuntimeError("Production Mongo chunks must be written through atomic commit_document_revision")
         embedded_chunks = [chunk for chunk in chunks if chunk.embedding is not None]
         incoming = [chunk.embedding for chunk in embedded_chunks]
         if any(
@@ -142,6 +149,14 @@ class MongoVectorStore(BaseVectorStore):
             f"Total: {self._collection.count_documents({})}"
         )
         return added_count
+
+    def commit_document_revision(self, document, chunks: List[TextChunk]) -> int:
+        """Persist the complete document revision and activate it atomically."""
+        revision = self.lifecycle_store.commit_document_revision(document, chunks)
+        if not revision or revision.get("lifecycle_state") != "ACTIVE":
+            raise RuntimeError("Mongo document revision did not become active")
+        self._reload_in_memory()
+        return len(chunks)
 
     def search(
         self,
@@ -355,6 +370,8 @@ class MongoVectorStore(BaseVectorStore):
         return [self._chunk_from_document(doc) for doc in self._collection.find(query, {"_id": 0})]
 
     def delete_document(self, document_id: str) -> int:
+        if os.environ.get("ENVIRONMENT", "local").strip().lower() in {"production", "prod"}:
+            raise RuntimeError("Production document deletion must use the shared lifecycle transaction")
         result = self._collection.delete_many({"document_id": document_id})
         if result.deleted_count:
             self._advance_corpus_revision()
@@ -362,6 +379,8 @@ class MongoVectorStore(BaseVectorStore):
         return result.deleted_count
 
     def set_document_state(self, document_id: str, state: str) -> int:
+        if os.environ.get("ENVIRONMENT", "local").strip().lower() in {"production", "prod"}:
+            raise RuntimeError("Production lifecycle transitions must use the shared lifecycle transaction")
         allowed = {"PENDING", "ACTIVE", "SUPERSEDED", "SOFT_DELETED", "DELETED", "QUARANTINED", "FAILED"}
         if state not in allowed:
             raise ValueError("Unsupported document lifecycle state.")
@@ -379,6 +398,8 @@ class MongoVectorStore(BaseVectorStore):
         title: Optional[str] = None,
         author: Optional[str] = None,
     ) -> int:
+        if os.environ.get("ENVIRONMENT", "local").strip().lower() in {"production", "prod"}:
+            raise RuntimeError("Production metadata revisions must use the shared lifecycle transaction")
         updates = {}
         if title is not None:
             updates["metadata.title"] = title
@@ -430,6 +451,7 @@ class MongoVectorStore(BaseVectorStore):
             tenant_id=doc.get("tenant_id", "default"),
             scope=scope,
             lifecycle_state=doc.get("lifecycle_state", "QUARANTINED"),
+            document_revision_id=doc.get("document_revision_id"),
             embedding=embedding,
             embedding_identity=embedding_identity,
         )
@@ -445,12 +467,46 @@ class MongoVectorStore(BaseVectorStore):
         self._faiss_index = None
         self._faiss_dirty = True
         revision_before = int(self.get_corpus_revision())
-        cursor = self._collection.find({"lifecycle_state": "ACTIVE"}, {"_id": 0})
+        active_revisions = list(self._db["rag_document_revisions"].find(
+            {"lifecycle_state": "ACTIVE"}, {"_id": 0}
+        ))
+        if any(not item.get("document_revision_id") for item in active_revisions):
+            raise RuntimeError("Active RAG lifecycle record has no immutable revision identity.")
+        active_revision_by_id = {
+            item["document_revision_id"]: item for item in active_revisions
+        }
+        if len(active_revision_by_id) != len(active_revisions):
+            raise RuntimeError("RAG lifecycle contains duplicate active revision identities.")
+        active_revision_ids = list(active_revision_by_id)
+        if active_revision_ids:
+            active_query = {
+                "lifecycle_state": "ACTIVE",
+                "document_revision_id": {"$in": active_revision_ids},
+            }
+        elif os.environ.get("ENVIRONMENT", "local").strip().lower() in {"production", "prod"}:
+            active_query = {"document_revision_id": {"$in": []}}
+        else:
+            # Legacy direct-store fixtures are tolerated only outside production.
+            active_query = {
+                "lifecycle_state": "ACTIVE",
+                "document_revision_id": {"$exists": False},
+            }
+        cursor = self._collection.find(active_query, {"_id": 0})
         chunks: List[TextChunk] = []
         embeddings: List[List[float]] = []
         expected_dimension: Optional[int] = None
         expected_identity: Optional[Dict[str, Any]] = None
+        revision_chunk_counts: Dict[str, int] = {}
         for doc in cursor:
+            revision_id = doc.get("document_revision_id")
+            revision = active_revision_by_id.get(revision_id)
+            if revision is not None and (
+                doc.get("document_id") != revision.get("document_id")
+                or doc.get("scope", "global") != revision.get("scope", "global")
+                or doc.get("tenant_id", "default") != revision.get("tenant_id", "default")
+                or doc.get("lifecycle_state") != "ACTIVE"
+            ):
+                raise RuntimeError("Active RAG chunk identity does not match its document revision pointer.")
             chunk = self._chunk_from_document(doc)
             embedding = chunk.embedding
             if embedding is None:
@@ -465,6 +521,15 @@ class MongoVectorStore(BaseVectorStore):
                 raise ValueError("Mongo vector store contains mixed embedding identities.")
             chunks.append(chunk)
             embeddings.append(embedding)
+            if revision is not None:
+                revision_chunk_counts[revision_id] = revision_chunk_counts.get(revision_id, 0) + 1
+
+        for revision_id, revision in active_revision_by_id.items():
+            expected_count = revision.get("chunk_count")
+            if not isinstance(expected_count, int) or expected_count <= 0:
+                raise RuntimeError("Active RAG lifecycle revision has an invalid expected chunk count.")
+            if revision_chunk_counts.get(revision_id, 0) != expected_count:
+                raise RuntimeError("Active RAG revision chunk set is incomplete or inconsistent.")
 
         # Publish only a fully validated generation: chunk/vector positions stay aligned.
         self._chunks = chunks

@@ -87,7 +87,24 @@ def verify_serving_artifacts(
             for architecture in _BUNDLES
         }
 
-    verified: list[str] = []
+    bundles = _verify_bundles(root, anchors)
+    return [f"model/bundles/{_BUNDLES[architecture]}" for architecture in bundles]
+
+
+def verify_trusted_serving_bundles(
+    root: Path = ML_SERVICE_ROOT,
+) -> dict[str, dict]:
+    """Return verified bundle contents tied to the committed trust anchor.
+
+    Callers that register bundles need the exact manifest and member paths
+    which were verified, not a second parse of self-reported bundle metadata.
+    """
+    root = Path(root).resolve()
+    return _verify_bundles(root, _read_trusted_anchors(root))
+
+
+def _verify_bundles(root: Path, anchors: Mapping[str, Mapping[str, str]]) -> dict[str, dict]:
+    verified: dict[str, dict] = {}
     for architecture, directory in _BUNDLES.items():
         anchor = anchors[architecture]
         expected_hash = anchor["bundle_manifest_sha256"]
@@ -101,7 +118,10 @@ def verify_serving_artifacts(
         expected_bundle_id = anchor["bundle_id"]
         if expected_bundle_id and bundle["manifest"]["bundle_id"] != expected_bundle_id:
             raise ArtifactVerificationError(f"{architecture} bundle ID differs from its trusted anchor")
-        verified.append(f"model/bundles/{directory}")
+        verified[architecture] = {
+            **bundle,
+            "bundle_dir": bundle_dir.resolve(),
+        }
     return verified
 
 
