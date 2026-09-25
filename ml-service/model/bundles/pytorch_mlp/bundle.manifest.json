@@ -4,14 +4,14 @@
     {
       "filename": "evaluation_report.json",
       "role": "evaluation_report",
-      "sha256": "ba978dd2ec4ea330ca50ee53ca5e0c4c5b7ebf0138b243ff0a677fe67361912c",
-      "size_bytes": 9184
+      "sha256": "e038944a4c1c2d55d9b03fb69f3c57cf905a2a1db2bdca08bf7dedf9014cb055",
+      "size_bytes": 8787
     },
     {
       "filename": "pytorch_metadata.json",
       "role": "metadata",
-      "sha256": "6101445a02cebd3d676fac36c2d51aebaa1897b36749ee0fff8169a6da5a9b8d",
-      "size_bytes": 11528
+      "sha256": "347fba8bb29979a09f4fc482c4e5bfca17cc43c0f080166b1bec33acc760397b",
+      "size_bytes": 11023
     },
     {
       "filename": "scaler.pkl",
@@ -27,7 +27,7 @@
     }
   ],
   "bundle_id": "mlp-aad75b72a38c-c3b27f38717f",
-  "bundle_manifest_sha256": "bdb6b87ce1a616ec8fd80e2044ff1fb6769af1b6b39fabbd1be5f708c407844c",
+  "bundle_manifest_sha256": "13585e90dc4036637071fc05076cb30bfb69d52f9dd7a2ef7f3a8983de795be7",
   "bundle_schema_version": 1,
   "dataset_lineage": {
     "feature_names": [
@@ -114,7 +114,7 @@
     ]
   },
   "evaluation_report_id": "mlp-aad75b72a38c-1f7f27296e57",
-  "evaluation_report_sha256": "ba978dd2ec4ea330ca50ee53ca5e0c4c5b7ebf0138b243ff0a677fe67361912c",
+  "evaluation_report_sha256": "e038944a4c1c2d55d9b03fb69f3c57cf905a2a1db2bdca08bf7dedf9014cb055",
   "feature_names": [
     "age",
     "monthly_take_home",

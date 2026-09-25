@@ -6,13 +6,13 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-from typing import Mapping, Any
+from typing import Mapping
 
 ML_SERVICE_ROOT = Path(__file__).resolve().parents[1]
 if str(ML_SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(ML_SERVICE_ROOT))
 
-from model.artifacts.bundle import ArtifactBundleError, verify_bundle  # noqa: E402
+from model.artifacts.bundle import ArtifactBundleError, canonical_json_bytes, verify_bundle  # noqa: E402
 
 
 class ArtifactVerificationError(RuntimeError):
@@ -26,16 +26,6 @@ _BUNDLES = {
     "FT_Transformer": "ft_transformer",
 }
 _SHA256_LENGTH = 64
-
-
-def _canonical_json(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
 
 
 def _read_trusted_anchors(root: Path) -> dict[str, dict[str, str]]:
@@ -53,7 +43,7 @@ def _read_trusted_anchors(root: Path) -> dict[str, dict[str, str]]:
     bundles = anchors["bundles"]
     if not isinstance(bundles, dict) or set(bundles) != set(_BUNDLES):
         raise ArtifactVerificationError("trusted bundle anchors must cover all architectures exactly once")
-    digest = hashlib.sha256(_canonical_json({key: anchors[key] for key in ("anchor_schema_version", "bundles")})).hexdigest()
+    digest = hashlib.sha256(canonical_json_bytes({key: anchors[key] for key in ("anchor_schema_version", "bundles")})).hexdigest()
     supplied_digest = anchors["anchor_sha256"]
     if not isinstance(supplied_digest, str) or supplied_digest != digest:
         raise ArtifactVerificationError("trusted bundle hash anchor self-check failed")

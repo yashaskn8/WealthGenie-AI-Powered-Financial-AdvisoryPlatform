@@ -21,7 +21,7 @@ import sklearn
 import joblib
 
 from model.architecture.base import BasePredictor
-from model.artifacts.bundle import MANIFEST_FILENAME, build_bundle_manifest, sha256_file
+from model.artifacts.bundle import MANIFEST_FILENAME, build_bundle_manifest, sha256_file, write_json_lf
 from model.config import (
     PyTorchModelConfig,
     TrainingConfig,
@@ -289,10 +289,7 @@ def train_pytorch_model(
     }
     report_path = (Path(bundle_dir) if bundle_dir is not None else paths.metadata_path.parent) / "evaluation_report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(
-        json.dumps(evaluation_report, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    write_json_lf(report_path, evaluation_report)
 
     metadata = {
         "model_type": "PyTorch_FinancialMLP",
@@ -326,8 +323,7 @@ def train_pytorch_model(
         "device_used": str(device),
     }
 
-    with open(paths.metadata_path, "w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2, sort_keys=True, allow_nan=False)
+    write_json_lf(paths.metadata_path, metadata)
 
     if bundle_dir is not None:
         bundle_root = Path(bundle_dir).resolve()
@@ -352,10 +348,7 @@ def train_pytorch_model(
             evaluation_report_sha256=sha256_file(report_path),
             serving_qualified=training_git_sha is not None,
         )
-        (bundle_root / MANIFEST_FILENAME).write_text(
-            json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n",
-            encoding="utf-8",
-        )
+        write_json_lf(bundle_root / MANIFEST_FILENAME, manifest)
 
     with open(paths.metrics_path, "w", encoding="utf-8") as f:
         json.dump(history, f, indent=2)
@@ -510,10 +503,7 @@ def train_ft_transformer_model(
         "evaluated_at": training_timestamp,
         "interpretation": "synthetic suitability-policy approximation fidelity; not investor outcomes or investment performance",
     }
-    report_path.write_text(
-        json.dumps(evaluation_report, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    write_json_lf(report_path, evaluation_report)
     metadata = {
         "version": "4.0.0",
         "model_version": "4.0.0",
@@ -540,10 +530,7 @@ def train_ft_transformer_model(
         "device_used": str(device),
         "metric_interpretation": evaluation_report["interpretation"],
     }
-    ft_metadata_path.write_text(
-        json.dumps(metadata, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    write_json_lf(ft_metadata_path, metadata)
 
     if bundle_dir is not None:
         bundle_root = Path(bundle_dir).resolve()
@@ -568,10 +555,7 @@ def train_ft_transformer_model(
             evaluation_report_sha256=sha256_file(report_path),
             serving_qualified=training_git_sha is not None,
         )
-        (bundle_root / MANIFEST_FILENAME).write_text(
-            json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n",
-            encoding="utf-8",
-        )
+        write_json_lf(bundle_root / MANIFEST_FILENAME, manifest)
 
     logger.info("FT-Transformer trained successfully and saved to %s", save_path)
     return {

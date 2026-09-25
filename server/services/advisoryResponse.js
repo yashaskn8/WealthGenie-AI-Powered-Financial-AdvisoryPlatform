@@ -44,6 +44,13 @@ function responseFromFreshState({ state, responseTemplate, replayed }) {
     advisoryExplanation: currentAdvisory.explanation,
   });
 
+  if (responseTemplate?.response_kind === 'PROFILE_UPDATE') {
+    return {
+      profile: formatProfileResponse(state.profile),
+      recommendation: recommendationBody,
+    };
+  }
+
   if (responseTemplate?.completion && responseTemplate?.profile) {
     return {
       profile: formatProfileResponse(state.profile),
@@ -72,6 +79,10 @@ export function committedResponseReconciliationError(cause) {
   error.clientMessage = 'The operation committed, but current financial state could not be verified. Retry with the same Idempotency-Key.';
   error.code = 'COMMITTED_BUT_RESPONSE_RECONCILIATION_FAILED';
   error.committed = true;
+  error.clientDetails = {
+    committed: true,
+    retryWithSameIdempotencyKey: true,
+  };
   error.reasonCodes = [cause?.code || 'CURRENT_STATE_RECONCILIATION_FAILED'];
   return error;
 }

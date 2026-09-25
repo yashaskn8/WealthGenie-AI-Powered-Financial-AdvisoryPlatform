@@ -1,5 +1,10 @@
 """Explicit and repeatable Phase-3 Mongo state migration contract tests."""
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import mongomock
 import pytest
 from pymongo.errors import DuplicateKeyError
@@ -9,6 +14,37 @@ from model.migrations.phase3_state import (
     migrate_phase3_state,
     verify_phase3_state,
 )
+
+
+ML_SERVICE_ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = ML_SERVICE_ROOT.parent
+MIGRATION_SCRIPT = ML_SERVICE_ROOT / "scripts" / "migrate_phase3_state.py"
+
+
+@pytest.mark.parametrize(
+    "working_directory",
+    [REPOSITORY_ROOT, ML_SERVICE_ROOT],
+    ids=["repository-root", "ml-service-root"],
+)
+def test_phase3_migration_cli_reports_missing_uri_without_import_error(working_directory):
+    environment = os.environ.copy()
+    environment.pop("MONGODB_URI", None)
+    environment.pop("MONGO_URI", None)
+    environment.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [sys.executable, str(MIGRATION_SCRIPT)],
+        cwd=working_directory,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "MONGODB_URI is required" in result.stderr
+    assert "ModuleNotFoundError" not in result.stderr
 
 
 def test_migration_installs_required_indexes_and_is_idempotent():

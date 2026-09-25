@@ -417,36 +417,91 @@ router.put(
   verifyJWT,
   validateStrict(financialProfileUpdateSchema),
   asyncHandler(async (req, res) => {
-    // TODO: Follow-up — make profile edits and recommendation refresh atomic;
-    // this endpoint intentionally preserves the existing two-step edit flow.
-    const expectedVersion = req.body.version;
     const existing = await FinancialProfile.findOne({
       _id: req.params.profileId,
       userId: req.user.userId,
     }).lean();
     if (!existing) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
 
-    const currentVersion = existing.version ?? 1;
-    if (currentVersion !== expectedVersion) {
-      return sendError(req, res, 409, 'Version conflict', 'PROFILE_VERSION_CONFLICT', {
-        currentVersion,
-        expectedVersion,
+    const idempotencyClaim = await claimAdvisoryIdempotency({
+      key: req.headers['idempotency-key'],
+      userId: req.user.userId,
+      profileId: existing._id,
+      payload: req.body,
+      operation: 'profile.update_and_recommendation',
+      method: 'PUT',
+    });
+    if (idempotencyClaim.state === 'REPLAY') {
+      res.setHeader('X-Cache-Lookup', 'HIT - Idempotent');
+      return res.status(idempotencyClaim.response.status).json(idempotencyClaim.response.body);
+    }
+
+    try {
+      const expectedVersion = req.body.version;
+      const currentVersion = existing.version ?? 1;
+      if (currentVersion !== expectedVersion) {
+        await releaseAdvisoryIdempotency(idempotencyClaim);
+        return sendError(req, res, 409, 'Version conflict', 'PROFILE_VERSION_CONFLICT', {
+          currentVersion,
+          expectedVersion,
+        });
+      }
+
+      const canonical = buildRecommendationProfile(req.body);
+      const suitability = assessSuitabilityRisk(canonical);
+      const nextVersion = currentVersion + 1;
+      await reachFinancialStateTestHook('profile.update.beforeRecommendationCompute', {
+        userId: String(req.user.userId), profileId: String(existing._id), expectedVersion: currentVersion, nextVersion,
       });
-    }
+      const core = await computeCoreRecommendation({
+        canonicalProfile: canonical,
+        profileVersion: nextVersion,
+        userId: req.user.userId,
+        profileId: existing._id,
+        correlationId: req.correlationId,
+        traceId: req.traceId || req.correlationId,
+        userRole: req.user.role,
+      });
+      await reachFinancialStateTestHook('profile.update.afterRecommendationCompute', {
+        userId: String(req.user.userId), profileId: String(existing._id), expectedVersion: currentVersion, nextVersion,
+      });
+      const persisted = await persistAdvisoryAtomically({
+        recommendation: core.recommendationData,
+        auditRecord: core.auditRecordData,
+        response: { ...core.response, response_kind: 'PROFILE_UPDATE' },
+        idempotencyClaim,
+        profileUpdate: {
+          expectedVersion: currentVersion,
+          expectedFinancialStateFence: Number(existing.financialStateFence ?? 0),
+          fields: toProfilePersistence(canonical, suitability),
+        },
+        testHooks: {
+          afterSourceProfileRead: session => reachFinancialStateTestHook('profile.update.afterSourceProfileRead', {
+            session, profileId: String(existing._id), expectedVersion: currentVersion, nextVersion,
+          }),
+          afterProfileUpdateWrite: session => reachFinancialStateTestHook('profile.update.afterProfileWriteBeforeRecommendation', {
+            session, profileId: String(existing._id), nextVersion,
+          }),
+          afterAuditCreate: session => reachFinancialStateTestHook('profile.update.afterAuditWriteBeforeCommit', {
+            session, profileId: String(existing._id), nextVersion,
+          }),
+          afterProfileUpdateRecommendationCreate: session => reachFinancialStateTestHook('profile.update.afterRecommendationCreate', {
+            session, profileId: String(existing._id), nextVersion,
+          }),
+          afterCommitBeforeReconcile: context => reachFinancialStateTestHook('profile.update.afterCommitBeforeResponse', {
+            ...context, profileId: String(existing._id), userId: String(req.user.userId),
+          }),
+        },
+      });
 
-    const canonical = buildRecommendationProfile(req.body);
-    const suitability = assessSuitabilityRisk(canonical);
-    const updated = await FinancialProfile.findOneAndUpdate(
-      { _id: req.params.profileId, userId: req.user.userId, version: expectedVersion },
-      { $set: toProfilePersistence(canonical, suitability), $inc: { version: 1, financialStateFence: 1 } },
-      { new: true, runValidators: true },
-    );
-    if (!updated) {
-      return sendError(req, res, 409, 'Version conflict', 'PROFILE_VERSION_CONFLICT');
+      void triggerPlanHealthCheck({ userId: req.user.userId, profileId: existing._id });
+      return res.status(200).json(persisted);
+    } catch (error) {
+      await releaseAdvisoryIdempotency(idempotencyClaim).catch(releaseError => {
+        console.error('[Profile] Failed to release profile-update idempotency claim:', releaseError.message);
+      });
+      throw error;
     }
-
-    void triggerPlanHealthCheck({ userId: req.user.userId, profileId: updated._id });
-    res.json(formatProfileResponse(updated));
   }),
 );
 

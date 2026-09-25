@@ -19,7 +19,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 from model.architecture.base import BasePredictor
-from model.artifacts.bundle import MANIFEST_FILENAME, build_bundle_manifest, sha256_file
+from model.artifacts.bundle import MANIFEST_FILENAME, build_bundle_manifest, sha256_file, write_json_lf
 from model.config import TrainingConfig
 from model.data.feature_engineering import FEATURE_NAMES, FEATURE_SCHEMA_VERSION
 from model.data.preprocessing import (
@@ -145,10 +145,7 @@ def train_random_forest_model(
         "evaluated_at": timestamp,
         "interpretation": "synthetic suitability-policy approximation fidelity; not investor outcomes or investment performance",
     }
-    evaluation_path.write_text(
-        json.dumps(evaluation_report, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    write_json_lf(evaluation_path, evaluation_report)
     metadata = {
         "model_name": "RandomForest",
         "model_version": "4.0.0",
@@ -181,10 +178,7 @@ def train_random_forest_model(
         "evaluation_run_id": evaluation_id,
         "metric_interpretation": evaluation_report["interpretation"],
     }
-    metadata_path.write_text(
-        json.dumps(metadata, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    write_json_lf(metadata_path, metadata)
 
     manifest = build_bundle_manifest(
         output_dir,
@@ -204,10 +198,7 @@ def train_random_forest_model(
         evaluation_report_sha256=sha256_file(evaluation_path),
         serving_qualified=training_git_sha is not None,
     )
-    (output_dir / MANIFEST_FILENAME).write_text(
-        json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    write_json_lf(output_dir / MANIFEST_FILENAME, manifest)
     logger.info("Saved RandomForest bundle to %s (serving_qualified=%s)", output_dir, manifest["serving_qualified"])
     return model, label_encoder, metadata
 

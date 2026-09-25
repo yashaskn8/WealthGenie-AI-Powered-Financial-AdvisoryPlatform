@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -10,7 +12,9 @@ from model.artifacts.bundle import (
     ArtifactBundleError,
     MANIFEST_FILENAME,
     build_bundle_manifest,
+    json_lf_bytes,
     verify_bundle,
+    write_json_lf,
 )
 from model.artifacts.store import ArtifactStoreError, LocalArtifactStore, get_artifact_store
 from model.architecture.base import BasePredictor
@@ -35,12 +39,9 @@ def _write_valid_rf_bundle(root: Path, *, serving_qualified: bool = True) -> str
     root.mkdir(parents=True, exist_ok=True)
     (root / "model.pkl").write_bytes(b"model-fixture-bytes")
     (root / "label_encoder.pkl").write_bytes(b"encoder-fixture-bytes")
-    evaluation_report = json.dumps(
-        {"evaluation_run_id": "eval-run-17", "metrics": {"macro_f1": 0.91}},
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    (root / "evaluation_report.json").write_bytes(evaluation_report)
+    evaluation_report_value = {"evaluation_run_id": "eval-run-17", "metrics": {"macro_f1": 0.91}}
+    write_json_lf(root / "evaluation_report.json", evaluation_report_value)
+    evaluation_report = (root / "evaluation_report.json").read_bytes()
     metadata = {
         "model_name": "RandomForest",
         "model_version": "rf-test-v1",
@@ -52,7 +53,7 @@ def _write_valid_rf_bundle(root: Path, *, serving_qualified: bool = True) -> str
         "training_timestamp": TRAINED_AT,
         "dataset_lineage": LINEAGE,
     }
-    (root / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    write_json_lf(root / "metadata.json", metadata)
     manifest = build_bundle_manifest(
         root,
         bundle_id="bundle-rf-test-v1",
@@ -72,7 +73,7 @@ def _write_valid_rf_bundle(root: Path, *, serving_qualified: bool = True) -> str
         serving_qualified=serving_qualified,
     )
     path = root / MANIFEST_FILENAME
-    path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    write_json_lf(path, manifest)
     return manifest["bundle_manifest_sha256"]
 
 
@@ -83,6 +84,65 @@ def test_bundle_manifest_is_deterministic_and_verifies_all_rf_members(tmp_path):
     assert verified["manifest_sha256"] == expected
     assert set(verified["members"]) == {"model", "label_encoder", "metadata", "evaluation_report"}
     assert all(path.is_file() for path in verified["members"].values())
+
+
+def test_bundle_json_writer_is_deterministic_utf8_and_literal_lf(tmp_path):
+    value = {"z": "wealth ₹", "a": [1, 2]}
+    path = tmp_path / "canonical.json"
+    write_json_lf(path, value)
+
+    payload = path.read_bytes()
+    assert payload == json_lf_bytes(value)
+    assert payload.endswith(b"\n")
+    assert b"\r" not in payload
+    assert json.loads(payload.decode("utf-8")) == value
+
+
+def test_copied_bundle_preserves_exact_member_sizes_and_hashes(tmp_path):
+    expected = _write_valid_rf_bundle(tmp_path / "source")
+    copied = tmp_path / "copied"
+    shutil.copytree(tmp_path / "source", copied)
+
+    manifest = json.loads((copied / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    for member in manifest["artifact_files"]:
+        payload = (copied / member["filename"]).read_bytes()
+        assert len(payload) == member["size_bytes"]
+        assert hashlib.sha256(payload).hexdigest() == member["sha256"]
+    assert verify_bundle(copied, expected)["manifest_sha256"] == expected
+
+
+def test_git_checkout_keeps_bundle_json_lf_and_verifiable(tmp_path):
+    import os
+
+    repository_root = Path(__file__).resolve().parents[2]
+    source_repo = tmp_path / "source-repo"
+    source_repo.mkdir()
+    shutil.copyfile(repository_root / ".gitattributes", source_repo / ".gitattributes")
+    expected = _write_valid_rf_bundle(source_repo / "model" / "bundles" / "random_forest")
+
+    def git(*args, cwd=None):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, check=True, timeout=20
+        )
+
+    git("init", "--quiet", cwd=source_repo)
+    git("config", "user.name", "Bundle Checkout Test", cwd=source_repo)
+    git("config", "user.email", "bundle-checkout@example.invalid", cwd=source_repo)
+    git("add", ".", cwd=source_repo)
+    git("commit", "--quiet", "-m", "fixture", cwd=source_repo)
+    checkout = tmp_path / "clean-checkout"
+    git("-c", "core.autocrlf=true", "clone", "--quiet", str(source_repo), str(checkout))
+
+    copied_bundle = checkout / "model" / "bundles" / "random_forest"
+    manifest = json.loads((copied_bundle / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    for member in manifest["artifact_files"]:
+        path = copied_bundle / member["filename"]
+        payload = path.read_bytes()
+        if path.suffix.lower() == ".json":
+            assert b"\r" not in payload
+        assert len(payload) == member["size_bytes"]
+        assert hashlib.sha256(payload).hexdigest() == member["sha256"]
+    assert verify_bundle(copied_bundle, expected)["manifest_sha256"] == expected
 
 
 @pytest.mark.parametrize("member", ["model.pkl", "label_encoder.pkl", "metadata.json", "evaluation_report.json"])

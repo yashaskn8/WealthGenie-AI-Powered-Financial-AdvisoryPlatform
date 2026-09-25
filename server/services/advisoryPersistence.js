@@ -25,6 +25,30 @@ function instrumentsAssumptionHash(instruments = []) {
   return instruments.find(item => item?.returnAssumptionHash)?.returnAssumptionHash || null;
 }
 
+const PROFILE_UPDATE_FIELDS = new Set([
+  'monthlyTakeHome', 'monthlySavings', 'age', 'riskTolerance', 'soldPropertyProceeds',
+  'hasLumpSum', 'lumpSumAmount', 'liquidSavings', 'emiBurdenPct', 'financialDependents',
+  'emergencyFundMonths', 'investmentGoals', 'investmentHorizonYears', 'riskCapacityScore',
+  'riskCapacityLevel', 'finalSuitabilityRisk', 'suitabilityReasonCodes', 'recommendationProfileVersion',
+]);
+
+function validatedProfileUpdate(profileUpdate) {
+  if (!profileUpdate || typeof profileUpdate !== 'object' || !profileUpdate.fields
+      || typeof profileUpdate.fields !== 'object' || Array.isArray(profileUpdate.fields)) {
+    throw new TypeError('A complete profile update fence is required.');
+  }
+  const fields = Object.fromEntries(Object.entries(profileUpdate.fields));
+  if (Object.keys(fields).some(field => !PROFILE_UPDATE_FIELDS.has(field))) {
+    throw new TypeError('Profile update contains a field outside the canonical mutable profile surface.');
+  }
+  if (!Number.isSafeInteger(Number(profileUpdate.expectedVersion)) || Number(profileUpdate.expectedVersion) < 1
+      || !Number.isSafeInteger(Number(profileUpdate.expectedFinancialStateFence))
+      || Number(profileUpdate.expectedFinancialStateFence) < 0) {
+    throw new TypeError('Profile update version and financial-state fence are required.');
+  }
+  return { ...profileUpdate, fields };
+}
+
 function historicalResponseSnapshot(response) {
   const historical = value => ({
     ...(value || {}),
@@ -69,12 +93,15 @@ function transactionRequirementError(error) {
  */
 export async function persistAdvisoryAtomically({
   profile = null,
+  profileUpdate: requestedProfileUpdate = null,
   recommendation,
   auditRecord,
   response,
   idempotencyClaim,
   testHooks = {},
 }) {
+  const profileUpdate = requestedProfileUpdate ? validatedProfileUpdate(requestedProfileUpdate) : null;
+  if (profile && profileUpdate) throw new TypeError('Profile creation and profile update cannot be combined.');
   await ensureAdvisoryPersistenceReady();
   const session = await mongoose.startSession();
   let committedResponse = null;
@@ -94,12 +121,29 @@ export async function persistAdvisoryAtomically({
         throw error;
       }
       await testHooks.afterSourceProfileRead?.(session);
+      let recommendationSourceProfile = currentProfile;
+      if (profileUpdate) {
+        const expectedVersion = Number(profileUpdate.expectedVersion);
+        const expectedFence = Number(profileUpdate.expectedFinancialStateFence);
+        const observedVersion = Number(currentProfile.version ?? 1);
+        const observedFence = Number(currentProfile.financialStateFence ?? 0);
+        if (String(currentProfile._id) !== String(recommendation.profileId)
+            || String(currentProfile.userId) !== String(recommendation.userId)
+            || observedVersion !== expectedVersion
+            || observedFence !== expectedFence) {
+          const error = new Error('The profile changed while its replacement recommendation was being computed.');
+          error.status = 409;
+          error.code = observedVersion !== expectedVersion ? 'PROFILE_VERSION_CONFLICT' : 'PROFILE_STATE_CHANGED';
+          throw error;
+        }
+        recommendationSourceProfile = { ...currentProfile, ...profileUpdate.fields, version: expectedVersion + 1 };
+      }
       const profileInputHash = buildRecommendationProfileHash(
-        buildRecommendationProfile(currentProfile),
+        buildRecommendationProfile(recommendationSourceProfile),
         { modelVersion: recommendation.modelVersion },
       );
       const expectedProfileVersion = Number(recommendation.profileVersion);
-      const currentProfileVersion = Number(currentProfile.version ?? 1);
+      const currentProfileVersion = Number(recommendationSourceProfile.version ?? 1);
       if (!Number.isSafeInteger(expectedProfileVersion) || expectedProfileVersion < 1
           || expectedProfileVersion !== currentProfileVersion) {
         const error = new Error('The profile version changed while the recommendation was being computed.');
@@ -113,7 +157,28 @@ export async function persistAdvisoryAtomically({
         error.code = 'PROFILE_STATE_CHANGED';
         throw error;
       }
-      if (!profile) {
+      if (profileUpdate) {
+        const expectedVersion = Number(profileUpdate.expectedVersion);
+        const expectedFence = Number(profileUpdate.expectedFinancialStateFence);
+        const profileCas = await FinancialProfile.updateOne({
+          _id: recommendation.profileId,
+          userId: recommendation.userId,
+          $and: [
+            { $or: [{ version: expectedVersion }, ...(expectedVersion === 1 ? [{ version: { $exists: false } }] : [])] },
+            { $or: [{ financialStateFence: expectedFence }, ...(expectedFence === 0 ? [{ financialStateFence: { $exists: false } }] : [])] },
+          ],
+        }, {
+          $set: { ...profileUpdate.fields, version: expectedVersion + 1 },
+          $inc: { financialStateFence: 1 },
+        }, { session, runValidators: true });
+        if (profileCas.matchedCount !== 1) {
+          const error = new Error('The profile changed before its replacement recommendation could be committed.');
+          error.status = 409;
+          error.code = 'PROFILE_VERSION_CONFLICT';
+          throw error;
+        }
+        await testHooks.afterProfileUpdateWrite?.(session);
+      } else if (!profile) {
         const profileVersion = currentProfile.version ?? 1;
         const profileFence = currentProfile.financialStateFence ?? 0;
         const profileCas = await FinancialProfile.updateOne({
@@ -143,6 +208,22 @@ export async function persistAdvisoryAtomically({
         error.status = 409;
         error.code = 'RECOMMENDATION_POLICY_CHANGED';
         throw error;
+      }
+      if (profileUpdate) {
+        const instrumentAssumptionHashes = (recommendation.instruments || [])
+          .map(item => item?.returnAssumptionHash)
+          .filter(Boolean);
+        const instrumentAssumptionVersions = (recommendation.instruments || [])
+          .map(item => item?.returnAssumptionVersion)
+          .filter(Boolean);
+        if (recommendation.returnAssumptionHash !== PROJECTION_ASSUMPTION_POLICY_HASH
+            || instrumentAssumptionHashes.some(hash => hash !== PROJECTION_ASSUMPTION_POLICY_HASH)
+            || instrumentAssumptionVersions.some(version => version !== PROJECTION_ASSUMPTION_VERSION)) {
+          const error = new Error('The return-assumption policy changed while the replacement recommendation was being computed.');
+          error.status = 409;
+          error.code = 'RETURN_ASSUMPTION_POLICY_CHANGED';
+          throw error;
+        }
       }
       const existingState = await RecommendationState.findOne({
         userId: recommendation.userId,
@@ -214,6 +295,7 @@ export async function persistAdvisoryAtomically({
         idempotencyRequestHash: idempotencyClaim.requestHash,
         responseSnapshot: historicalResponseSnapshot(committedResponse),
       })], { session });
+      if (profileUpdate) await testHooks.afterProfileUpdateRecommendationCreate?.(session);
 
       await createAllocationRevision({
         session,

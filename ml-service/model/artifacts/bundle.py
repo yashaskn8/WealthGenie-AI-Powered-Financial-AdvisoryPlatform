@@ -80,6 +80,35 @@ def _canonical_json(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def canonical_json_bytes(value: Any) -> bytes:
+    """Return compact canonical JSON bytes used for manifest trust digests."""
+    return _canonical_json(value)
+
+
+def json_lf_bytes(value: Any) -> bytes:
+    """Serialize bundle JSON deterministically with UTF-8 and literal LF bytes.
+
+    These files are hashed before source-control normalization.  Writing the
+    encoded bytes (rather than using a platform text stream) keeps the recorded
+    member size and digest identical on Windows and POSIX.
+    """
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def write_json_lf(path: Path, value: Any) -> None:
+    """Write deterministic UTF-8 JSON using LF bytes without newline translation."""
+    Path(path).write_bytes(json_lf_bytes(value))
+
+
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -378,7 +407,7 @@ def materialize_verified_bundle(verified_bundle: Mapping[str, Any]) -> Path:
             if digest.hexdigest() != entry["sha256"] or size != entry["size_bytes"]:
                 raise ArtifactBundleError(f"bundle member changed during verified copy: {entry['role']}")
         manifest_path = target_root / MANIFEST_FILENAME
-        manifest_path.write_bytes(_canonical_json(manifest))
+        write_json_lf(manifest_path, manifest)
         manifest_path.chmod(0o400)
         for path in target_root.iterdir():
             if path != manifest_path:

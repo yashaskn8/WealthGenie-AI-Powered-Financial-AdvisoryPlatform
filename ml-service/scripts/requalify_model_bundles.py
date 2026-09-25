@@ -24,7 +24,7 @@ if str(ML_SERVICE_ROOT) not in sys.path:
 
 from model.architecture.base import BasePredictor  # noqa: E402
 from model.architecture.ft_transformer import FTTransformerConfig  # noqa: E402
-from model.artifacts.bundle import MANIFEST_FILENAME, sha256_file, verify_bundle  # noqa: E402
+from model.artifacts.bundle import MANIFEST_FILENAME, canonical_json_bytes, sha256_file, verify_bundle, write_json_lf  # noqa: E402
 from model.config import ArtifactPaths, PyTorchModelConfig, TrainingConfig  # noqa: E402
 from model.data.feature_engineering import FEATURE_NAMES, FEATURE_SCHEMA_VERSION  # noqa: E402
 from model.data.preprocessing import (  # noqa: E402
@@ -73,13 +73,10 @@ def _write_trusted_anchors(bundle_root: Path, bundle_records: dict[str, dict[str
             for architecture, record in sorted(bundle_records.items())
         },
     }
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    canonical = canonical_json_bytes(payload)
     payload["anchor_sha256"] = hashlib.sha256(canonical).hexdigest()
     anchor_path = bundle_root / TRUST_ANCHOR_FILENAME
-    anchor_path.write_text(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    write_json_lf(anchor_path, payload)
 
 
 def requalify_models(*, num_samples: int = 2000, seed: int = 42) -> dict[str, Any]:
