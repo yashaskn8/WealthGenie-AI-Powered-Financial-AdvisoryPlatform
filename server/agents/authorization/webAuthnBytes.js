@@ -23,15 +23,20 @@ export function normalizePublicKey(value) {
   return bytes;
 }
 
-export function normalizeWebAuthnCredential({ credentialId, publicKey, counter = 0, transports = [] } = {}) {
+export function normalizeWebAuthnCredential({ credentialId, publicKey, counter = 0, transports = [], deviceType, backedUp } = {}) {
   const normalizedCounter = Number(counter);
   if (!Number.isInteger(normalizedCounter) || normalizedCounter < 0) {
     throw mandateError('TRUSTED_APPROVAL_INVALID', 'Authenticator counter is invalid.');
+  }
+  if (!['singleDevice', 'multiDevice'].includes(deviceType) || typeof backedUp !== 'boolean') {
+    throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey backup eligibility/state is unavailable.');
   }
   return {
     credentialId: normalizeCredentialId(credentialId),
     publicKey: normalizePublicKey(publicKey),
     counter: normalizedCounter,
     transports: Array.isArray(transports) ? transports.map(String).slice(0, 8) : [],
+    deviceType,
+    backedUp,
   };
 }

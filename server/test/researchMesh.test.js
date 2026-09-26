@@ -209,6 +209,8 @@ test('Plan Review invokes ResearchMesh only through a sanitized brief and merges
   });
   assert.equal(result.researchNeed.mode, 'DEEP_RESEARCH');
   assert.equal(receivedBrief.topic, 'Current public financial and regulatory evidence');
+  assert.equal(result.evidencePacket.status, 'UNAVAILABLE', 'public ResearchMesh results cannot repair missing authoritative plan evidence');
+  assert.ok(result.evidencePacket.unavailableFacts.includes('RECOMMENDATION_MISSING'));
   assert.ok(result.evidencePacket.entries.some(entry => entry.id.startsWith('E_RESEARCH_')));
 });
 

@@ -26,6 +26,43 @@ returns an action descriptor only; it never mutates a profile, recommendation,
 allocation, or trade. The authoritative recompute workflow remains outside the
 agent.
 
+Every enqueue binds the run to a canonical financial snapshot hash. Before
+publication, the worker re-resolves that snapshot and transactionally fences
+the profile, recommendation-state pointer, and owned run. A source change
+terminalizes the review as superseded; it does not publish stale findings.
+Replay checkpoints are source-, run-, and execution-generation-bound and a
+present checkpoint that fails its integrity checks is rejected rather than
+silently resetting its counters.
+
+Provider calls reserve the per-run input/output token ceiling and provider-call
+count durably under the worker lease before the external request begins. A
+fallback provider consumes the same run budget. If the process crashes after
+reservation, recovery carries the reservation forward, even if the provider
+result was not checkpointed; this can conservatively spend budget but cannot
+repeat calls without accounting for them. A timed-out run closes its local
+budget so late graph work cannot start another provider request.
+
+## Persistence deployment gate
+
+PlanReview uses explicit indexes for run identity, active deduplication,
+execution-generation-scoped checkpoints, graph checkpoints, and event sequence.
+The API and worker only verify these indexes at startup; neither performs
+schema/index DDL. Before deploying either process to a fresh or upgraded
+database, run `npm run migrate:phase4-plan-review-indexes --prefix server` with
+`MONGODB_MIGRATION_URI` set to a transaction-capable MongoDB replica-set URI.
+The one-shot Kubernetes migration Job is ordered after the Phase-3 state
+migration and before application manifests. Migration failure blocks rollout.
+
+Production deployments explicitly set `AGENTIC_PLAN_REVIEW_ENABLED=false`.
+Enabling PlanReview is an operator change after the migration and readiness
+checks; it is not enabled by this remediation.
+
+The `eval:live` command is intentionally fail-closed when explicitly enabled:
+there is currently no registered isolated real-runner fixture, so it returns
+`LIVE_EVAL_RUNNER_REQUIRED` before initializing a model provider. Deterministic
+contract and trajectory evaluation remains the supported CI path; no live
+closed-loop result is claimed.
+
 The deterministic Plan Health Monitor reads profile/recommendation freshness,
 records deduplicated `PlanHealthEvent` metadata, and exposes acknowledgement.
 It never calls an LLM, creates allocations, rebalances a plan, or changes

@@ -6,7 +6,7 @@ const REQUIRED_MANDATE_KEYS = Object.freeze([
   'mandateId', 'version', 'issuer', 'subject', 'audience', 'userId', 'agentIdentity',
   'agentType', 'agentVersion', 'runId', 'correlationId', 'action', 'resourceType',
   'resourceId', 'profileId', 'recommendationId', 'financialSnapshotHash',
-  'recommendationFingerprint', 'policyVersion', 'actionPayloadHash', 'constraints',
+  'recommendationFingerprint', 'planReviewSnapshotHash', 'policyVersion', 'actionPayloadHash', 'constraints',
   'issuedAt', 'notBefore', 'expiresAt', 'nonce', 'singleUse', 'parentGrantId',
   'delegationDepth', 'approvalMethod', 'status',
   'mandateHash', 'signatureMetadata', 'approval',
@@ -63,9 +63,9 @@ export function canonicalizeMandate(mandate) {
   const constraints = mandate.constraints;
   assertPlainObject(constraints, 'Mandate constraints');
   assertKeys(constraints, ['maxAgeSeconds', 'allowedAgentType', 'resourceVersion', 'noFinancialMutationByAgent'], 'Mandate constraints');
-  if (mandate.approval) assertKeys(mandate.approval, ['method', 'verifiedAt', 'credentialId', 'challengeHash', 'authenticatorCounter'], 'Mandate approval');
+  if (mandate.approval) assertKeys(mandate.approval, ['method', 'verifiedAt', 'credentialId', 'challengeHash', 'authenticatorCounter', 'credentialDeviceType', 'credentialBackedUp'], 'Mandate approval');
   if (mandate.signatureMetadata) assertKeys(mandate.signatureMetadata, ['algorithm', 'keyId', 'signature', 'environment'], 'Mandate signature metadata');
-  for (const [value, label] of [[mandate.financialSnapshotHash, 'financialSnapshotHash'], [mandate.recommendationFingerprint, 'recommendationFingerprint'], [mandate.actionPayloadHash, 'actionPayloadHash']]) assertHash(value, label);
+  for (const [value, label] of [[mandate.financialSnapshotHash, 'financialSnapshotHash'], [mandate.recommendationFingerprint, 'recommendationFingerprint'], [mandate.planReviewSnapshotHash, 'planReviewSnapshotHash'], [mandate.actionPayloadHash, 'actionPayloadHash']]) assertHash(value, label);
   if (typeof mandate.mandateId !== 'string' || !/^[0-9a-f-]{36}$/i.test(mandate.mandateId)) throw new TypeError('Mandate ID is invalid');
   if (typeof mandate.nonce !== 'string' || !/^[A-Za-z0-9_-]{22,}$/.test(mandate.nonce)) throw new TypeError('Mandate nonce is invalid');
   if (!Number.isInteger(mandate.delegationDepth) || mandate.delegationDepth < 0 || mandate.delegationDepth > 2) throw new TypeError('Mandate delegation depth is invalid');
@@ -103,6 +103,7 @@ export function canonicalizeMandate(mandate) {
     recommendationId: mandate.recommendationId ? String(mandate.recommendationId) : null,
     financialSnapshotHash: mandate.financialSnapshotHash,
     recommendationFingerprint: mandate.recommendationFingerprint,
+    planReviewSnapshotHash: mandate.planReviewSnapshotHash,
     policyVersion: mandate.policyVersion,
     actionPayloadHash: mandate.actionPayloadHash,
     constraints: {

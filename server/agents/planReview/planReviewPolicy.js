@@ -26,19 +26,31 @@ const FINDING_COPY = Object.freeze({
   GOALS_UNAVAILABLE: ['GOALS_UNAVAILABLE', 'ATTENTION', 'Goals unavailable', 'Goal status could not be loaded for this profile.'],
 });
 
-function hasReason(reasons, code) {
-  return Array.isArray(reasons) && reasons.includes(code);
-}
+const RECOMPUTE_REASONS = new Set([
+  'RECOMMENDATION_MISSING', 'MODEL_VERSION_MISSING', 'PROFILE_HASH_MISSING',
+  'PROFILE_CHANGED', 'PROFILE_VERSION_MISSING', 'PROFILE_VERSION_CHANGED',
+  'REGULATORY_POLICY_CHANGED', 'RECOMMENDATION_POLICY_MISSING',
+  'RECOMMENDATION_POLICY_CHANGED', 'ALLOCATION_REVISION_MISSING',
+  'ALLOCATION_REVISION_INVALID', 'ALLOCATION_RECOMMENDATION_MISMATCH',
+  'ALLOCATION_PROFILE_CHANGED', 'ALLOCATION_PROFILE_VERSION_MISSING',
+  'ALLOCATION_USER_MISMATCH', 'ALLOCATION_SOURCE_MISSING',
+  'ASSUMPTION_VERSION_MISSING', 'ASSUMPTION_VERSION_CHANGED',
+  'ASSUMPTION_SOURCE_MISSING', 'ASSUMPTION_SOURCE_CHANGED',
+  'ASSUMPTION_HASH_MISSING', 'ASSUMPTION_HASH_CHANGED',
+  'LEGACY_GENERATION_STATE_CONFLICT', 'CURRENT_RECOMMENDATION_MISMATCH',
+  'FINANCIAL_STATE_MISSING',
+]);
 
 export function deriveRecommendedAction({ profile, freshness, goalSummary, evidenceStatus }) {
   if (!profile) return 'REVIEW_PROFILE';
-  if (hasReason(freshness?.reasonCodes, 'RECOMMENDATION_MISSING')
-      || hasReason(freshness?.reasonCodes, 'PROFILE_CHANGED')
-      || hasReason(freshness?.reasonCodes, 'REGULATORY_POLICY_CHANGED')
-      || hasReason(freshness?.reasonCodes, 'MODEL_VERSION_MISSING')
-      || hasReason(freshness?.reasonCodes, 'PROFILE_HASH_MISSING')) return 'RECOMPUTE_PLAN';
-  if (hasReason(freshness?.reasonCodes, 'REGULATORY_VERSION_UNAVAILABLE')
-      || evidenceStatus === 'UNAVAILABLE') return 'INSUFFICIENT_EVIDENCE';
+  const reasons = Array.isArray(freshness?.reasonCodes) ? freshness.reasonCodes : [];
+  if (reasons.includes('PROFILE_MISSING')) return 'REVIEW_PROFILE';
+  if (reasons.some(reason => RECOMPUTE_REASONS.has(reason))) return 'RECOMPUTE_PLAN';
+  // Missing, malformed, or newly introduced freshness states cannot be
+  // interpreted as current. Unknown reason codes deliberately fail closed.
+  if (freshness?.fresh !== true || reasons.length > 0 || evidenceStatus === 'UNAVAILABLE') {
+    return 'INSUFFICIENT_EVIDENCE';
+  }
   if (goalSummary?.status === 'UNAVAILABLE') return 'REVIEW_GOALS';
   return 'NONE';
 }
@@ -73,7 +85,7 @@ function safeSummary(action, findings) {
     : 'The plan review completed with the evidence and limitations shown below.';
 }
 
-export function buildSafeReview({ runId, profile, freshness, goalSummary, evidence, provider = null, status = 'COMPLETED', stepCount = 0, toolCallCount = 0 }) {
+export function buildSafeReview({ runId, profile, freshness, goalSummary, evidence, provider = null, status = 'COMPLETED', stepCount = 0, toolCallCount = 0, modelCallCount = 0, tokenUsage = 0 }) {
   const evidenceStatus = evidence?.status || 'UNAVAILABLE';
   const recommendedAction = deriveRecommendedAction({ profile, freshness, goalSummary, evidenceStatus });
   const findings = deriveFindings({ profile, freshness, goalSummary, evidenceStatus });
@@ -102,7 +114,7 @@ export function buildSafeReview({ runId, profile, freshness, goalSummary, eviden
       model: provider?.model || null,
       fallback: provider?.fallback !== false,
     },
-    execution: { stepCount, toolCallCount },
+    execution: { stepCount, toolCallCount, modelCallCount, tokenUsage },
   };
 }
 
@@ -126,8 +138,8 @@ export function policyGuardReview(review, evidencePacket, explanation = null) {
   return { allowed: errors.length === 0, reasonCodes: [...new Set(errors)], validation };
 }
 
-export function safeFallbackAfterPolicyRejection({ runId, profile, freshness, goalSummary, evidence, provider, reasonCodes, stepCount, toolCallCount }) {
-  const safe = buildSafeReview({ runId, profile, freshness, goalSummary, evidence, provider: { ...provider, fallback: true }, stepCount, toolCallCount });
+export function safeFallbackAfterPolicyRejection({ runId, profile, freshness, goalSummary, evidence, provider, reasonCodes, stepCount, toolCallCount, modelCallCount, tokenUsage }) {
+  const safe = buildSafeReview({ runId, profile, freshness, goalSummary, evidence, provider: { ...provider, fallback: true }, stepCount, toolCallCount, modelCallCount, tokenUsage });
   return {
     ...safe,
     recommendedAction: 'INSUFFICIENT_EVIDENCE',

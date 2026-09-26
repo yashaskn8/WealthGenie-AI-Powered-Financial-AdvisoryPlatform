@@ -26,6 +26,7 @@ import { toast } from 'sonner';
 import { RISK_COLORS } from '../investmentDatabase';
 import * as api from '../services/api';
 import ResearchStatusCard from './agent/ResearchStatusCard';
+import PlanReviewAuthorization from './agent/PlanReviewAuthorization';
 import './AllocationPlanner.css';
 
 const SLICE_GRADIENTS = [
@@ -116,7 +117,7 @@ const PLAN_REVIEW_STAGES = [
   'Preparing a grounded review',
 ];
 
-const PlanReviewPanel = ({ profileId, onRecomputePlan }) => {
+const PlanReviewPanel = ({ profile, profileId, financialStateKey, onRecomputePlan }) => {
   const prefersReducedMotion = useReducedMotion();
   const [status, setStatus] = useState('idle');
   const [run, setRun] = useState(null);
@@ -129,21 +130,28 @@ const PlanReviewPanel = ({ profileId, onRecomputePlan }) => {
     let cancelled = false;
     api.getCurrentPlanReviewRun(profileId, { timeoutMs: 1500 }).then(current => {
       if (cancelled || !current) return;
+      if (current.currentStateMatch !== true || current.status === 'SUPERSEDED') {
+        setStatus('error');
+        setError('This plan review no longer matches your current saved plan. Run it again.');
+        return;
+      }
       setRun(current);
       if (current.result) setReview(current.result);
       if (current.status === 'COMPLETED' || current.status === 'WAITING_FOR_APPROVAL') setStatus('completed');
       else if (['QUEUED', 'RUNNING'].includes(current.status)) setStatus('running');
-      else if (['FAILED', 'CANCELLED', 'BUDGET_EXCEEDED'].includes(current.status)) {
+      else if (['FAILED', 'CANCELLED', 'BUDGET_EXCEEDED', 'SUPERSEDED'].includes(current.status)) {
         setStatus('error');
-        setError(current.status === 'CANCELLED'
-          ? 'This plan review was cancelled.'
-          : current.failure?.message || 'The plan review did not complete.');
+        setError(current.status === 'SUPERSEDED'
+          ? 'This plan review no longer matches your current saved plan. Run it again.'
+          : current.status === 'CANCELLED'
+            ? 'This plan review was cancelled.'
+            : current.failure?.message || 'The plan review did not complete.');
       }
     }).catch(() => {
       // A missing run is the normal initial state; it is not a panel error.
     });
     return () => { cancelled = true; };
-  }, [profileId]);
+  }, [profileId, financialStateKey]);
 
   useEffect(() => {
     if (!run?.runId || status !== 'running') return undefined;
@@ -152,14 +160,23 @@ const PlanReviewPanel = ({ profileId, onRecomputePlan }) => {
       try {
         const current = await api.getPlanReviewRun(run.runId);
         if (cancelled) return;
+        if (current.currentStateMatch !== true || current.status === 'SUPERSEDED') {
+          setRun(null);
+          setReview(null);
+          setStatus('error');
+          setError('Your saved plan changed while this review was running. Run it again.');
+          return;
+        }
         setRun(current);
         if (current.result) setReview(current.result);
         if (current.status === 'COMPLETED' || current.status === 'WAITING_FOR_APPROVAL') {
           setStatus('completed');
           toast.success('Plan review ready', { description: 'No plan changes were made.' });
-        } else if (['FAILED', 'CANCELLED', 'BUDGET_EXCEEDED'].includes(current.status)) {
+        } else if (['FAILED', 'CANCELLED', 'BUDGET_EXCEEDED', 'SUPERSEDED'].includes(current.status)) {
           setStatus('error');
-          setError(current.failure?.message || 'The plan review did not complete.');
+          setError(current.status === 'SUPERSEDED'
+            ? 'Your saved plan changed while this review was running. Run it again.'
+            : current.failure?.message || 'The plan review did not complete.');
         }
       } catch (err) {
         if (!cancelled && err?.status && err.status >= 400 && err.status < 500) {
@@ -181,6 +198,13 @@ const PlanReviewPanel = ({ profileId, onRecomputePlan }) => {
     setError(null);
     try {
       const queued = await api.runPlanReview(profileId);
+      if (queued.currentStateMatch !== true || queued.status === 'SUPERSEDED') {
+        setRun(null);
+        setReview(null);
+        setStatus('error');
+        setError('Your saved plan changed before the review could be bound. Refresh your recommendation and try again.');
+        return;
+      }
       setRun(queued);
       if (queued.result) setReview(queued.result);
       if (queued.status === 'COMPLETED' || queued.status === 'WAITING_FOR_APPROVAL' || queued.summary) {
@@ -282,7 +306,11 @@ const PlanReviewPanel = ({ profileId, onRecomputePlan }) => {
                 </Dialog.Portal>
               </Dialog.Root>
               {actionNeedsRecompute && typeof onRecomputePlan === 'function' && (
-                <button type="button" className="ap-review-primary ap-review-recompute" onClick={onRecomputePlan}><RefreshCw size={16} aria-hidden="true" /> Recompute plan</button>
+                <PlanReviewAuthorization
+                  run={run}
+                  onAuthorizationUnavailable={() => onRecomputePlan(profile, null)}
+                  onExecutionComplete={response => onRecomputePlan(profile, response)}
+                />
               )}
               <button type="button" className="ap-review-icon-button" onClick={runReview} aria-label="Run plan review again"><RefreshCw size={16} aria-hidden="true" /></button>
             </div>
@@ -354,6 +382,16 @@ const AllocationPlanner = ({ profile, recommendations = [], recommendationMeta, 
   const goals = Array.isArray(profile?.investment_goals) ? profile.investment_goals.filter(Boolean) : [];
   const isLoading = recommendationMeta?.loading === true || recommendationMeta?.status === 'LOADING';
   const hasError = Boolean(recommendationMeta?.error || recommendationMeta?.status === 'ERROR');
+  const financialStateKey = [
+    profile?.profileId || recommendationMeta?.profileId || '',
+    profile?.version ?? profile?.profile_version ?? recommendationMeta?.profile_version ?? '',
+    recommendationMeta?.recommendationId ?? recommendationMeta?.recommendation_id ?? '',
+    recommendationMeta?.recommendation_generation ?? recommendationMeta?.generation_revision ?? '',
+    recommendationMeta?.allocation_revision ?? '',
+    recommendationMeta?.allocation_revision_id ?? '',
+    recommendationMeta?.portfolio_fingerprint ?? '',
+    recommendationMeta?.recommendation_fingerprint ?? '',
+  ].map(value => String(value)).join(':');
   const methodologyRows = [
     ['Allocation source', recommendationMeta?.current_allocation_source || 'Backend recommendation'],
     ['Return basis', recommendationMeta?.return_basis || 'Model assumption'],
@@ -431,8 +469,10 @@ const AllocationPlanner = ({ profile, recommendations = [], recommendationMeta, 
         </motion.header>
 
         <PlanReviewPanel
-          key={profile?.profileId || recommendationMeta?.profileId || 'no-profile'}
+          key={financialStateKey || 'no-financial-state'}
+          profile={profile}
           profileId={profile?.profileId || recommendationMeta?.profileId}
+          financialStateKey={financialStateKey}
           onRecomputePlan={onRecomputePlan}
         />
 

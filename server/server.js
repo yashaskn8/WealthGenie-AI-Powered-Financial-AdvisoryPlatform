@@ -14,6 +14,7 @@ import { startPlanReviewWorker, stopPlanReviewWorker } from './agents/planReview
 import logger from './utils/logger.js';
 import { createRuntimeState } from './services/runtimeState.js';
 import { warmAdvisoryPersistence } from './services/advisoryPersistence.js';
+import { verifyPlanReviewPersistenceIndexes } from './services/planReviewPersistence.js';
 import AgentRunEvent from './models/AgentRunEvent.js';
 import { warmAuthorizationPersistence } from './services/authorizationPersistence.js';
 import { reconcileAuthorizedExecutions } from './agents/authorization/executionRecovery.js';
@@ -83,6 +84,7 @@ export async function startServer({ env = process.env } = {}) {
       requireTransactions: true,
     });
     await warmAdvisoryPersistence();
+    if (config.agenticPlanReviewEnabled) await verifyPlanReviewPersistenceIndexes();
     if (config.authorization.verifiableActionsEnabled) await warmAuthorizationPersistence();
     await connectRedis({ url: env.REDIS_URL });
     if (config.requireRedis && !redisAvailable) {

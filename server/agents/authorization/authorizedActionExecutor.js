@@ -19,6 +19,7 @@ import { appendAuthorizationEvent } from './authorizationEvents.js';
 import { PrometheusMetrics } from '../../services/metricsCollector.js';
 import { canonicalSha256 } from '../../utils/canonicalJson.js';
 import { newExecutionClaim, reconcileAuthorizedExecution } from './executionRecovery.js';
+import { resolvePlanReviewSnapshot } from '../planReview/planReviewSnapshot.js';
 
 async function resolve(value) { return typeof value?.lean === 'function' ? value.lean() : value; }
 
@@ -215,8 +216,20 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
       const profile = await resolve(models.profileModel.findOne({ _id: stored.profileId, userId }));
       const recommendation = stored.recommendationId
         ? await resolve(models.recommendationModel.findOne({ _id: stored.recommendationId, profileId: stored.profileId, userId }))
-        : await resolve(models.recommendationModel.findOne({ profileId: stored.profileId, userId }).sort({ generatedAt: -1 }));
+        : null;
       if (!profile) throw mandateError('MANDATE_STALE', 'The financial profile required by this authorization is no longer available.');
+      const snapshotResolver = dependencies.planReviewSnapshotResolver || resolvePlanReviewSnapshot;
+      const currentPlanReviewSnapshot = await snapshotResolver({
+        userId,
+        profileId: stored.profileId,
+        profileModel: models.profileModel,
+        dependencies: dependencies.planReviewSnapshotDependencies || {},
+      });
+      if (currentPlanReviewSnapshot.planReviewSnapshotHash !== stored.planReviewSnapshotHash) {
+        PrometheusMetrics.inc('snapshot_mismatch_rejections_total');
+        await models.mandateModel.updateOne({ mandateId, userId, status: 'AUTHORIZED' }, { $set: { status: 'FAILED', failureCode: 'MANDATE_STALE' } });
+        throw mandateError('MANDATE_STALE', 'The approved Plan Review source state has changed. Fresh review and approval are required.');
+      }
       const currentSnapshot = buildSnapshotFingerprint({ profile, recommendation });
       if (currentSnapshot.financialSnapshotHash !== stored.financialSnapshotHash
           || currentSnapshot.recommendationFingerprint !== stored.recommendationFingerprint

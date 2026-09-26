@@ -25,6 +25,8 @@ const approvalSchema = new mongoose.Schema({
   credentialId: { type: String, default: null, maxlength: 512 },
   challengeHash: { type: String, default: null, match: /^[a-f0-9]{64}$/ },
   authenticatorCounter: { type: Number, min: 0, default: null },
+  credentialDeviceType: { type: String, enum: ['singleDevice', 'multiDevice'], default: null },
+  credentialBackedUp: { type: Boolean, default: null },
 }, { _id: false, strict: 'throw' });
 
 const signatureSchema = new mongoose.Schema({
@@ -53,6 +55,7 @@ const schema = new mongoose.Schema({
   recommendationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Recommendation', default: null, immutable: true },
   financialSnapshotHash: { type: String, required: true, immutable: true, match: /^[a-f0-9]{64}$/ },
   recommendationFingerprint: { type: String, required: true, immutable: true, match: /^[a-f0-9]{64}$/ },
+  planReviewSnapshotHash: { type: String, required: true, immutable: true, match: /^[a-f0-9]{64}$/ },
   policyVersion: { type: String, required: true, immutable: true, maxlength: 120 },
   actionPayloadHash: { type: String, required: true, immutable: true, match: /^[a-f0-9]{64}$/ },
   constraints: { type: constraintsSchema, required: true, immutable: true },

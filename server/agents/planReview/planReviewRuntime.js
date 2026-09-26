@@ -1,4 +1,4 @@
-import crypto from 'node:crypto';
+import { canonicalSha256 } from '../../utils/canonicalJson.js';
 
 export const PLAN_REVIEW_AGENT_VERSION = 'plan-review-agent-2.0.0';
 export const PLAN_REVIEW_GRAPH_VERSION = 'plan-review-graph-1.1.0';
@@ -12,6 +12,7 @@ export const PLAN_REVIEW_RUN_STATES = Object.freeze([
   'COMPLETED',
   'FAILED',
   'CANCELLED',
+  'SUPERSEDED',
   'BUDGET_EXCEEDED',
   'FEATURE_UNAVAILABLE',
 ]);
@@ -28,17 +29,19 @@ export const TERMINAL_PLAN_REVIEW_STATES = Object.freeze([
   'CANCELLED',
   'BUDGET_EXCEEDED',
   'FEATURE_UNAVAILABLE',
+  'SUPERSEDED',
 ]);
 
 export const PLAN_REVIEW_TRANSITIONS = Object.freeze({
-  QUEUED: ['RUNNING', 'CANCELLED'],
-  RUNNING: ['WAITING_FOR_APPROVAL', 'COMPLETED', 'FAILED', 'CANCELLED', 'BUDGET_EXCEEDED'],
-  WAITING_FOR_APPROVAL: ['RUNNING', 'COMPLETED', 'CANCELLED'],
+  QUEUED: ['RUNNING', 'CANCELLED', 'SUPERSEDED'],
+  RUNNING: ['WAITING_FOR_APPROVAL', 'COMPLETED', 'FAILED', 'CANCELLED', 'BUDGET_EXCEEDED', 'SUPERSEDED'],
+  WAITING_FOR_APPROVAL: ['RUNNING', 'COMPLETED', 'CANCELLED', 'SUPERSEDED'],
   COMPLETED: [],
   FAILED: [],
   CANCELLED: [],
   BUDGET_EXCEEDED: [],
   FEATURE_UNAVAILABLE: [],
+  SUPERSEDED: [],
 });
 
 export const PLAN_REVIEW_TRAJECTORY_EVENTS = Object.freeze([
@@ -75,10 +78,53 @@ export const PLAN_REVIEW_BUDGETS = Object.freeze({
   maxAttempts: 2,
 });
 
-export function hashPlanReviewRequest({ userId, profileId, agentVersion = PLAN_REVIEW_AGENT_VERSION }) {
-  return crypto.createHash('sha256')
-    .update(JSON.stringify({ userId: String(userId), profileId: String(profileId), agentVersion }))
-    .digest('hex');
+export function buildPlanReviewSnapshotBinding({ userId, profileId, currentState = null, freshness = null }) {
+  const recommendation = currentState?.recommendation || null;
+  const allocation = currentState?.allocationRevision || currentState?.currentAllocation || null;
+  const provenance = currentState?.provenance || {};
+  const profile = currentState?.profile || null;
+  const profileVersion = currentState?.profileVersion ?? profile?.version ?? null;
+  return Object.freeze({
+    schemaVersion: 'plan-review-source-binding-1.0.0',
+    userId: String(userId),
+    profileId: String(profileId),
+    profileVersion: Number.isInteger(Number(profileVersion)) ? Number(profileVersion) : null,
+    profileInputHash: recommendation?.profileInputHash || provenance.profileInputHash || null,
+    recommendationId: recommendation?._id ? String(recommendation._id) : null,
+    recommendationGeneration: recommendation?.recommendationGeneration ?? currentState?.statePointer?.generationRevision ?? null,
+    allocationRevision: allocation?.revision ?? null,
+    allocationRevisionId: allocation?._id ? String(allocation._id) : null,
+    portfolioFingerprint: currentState?.portfolioFingerprint || allocation?.portfolioFingerprint || null,
+    recommendationFingerprint: currentState?.recommendationFingerprint || allocation?.recommendationFingerprint || null,
+    recommendationPolicyVersion: recommendation?.recommendationPolicyVersion || provenance.recommendationPolicyVersion || null,
+    regulatoryRuleVersion: recommendation?.regulatoryRuleVersion || provenance.regulatoryRuleVersion || null,
+    returnAssumptionVersion: allocation?.returnAssumptionVersion || provenance.returnAssumptionVersion || null,
+    returnAssumptionHash: allocation?.returnAssumptionHash || provenance.returnAssumptionHash || null,
+    returnAssumptionSource: allocation?.returnAssumptionSource || provenance.returnAssumptionSource || null,
+    provenanceStatus: provenance.status || 'MISSING',
+    freshnessReasonCodes: [...new Set(freshness?.reasonCodes || currentState?.freshness?.reasonCodes || [])].sort(),
+  });
+}
+
+export function hashPlanReviewSnapshot(binding) {
+  return canonicalSha256(binding);
+}
+
+export function planReviewGraphThreadId(runId, executionGeneration) {
+  const generation = Number(executionGeneration);
+  if (!runId || !Number.isInteger(generation) || generation < 1) {
+    throw new TypeError('A run ID and positive execution generation are required for checkpoint isolation.');
+  }
+  return `${String(runId)}:${generation}`;
+}
+
+export function hashPlanReviewRequest({ userId, profileId, planReviewSnapshotHash, agentVersion = PLAN_REVIEW_AGENT_VERSION }) {
+  return canonicalSha256({
+    userId: String(userId),
+    profileId: String(profileId),
+    planReviewSnapshotHash: String(planReviewSnapshotHash || ''),
+    agentVersion,
+  });
 }
 
 export function isActivePlanReviewState(status) {

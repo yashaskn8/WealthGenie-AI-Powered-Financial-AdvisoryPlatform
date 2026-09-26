@@ -417,6 +417,15 @@ export async function getMandateApprovalOptions(mandateId, options = {}) {
   return request('POST', `/agent/mandates/${encodeURIComponent(mandateId)}/approval/options`, {}, { retries: 0, ...options });
 }
 
+export async function getPasskeyRegistrationOptions(options = {}) {
+  return request('POST', '/agent/passkeys/registration/options', {}, { retries: 0, ...options });
+}
+
+export async function verifyPasskeyRegistration(response, options = {}) {
+  if (!response) throw new TypeError('A passkey registration response is required.');
+  return request('POST', '/agent/passkeys/registration/verify', response, { retries: 0, ...options });
+}
+
 export async function verifyMandateApproval(mandateId, assertion, options = {}) {
   if (!mandateId || !assertion) throw new TypeError('A mandate ID and approval assertion are required.');
   return request('POST', `/agent/mandates/${encodeURIComponent(mandateId)}/approval/verify`, assertion, { retries: 0, ...options });
@@ -719,7 +728,7 @@ const api = {
   setAuthToken, getAuthToken, clearAuthToken, clearUserSession,
   subscribeAuth, getAuthSnapshot,
   setUserInfo, getUserInfo,
-  buildProfile, precomputeProfile, completeFinancialProfile, getCurrentProfile, getCurrentRecommendation, getFinancialHealthScore, updateProfile, getRecommendations, runPlanReview, getPlanReviewRun, getCurrentPlanReviewRun, cancelPlanReviewRun, actOnPlanReview, listAuthorizedMandates, getAuthorizedMandate, getMandateApprovalOptions, verifyMandateApproval, revokeAuthorizedMandate, executeAuthorizedMandate, getExecutionReceipt, verifyExecutionReceipt, getPlanHealth, getPlanHealthEvents, getInstruments, rankInvestmentCandidates, getProjections, calculateStepUpProjection, calculateAllocationSplit, compareInvestmentProjection, getCustomPortfolioProjection, runInstrumentStressTest,
+  buildProfile, precomputeProfile, completeFinancialProfile, getCurrentProfile, getCurrentRecommendation, getFinancialHealthScore, updateProfile, getRecommendations, runPlanReview, getPlanReviewRun, getCurrentPlanReviewRun, cancelPlanReviewRun, actOnPlanReview, listAuthorizedMandates, getAuthorizedMandate, getMandateApprovalOptions, getPasskeyRegistrationOptions, verifyPasskeyRegistration, verifyMandateApproval, revokeAuthorizedMandate, executeAuthorizedMandate, getExecutionReceipt, verifyExecutionReceipt, getPlanHealth, getPlanHealthEvents, getInstruments, rankInvestmentCandidates, getProjections, calculateStepUpProjection, calculateAllocationSplit, compareInvestmentProjection, getCustomPortfolioProjection, runInstrumentStressTest,
   runMonteCarlo, runPortfolioMonteCarlo, createGoal, getGoals, updateGoal, simulateGoal, deleteGoal, healthCheck,
   getMarketRates, getBenchmarkMarketFacts, getMutualFundNavFacts, refreshMarketRates,
   sendChatMessage, getChatHistory, clearChatSession, rebalancePortfolio,

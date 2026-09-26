@@ -6,8 +6,8 @@ const schema = new mongoose.Schema({
   publicKey: { type: Buffer, required: true, immutable: true },
   counter: { type: Number, min: 0, required: true, default: 0 },
   transports: { type: [String], default: [] },
-  deviceType: { type: String, default: null, maxlength: 80 },
-  backedUp: { type: Boolean, default: false },
+  deviceType: { type: String, enum: ['singleDevice', 'multiDevice'], default: null },
+  backedUp: { type: Boolean, default: null },
   createdAt: { type: Date, default: Date.now, immutable: true },
   lastUsedAt: { type: Date, default: null },
 }, { strict: 'throw', timestamps: false });
@@ -15,4 +15,3 @@ const schema = new mongoose.Schema({
 schema.index({ userId: 1, createdAt: -1 });
 
 export default mongoose.model('PasskeyCredential', schema);
-

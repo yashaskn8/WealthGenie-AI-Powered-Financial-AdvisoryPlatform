@@ -30,6 +30,8 @@ export async function verifyPasskeyRegistration({ userId, response, runtimeConfi
     publicKey: info.credential?.publicKey || info.credentialPublicKey,
     counter: info.credential?.counter ?? info.counter ?? 0,
     transports: response?.response?.transports || [],
+    deviceType: info.credentialDeviceType,
+    backedUp: info.credentialBackedUp,
   });
   const consumed = await models.challengeModel.findOneAndUpdate(
     { _id: challenge._id, consumedAt: null },

@@ -15,6 +15,7 @@ const recommendationStateSchema = new mongoose.Schema({
   returnAssumptionHash: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
   returnAssumptionSource: { type: String, required: true },
   financialStateFence: { type: Number, min: 0, default: 0 },
+  planReviewPublicationFence: { type: Number, min: 0, default: 0 },
 }, { timestamps: true, strict: 'throw' });
 
 recommendationStateSchema.index({ userId: 1, profileId: 1 }, { unique: true });

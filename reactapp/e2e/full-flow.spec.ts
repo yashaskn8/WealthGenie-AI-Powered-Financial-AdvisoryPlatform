@@ -280,6 +280,47 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     await expect(page.getByRole('heading', { name: /Where to Invest Your Money/i })).toBeVisible();
     await expect(page.getByRole('region', { name: 'Investment allocation breakdown donut chart' })).toBeVisible();
 
+    const planReviewQueuedPromise = page.waitForResponse(apiResponse('POST', '/api/agent/plan-review'), { timeout: 30_000 });
+    await page.getByRole('button', { name: 'Run plan review' }).click();
+    const planReviewQueuedResponse = await planReviewQueuedPromise;
+    expect(planReviewQueuedResponse.status()).toBe(202);
+    const queuedPlanReview = await planReviewQueuedResponse.json();
+    expect(queuedPlanReview).toMatchObject({
+      status: 'QUEUED',
+      currentStateMatch: true,
+      profileId: profile.profileId,
+    });
+    expect(queuedPlanReview.planReviewSnapshotHash).toMatch(/^[a-f0-9]{64}$/i);
+    expect(queuedPlanReview.runId).toBeTruthy();
+    await expect(page.getByText('Review complete', { exact: true })).toBeVisible({ timeout: 120_000 });
+
+    const completedPlanReviewResponse = await page.request.get(
+      apiUrl(`/agent/plan-review/${encodeURIComponent(queuedPlanReview.runId)}`),
+    );
+    expect(completedPlanReviewResponse.status()).toBe(200);
+    const completedPlanReview = await completedPlanReviewResponse.json();
+    expect(['COMPLETED', 'WAITING_FOR_APPROVAL']).toContain(completedPlanReview.status);
+    expect(completedPlanReview).toMatchObject({
+      runId: queuedPlanReview.runId,
+      currentStateMatch: true,
+      profileId: profile.profileId,
+      recommendationId: queuedPlanReview.recommendationId,
+      planReviewSnapshotHash: queuedPlanReview.planReviewSnapshotHash,
+    });
+
+    const currentRecommendationResponse = await page.request.get(
+      apiUrl(`/recommend/current?profileId=${encodeURIComponent(profile.profileId)}`),
+    );
+    expect(currentRecommendationResponse.status()).toBe(200);
+    const currentRecommendation = await currentRecommendationResponse.json();
+    expectCurrentFinancialBinding(currentRecommendation, {
+      profileId: profile.profileId,
+      profileVersion: Number(updatedProfile.version),
+    });
+    expect(currentRecommendation.recommendation_fingerprint).toBe(profileUpdateBody.recommendation.recommendation_fingerprint);
+    expect(currentRecommendation.portfolio_fingerprint).toBe(profileUpdateBody.recommendation.portfolio_fingerprint);
+    expect(currentRecommendation.allocation_revision_id).toBe(profileUpdateBody.recommendation.allocation_revision_id);
+
     await page.getByTestId('nav-goal-planner').click();
     await page.getByRole('button', { name: 'Create Target Goal' }).click();
     await expect(page.getByTestId('goal-form')).toBeVisible();

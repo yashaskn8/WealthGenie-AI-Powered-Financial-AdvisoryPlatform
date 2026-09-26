@@ -38,6 +38,7 @@ function signedExecutingMandate(keys) {
       userId,
       profileId,
       recommendationId,
+      planReviewSnapshotHash: 'c'.repeat(64),
       status: 'WAITING_FOR_APPROVAL',
       recommendedAction: 'RECOMPUTE_PLAN',
       agentVersion: 'plan-review-agent-2.0.0',

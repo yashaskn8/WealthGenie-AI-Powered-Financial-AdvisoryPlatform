@@ -173,7 +173,7 @@ paths:
       tags: [Agent]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       parameters: [{ name: profileId, in: query, required: true, schema: { type: string, pattern: '^[0-9a-fA-F]{24}$' } }]
-      responses: { '200': { $ref: '#/components/responses/PlanReviewRun' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+      responses: { '200': { $ref: '#/components/responses/PlanReviewRun' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
   /api/agent/cards:
     get:
       operationId: listAgentCards
@@ -194,7 +194,7 @@ paths:
       tags: [Agent]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       parameters: [{ name: runId, in: path, required: true, schema: { type: string, format: uuid } }]
-      responses: { '200': { $ref: '#/components/responses/PlanReviewRun' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+      responses: { '200': { $ref: '#/components/responses/PlanReviewRun' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
   /api/agent/plan-review/{runId}/events:
     get:
       operationId: streamPlanReviewEvents
@@ -203,14 +203,14 @@ paths:
       parameters:
         - { name: runId, in: path, required: true, schema: { type: string, format: uuid } }
         - { name: Last-Event-ID, in: header, required: false, schema: { type: integer, minimum: 0 } }
-      responses: { '200': { description: Owned AG-UI-inspired internal SSE event stream (not the official AG-UI protocol), content: { text/event-stream: { schema: { type: string } } } }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+      responses: { '200': { description: Owned AG-UI-inspired internal SSE event stream (not the official AG-UI protocol), content: { text/event-stream: { schema: { type: string } } } }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
   /api/agent/plan-review/{runId}/ui:
     get:
       operationId: getPlanReviewA2UI
       tags: [Agent]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       parameters: [{ name: runId, in: path, required: true, schema: { type: string, format: uuid } }]
-      responses: { '200': { $ref: '#/components/responses/Object' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+      responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
   /api/agent/plan-review/{runId}/cancel:
     post:
       operationId: cancelPlanReviewRun
@@ -218,7 +218,7 @@ paths:
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       x-csrf-protection: cookie-session
       parameters: [{ name: runId, in: path, required: true, schema: { type: string, format: uuid } }]
-      responses: { '200': { $ref: '#/components/responses/Object' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
+      responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' } }
   /api/agent/plan-review/{runId}/action:
     post:
       operationId: actOnPlanReview
@@ -227,7 +227,7 @@ paths:
       x-csrf-protection: cookie-session
       parameters: [{ name: runId, in: path, required: true, schema: { type: string, format: uuid } }]
       requestBody: { required: true, content: { application/json: { schema: { type: object, required: [action], properties: { action: { type: string, enum: [APPROVE_RECOMPUTE, REJECT_RECOMPUTE, OPEN_PROFILE, OPEN_GOALS] } } } } } }
-      responses: { '200': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' } }
+      responses: { '200': { $ref: '#/components/responses/Object' }, '201': { $ref: '#/components/responses/Object' }, '400': { $ref: '#/components/responses/BadRequest' }, '401': { $ref: '#/components/responses/Unauthorized' }, '404': { $ref: '#/components/responses/NotFound' }, '409': { $ref: '#/components/responses/Conflict' } }
   /api/agent/mandates:
     get:
       operationId: listUserIntentMandates
@@ -920,13 +920,25 @@ components:
       required: [runId, status, agentVersion, graphVersion]
       properties:
         runId: { type: string, format: uuid }
-        status: { type: string, enum: [QUEUED, RUNNING, WAITING_FOR_APPROVAL, COMPLETED, FAILED, CANCELLED, BUDGET_EXCEEDED] }
+        status: { type: string, enum: [QUEUED, RUNNING, WAITING_FOR_APPROVAL, COMPLETED, FAILED, CANCELLED, SUPERSEDED, BUDGET_EXCEEDED, FEATURE_UNAVAILABLE] }
         profileId: { type: [string, 'null'] }
+        recommendationId: { type: [string, 'null'] }
+        planReviewSnapshotHash: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }
+        currentStateMatch: { type: [boolean, 'null'] }
         recommendedAction: { type: string }
         result: { oneOf: [{ $ref: '#/components/schemas/PlanReviewResponse' }, { type: 'null' }] }
         progress: { type: object, additionalProperties: true }
+        currentNode: { type: [string, 'null'] }
+        attempt: { type: integer, minimum: 0 }
+        maxAttempts: { type: integer, minimum: 1, maximum: 2 }
+        tokenUsage: { type: integer, minimum: 0, maximum: 5200 }
         agentVersion: { type: string }
         graphVersion: { type: string }
+        queuedAt: { type: [string, 'null'], format: date-time }
+        startedAt: { type: [string, 'null'], format: date-time }
+        completedAt: { type: [string, 'null'], format: date-time }
+        failure: { type: [object, 'null'], additionalProperties: true }
+        approval: { type: [object, 'null'], additionalProperties: true }
       additionalProperties: true
     UserIntentMandate:
       type: object
@@ -953,7 +965,17 @@ components:
         status: { type: string, enum: [DRAFT, PENDING_USER_VERIFICATION, AUTHORIZED, EXECUTING, EXECUTED, REJECTED, EXPIRED, REVOKED, FAILED] }
         mandateHash: { type: string, pattern: '^[a-f0-9]{64}$' }
         signatureMetadata: { type: [object, 'null'], additionalProperties: true }
-        approval: { type: [object, 'null'], additionalProperties: true }
+        approval:
+          type: [object, 'null']
+          additionalProperties: false
+          properties:
+            method: { type: [string, 'null'], enum: [DEVELOPMENT, WEBAUTHN, null] }
+            verifiedAt: { type: [string, 'null'], format: date-time }
+            credentialId: { type: [string, 'null'], maxLength: 512 }
+            challengeHash: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }
+            authenticatorCounter: { type: [integer, 'null'], minimum: 0 }
+            credentialDeviceType: { type: [string, 'null'], enum: [singleDevice, multiDevice, null] }
+            credentialBackedUp: { type: [boolean, 'null'] }
         receiptId: { type: [string, 'null'] }
       additionalProperties: false
     MandateApprovalAssertion:

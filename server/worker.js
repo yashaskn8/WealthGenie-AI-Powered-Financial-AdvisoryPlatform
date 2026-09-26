@@ -8,6 +8,7 @@ import { validateEnvironmentConfig } from './config/validateEnv.js';
 import { createPlanReviewWorker } from './agents/planReview/planReviewWorker.js';
 import AgentRunEvent from './models/AgentRunEvent.js';
 import { createWorkerHealthServer } from './services/workerHealthServer.js';
+import { verifyPlanReviewPersistenceIndexes } from './services/planReviewPersistence.js';
 import { startPlanHealthScheduler, stopPlanHealthScheduler } from './services/planHealthScheduler.js';
 import logger from './utils/logger.js';
 
@@ -48,6 +49,7 @@ export async function startWorker({ env = process.env } = {}) {
     },
     requireTransactions: true,
   });
+  if (config.agenticPlanReviewEnabled) await verifyPlanReviewPersistenceIndexes();
   await connectRedis({ url: env.REDIS_URL });
   if (config.requireRedis && !redisAvailable) throw new Error('Redis is required in this environment but is unavailable');
 
@@ -58,6 +60,7 @@ export async function startWorker({ env = process.env } = {}) {
     port: config.agentPlanReview.healthPort,
     stateProvider: () => worker?.state(),
     requireRedis: config.requireRedis,
+    requirePlanReviewIndexes: config.agenticPlanReviewEnabled,
   });
   await healthServer.listen();
   logger.info('WealthGenie agent worker started', { healthPort: config.agentPlanReview.healthPort });

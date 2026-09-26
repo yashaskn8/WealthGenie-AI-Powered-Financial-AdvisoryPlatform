@@ -111,6 +111,7 @@ describe('AllocationPlanner', () => {
     vi.spyOn(api, 'runPlanReview').mockResolvedValue({
       version: 'plan-review-1.0.0',
       runId: '4f4f4f4f-1111-4111-8111-111111111111',
+      currentStateMatch: true,
       status: 'COMPLETED',
       recommendedAction: 'NONE',
       summary: 'The available evidence is aligned with your saved plan. No plan changes were made.',
@@ -139,6 +140,7 @@ describe('AllocationPlanner', () => {
     vi.spyOn(api, 'runPlanReview').mockResolvedValue({
       version: 'plan-review-1.0.0',
       runId: '4f4f4f4f-1111-4111-8111-111111111111',
+      currentStateMatch: true,
       status: 'COMPLETED',
       recommendedAction: 'RECOMPUTE_PLAN',
       summary: 'The saved recommendation needs a fresh authoritative recommendation.',
@@ -148,11 +150,70 @@ describe('AllocationPlanner', () => {
       evidence: { status: 'UNAVAILABLE', unavailableFacts: ['PROFILE_CHANGED'], entries: [] },
       provider: { name: 'DETERMINISTIC_FALLBACK', model: null, fallback: true },
     });
+    vi.spyOn(api.default, 'actOnPlanReview').mockResolvedValue({ authorization: { enabled: false } });
     const recompute = vi.fn();
     render(<AllocationPlanner profile={profile} recommendations={recommendations} recommendationMeta={recommendationMeta} onRecomputePlan={recompute} />);
     fireEvent.click(screen.getByRole('button', { name: /Run plan review/i }));
-    await waitFor(() => expect(screen.getByRole('button', { name: /Recompute plan/i })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole('button', { name: /Recompute plan/i }));
-    expect(recompute).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByRole('button', { name: /Request step-up approval/i })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /Request step-up approval/i }));
+    await waitFor(() => expect(api.default.actOnPlanReview).toHaveBeenCalledWith('4f4f4f4f-1111-4111-8111-111111111111', 'APPROVE_RECOMPUTE'));
+    await waitFor(() => expect(recompute).toHaveBeenCalledWith(profile, null));
+  });
+
+  it('does not display a completed review that is bound to a superseded financial state', async () => {
+    vi.spyOn(api, 'getCurrentPlanReviewRun').mockResolvedValue({
+      version: 'plan-review-1.0.0',
+      runId: '5f5f5f5f-1111-4111-8111-111111111111',
+      currentStateMatch: false,
+      status: 'COMPLETED',
+      summary: 'Historical review that must not appear as current.',
+      result: { summary: 'Historical review that must not appear as current.' },
+    });
+
+    render(<AllocationPlanner profile={profile} recommendations={recommendations} recommendationMeta={recommendationMeta} />);
+
+    await waitFor(() => expect(screen.getByText('This plan review no longer matches your current saved plan. Run it again.')).toBeInTheDocument());
+    expect(screen.queryByText('Historical review that must not appear as current.')).not.toBeInTheDocument();
+  });
+
+  it('reloads the review when the canonical allocation revision changes without a profile version change', async () => {
+    vi.spyOn(api, 'getCurrentPlanReviewRun')
+      .mockResolvedValueOnce({
+        version: 'plan-review-1.0.0',
+        runId: '6f6f6f6f-1111-4111-8111-111111111111',
+        currentStateMatch: true,
+        status: 'COMPLETED',
+        result: { recommendedAction: 'NONE', summary: 'Review for allocation revision one.' },
+      })
+      .mockResolvedValueOnce({
+        version: 'plan-review-1.0.0',
+        runId: '7f7f7f7f-1111-4111-8111-111111111111',
+        currentStateMatch: true,
+        status: 'COMPLETED',
+        result: { recommendedAction: 'NONE', summary: 'Review for allocation revision two.' },
+      });
+
+    const firstMeta = {
+      ...recommendationMeta,
+      recommendationId: '8f8f8f8f-1111-4111-8111-111111111111',
+      allocation_revision: 1,
+      allocation_revision_id: '9f9f9f9f-1111-4111-8111-111111111111',
+      recommendation_fingerprint: 'a'.repeat(64),
+      portfolio_fingerprint: 'b'.repeat(64),
+    };
+    const { rerender } = render(<AllocationPlanner profile={profile} recommendations={recommendations} recommendationMeta={firstMeta} />);
+    await waitFor(() => expect(screen.getByText('Review for allocation revision one.')).toBeInTheDocument());
+
+    rerender(<AllocationPlanner profile={profile} recommendations={recommendations} recommendationMeta={{
+      ...firstMeta,
+      allocation_revision: 2,
+      allocation_revision_id: 'afafafaf-1111-4111-8111-111111111111',
+      recommendation_fingerprint: 'c'.repeat(64),
+      portfolio_fingerprint: 'd'.repeat(64),
+    }} />);
+
+    await waitFor(() => expect(screen.getByText('Review for allocation revision two.')).toBeInTheDocument());
+    expect(screen.queryByText('Review for allocation revision one.')).not.toBeInTheDocument();
+    expect(api.getCurrentPlanReviewRun).toHaveBeenCalledTimes(2);
   });
 });

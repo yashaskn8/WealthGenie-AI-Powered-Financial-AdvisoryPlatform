@@ -10,22 +10,50 @@ export async function loadPlanReviewDataset(datasetPath = path.join(root, 'plan-
 }
 
 export function gradePlanReviewTrajectory({ caseDefinition, result, trajectory = [] }) {
-  const selectedTools = trajectory.filter(event => event.type === 'TOOL_SUCCEEDED').map(event => event.tool).filter(Boolean);
+  const selectedTools = trajectory.filter(event => event?.type === 'TOOL_SUCCEEDED').map(event => event.tool).filter(Boolean);
   const forbidden = selectedTools.filter(tool => caseDefinition.forbiddenTools.includes(tool));
   const unsupported = selectedTools.filter(tool => !SAFE_PLAN_REVIEW_TOOLS.includes(tool));
+  const missingExpectedTools = (caseDefinition.expectedTools || []).filter(tool => !selectedTools.includes(tool));
   const resultAction = result?.review?.recommendedAction || result?.recommendedAction;
-  const reasons = result?.review?.freshness?.reasonCodes || result?.freshness?.reasonCodes || [];
+  const reasons = result?.review?.freshness?.reasonCodes ?? result?.freshness?.reasonCodes;
+  const expectedReasons = caseDefinition.requiredReasonCodes || [];
+  const observedReasons = Array.isArray(reasons) ? reasons : [];
+  const missingReasonCodes = expectedReasons.filter(reason => !observedReasons.includes(reason));
+  const stepCount = result?.stepCount ?? result?.review?.execution?.stepCount;
+  const validStepCount = Number.isInteger(stepCount) && stepCount >= 0;
+  const toolCallCount = result?.toolCallCount ?? result?.review?.execution?.toolCallCount ?? selectedTools.length;
+  const boundedToolCalls = Number.isInteger(toolCallCount)
+    && toolCallCount >= selectedTools.length
+    && toolCallCount <= caseDefinition.maxToolCalls;
+  const boundedTrajectory = trajectory.length <= 100
+    && validStepCount
+    && stepCount <= caseDefinition.maxSteps
+    && boundedToolCalls;
+  const evidenceStatus = result?.review?.evidence?.status ?? result?.evidence?.status;
+  const grounding = !caseDefinition.groundingRequired
+    || (evidenceStatus === 'AVAILABLE' && result?.validation?.valid !== false && result?.review?.validation?.valid !== false);
+  const toolSelection = forbidden.length === 0 && unsupported.length === 0 && missingExpectedTools.length === 0;
+  const policy = result?.review?.policy?.allowed !== false
+    && result?.policy?.allowed !== false
+    && forbidden.length === 0
+    && unsupported.length === 0
+    && missingReasonCodes.length === 0;
+  const action = resultAction === caseDefinition.expectedAction;
+  const robustness = Array.isArray(reasons)
+    && observedReasons.every(reason => typeof reason === 'string' && /^[A-Z0-9_]{2,100}$/.test(reason));
   return {
     caseId: caseDefinition.id,
-    toolSelection: forbidden.length === 0 && unsupported.length === 0,
-    trajectory: trajectory.length <= 100 && (result?.stepCount ?? result?.review?.execution?.stepCount ?? 0) <= caseDefinition.maxSteps,
-    grounding: !caseDefinition.groundingRequired || result?.review?.evidence?.status === 'AVAILABLE',
-    policy: forbidden.length === 0 && unsupported.length === 0,
-    action: resultAction === caseDefinition.expectedAction,
-    robustness: reasons.every(reason => typeof reason === 'string' && reason.length <= 100),
+    toolSelection,
+    trajectory: boundedTrajectory,
+    grounding,
+    policy,
+    action,
+    robustness,
     forbiddenTools: forbidden,
     unsupportedTools: unsupported,
-    passed: forbidden.length === 0 && unsupported.length === 0 && resultAction === caseDefinition.expectedAction,
+    missingExpectedTools,
+    missingReasonCodes,
+    passed: toolSelection && boundedTrajectory && grounding && policy && action && robustness,
   };
 }
 

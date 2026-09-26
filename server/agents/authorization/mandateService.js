@@ -24,6 +24,8 @@ import { canonicalizeMandate, hashActionPayload, hashMandatePayload, verifyManda
 import { PrometheusMetrics } from '../../services/metricsCollector.js';
 import { assertVerifiedAgentIdentity, createAgentIdentityVerifier } from '../identity/agentIdentityVerifier.js';
 import { normalizeCredentialId, normalizePublicKey } from './webAuthnBytes.js';
+import { resolvePlanReviewSnapshot } from '../planReview/planReviewSnapshot.js';
+import { hashPlanReviewSnapshot } from '../planReview/planReviewRuntime.js';
 
 function asId(value) { return value === null || value === undefined ? null : String(value); }
 
@@ -57,6 +59,9 @@ export function buildMandateDraft({ run, profile, recommendation = null, agentId
   if (!run?.runId || run.status !== 'WAITING_FOR_APPROVAL') throw mandateError('MANDATE_SOURCE_NOT_APPROVABLE', 'This plan review is not waiting for approval.');
   if (run.recommendedAction !== 'RECOMPUTE_PLAN') throw mandateError('ACTION_NOT_PROPOSED', 'This plan review did not propose recompute.');
   if (!profile?._id || String(profile._id) !== String(run.profileId)) throw mandateError('RESOURCE_OWNERSHIP_DENIED', 'The plan review resource is unavailable.');
+  if (typeof run.planReviewSnapshotHash !== 'string' || !/^[a-f0-9]{64}$/.test(run.planReviewSnapshotHash)) {
+    throw mandateError('PLAN_REVIEW_SOURCE_UNBOUND', 'This plan review is not bound to a verified financial source snapshot.', 409);
+  }
   assertVerifiedAgentIdentity(agentIdentity, { allowDevelopment: true });
   const boundedTtl = Math.min(MAX_MANDATE_TTL_SECONDS, Math.max(1, Number(ttlSeconds) || DEFAULT_MANDATE_TTL_SECONDS));
   const snapshot = buildSnapshotFingerprint({ profile, recommendation });
@@ -89,6 +94,7 @@ export function buildMandateDraft({ run, profile, recommendation = null, agentId
     recommendationId: snapshot.recommendationId,
     financialSnapshotHash: snapshot.financialSnapshotHash,
     recommendationFingerprint: snapshot.recommendationFingerprint,
+    planReviewSnapshotHash: run.planReviewSnapshotHash,
     policyVersion: AUTHORIZATION_POLICY_VERSION,
     actionPayloadHash: hashActionPayload(actionPayload),
     constraints: {
@@ -157,13 +163,36 @@ export async function createMandateForPlanReview({ runId, userId, correlationId 
   if (!run) throw mandateError('PLAN_REVIEW_NOT_FOUND', 'Plan review run not found.', 404);
   const profile = await models.profileModel.findOne({ _id: run.profileId, userId }).lean();
   if (!profile) throw mandateError('RESOURCE_OWNERSHIP_DENIED', 'Financial profile not found or access denied.', 404);
-  const recommendation = run.recommendationId
-    ? await models.recommendationModel.findOne({ _id: run.recommendationId, profileId: run.profileId, userId }).lean()
-    : await models.recommendationModel.findOne({ profileId: run.profileId, userId }).sort({ generatedAt: -1 }).lean();
+  if (typeof run.planReviewSnapshotHash !== 'string'
+    || !/^[a-f0-9]{64}$/.test(run.planReviewSnapshotHash)
+    || !run.sourceBinding
+    || hashPlanReviewSnapshot(run.sourceBinding) !== run.planReviewSnapshotHash
+    || String(run.sourceBinding.userId) !== String(userId)
+    || String(run.sourceBinding.profileId) !== String(run.profileId)
+    || String(run.sourceBinding.recommendationId || '') !== String(run.recommendationId || '')) {
+    throw mandateError('PLAN_REVIEW_SOURCE_UNBOUND', 'This plan review is not bound to a verified financial source snapshot.', 409);
+  }
+  const snapshotResolver = dependencies.planReviewSnapshotResolver || resolvePlanReviewSnapshot;
+  const currentSnapshot = await snapshotResolver({
+    userId,
+    profileId: run.profileId,
+    profileModel: models.profileModel,
+    dependencies: dependencies.planReviewSnapshotDependencies || {},
+  });
+  if (currentSnapshot.planReviewSnapshotHash !== run.planReviewSnapshotHash) {
+    throw mandateError('PLAN_REVIEW_SOURCE_SUPERSEDED', 'The financial source state changed after this review. Run a new plan review before requesting approval.', 409);
+  }
+  const recommendationId = run.sourceBinding.recommendationId;
+  const recommendation = recommendationId
+    ? await models.recommendationModel.findOne({ _id: recommendationId, profileId: run.profileId, userId }).lean()
+    : null;
+  if (recommendationId && (!recommendation || String(recommendation._id) !== String(recommendationId))) {
+    throw mandateError('PLAN_REVIEW_SOURCE_SUPERSEDED', 'The recommendation bound to this review is no longer available.', 409);
+  }
   const env = runtimeConfig.env || process.env;
   const identityVerifier = dependencies.agentIdentityVerifier || createAgentIdentityVerifier({ env, dependencies });
   const agentIdentity = dependencies.agentIdentity
-    ? assertVerifiedAgentIdentity(dependencies.agentIdentity)
+    ? assertVerifiedAgentIdentity(dependencies.agentIdentity, { allowDevelopment: true, env })
     : await identityVerifier.verify({
       agentType: 'PLAN_REVIEW',
       token: dependencies.agentIdentityToken || env.AGENT_IDENTITY_ASSERTION,
@@ -194,6 +223,7 @@ export async function createApprovalOptions({ mandateId, userId, dependencies = 
   if (new Date(mandate.expiresAt).getTime() <= Date.now()) throw mandateError('MANDATE_EXPIRED', 'This authorization has expired.');
   if (mandate.status !== 'DRAFT' && mandate.status !== 'PENDING_USER_VERIFICATION') throw mandateError('MANDATE_NOT_APPROVABLE', 'This mandate is not awaiting approval.');
   const provider = dependencies.approvalProvider || createTrustedApprovalProvider({ env: runtimeConfig.env || process.env, verifier: dependencies.webauthnVerifier });
+  if (mandate.approvalMethod !== provider.name) throw mandateError('TRUSTED_APPROVAL_INVALID', 'The approval provider does not match this mandate.');
   let credentialIds = [];
   if (provider.name === 'WEBAUTHN') {
     const credentials = await models.credentialModel.find({ userId }).lean();
@@ -208,13 +238,18 @@ export async function createApprovalOptions({ mandateId, userId, dependencies = 
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
   }
-  if (mandate.approvalMethod !== provider.name) throw mandateError('TRUSTED_APPROVAL_INVALID', 'The approval provider does not match this mandate.');
   const updated = await models.mandateModel.findOneAndUpdate(
-    { mandateId, userId, status: { $in: ['DRAFT', 'PENDING_USER_VERIFICATION'] } },
+    {
+      mandateId,
+      userId,
+      status: { $in: ['DRAFT', 'PENDING_USER_VERIFICATION'] },
+      $expr: { $gt: ['$expiresAt', '$$NOW'] },
+    },
     { $set: { status: 'PENDING_USER_VERIFICATION' } },
     { new: true },
   );
-  return { mandate: publicMandate(updated || { ...mandate, status: 'PENDING_USER_VERIFICATION' }), provider: provider.name, options };
+  if (!updated) throw mandateError('MANDATE_NOT_APPROVABLE', 'This mandate changed or expired while approval options were being created.');
+  return { mandate: publicMandate(updated), provider: provider.name, options };
 }
 
 export async function verifyMandateApproval({ mandateId, userId, assertion, dependencies = {}, runtimeConfig = {} }) {
@@ -227,6 +262,7 @@ export async function verifyMandateApproval({ mandateId, userId, assertion, depe
     throw mandateError('MANDATE_EXPIRED', 'This authorization has expired.');
   }
   const provider = dependencies.approvalProvider || createTrustedApprovalProvider({ env: runtimeConfig.env || process.env, verifier: dependencies.webauthnVerifier });
+  if (mandate.approvalMethod !== provider.name) throw mandateError('TRUSTED_APPROVAL_INVALID', 'The approval provider does not match this mandate.');
   let credential = null;
   let expectedChallenge = null;
   if (provider.name === 'WEBAUTHN') {
@@ -265,14 +301,28 @@ export async function verifyMandateApproval({ mandateId, userId, assertion, depe
     if (!Number.isInteger(approval.newCounter) || approval.newCounter < 0) {
       throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey authenticator counter is invalid.');
     }
+    if (!['singleDevice', 'multiDevice'].includes(approval.deviceType) || typeof approval.backedUp !== 'boolean') {
+      throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey backup eligibility/state is unavailable.');
+    }
     const counterUpdate = await models.credentialModel.findOneAndUpdate(
       { userId, credentialId: credential.id, counter: credential.counter },
-      { $set: { counter: approval.newCounter, lastUsedAt: new Date() } },
+      { $set: {
+        counter: approval.newCounter,
+        deviceType: approval.deviceType,
+        backedUp: approval.backedUp,
+        lastUsedAt: new Date(),
+      } },
       { new: true },
     );
     if (!counterUpdate) throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey authenticator counter changed unexpectedly.');
     const challengeConsumed = await models.challengeModel.findOneAndUpdate(
-      { mandateId, userId, mandateHash: mandate.mandateHash, consumedAt: null },
+      {
+        mandateId,
+        userId,
+        mandateHash: mandate.mandateHash,
+        consumedAt: null,
+        $expr: { $gt: ['$expiresAt', '$$NOW'] },
+      },
       { $set: { consumedAt: new Date() } },
       { new: true },
     );
@@ -281,11 +331,44 @@ export async function verifyMandateApproval({ mandateId, userId, assertion, depe
   const keyProvider = dependencies.keyProvider || createAuthorizationKeyProvider({ env: runtimeConfig.env || process.env, required: (runtimeConfig.env || process.env).NODE_ENV === 'production' });
   const signature = keyProvider.sign(canonicalizeMandate(mandate));
   const update = await models.mandateModel.findOneAndUpdate(
-    { mandateId, userId, status: 'PENDING_USER_VERIFICATION', mandateHash: mandate.mandateHash },
-    { $set: { status: 'AUTHORIZED', approval: { method: provider.name, verifiedAt: approval.verifiedAt, credentialId: approval.credentialId, authenticatorCounter: approval.newCounter || null }, signatureMetadata: { ...keyProvider.metadata(), signature } } },
+    {
+      mandateId,
+      userId,
+      status: 'PENDING_USER_VERIFICATION',
+      mandateHash: mandate.mandateHash,
+      $expr: { $gt: ['$expiresAt', '$$NOW'] },
+    },
+    { $set: { status: 'AUTHORIZED', approval: {
+      method: provider.name,
+      verifiedAt: approval.verifiedAt,
+      credentialId: approval.credentialId,
+      authenticatorCounter: approval.newCounter || null,
+      credentialDeviceType: approval.deviceType || null,
+      credentialBackedUp: typeof approval.backedUp === 'boolean' ? approval.backedUp : null,
+    }, signatureMetadata: { ...keyProvider.metadata(), signature } } },
     { new: true },
   ).lean();
-  if (!update) throw mandateError('MANDATE_ALREADY_CONSUMED', 'This mandate changed while it was being approved.');
+  if (!update) {
+    const expired = await models.mandateModel.findOne({
+      mandateId,
+      userId,
+      status: 'PENDING_USER_VERIFICATION',
+      $expr: { $lte: ['$expiresAt', '$$NOW'] },
+    }).lean();
+    if (expired) {
+      await models.mandateModel.updateOne(
+        {
+          mandateId,
+          userId,
+          status: 'PENDING_USER_VERIFICATION',
+          $expr: { $lte: ['$expiresAt', '$$NOW'] },
+        },
+        { $set: { status: 'EXPIRED', failureCode: 'MANDATE_EXPIRED' } },
+      );
+      throw mandateError('MANDATE_EXPIRED', 'This authorization expired during passkey verification.');
+    }
+    throw mandateError('MANDATE_ALREADY_CONSUMED', 'This mandate changed while it was being approved.');
+  }
   PrometheusMetrics.inc('mandates_authorized_total');
   return publicMandate(update);
 }

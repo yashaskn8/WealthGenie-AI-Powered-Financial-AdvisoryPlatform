@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import mongoose from 'mongoose';
 import { redisAvailable, redisClient } from '../config/redis.js';
+import { verifyPlanReviewPersistenceIndexes } from './planReviewPersistence.js';
 
 function json(res, status, body) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
@@ -17,15 +18,24 @@ async function mongoReady() {
   }
 }
 
-export function createWorkerHealthServer({ port = 5050, stateProvider, requireRedis = false } = {}) {
+export function createWorkerHealthServer({ port = 5050, stateProvider, requireRedis = false, requirePlanReviewIndexes = false } = {}) {
   const server = createServer(async (req, res) => {
     if (req.url === '/health/live') return json(res, 200, { status: 'ALIVE' });
     if (req.url !== '/health/ready') return json(res, 404, { status: 'NOT_FOUND' });
 
     const state = stateProvider?.() || { ready: false, draining: false };
+    let checkpointIndexesReady = !requirePlanReviewIndexes;
+    if (requirePlanReviewIndexes && mongoose.connection.readyState === 1) {
+      try {
+        await verifyPlanReviewPersistenceIndexes();
+        checkpointIndexesReady = true;
+      } catch {
+        checkpointIndexesReady = false;
+      }
+    }
     const checks = {
       mongo: await mongoReady(),
-      checkpointStore: mongoose.connection.readyState === 1,
+      checkpointStore: mongoose.connection.readyState === 1 && checkpointIndexesReady,
       queue: mongoose.connection.readyState === 1,
       redis: !requireRedis || Boolean(redisAvailable && redisClient?.isReady),
       worker: Boolean(state.ready) && !state.draining,
@@ -33,6 +43,7 @@ export function createWorkerHealthServer({ port = 5050, stateProvider, requireRe
     const ready = Object.values(checks).every(Boolean);
     return json(res, ready ? 200 : 503, {
       status: ready ? 'READY' : 'NOT_READY',
+      planReviewEnabled: requirePlanReviewIndexes,
       checks,
       timestamp: new Date().toISOString(),
     });

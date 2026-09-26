@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { protectImmutableIdentity } from './immutableIdentity.js';
 
 const schema = new mongoose.Schema({
   runId: { type: String, required: true, immutable: true, index: true },
@@ -12,5 +13,9 @@ const schema = new mongoose.Schema({
 
 schema.index({ runId: 1, sequence: 1 }, { unique: true });
 schema.index({ userId: 1, runId: 1, sequence: 1 });
+protectImmutableIdentity(schema, ['runId', 'userId', 'executionGeneration', 'sequence', 'eventType'], {
+  code: 'AGENT_RUN_EVENT_IDENTITY_IMMUTABLE',
+  label: 'Agent run event identity',
+});
 
 export default mongoose.model('AgentRunEvent', schema);

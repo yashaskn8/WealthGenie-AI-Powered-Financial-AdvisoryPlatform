@@ -24,10 +24,16 @@ import {
   safeFallbackAfterPolicyRejection,
 } from './planReviewPolicy.js';
 import {
+  PLAN_REVIEW_BUDGETS,
   PLAN_REVIEW_GRAPH_VERSION,
   PLAN_REVIEW_TRAJECTORY_EVENTS,
+  hashPlanReviewSnapshot,
+  planReviewGraphThreadId,
 } from './planReviewRuntime.js';
 import { resolvePromptBundle } from '../evolution/promptBundle.js';
+import { canonicalSha256 } from '../../utils/canonicalJson.js';
+import { hashGroundedEvidence } from '../../services/groundedEvidence.js';
+import { createBudgetedPlanReviewProvider, createPlanReviewTokenBudget } from './planReviewTokenBudget.js';
 
 function uuid() {
   return crypto.randomUUID();
@@ -138,24 +144,71 @@ export async function planWithProvider({ freshness, profileContext, provider, to
 }
 
 async function loadContextNode(state, dependencies) {
-  if (state.resumeCheckpoint?.contextReady && state.resumeCheckpoint.profileContext) {
-    return {
-      ...state.resumeCheckpoint,
-      status: 'RUNNING',
-      stepCount: incrementStep(state, dependencies),
-    };
-  }
   const contextLoader = dependencies.loadPlanReviewContext || loadPlanReviewContext;
   const context = await contextLoader({
     userId: state.userId,
     profileId: state.profileId,
     dependencies,
   });
+  if (state.expectedPlanReviewSnapshotHash
+      && context.planReviewSnapshotHash !== state.expectedPlanReviewSnapshotHash) {
+    const error = new Error('The financial source state changed before the queued plan review started.');
+    error.code = 'PLAN_REVIEW_SOURCE_SUPERSEDED';
+    throw error;
+  }
+  const replay = state.resumeCheckpoint;
+  let counters = {};
+  if (replay?.schemaVersion === 'plan-review-replay-checkpoint-1.0.0') {
+    const replayValid = replay.schemaVersion === 'plan-review-replay-checkpoint-1.0.0'
+      && replay.runId === state.runId
+      && replay.planReviewSnapshotHash === context.planReviewSnapshotHash
+      && hashPlanReviewSnapshot(replay.sourceBinding) === replay.planReviewSnapshotHash
+      && canonicalSha256({
+        schemaVersion: replay.schemaVersion,
+        runId: replay.runId,
+        planReviewSnapshotHash: replay.planReviewSnapshotHash,
+        sourceBinding: replay.sourceBinding,
+        counters: replay.counters,
+      }) === replay.checkpointHash;
+    if (!replayValid) {
+      const error = new Error('PlanReview replay checkpoint failed source or integrity validation.');
+      error.code = 'CHECKPOINT_FAILURE';
+      throw error;
+    }
+    counters = replay.counters || {};
+  }
+  const maxSteps = configuredLimit(dependencies.maxSteps, MAX_AGENT_STEPS, MAX_AGENT_STEPS);
+  const maxToolCalls = configuredLimit(dependencies.maxToolCalls, MAX_TOOL_CALLS, MAX_TOOL_CALLS);
+  const toolCallCounts = Object.fromEntries(Object.entries(counters.toolCallCounts || {})
+    .filter(([name, count]) => SAFE_PLAN_REVIEW_TOOLS.includes(name) && Number.isInteger(Number(count)) && Number(count) >= 0)
+    .map(([name, count]) => [name, Math.min(MAX_TOOL_CALLS_PER_TOOL, Number(count))]));
+  const tokenUsage = counters.tokenUsage === undefined ? 0 : Number(counters.tokenUsage);
+  const modelCallCount = counters.modelCallCount === undefined ? 0 : Number(counters.modelCallCount);
+  const maxModelCalls = scaffoldLimit(dependencies, 'maxModelCalls', PLAN_REVIEW_BUDGETS.maxModelCalls, PLAN_REVIEW_BUDGETS.maxModelCalls);
+  if (!Number.isInteger(tokenUsage) || tokenUsage < 0 || tokenUsage > scaffoldLimit(dependencies, 'maxTotalTokens', PLAN_REVIEW_BUDGETS.maxTotalTokens, PLAN_REVIEW_BUDGETS.maxTotalTokens)) {
+    const error = new Error('PlanReview checkpoint token usage is invalid.');
+    error.code = 'AGENT_BUDGET_EXCEEDED';
+    throw error;
+  }
+  if (!Number.isInteger(modelCallCount) || modelCallCount < 0 || modelCallCount > maxModelCalls) {
+    const error = new Error('PlanReview checkpoint model-call usage is invalid.');
+    error.code = 'AGENT_BUDGET_EXCEEDED';
+    throw error;
+  }
+  dependencies.modelBudget?.restore(tokenUsage);
+  dependencies.modelBudget?.restoreModelCalls(modelCallCount);
   return {
-    stepCount: incrementStep(state, dependencies),
+    stepCount: Math.min(maxSteps, Math.max(0, Number(counters.stepCount) || 0) + 1),
+    toolCallCount: Math.min(maxToolCalls, Math.max(0, Number(counters.toolCallCount) || 0)),
+    toolCallCounts,
+    modelCallCount,
+    tokenUsage,
     profile: context.profile,
     profileContext: context.profileContext,
     recommendation: context.recommendation,
+    currentState: context.currentState,
+    sourceBinding: context.sourceBinding,
+    planReviewSnapshotHash: context.planReviewSnapshotHash,
     recommendationSummary: context.recommendationSummary,
     freshness: context.freshness,
     status: 'RUNNING',
@@ -170,10 +223,12 @@ async function determineChecksNode(state, dependencies) {
   let modelCallCount = Number(state.modelCallCount || 0);
   const promptBundle = resolvePromptBundle({ dependencies, scaffoldSpec: dependencies.scaffoldSpec });
   const plannerRole = dependencies.scaffoldSpec?.safeModelRoleRouting?.planner || 'PLANNER';
-  const plannerProvider = dependencies.plannerProvider || (dependencies.modelGateway && dependencies.modelPlannerEnabled ? {
+  const plannerProvider = dependencies.plannerProvider
+    ? createBudgetedPlanReviewProvider(dependencies.plannerProvider, dependencies.modelBudget)
+    : (dependencies.modelGateway && dependencies.modelPlannerEnabled ? {
     name: 'model-gateway',
     configuredModel: () => 'model-gateway',
-    generate: args => dependencies.modelGateway.generate({ role: plannerRole, ...args }),
+    generate: args => dependencies.modelGateway.generate({ role: plannerRole, ...args, requestBudget: dependencies.modelBudget }),
   } : null);
   if (state.profile && plannerProvider) {
     try {
@@ -182,7 +237,6 @@ async function determineChecksNode(state, dependencies) {
         error.code = 'AGENT_BUDGET_EXCEEDED';
         throw error;
       }
-      modelCallCount += 1;
       const modelPlan = await planWithProvider({
         freshness: state.freshness,
         profileContext: dependencies.scaffoldSpec?.contextCompressionPolicy === 'MINIMAL_PROFILE_CONTEXT'
@@ -197,9 +251,11 @@ async function determineChecksNode(state, dependencies) {
         const maxToolCalls = scaffoldLimit(dependencies, 'maxToolCalls', MAX_TOOL_CALLS, MAX_TOOL_CALLS);
         requestedChecks = unique([...modelPlan.checks, ...required]).filter(tool => tools.includes(tool)).slice(0, maxToolCalls);
       }
+      modelCallCount = dependencies.modelBudget?.modelCalls ?? modelCallCount + 1;
     } catch (error) {
-      if (error?.code === 'AGENT_BUDGET_EXCEEDED') throw error;
+      if (error?.code === 'AGENT_BUDGET_EXCEEDED' || error?.code === 'AGENT_BUDGET_PERSISTENCE_UNAVAILABLE') throw error;
       planner = { provider: 'DETERMINISTIC', model: null, fallback: true };
+      modelCallCount = dependencies.modelBudget?.modelCalls ?? modelCallCount + 1;
     }
   }
   return {
@@ -207,6 +263,7 @@ async function determineChecksNode(state, dependencies) {
     requestedChecks,
     planner,
     modelCallCount,
+    tokenUsage: dependencies.modelBudget?.accountedTokens ?? Number(state.tokenUsage || 0),
   };
 }
 
@@ -227,6 +284,7 @@ async function executeSafeToolsNode(state, dependencies) {
     profile: state.profile,
     profileContext: state.profileContext,
     recommendation: state.recommendation,
+    currentState: state.currentState,
     recommendationSummary: state.recommendationSummary,
     freshness: state.freshness,
     dependencies,
@@ -284,36 +342,35 @@ async function executeSafeToolsNode(state, dependencies) {
 }
 
 async function validateEvidenceNode(state) {
-  if (state.evidencePacket?.entries) {
-    return {
-      evidencePacket: state.evidencePacket,
-      goalSummary: state.goalSummary || state.toolResults?.get_goal_status_summary || { status: state.profile ? 'NONE' : 'UNAVAILABLE', items: [] },
-      errors: [],
-    };
-  }
-  const evidence = state.toolResults?.get_plan_evidence_snapshot;
+  const evidence = state.evidencePacket || state.toolResults?.get_plan_evidence_snapshot;
   const goalSummary = state.toolResults?.get_goal_status_summary
     || { status: state.profile ? 'NONE' : 'UNAVAILABLE', items: [] };
   const evidencePacket = evidence?.status === 'AVAILABLE'
-    ? {
-      groundingVersion: evidence.groundingVersion,
-      evidenceHash: evidence.evidenceHash,
-      entries: evidence.entries || [],
-      unavailableFacts: evidence.unavailableFacts || [],
-      status: 'AVAILABLE',
-    }
-    : { groundingVersion: null, evidenceHash: null, entries: [], unavailableFacts: evidence?.unavailableFacts || ['EVIDENCE_UNAVAILABLE'], status: 'UNAVAILABLE' };
+    ? { ...evidence, entries: evidence.entries || [], unavailableFacts: evidence.unavailableFacts || [], status: 'AVAILABLE' }
+    : evidence?.supplementalResearchOnly === true
+      ? { ...evidence, status: 'UNAVAILABLE' }
+      : { groundingVersion: null, evidenceHash: null, entries: [], unavailableFacts: evidence?.unavailableFacts || ['EVIDENCE_UNAVAILABLE'], status: 'UNAVAILABLE' };
   const evidenceIds = unique(evidencePacket.entries.map(item => item?.id));
   const evidenceValid = evidenceIds.length === evidencePacket.entries.length
     && evidenceIds.every(id => /^E_[A-Z0-9_:-]+$/.test(id));
-  if (!evidenceValid) {
+  const { evidenceHash, status: _status, ...hashPayload } = evidencePacket;
+  const hashRequired = evidencePacket.status === 'AVAILABLE' || evidencePacket.supplementalResearchOnly === true;
+  const hashValid = !hashRequired
+    || (typeof evidenceHash === 'string' && hashGroundedEvidence(hashPayload) === evidenceHash);
+  if (!evidenceValid || !hashValid) {
     evidencePacket.entries = [];
-    evidencePacket.unavailableFacts = unique([...evidencePacket.unavailableFacts, 'EVIDENCE_UNAVAILABLE']);
+    evidencePacket.status = 'UNAVAILABLE';
+    evidencePacket.evidenceHash = null;
+    evidencePacket.unavailableFacts = unique([
+      ...evidencePacket.unavailableFacts,
+      'EVIDENCE_UNAVAILABLE',
+      ...(!hashValid ? ['EVIDENCE_HASH_INVALID'] : []),
+    ]);
   }
   return {
     evidencePacket,
     goalSummary,
-    errors: evidenceValid ? [] : ['INVALID_EVIDENCE_SNAPSHOT'],
+    errors: evidenceValid && hashValid ? [] : ['INVALID_EVIDENCE_SNAPSHOT'],
   };
 }
 
@@ -355,18 +412,29 @@ async function researchMeshNode(state, dependencies) {
     }
     const researchEntries = researchArtifactToEvidenceEntries(result.artifact);
     const existingIds = new Set(evidencePacket.entries.map(entry => entry.id));
-    const mergedEntries = [...evidencePacket.entries, ...researchEntries.filter(entry => !existingIds.has(entry.id))];
+    if (researchEntries.some(entry => existingIds.has(entry.id))) {
+      return { ...base, researchBrief: brief, researchFailure: 'RESEARCH_EVIDENCE_ID_COLLISION', researchVerification: verification };
+    }
+    const mergedEntries = [...evidencePacket.entries, ...researchEntries];
+    const { evidenceHash: _oldEvidenceHash, status: _status, ...hashPayload } = evidencePacket;
+    const mergedPacket = {
+      ...hashPayload,
+      status: evidencePacket.status,
+      supplementalResearchOnly: evidencePacket.status !== 'AVAILABLE' || evidencePacket.supplementalResearchOnly === true,
+      entries: mergedEntries,
+      // Research can supplement explanation, but it cannot erase authoritative
+      // evidence failures or make a missing financial snapshot appear ready.
+      unavailableFacts: [...(evidencePacket.unavailableFacts || [])],
+    };
+    const { status: _mergedStatus, ...mergedHashPayload } = mergedPacket;
+    mergedPacket.evidenceHash = hashGroundedEvidence(mergedHashPayload);
     return {
       ...base,
       researchBrief: brief,
       researchArtifact: result.artifact,
       researchVerification: verification,
-      evidencePacket: {
-        ...evidencePacket,
-        status: mergedEntries.length > 0 ? 'AVAILABLE' : evidencePacket.status,
-        entries: mergedEntries,
-        unavailableFacts: evidencePacket.unavailableFacts.filter(code => code !== 'EVIDENCE_UNAVAILABLE'),
-      },
+      supplementalResearchStatus: 'AVAILABLE',
+      evidencePacket: mergedPacket,
     };
   } catch (error) {
     await reportProgress(dependencies, { node: 'research_mesh', state: { ...state, researchNeed, researchBrief: brief }, event: trajectoryEvent('RESEARCH_FAILED', { code: error.code || 'RESEARCH_FAILED' }) });
@@ -397,7 +465,6 @@ async function synthesizeNode(state, dependencies) {
         error.code = 'AGENT_BUDGET_EXCEEDED';
         throw error;
       }
-      modelCallCount += 1;
       explanation = await withAgentSpan('gen_ai.chat', {
         'agent.type': 'PLAN_REVIEW',
         'gen_ai.operation.name': 'explainer',
@@ -405,13 +472,16 @@ async function synthesizeNode(state, dependencies) {
         const gatewayProvider = dependencies.modelGateway ? {
           name: 'model-gateway',
           configuredModel: () => 'model-gateway',
-          generate: args => dependencies.modelGateway.generate({ role: dependencies.scaffoldSpec?.safeModelRoleRouting?.synthesis || 'EXPLAINER', ...args }),
+          generate: args => dependencies.modelGateway.generate({ role: dependencies.scaffoldSpec?.safeModelRoleRouting?.synthesis || 'EXPLAINER', ...args, requestBudget: dependencies.modelBudget }),
         } : null;
+        const explanationProviders = gatewayProvider
+          ? [gatewayProvider]
+          : (dependencies.explanationProviders || []).map(item => createBudgetedPlanReviewProvider(item, dependencies.modelBudget));
         const value = await generateGroundedExplanation({
           question: promptBundle.synthesisInstruction,
           evidencePacket: evidence,
         }, {
-          providers: gatewayProvider ? [gatewayProvider] : dependencies.explanationProviders,
+          providers: explanationProviders,
           getCache: async () => null,
           setCache: async () => undefined,
         });
@@ -421,10 +491,12 @@ async function synthesizeNode(state, dependencies) {
         return value;
       });
       provider = { provider: explanation.provider, model: explanation.model, fallback: explanation.fallback };
+      modelCallCount = dependencies.modelBudget?.modelCalls ?? modelCallCount + 1;
     } catch (error) {
-      if (error?.code === 'AGENT_BUDGET_EXCEEDED') throw error;
+      if (error?.code === 'AGENT_BUDGET_EXCEEDED' || error?.code === 'AGENT_BUDGET_PERSISTENCE_UNAVAILABLE') throw error;
       explanation = null;
       provider = safeProvider;
+      modelCallCount = dependencies.modelBudget?.modelCalls ?? modelCallCount + 1;
     }
   }
   const base = buildSafeReview({
@@ -440,10 +512,13 @@ async function synthesizeNode(state, dependencies) {
   const review = explanation?.text && !explanation.fallback
     ? { ...base, summary: explanation.text, provider }
     : base;
+  const tokenUsage = dependencies.modelBudget?.accountedTokens ?? Number(state.tokenUsage || 0);
+  review.execution = { ...review.execution, modelCallCount, tokenUsage };
   return {
     ...validated,
     explanation,
     modelCallCount,
+    tokenUsage,
     review,
     stepCount: incrementStep(state, dependencies),
   };
@@ -478,7 +553,7 @@ async function validateAgentOutputNode(state, dependencies = {}) {
   };
 }
 
-async function policyGuardNode(state) {
+async function policyGuardNode(state, dependencies = {}) {
   const policy = policyGuardReview(state.review, state.evidencePacket, state.explanation);
   if (policy.allowed && state.validation?.valid) {
     return { policy, status: 'COMPLETED' };
@@ -494,6 +569,8 @@ async function policyGuardNode(state) {
     reasonCodes: unique([...policy.reasonCodes, ...(state.validation?.errors || [])]),
     stepCount: state.stepCount,
     toolCallCount: state.toolCallCount,
+    modelCallCount: state.modelCallCount,
+    tokenUsage: dependencies.modelBudget?.accountedTokens ?? state.tokenUsage,
   });
   return { policy: { ...policy, allowed: false }, review: fallback, status: 'COMPLETED' };
 }
@@ -505,7 +582,9 @@ async function persistNode(state, dependencies) {
       review,
       userId: state.userId,
       profileId: state.profileId,
-      recommendationId: state.recommendation?._id || null,
+      recommendationId: state.sourceBinding?.recommendationId || state.recommendation?._id || null,
+      planReviewSnapshotHash: state.planReviewSnapshotHash,
+      sourceBinding: state.sourceBinding,
       traceId: state.traceId,
       correlationId: state.correlationId,
       startedAt: state.startedAt,
@@ -514,6 +593,7 @@ async function persistNode(state, dependencies) {
       stepCount: state.stepCount,
       toolCallCount: state.toolCallCount,
       modelCallCount: state.modelCallCount,
+      tokenUsage: dependencies.modelBudget?.accountedTokens ?? state.tokenUsage,
     });
   }
   PrometheusMetrics.recordAgentRun(state.status === 'COMPLETED' ? 'completed' : 'failed');
@@ -521,51 +601,61 @@ async function persistNode(state, dependencies) {
 }
 
 export function createPlanReviewGraph(dependencies = {}) {
+  const runtimeDependencies = {
+    ...dependencies,
+    modelBudget: dependencies.modelBudget || createPlanReviewTokenBudget({
+      maxInputTokens: scaffoldLimit(dependencies, 'maxInputTokens', PLAN_REVIEW_BUDGETS.maxInputTokens, PLAN_REVIEW_BUDGETS.maxInputTokens),
+      maxOutputTokens: scaffoldLimit(dependencies, 'maxOutputTokens', PLAN_REVIEW_BUDGETS.maxOutputTokens, PLAN_REVIEW_BUDGETS.maxOutputTokens),
+      maxTotalTokens: scaffoldLimit(dependencies, 'maxTotalTokens', PLAN_REVIEW_BUDGETS.maxTotalTokens, PLAN_REVIEW_BUDGETS.maxTotalTokens),
+      maxModelCalls: scaffoldLimit(dependencies, 'maxModelCalls', PLAN_REVIEW_BUDGETS.maxModelCalls, PLAN_REVIEW_BUDGETS.maxModelCalls),
+      onReserve: dependencies.onModelBudgetReservation,
+    }),
+  };
   const graph = new StateGraph(PlanReviewState)
     .addNode('load_context', async state => {
-      const next = await loadContextNode(state, dependencies);
-      await reportProgress(dependencies, { node: 'load_context', state: { ...state, ...next }, event: trajectoryEvent('NODE_ENTERED', { node: 'load_context' }) });
+      const next = await loadContextNode(state, runtimeDependencies);
+      await reportProgress(runtimeDependencies, { node: 'load_context', state: { ...state, ...next }, event: trajectoryEvent('NODE_ENTERED', { node: 'load_context' }) });
       return next;
     })
     .addNode('check_recommendation_freshness', async state => {
-      const next = { freshness: state.freshness, stepCount: incrementStep(state, dependencies) };
-      await reportProgress(dependencies, { node: 'check_recommendation_freshness', state: { ...state, ...next }, event: trajectoryEvent('NODE_ENTERED', { node: 'check_recommendation_freshness' }) });
+      const next = { freshness: state.freshness, stepCount: incrementStep(state, runtimeDependencies) };
+      await reportProgress(runtimeDependencies, { node: 'check_recommendation_freshness', state: { ...state, ...next }, event: trajectoryEvent('NODE_ENTERED', { node: 'check_recommendation_freshness' }) });
       return next;
     })
     .addNode('determine_required_checks', async state => {
-      const next = await determineChecksNode(state, dependencies);
-      await reportProgress(dependencies, { node: 'determine_required_checks', state: { ...state, ...next }, event: trajectoryEvent('NODE_ENTERED', { node: 'determine_required_checks' }) });
+      const next = await determineChecksNode(state, runtimeDependencies);
+      await reportProgress(runtimeDependencies, { node: 'determine_required_checks', state: { ...state, ...next }, event: trajectoryEvent('NODE_ENTERED', { node: 'determine_required_checks' }) });
       return next;
     })
-    .addNode('execute_safe_tools', async state => executeSafeToolsNode(state, dependencies))
+    .addNode('execute_safe_tools', async state => executeSafeToolsNode(state, runtimeDependencies))
     .addNode('validate_evidence', async state => {
       const next = await validateEvidenceNode(state);
-      await reportProgress(dependencies, { node: 'validate_evidence', state: { ...state, ...next }, event: trajectoryEvent('EVIDENCE_VALIDATED') });
+      await reportProgress(runtimeDependencies, { node: 'validate_evidence', state: { ...state, ...next }, event: trajectoryEvent('EVIDENCE_VALIDATED') });
       return next;
     })
     .addNode('research_mesh', async state => {
-      const next = await researchMeshNode(state, dependencies);
-      await reportProgress(dependencies, { node: 'research_mesh', state: { ...state, ...next }, event: next.researchFailure ? trajectoryEvent('RESEARCH_FAILED', { code: next.researchFailure }) : trajectoryEvent('RESEARCH_COMPLETED', { mode: next.researchNeed?.mode }) });
+      const next = await researchMeshNode(state, runtimeDependencies);
+      await reportProgress(runtimeDependencies, { node: 'research_mesh', state: { ...state, ...next }, event: next.researchFailure ? trajectoryEvent('RESEARCH_FAILED', { code: next.researchFailure }) : trajectoryEvent('RESEARCH_COMPLETED', { mode: next.researchNeed?.mode }) });
       return next;
     })
     .addNode('synthesize_review', async state => {
-      const next = await synthesizeNode(state, dependencies);
-      await reportProgress(dependencies, { node: 'synthesize_review', state: { ...state, ...next }, event: trajectoryEvent(next.explanation?.fallback ? 'FALLBACK_USED' : 'NODE_ENTERED', { node: 'synthesize_review' }) });
+      const next = await synthesizeNode(state, runtimeDependencies);
+      await reportProgress(runtimeDependencies, { node: 'synthesize_review', state: { ...state, ...next }, event: trajectoryEvent(next.explanation?.fallback ? 'FALLBACK_USED' : 'NODE_ENTERED', { node: 'synthesize_review' }) });
       return next;
     })
     .addNode('validate_agent_output', async state => {
-      const next = await validateAgentOutputNode(state, dependencies);
-      await reportProgress(dependencies, { node: 'validate_agent_output', state: { ...state, ...next }, event: trajectoryEvent('NODE_ENTERED', { node: 'validate_agent_output' }) });
+      const next = await validateAgentOutputNode(state, runtimeDependencies);
+      await reportProgress(runtimeDependencies, { node: 'validate_agent_output', state: { ...state, ...next }, event: trajectoryEvent('NODE_ENTERED', { node: 'validate_agent_output' }) });
       return next;
     })
     .addNode('policy_guard', async state => {
-      const next = await policyGuardNode(state);
-      await reportProgress(dependencies, { node: 'policy_guard', state: { ...state, ...next }, event: trajectoryEvent(next.policy?.allowed === false ? 'POLICY_REJECTED' : 'NODE_ENTERED', { node: 'policy_guard' }) });
+      const next = await policyGuardNode(state, runtimeDependencies);
+      await reportProgress(runtimeDependencies, { node: 'policy_guard', state: { ...state, ...next }, event: trajectoryEvent(next.policy?.allowed === false ? 'POLICY_REJECTED' : 'NODE_ENTERED', { node: 'policy_guard' }) });
       return next;
     })
     .addNode('persist_agent_run', async state => {
-      const next = await persistNode(state, dependencies);
-      await reportProgress(dependencies, { node: 'persist_agent_run', state: { ...state, ...next }, event: trajectoryEvent('RUN_COMPLETED') });
+      const next = await persistNode(state, runtimeDependencies);
+      await reportProgress(runtimeDependencies, { node: 'persist_agent_run', state: { ...state, ...next }, event: trajectoryEvent('RUN_COMPLETED') });
       return next;
     })
     .addEdge(START, 'load_context')
@@ -579,17 +669,38 @@ export function createPlanReviewGraph(dependencies = {}) {
     .addEdge('validate_agent_output', 'policy_guard')
     .addEdge('policy_guard', 'persist_agent_run')
     .addEdge('persist_agent_run', END);
-  return graph.compile(dependencies.checkpointer ? { checkpointer: dependencies.checkpointer } : undefined);
+  return graph.compile(runtimeDependencies.checkpointer ? { checkpointer: runtimeDependencies.checkpointer } : undefined);
 }
 
-export async function invokePlanReviewGraph({ userId, profileId, runId: requestedRunId = null, correlationId = null, traceId = null, resumeCheckpoint = null, dependencies = {} }) {
+export async function invokePlanReviewGraph({
+  userId,
+  profileId,
+  runId: requestedRunId = null,
+  executionGeneration = 1,
+  expectedPlanReviewSnapshotHash = null,
+  correlationId = null,
+  traceId = null,
+  resumeCheckpoint = null,
+  dependencies = {},
+}) {
   const runId = requestedRunId || uuid();
+  const checkpointThreadId = planReviewGraphThreadId(runId, executionGeneration);
   const startedAt = new Date();
-  const graph = createPlanReviewGraph(dependencies);
+  const modelBudget = dependencies.modelBudget || createPlanReviewTokenBudget({
+    maxInputTokens: scaffoldLimit(dependencies, 'maxInputTokens', PLAN_REVIEW_BUDGETS.maxInputTokens, PLAN_REVIEW_BUDGETS.maxInputTokens),
+    maxOutputTokens: scaffoldLimit(dependencies, 'maxOutputTokens', PLAN_REVIEW_BUDGETS.maxOutputTokens, PLAN_REVIEW_BUDGETS.maxOutputTokens),
+    maxTotalTokens: scaffoldLimit(dependencies, 'maxTotalTokens', PLAN_REVIEW_BUDGETS.maxTotalTokens, PLAN_REVIEW_BUDGETS.maxTotalTokens),
+    maxModelCalls: scaffoldLimit(dependencies, 'maxModelCalls', PLAN_REVIEW_BUDGETS.maxModelCalls, PLAN_REVIEW_BUDGETS.maxModelCalls),
+    onReserve: dependencies.onModelBudgetReservation,
+  });
+  const executionDependencies = { ...dependencies, modelBudget };
+  const graph = createPlanReviewGraph(executionDependencies);
   const state = {
     runId,
     userId: String(userId),
     profileId: String(profileId),
+    executionGeneration,
+    expectedPlanReviewSnapshotHash,
     correlationId,
     traceId: traceId || correlationId || runId,
     startedAt: startedAt.toISOString(),
@@ -598,7 +709,7 @@ export async function invokePlanReviewGraph({ userId, profileId, runId: requeste
   const timeoutMs = Number(dependencies.timeoutMs) || 30000;
   const invoke = graph.invoke(state, {
     recursionLimit: 20,
-    ...(dependencies.checkpointer ? { configurable: { thread_id: runId } } : {}),
+    ...(executionDependencies.checkpointer ? { configurable: { thread_id: checkpointThreadId } } : {}),
   });
   return startAgentSpan('plan_review.run', {
     attributes: {
@@ -620,8 +731,16 @@ export async function invokePlanReviewGraph({ userId, profileId, runId: requeste
       ]);
       span.setAttribute('agent.step_count', Number(result.stepCount || 0));
       span.setAttribute('agent.tool_call_count', Number(result.toolCallCount || 0));
+      modelBudget.close();
       return result;
     } catch (error) {
+      modelBudget.close();
+      if (error && typeof error === 'object') {
+        error.planReviewUsage = {
+          modelCallCount: modelBudget.modelCalls,
+          tokenUsage: modelBudget.accountedTokens,
+        };
+      }
       recordAgentError(span, error);
       throw error;
     } finally {

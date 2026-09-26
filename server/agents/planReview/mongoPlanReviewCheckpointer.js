@@ -1,5 +1,6 @@
 import { BaseCheckpointSaver } from '@langchain/langgraph';
 import AgentGraphCheckpoint from '../../models/AgentGraphCheckpoint.js';
+import { planReviewGraphThreadId } from './planReviewRuntime.js';
 
 function threadIdOf(config) {
   const value = config?.configurable?.thread_id;
@@ -22,37 +23,58 @@ function decoded(value) {
 export class MongoPlanReviewCheckpointer extends BaseCheckpointSaver {
   constructor({ model = AgentGraphCheckpoint, runId, userId, workerId = null, executionGeneration = 0, assertLease = null } = {}) {
     super();
+    if (!runId || !userId || !Number.isInteger(Number(executionGeneration)) || Number(executionGeneration) < 1) {
+      throw new TypeError('A run, owner, and positive execution generation are required for PlanReview checkpoints.');
+    }
     this.model = model;
     this.runId = String(runId);
     this.userId = userId;
     this.workerId = workerId;
-    this.executionGeneration = executionGeneration;
+    this.executionGeneration = Number(executionGeneration);
+    this.expectedThreadId = planReviewGraphThreadId(this.runId, this.executionGeneration);
     this.assertLease = assertLease;
+  }
+
+  scope(threadId) {
+    if (String(threadId) !== this.expectedThreadId) {
+      const error = new Error('Checkpoint thread does not belong to this PlanReview execution generation.');
+      error.code = 'CHECKPOINT_SCOPE_MISMATCH';
+      throw error;
+    }
+    return {
+      threadId: this.expectedThreadId,
+      runId: this.runId,
+      userId: this.userId,
+      executionGeneration: this.executionGeneration,
+    };
   }
 
   async put(config, checkpoint, metadata, newVersions) {
     await this.assertLease?.();
     const threadId = threadIdOf(config);
+    const scope = this.scope(threadId);
     const [checkpointType, checkpointBytes] = await this.serde.dumpsTyped({ ...checkpoint, channel_versions: newVersions });
     const [metadataType, metadataBytes] = await this.serde.dumpsTyped(metadata);
     const parentCheckpointId = checkpointIdOf(config);
     await this.model.findOneAndUpdate(
-      { threadId, checkpointId: checkpoint.id },
+      { ...scope, checkpointId: checkpoint.id },
       {
         $set: {
-          threadId,
-          checkpointId: checkpoint.id,
           parentCheckpointId,
-          runId: this.runId,
-          userId: this.userId,
-          executionGeneration: this.executionGeneration,
           workerId: this.workerId,
           checkpointType,
           checkpoint: encoded(checkpointBytes),
           metadataType,
           metadata: encoded(metadataBytes),
         },
-        $setOnInsert: { createdAt: new Date() },
+        $setOnInsert: {
+          threadId,
+          checkpointId: checkpoint.id,
+          runId: this.runId,
+          userId: this.userId,
+          executionGeneration: this.executionGeneration,
+          createdAt: new Date(),
+        },
       },
       { upsert: true, new: true },
     );
@@ -63,6 +85,7 @@ export class MongoPlanReviewCheckpointer extends BaseCheckpointSaver {
   async putWrites(config, writes, taskId) {
     await this.assertLease?.();
     const threadId = threadIdOf(config);
+    const scope = this.scope(threadId);
     const checkpointId = checkpointIdOf(config);
     if (!checkpointId) return;
     const serialized = [];
@@ -70,16 +93,22 @@ export class MongoPlanReviewCheckpointer extends BaseCheckpointSaver {
       const [type, bytes] = await this.serde.dumpsTyped(value);
       serialized.push([taskId, channel, type, encoded(bytes)]);
     }
-    await this.model.updateOne({ threadId, checkpointId }, { $push: { pendingWrites: { $each: serialized } } });
+    const updated = await this.model.updateOne({ ...scope, checkpointId }, { $push: { pendingWrites: { $each: serialized } } });
+    if (!Number(updated?.matchedCount ?? updated?.modifiedCount ?? updated?.n ?? 0)) {
+      const error = new Error('PlanReview checkpoint target is unavailable in this execution generation.');
+      error.code = 'CHECKPOINT_SCOPE_MISMATCH';
+      throw error;
+    }
     await this.assertLease?.();
   }
 
   async getTuple(config) {
     const threadId = threadIdOf(config);
+    const scope = this.scope(threadId);
     const checkpointId = checkpointIdOf(config);
     const document = await (checkpointId
-      ? this.model.findOne({ threadId, checkpointId }).lean()
-      : this.model.findOne({ threadId }).sort({ createdAt: -1 }).lean());
+      ? this.model.findOne({ ...scope, checkpointId }).lean()
+      : this.model.findOne(scope).sort({ createdAt: -1 }).lean());
     if (!document) return undefined;
     const checkpoint = await this.serde.loadsTyped(document.checkpointType, decoded(document.checkpoint));
     const metadata = await this.serde.loadsTyped(document.metadataType, decoded(document.metadata));
@@ -100,8 +129,8 @@ export class MongoPlanReviewCheckpointer extends BaseCheckpointSaver {
 
   async *list(config, options = {}) {
     const threadId = threadIdOf(config);
-    const filter = { threadId };
-    if (options.filter?.runId) filter.runId = options.filter.runId;
+    const filter = this.scope(threadId);
+    if (options.filter?.runId && String(options.filter.runId) !== this.runId) return;
     const query = this.model.find(filter).sort({ createdAt: -1 }).limit(options.limit || 20).lean();
     const documents = await query;
     for (const document of documents) {
@@ -110,6 +139,6 @@ export class MongoPlanReviewCheckpointer extends BaseCheckpointSaver {
   }
 
   async deleteThread(threadId) {
-    await this.model.deleteMany({ threadId: String(threadId) });
+    await this.model.deleteMany(this.scope(threadId));
   }
 }

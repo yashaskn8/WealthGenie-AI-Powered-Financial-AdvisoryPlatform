@@ -8,6 +8,7 @@ import { assessRecommendationFreshness } from '../../services/recommendationFres
 import { assessGoalCalculationFreshness, resolveCurrentRecommendationState } from '../../services/recommendationState.js';
 import { buildGroundedEvidencePacket, makeEvidenceEntry } from '../../services/groundedEvidence.js';
 import { SAFE_PLAN_REVIEW_TOOLS } from './planReviewSchemas.js';
+import { buildPlanReviewSnapshotBinding, hashPlanReviewSnapshot } from './planReviewRuntime.js';
 
 function idOf(value) {
   return value?._id ? String(value._id) : value ? String(value) : null;
@@ -118,12 +119,8 @@ async function getPlanEvidenceSnapshot(context) {
     purpose: 'PLAN_REVIEW',
   });
   return {
+    ...packet,
     status: 'AVAILABLE',
-    evidenceHash: packet.evidenceHash,
-    groundingVersion: packet.groundingVersion,
-    entries: packet.entries,
-    unavailableFacts: packet.unavailableFacts,
-    privacy: packet.privacy,
   };
 }
 
@@ -217,12 +214,18 @@ export async function loadPlanReviewContext({ userId, profileId, dependencies = 
   const auditModel = dependencies.auditModel || AuditRecord;
   const storedProfile = await profileModel.findOne({ _id: profileId, userId }).lean();
   if (!storedProfile) {
+    const freshness = assessRecommendationFreshness({ profile: null, recommendation: null });
+    const currentState = { profile: null, recommendation: null, freshness, provenance: { status: 'MISSING' } };
+    const sourceBinding = buildPlanReviewSnapshotBinding({ userId, profileId, currentState, freshness });
     return {
       profile: null,
       profileContext: null,
       recommendation: null,
+      currentState,
+      sourceBinding,
+      planReviewSnapshotHash: hashPlanReviewSnapshot(sourceBinding),
       recommendationSummary: buildRecommendationSummary(null),
-      freshness: assessRecommendationFreshness({ profile: null, recommendation: null }),
+      freshness,
     };
   }
 
@@ -253,11 +256,21 @@ export async function loadPlanReviewContext({ userId, profileId, dependencies = 
     currentRegulatoryRuleVersion,
     recommendationRegulatoryRuleVersion,
   });
+  currentState ||= {
+    profile: storedProfile,
+    profileVersion: Number(storedProfile.version) || null,
+    recommendation,
+    freshness,
+    provenance: { status: recommendation ? 'ADAPTER_UNVERIFIED' : 'MISSING' },
+  };
+  const sourceBinding = buildPlanReviewSnapshotBinding({ userId, profileId, currentState, freshness });
   return {
     profile,
     profileContext: buildProfileContext(storedProfile, profile),
     recommendation,
     currentState,
+    sourceBinding,
+    planReviewSnapshotHash: hashPlanReviewSnapshot(sourceBinding),
     recommendationSummary: buildRecommendationSummary(recommendation, freshness),
     freshness,
   };

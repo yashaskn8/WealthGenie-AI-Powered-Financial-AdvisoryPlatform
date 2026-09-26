@@ -177,6 +177,9 @@ export const LIVE_CONTRACT_CASES = Object.freeze([
   { operation: 'GET /api/recommend/audit', method: 'GET', path: '/api/recommend/audit', url: '/api/recommend/audit?profileId=garbage', expectedStatus: 400, authenticated: true },
   { operation: 'GET /api/chat/history', method: 'GET', path: '/api/chat/history', url: '/api/chat/history?limit=20garbage', expectedStatus: 400, authenticated: true },
   { operation: 'GET /api/agent/plan-health', method: 'GET', path: '/api/agent/plan-health', url: '/api/agent/plan-health?profileId=garbage', expectedStatus: 400, authenticated: true },
+  { operation: 'GET /api/agent/plan-review/current', method: 'GET', path: '/api/agent/plan-review/current', url: '/api/agent/plan-review/current?profileId=garbage', expectedStatus: 400, authenticated: true },
+  { operation: 'POST /api/agent/plan-review/{runId}/action', method: 'POST', path: '/api/agent/plan-review/{runId}/action', url: '/api/agent/plan-review/65b00000-0000-4000-8000-000000000099/action', expectedStatus: 400, authenticated: true, body: { action: 'UNSAFE_ACTION' } },
+  { operation: 'POST /api/agent/plan-review/{runId}/action', method: 'POST', path: '/api/agent/plan-review/{runId}/action', url: '/api/agent/plan-review/65b00000-0000-4000-8000-000000000099/action', expectedStatus: 404, authenticated: true, body: { action: 'OPEN_PROFILE' } },
   { operation: 'GET /api/market/mutual-funds/nav', method: 'GET', path: '/api/market/mutual-funds/nav', url: '/api/market/mutual-funds/nav?schemeCodes=1001&extra=unexpected', expectedStatus: 400 },
 ]);
 

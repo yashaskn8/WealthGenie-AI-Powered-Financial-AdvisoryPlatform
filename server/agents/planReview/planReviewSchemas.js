@@ -1,4 +1,5 @@
 import Joi from 'joi';
+import { PLAN_REVIEW_BUDGETS } from './planReviewRuntime.js';
 
 export const PLAN_REVIEW_VERSION = 'plan-review-1.0.0';
 export const PLAN_REVIEW_PLANNER_VERSION = 'plan-review-planner-1.0.0';
@@ -75,6 +76,8 @@ export const planReviewResponseSchema = Joi.object({
   execution: Joi.object({
     stepCount: Joi.number().integer().min(0).max(MAX_AGENT_STEPS).required(),
     toolCallCount: Joi.number().integer().min(0).max(MAX_TOOL_CALLS).required(),
+    modelCallCount: Joi.number().integer().min(0).max(2).optional(),
+    tokenUsage: Joi.number().integer().min(0).max(PLAN_REVIEW_BUDGETS.maxTotalTokens).optional(),
   }).unknown(false).required(),
   policyReasonCodes: Joi.array().items(Joi.string().max(120)).max(20).optional(),
 }).unknown(false);

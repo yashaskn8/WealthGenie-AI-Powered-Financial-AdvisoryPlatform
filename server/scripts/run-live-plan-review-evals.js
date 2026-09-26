@@ -1,18 +1,14 @@
-import { ProviderManager } from '../services/providerAbstraction.js';
-import { loadPlanReviewDataset } from '../agents/evals/planReviewEvals.js';
-import { runLivePlanReviewEvaluations } from '../agents/evals/livePlanReviewEvals.js';
-
 if (process.env.RUN_AGENT_LIVE_EVALS !== 'true') {
   console.log(JSON.stringify({ enabled: false, reason: 'RUN_AGENT_LIVE_EVALS is not true' }));
   process.exit(0);
 }
 
-const configured = String(process.env.LLM_PRIMARY_PROVIDER || 'NVIDIA_NIM').toUpperCase();
-const provider = { NVIDIA_NIM: ProviderManager.nvidia, GEMINI: ProviderManager.gemini, GROQ: ProviderManager.groq }[configured];
-const dataset = await loadPlanReviewDataset();
-const report = await runLivePlanReviewEvaluations({
-  dataset,
-  provider,
-  maxCases: Number(process.env.AGENT_LIVE_EVAL_MAX_CASES) || 3,
-});
-console.log(JSON.stringify(report, null, 2));
+// Do not initialize a paid provider or imply a closed-loop evaluation exists.
+// This repository does not yet register an isolated real PlanReview runner
+// for the live evaluator. The library requires one and rejects omission.
+console.error(JSON.stringify({
+  enabled: false,
+  code: 'LIVE_EVAL_RUNNER_REQUIRED',
+  reason: 'No isolated real PlanReview evaluation runner is configured; no provider call was made.',
+}));
+process.exitCode = 2;

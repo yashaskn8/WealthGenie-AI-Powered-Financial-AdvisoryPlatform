@@ -61,24 +61,28 @@ function modelQuery(model, operation, ...args) {
   return model[operation](...args);
 }
 
-async function resolveProfile({ userId, profileId, profile, profileModel }) {
+function querySession(query, session) {
+  return session && typeof query?.session === 'function' ? query.session(session) : query;
+}
+
+async function resolveProfile({ userId, profileId, profile, profileModel, session = null }) {
   // Callers often pass the canonical allowlisted profile, which intentionally
   // excludes persistence metadata. Load the owned document when the version
   // token is absent so long-running financial work can bind to it.
   if (profile && profile.version !== null && profile.version !== undefined
       && Number.isInteger(Number(profile.version)) && Number(profile.version) > 0 && profile._id) return plain(profile);
-  return modelQuery(profileModel, 'findOne', { _id: profileId, userId }).lean();
+  return querySession(modelQuery(profileModel, 'findOne', { _id: profileId, userId }), session).lean();
 }
 
-async function resolveRecommendation({ userId, profileId, recommendationId, recommendationModel, statePointer }) {
-  if (recommendationId) return modelQuery(recommendationModel, 'findOne', { _id: recommendationId, userId, profileId }).lean();
+async function resolveRecommendation({ userId, profileId, recommendationId, recommendationModel, statePointer, session = null }) {
+  if (recommendationId) return querySession(modelQuery(recommendationModel, 'findOne', { _id: recommendationId, userId, profileId }), session).lean();
   if (statePointer?.currentRecommendationId) {
-    const pointed = await modelQuery(recommendationModel, 'findOne', { _id: statePointer.currentRecommendationId, userId, profileId }).lean();
+    const pointed = await querySession(modelQuery(recommendationModel, 'findOne', { _id: statePointer.currentRecommendationId, userId, profileId }), session).lean();
     if (pointed) return pointed;
   }
   // This is the only timestamp fallback in the application. It exists solely
   // for legacy records before RecommendationState was introduced.
-  return modelQuery(recommendationModel, 'findOne', { profileId, userId }).sort({ recommendationGeneration: -1, generatedAt: -1, _id: -1 }).lean();
+  return querySession(modelQuery(recommendationModel, 'findOne', { profileId, userId }).sort({ recommendationGeneration: -1, generatedAt: -1, _id: -1 }), session).lean();
 }
 
 function sameId(left, right) {
@@ -271,6 +275,7 @@ export async function resolveCurrentRecommendationState({
   recommendationId = null,
   profile = null,
   requireFresh = false,
+  session = null,
   dependencies = {},
 } = {}) {
   const profileModel = dependencies.profileModel || FinancialProfile;
@@ -278,8 +283,8 @@ export async function resolveCurrentRecommendationState({
   const stateModel = dependencies.stateModel || RecommendationState;
   const revisionModel = dependencies.revisionModel || RecommendationAllocationRevision;
   const currentRegulatoryRuleVersion = (dependencies.getCurrentRegulatoryRuleVersion || getCurrentRegulatoryRuleVersion)();
-  const currentProfile = await resolveProfile({ userId, profileId, profile, profileModel });
-  const statePointer = await modelQuery(stateModel, 'findOne', { userId, profileId }).lean();
+  const currentProfile = await resolveProfile({ userId, profileId, profile, profileModel, session });
+  const statePointer = await querySession(modelQuery(stateModel, 'findOne', { userId, profileId }), session).lean();
   if (statePointer && (!statePointer.currentRecommendationId
     || !statePointer.currentAllocationRevision
     || !statePointer.currentAllocationRevisionId
@@ -294,7 +299,7 @@ export async function resolveCurrentRecommendationState({
     failure.reasonCodes = ['FINANCIAL_STATE_POINTER_INVALID'];
     if (requireFresh) throw failure;
   }
-  const recommendation = await resolveRecommendation({ userId, profileId, recommendationId, recommendationModel, statePointer });
+  const recommendation = await resolveRecommendation({ userId, profileId, recommendationId, recommendationModel, statePointer, session });
   if (!recommendation) {
     if (statePointer) {
       const failure = errorWithCode('The canonical financial recommendation is unavailable.', 'FINANCIAL_STATE_POINTER_INVALID', 503);
@@ -303,7 +308,7 @@ export async function resolveCurrentRecommendationState({
     }
     const freshness = assessRecommendationFreshness({ profile: currentProfile, recommendation: null, currentRegulatoryRuleVersion });
     if (requireFresh) throw errorWithCode('No authoritative recommendation is available.', 'RECOMMENDATION_REQUIRED', 409);
-    return { profile: currentProfile, recommendation: null, generationSnapshot: null, currentAllocation: null, allocationRevision: null, freshness, provenance: { status: 'MISSING' } };
+    return { profile: currentProfile, profileVersion: Number(currentProfile?.version) || null, recommendation: null, generationSnapshot: null, currentAllocation: null, allocationRevision: null, freshness, provenance: { status: 'MISSING' }, statePointer };
   }
 
   if (recommendationId && statePointer && !sameId(statePointer.currentRecommendationId, recommendationId)) {
@@ -323,11 +328,12 @@ export async function resolveCurrentRecommendationState({
 
   const pointer = statePointer;
   const hasState = Boolean(pointer);
-  const persistedRevision = await modelQuery(revisionModel, 'findOne', {
+  const persistedRevisionQuery = modelQuery(revisionModel, 'findOne', {
     recommendationId: recommendation._id,
     profileId,
     userId,
-  }).sort({ revision: -1 }).lean();
+  }).sort({ revision: -1 });
+  const persistedRevision = await querySession(persistedRevisionQuery, session).lean();
   if (!hasState && persistedRevision) {
     const failure = errorWithCode('The canonical financial state pointer is missing.', 'FINANCIAL_STATE_MISSING', 503);
     failure.reasonCodes = ['FINANCIAL_STATE_MISSING'];
@@ -335,13 +341,13 @@ export async function resolveCurrentRecommendationState({
   }
   let allocationRevision = null;
   if (pointer?.currentAllocationRevision && pointer?.currentAllocationRevisionId) {
-    allocationRevision = await modelQuery(revisionModel, 'findOne', {
+    allocationRevision = await querySession(modelQuery(revisionModel, 'findOne', {
       _id: pointer.currentAllocationRevisionId,
       recommendationId: recommendation._id,
       profileId,
       userId,
       revision: pointer.currentAllocationRevision,
-    }).lean();
+    }), session).lean();
   }
   if (pointer && !allocationRevision) {
     const failure = errorWithCode('The canonical allocation revision pointer is invalid.', 'ALLOCATION_REVISION_ID_MISMATCH', 503);
@@ -377,19 +383,19 @@ export async function resolveCurrentRecommendationState({
   if (!persistedIntegrityFailure && provenance.status === 'PERSISTED_REVISION'
       && allocationRevision?.source === ALLOCATION_SOURCES.USER_REBALANCED) {
     const previousRevision = allocationRevision.previousAllocationRevisionId
-      ? await modelQuery(revisionModel, 'findOne', {
+      ? await querySession(modelQuery(revisionModel, 'findOne', {
         _id: allocationRevision.previousAllocationRevisionId,
         recommendationId: recommendation._id,
         profileId,
         userId,
         revision: allocationRevision.previousRevision,
-      }).lean()
+      }), session).lean()
       : null;
     const auditRecord = allocationRevision.auditRecordId
-      ? await modelQuery(dependencies.auditModel || AuditRecord, 'findOne', {
+      ? await querySession(modelQuery(dependencies.auditModel || AuditRecord, 'findOne', {
         _id: allocationRevision.auditRecordId,
         userId,
-      }).lean()
+      }), session).lean()
       : null;
     persistedIntegrityFailure = verifyAllocationAuditBinding({
       revision: allocationRevision,
@@ -477,6 +483,7 @@ export async function resolveCurrentRecommendationState({
   }
   const result = {
     profile: currentProfile,
+    statePointer: pointer,
     profileVersion: currentProfile?.version !== null && currentProfile?.version !== undefined
       && Number.isInteger(Number(currentProfile.version)) && Number(currentProfile.version) > 0
       ? Number(currentProfile.version)

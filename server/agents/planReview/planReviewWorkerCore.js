@@ -1,12 +1,18 @@
 import crypto from 'node:crypto';
+import mongoose from 'mongoose';
 import { trace } from '../../config/tracing.js';
 import AgentRun from '../../models/AgentRun.js';
 import AgentCheckpoint from '../../models/AgentCheckpoint.js';
+import FinancialProfile from '../../models/FinancialProfile.js';
+import RecommendationState from '../../models/RecommendationState.js';
 import { PrometheusMetrics } from '../../services/metricsCollector.js';
 import { runPlanReview } from './planReviewService.js';
 import { MongoPlanReviewCheckpointer } from './mongoPlanReviewCheckpointer.js';
-import { PLAN_REVIEW_BUDGETS } from './planReviewRuntime.js';
+import { PLAN_REVIEW_BUDGETS, hashPlanReviewSnapshot } from './planReviewRuntime.js';
+import { canonicalSha256 } from '../../utils/canonicalJson.js';
+import { resolvePlanReviewSnapshot } from './planReviewSnapshot.js';
 import { allocateAgentRunEventSequence } from '../../services/agentEventSequence.js';
+import { SAFE_PLAN_REVIEW_TOOLS } from './planReviewSchemas.js';
 
 const NODE_LABELS = Object.freeze({
   load_context: 'Loading your saved plan',
@@ -25,45 +31,60 @@ let defaultWorker = null;
 
 function now() { return new Date(); }
 
-function bounded(value, limit = 100) {
-  if (value === null || value === undefined) return value;
-  if (typeof value === 'string') return value.slice(0, limit);
-  if (Array.isArray(value)) return value.slice(0, limit).map(item => bounded(item, limit));
-  if (typeof value === 'object') return Object.fromEntries(Object.entries(value).slice(0, limit).map(([key, item]) => [key, bounded(item, limit)]));
-  return value;
+function checkpointState(state) {
+  const payload = {
+    schemaVersion: 'plan-review-replay-checkpoint-1.0.0',
+    runId: state.runId,
+    planReviewSnapshotHash: state.planReviewSnapshotHash,
+    sourceBinding: state.sourceBinding,
+    counters: {
+      stepCount: Math.min(PLAN_REVIEW_BUDGETS.maxSteps, Math.max(0, Number(state.stepCount) || 0)),
+      toolCallCount: Math.min(PLAN_REVIEW_BUDGETS.maxToolCalls, Math.max(0, Number(state.toolCallCount) || 0)),
+      modelCallCount: Math.min(PLAN_REVIEW_BUDGETS.maxModelCalls, Math.max(0, Number(state.modelCallCount) || 0)),
+      tokenUsage: Number.isInteger(state.tokenUsage) && state.tokenUsage >= 0
+        ? Math.min(PLAN_REVIEW_BUDGETS.maxTotalTokens, state.tokenUsage)
+        : 0,
+      toolCallCounts: Object.fromEntries(Object.entries(state.toolCallCounts || {})
+        .filter(([name, count]) => SAFE_PLAN_REVIEW_TOOLS.includes(name) && Number.isInteger(Number(count)) && Number(count) >= 0)
+        .slice(0, SAFE_PLAN_REVIEW_TOOLS.length)
+        .map(([name, count]) => [name, Math.min(PLAN_REVIEW_BUDGETS.maxToolCallsPerTool, Number(count))])),
+    },
+  };
+  return { ...payload, checkpointHash: canonicalSha256(payload) };
 }
 
-function checkpointState(state) {
-  return bounded({
-    runId: state.runId,
-    profile: state.profile,
-    profileContext: state.profileContext,
-    recommendationSummary: state.recommendationSummary,
-    freshness: state.freshness,
-    requestedChecks: state.requestedChecks,
-    toolResults: state.toolResults,
-    toolCallCounts: state.toolCallCounts,
-    toolCallCount: state.toolCallCount,
-    stepCount: state.stepCount,
-    repeatedRequests: state.repeatedRequests,
-    evidencePacket: state.evidencePacket,
-    goalSummary: state.goalSummary,
-    planner: state.planner,
-    review: state.review,
-    explanation: state.explanation ? {
-      provider: state.explanation.provider,
-      model: state.explanation.model,
-      fallback: state.explanation.fallback,
-      evidenceIdsUsed: state.explanation.evidenceIdsUsed,
-      claims: state.explanation.claims,
-      unavailableFacts: state.explanation.unavailableFacts,
-      text: state.explanation.text,
-    } : null,
-    validation: state.validation,
-    evidenceVerification: state.evidenceVerification,
-    policy: state.policy,
-    contextReady: Boolean(state.profileContext),
-  }, 120);
+export function reconcilePlanReviewReplayCheckpoint(run) {
+  const checkpoint = run?.checkpoint?.state || run?.checkpoint || null;
+  if (!checkpoint) return null;
+  const payload = {
+    schemaVersion: checkpoint.schemaVersion,
+    runId: checkpoint.runId,
+    planReviewSnapshotHash: checkpoint.planReviewSnapshotHash,
+    sourceBinding: checkpoint.sourceBinding,
+    counters: checkpoint.counters,
+  };
+  const valid = checkpoint.schemaVersion === 'plan-review-replay-checkpoint-1.0.0'
+    && checkpoint.runId === run.runId
+    && checkpoint.planReviewSnapshotHash === run.planReviewSnapshotHash
+    && hashPlanReviewSnapshot(checkpoint.sourceBinding) === checkpoint.planReviewSnapshotHash
+    && canonicalSha256(payload) === checkpoint.checkpointHash;
+  if (!valid) {
+    return {
+      schemaVersion: 'plan-review-replay-checkpoint-1.0.0',
+      runId: run.runId,
+      planReviewSnapshotHash: run.planReviewSnapshotHash,
+      sourceBinding: run.sourceBinding,
+      counters: checkpoint.counters || {},
+      checkpointHash: 'INVALID_CHECKPOINT_HASH',
+    };
+  }
+  const counters = {
+    ...checkpoint.counters,
+    modelCallCount: Math.max(Number(checkpoint.counters?.modelCallCount) || 0, Number(run.modelCallCount) || 0),
+    tokenUsage: Math.max(Number(checkpoint.counters?.tokenUsage) || 0, Number(run.tokenUsage) || 0),
+  };
+  const reconciled = { ...payload, counters };
+  return { ...reconciled, checkpointHash: canonicalSha256(reconciled) };
 }
 
 function progressFor(node, completedNodes = []) {
@@ -103,7 +124,9 @@ function isModified(result) {
 
 function classifyFailure(error) {
   if (error?.code === 'AGENT_RUN_CANCELLED') return 'CANCELLED';
+  if (error?.code === 'PLAN_REVIEW_SOURCE_SUPERSEDED') return 'PLAN_REVIEW_SOURCE_SUPERSEDED';
   if (error?.code === 'AGENT_BUDGET_EXCEEDED') return 'BUDGET_EXCEEDED';
+  if (error?.code === 'AGENT_BUDGET_PERSISTENCE_UNAVAILABLE') return 'BUDGET_RESERVATION_UNAVAILABLE';
   if (error?.code === 'AGENT_LEASE_LOST') return 'INTERNAL_RUNTIME_FAILURE';
   if (error?.code === 'CHECKPOINT_FAILURE') return 'CHECKPOINT_FAILURE';
   if (error?.code === 'UNKNOWN_TOOL' || error?.code?.startsWith?.('TOOL_')) return 'TOOL_FAILURE';
@@ -170,11 +193,27 @@ async function updateQueueMetrics(model) {
 }
 
 class PlanReviewWorker {
-  constructor({ model = AgentRun, checkpointModel = AgentCheckpoint, eventModel = null, runtimeConfig = null, worker = null } = {}) {
+  constructor({
+    model = AgentRun,
+    checkpointModel = AgentCheckpoint,
+    eventModel = null,
+    profileModel = FinancialProfile,
+    stateModel = RecommendationState,
+    snapshotResolver = resolvePlanReviewSnapshot,
+    mongo = mongoose,
+    runtimeConfig = null,
+    worker = null,
+    runPlanReviewImpl = runPlanReview,
+  } = {}) {
     this.model = model;
     this.checkpointModel = checkpointModel;
     this.eventModel = eventModel;
+    this.profileModel = profileModel;
+    this.stateModel = stateModel;
+    this.snapshotResolver = snapshotResolver;
+    this.mongo = mongo;
     this.runtimeConfig = runtimeConfig;
+    this.runPlanReviewImpl = runPlanReviewImpl;
     this.workerId = worker || `plan-review-worker-${crypto.randomUUID()}`;
     this.leaseMs = runtimeConfig?.agentPlanReview?.leaseMs || 60000;
     this.heartbeatMs = runtimeConfig?.agentPlanReview?.heartbeatMs || Math.floor(this.leaseMs / 4);
@@ -249,8 +288,11 @@ class PlanReviewWorker {
     const sequence = Number(current?.checkpointSequence || 0) + 1;
     const safeState = checkpointState(payload.state || {});
     await this.checkpointModel.findOneAndUpdate(
-      { runId: run.runId, sequence },
-      { $set: { runId: run.runId, userId: run.userId, executionGeneration: run.executionGeneration, workerId: run.workerId, sequence, node: payload.node || 'unknown', state: safeState } },
+      { runId: run.runId, userId: run.userId, executionGeneration: run.executionGeneration, sequence },
+      {
+        $setOnInsert: { runId: run.runId, userId: run.userId, executionGeneration: run.executionGeneration, sequence, createdAt: now() },
+        $set: { workerId: run.workerId, node: payload.node || 'unknown', state: safeState },
+      },
       { upsert: true, new: true },
     );
     PrometheusMetrics.inc('agent_checkpoint_writes_total');
@@ -282,6 +324,39 @@ class PlanReviewWorker {
       throw staleLeaseError();
     }
     await this.appendEvent(run, sequence, payload.event, payload.node);
+  }
+
+  async persistModelBudgetReservation(run, usage) {
+    if (!Number.isInteger(usage?.modelCallCount)
+        || usage.modelCallCount < 0
+        || usage.modelCallCount > PLAN_REVIEW_BUDGETS.maxModelCalls
+        || !Number.isInteger(usage?.tokenUsage)
+        || usage.tokenUsage < 0
+        || usage.tokenUsage > PLAN_REVIEW_BUDGETS.maxTotalTokens) {
+      const error = new Error('PlanReview model budget reservation is invalid.');
+      error.code = 'AGENT_BUDGET_EXCEEDED';
+      throw error;
+    }
+    let result;
+    try {
+      result = await this.model.updateOne({
+        ...leaseFilter(run),
+        status: 'RUNNING',
+        leaseUntil: { $gt: now() },
+      }, {
+        $max: {
+          modelCallCount: usage.modelCallCount,
+          tokenUsage: usage.tokenUsage,
+        },
+        $set: { lastHeartbeatAt: now(), leaseUntil: new Date(Date.now() + this.leaseMs) },
+      });
+    } catch (cause) {
+      const error = new Error('Unable to durably reserve the PlanReview provider budget.');
+      error.code = 'AGENT_BUDGET_PERSISTENCE_UNAVAILABLE';
+      error.cause = cause;
+      throw error;
+    }
+    if (!isModified(result)) throw staleLeaseError();
   }
 
   async appendEvent(run, sequence, event, node = null) {
@@ -318,6 +393,11 @@ class PlanReviewWorker {
 
   async finishRun(run, review) {
     const current = await this.assertLease(run);
+    if (!run.sourceBinding || hashPlanReviewSnapshot(run.sourceBinding) !== run.planReviewSnapshotHash) {
+      const error = new Error('The queued PlanReview source binding failed integrity verification.');
+      error.code = 'PLAN_REVIEW_SOURCE_BINDING_INVALID';
+      throw error;
+    }
     const result = review || null;
     const status = result?.recommendedAction === 'RECOMPUTE_PLAN' ? 'WAITING_FOR_APPROVAL' : 'COMPLETED';
     const update = {
@@ -329,8 +409,10 @@ class PlanReviewWorker {
         evidenceIds: (result?.evidence?.entries || []).map(item => item.id).filter(Boolean),
         provider: result?.provider?.name || 'DETERMINISTIC_FALLBACK',
         model: result?.provider?.model || null,
-        stepCount: result?.execution?.stepCount || 0,
-        toolCallCount: result?.execution?.toolCallCount || 0,
+        stepCount: Math.min(PLAN_REVIEW_BUDGETS.maxSteps, Number(result?.execution?.stepCount) || 0),
+        toolCallCount: Math.min(PLAN_REVIEW_BUDGETS.maxToolCalls, Number(result?.execution?.toolCallCount) || 0),
+        modelCallCount: Math.min(PLAN_REVIEW_BUDGETS.maxModelCalls, Number(result?.execution?.modelCallCount) || 0),
+        tokenUsage: Math.min(PLAN_REVIEW_BUDGETS.maxTotalTokens, Number(result?.execution?.tokenUsage) || 0),
         completedAt: now(),
         leaseUntil: null,
         currentNode: null,
@@ -339,10 +421,75 @@ class PlanReviewWorker {
       $push: { trajectory: { $each: [{ type: 'RUN_COMPLETED', at: now().toISOString() }], $slice: -100 } },
     };
     if (status === 'COMPLETED') update.$unset = { activeDedupeKey: 1 };
-    const written = await this.model.updateOne({ ...leaseFilter(run), status: 'RUNNING' }, update);
-    if (!isModified(written)) {
-      PrometheusMetrics.inc('agent_worker_stale_write_rejections_total');
-      throw staleLeaseError();
+    const session = await this.mongo.startSession();
+    try {
+      if (typeof session.withTransaction !== 'function') {
+        const error = new Error('PlanReview publication requires transaction-capable MongoDB.');
+        error.code = 'TRANSACTION_REQUIRED';
+        throw error;
+      }
+      await session.withTransaction(async () => {
+        const snapshot = await this.snapshotResolver({
+          userId: run.userId,
+          profileId: run.profileId,
+          profileModel: this.profileModel,
+          session,
+          dependencies: { stateModel: this.stateModel },
+        });
+        if (snapshot.planReviewSnapshotHash !== run.planReviewSnapshotHash) {
+          const error = new Error('Financial source state changed while the PlanReview was running.');
+          error.code = 'PLAN_REVIEW_SOURCE_SUPERSEDED';
+          throw error;
+        }
+
+        const profileWrite = await this.profileModel.updateOne({
+          _id: run.profileId,
+          userId: run.userId,
+          version: snapshot.sourceBinding.profileVersion,
+        }, { $inc: { planReviewPublicationFence: 1 } }, { session });
+        if (!isModified(profileWrite)) {
+          const error = new Error('Profile changed before PlanReview publication.');
+          error.code = 'PLAN_REVIEW_SOURCE_SUPERSEDED';
+          throw error;
+        }
+
+        const pointer = snapshot.currentState?.statePointer;
+        if (pointer) {
+          const stateWrite = await this.stateModel.updateOne({
+            _id: pointer._id,
+            userId: run.userId,
+            profileId: run.profileId,
+            currentRecommendationId: pointer.currentRecommendationId,
+            currentAllocationRevision: pointer.currentAllocationRevision,
+            currentAllocationRevisionId: pointer.currentAllocationRevisionId,
+            generationRevision: pointer.generationRevision,
+            profileInputHash: pointer.profileInputHash,
+            profileVersion: pointer.profileVersion,
+            portfolioFingerprint: pointer.portfolioFingerprint,
+            returnAssumptionVersion: pointer.returnAssumptionVersion,
+            returnAssumptionHash: pointer.returnAssumptionHash,
+            returnAssumptionSource: pointer.returnAssumptionSource,
+          }, { $inc: { planReviewPublicationFence: 1 } }, { session });
+          if (!isModified(stateWrite)) {
+            const error = new Error('Canonical recommendation state changed before PlanReview publication.');
+            error.code = 'PLAN_REVIEW_SOURCE_SUPERSEDED';
+            throw error;
+          }
+        }
+
+        const written = await this.model.updateOne({
+          ...leaseFilter(run),
+          status: 'RUNNING',
+          planReviewSnapshotHash: run.planReviewSnapshotHash,
+          leaseUntil: { $gt: now() },
+        }, update, { session });
+        if (!isModified(written)) {
+          PrometheusMetrics.inc('agent_worker_stale_write_rejections_total');
+          throw staleLeaseError();
+        }
+      });
+    } finally {
+      await session.endSession();
     }
     await this.appendEvent(run, Number(current?.checkpointSequence || 0) + 1, {
       type: 'RUN_COMPLETED',
@@ -355,35 +502,47 @@ class PlanReviewWorker {
     const terminal = Number(run.attempt || 0) >= Number(run.maxAttempts || PLAN_REVIEW_BUDGETS.maxAttempts);
     const cancelled = error?.code === 'AGENT_RUN_CANCELLED';
     const budgetExceeded = error?.code === 'AGENT_BUDGET_EXCEEDED';
+    const superseded = error?.code === 'PLAN_REVIEW_SOURCE_SUPERSEDED';
     const classification = classifyFailure(error);
     if (cancelled) PrometheusMetrics.inc('agent_cancellation_total');
     if (budgetExceeded) PrometheusMetrics.inc('agent_budget_exceeded_total');
     const update = {
       $set: {
-        status: cancelled ? 'CANCELLED' : (budgetExceeded ? 'BUDGET_EXCEEDED' : (terminal ? 'FAILED' : 'QUEUED')),
-        retryAt: terminal || cancelled || budgetExceeded ? null : new Date(Date.now() + Math.min(30000, 1000 * (2 ** Math.max(0, Number(run.attempt || 1) - 1)))),
+        status: superseded ? 'SUPERSEDED' : (cancelled ? 'CANCELLED' : (budgetExceeded ? 'BUDGET_EXCEEDED' : (terminal ? 'FAILED' : 'QUEUED'))),
+        retryAt: terminal || cancelled || budgetExceeded || superseded ? null : new Date(Date.now() + Math.min(30000, 1000 * (2 ** Math.max(0, Number(run.attempt || 1) - 1)))),
         failure: { code: classification, message: String(error?.message || 'Agent run failed').slice(0, 240) },
         deadLetter: terminal && !cancelled ? { code: classification, at: now() } : null,
         leaseUntil: null,
-        completedAt: terminal || cancelled || budgetExceeded ? now() : null,
-        currentNode: terminal || cancelled || budgetExceeded ? null : run.currentNode,
+        completedAt: terminal || cancelled || budgetExceeded || superseded ? now() : null,
+        currentNode: terminal || cancelled || budgetExceeded || superseded ? null : run.currentNode,
       },
     };
-    if (terminal || cancelled || budgetExceeded) update.$unset = { activeDedupeKey: 1 };
+    const measuredUsage = error?.planReviewUsage;
+    if (Number.isInteger(measuredUsage?.modelCallCount)
+        && measuredUsage.modelCallCount >= 0
+        && measuredUsage.modelCallCount <= PLAN_REVIEW_BUDGETS.maxModelCalls) {
+      update.$max = { ...(update.$max || {}), modelCallCount: measuredUsage.modelCallCount };
+    }
+    if (Number.isInteger(measuredUsage?.tokenUsage)
+        && measuredUsage.tokenUsage >= 0
+        && measuredUsage.tokenUsage <= PLAN_REVIEW_BUDGETS.maxTotalTokens) {
+      update.$max = { ...(update.$max || {}), tokenUsage: measuredUsage.tokenUsage };
+    }
+    if (terminal || cancelled || budgetExceeded || superseded) update.$unset = { activeDedupeKey: 1 };
     const written = await this.model.updateOne({ ...leaseFilter(run), status: 'RUNNING' }, update);
     if (!isModified(written)) {
       PrometheusMetrics.inc('agent_worker_stale_write_rejections_total');
       throw staleLeaseError();
     }
     await this.appendEvent(run, Number(run.checkpointSequence || 0) + 1, {
-      type: cancelled ? 'RUN_CANCELLED' : 'RUN_FAILED',
+      type: superseded ? 'RUN_SUPERSEDED' : (cancelled ? 'RUN_CANCELLED' : 'RUN_FAILED'),
       code: classification,
       at: now().toISOString(),
     }, run.currentNode);
   }
 
   async processNext() {
-    if (this.draining || this.activePromise) return false;
+    if (this.draining || this.activePromise || this.runtimeConfig?.agenticPlanReviewEnabled === false) return false;
     await updateQueueMetrics(this.model);
     const run = await claimNextPlanReviewRun({ model: this.model, worker: this.workerId, leaseMs: this.leaseMs });
     if (!run) return false;
@@ -393,16 +552,20 @@ class PlanReviewWorker {
     const span = tracer.startSpan('agent.worker.execute', { attributes: { 'agent.type': 'PLAN_REVIEW', attempt: run.attempt || 0, 'queue.priority': run.priority || 'INTERACTIVE_PLAN_REVIEW' } });
     this.activePromise = (async () => {
       try {
-        const review = await runPlanReview({
+        const review = await this.runPlanReviewImpl({
           userId: run.userId,
           profileId: run.profileId,
           runId: run.runId,
-          resumeCheckpoint: run.checkpoint,
+          executionGeneration: run.executionGeneration,
+          expectedPlanReviewSnapshotHash: run.planReviewSnapshotHash,
+          resumeCheckpoint: reconcilePlanReviewReplayCheckpoint(run),
           correlationId: run.correlationId,
+          returnInternalResult: true,
           runtimeConfig: this.runtimeConfig,
           dependencies: {
             checkpointer: new MongoPlanReviewCheckpointer({ runId: run.runId, userId: run.userId, workerId: run.workerId, executionGeneration: run.executionGeneration, assertLease: () => this.assertLease(run) }),
             onNodeProgress: payload => this.updateProgress(run, payload),
+            onModelBudgetReservation: usage => this.persistModelBudgetReservation(run, usage),
             // The queue owns AgentRun finalization. Keeping this graph callback
             // side-effect free lets the final LangGraph checkpoint be written
             // while the lease is still RUNNING; finishRun then applies the

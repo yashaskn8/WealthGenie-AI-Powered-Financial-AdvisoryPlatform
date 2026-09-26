@@ -4,6 +4,7 @@ export {
   getPlanReviewWorkerState,
   processNextPlanReviewRun,
   recoverExpiredPlanReviewRuns,
+  reconcilePlanReviewReplayCheckpoint,
   startPlanReviewWorker,
   stopPlanReviewWorker,
 } from './planReviewWorkerCore.js';

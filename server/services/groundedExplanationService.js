@@ -211,7 +211,8 @@ export async function generateGroundedExplanation({ question, evidencePacket }, 
         jsonMode: true,
         tools: GROUNDED_LLM_TOOL_ALLOWLIST.length > 0 ? GROUNDED_LLM_TOOL_ALLOWLIST : null,
       });
-    } catch {
+    } catch (error) {
+      if (error?.code === 'AGENT_BUDGET_EXCEEDED' || error?.code === 'AGENT_BUDGET_PERSISTENCE_UNAVAILABLE') throw error;
       failures.push(`${providerName.toUpperCase()}_REQUEST_FAILED`);
       continue;
     }

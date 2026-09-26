@@ -76,12 +76,18 @@ export class WebAuthnApprovalProvider extends TrustedApprovalProvider {
       requireUserVerification: true,
     });
     if (!result?.verified || !result.authenticationInfo?.userVerified) throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey user verification failed.');
+    if (!['singleDevice', 'multiDevice'].includes(result.authenticationInfo.credentialDeviceType)
+      || typeof result.authenticationInfo.credentialBackedUp !== 'boolean') {
+      throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey backup eligibility/state is unavailable.');
+    }
     return {
       verified: true,
       method: 'WEBAUTHN',
       verifiedAt: new Date().toISOString(),
       credentialId: credential.id || credential.credentialId,
       newCounter: result.authenticationInfo.newCounter,
+      deviceType: result.authenticationInfo.credentialDeviceType,
+      backedUp: result.authenticationInfo.credentialBackedUp,
     };
   }
 
@@ -112,6 +118,10 @@ export class WebAuthnApprovalProvider extends TrustedApprovalProvider {
       requireUserVerification: true,
     });
     if (!result?.verified || !result.registrationInfo?.credential) throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey enrollment verification failed.');
+    if (!['singleDevice', 'multiDevice'].includes(result.registrationInfo.credentialDeviceType)
+      || typeof result.registrationInfo.credentialBackedUp !== 'boolean') {
+      throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey backup eligibility/state is unavailable.');
+    }
     return result.registrationInfo;
   }
 }

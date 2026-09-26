@@ -9,6 +9,7 @@ import {
 import {
   buildMandateDraft,
   buildSnapshotFingerprint,
+  createMandateForPlanReview,
   assertVerifiableMandate,
   verifyMandateRecord,
 } from '../agents/authorization/mandateService.js';
@@ -20,6 +21,7 @@ import { evaluateAuthorizationPolicy } from '../agents/authorization/policyEngin
 import { getAgentCapabilityGrant, assertCapabilityGrant } from '../agents/authorization/capabilityGrants.js';
 import { createDelegationContext, verifyDelegationContext } from '../agents/authorization/delegationContext.js';
 import { assertScaffoldSpecSafe } from '../agents/evolution/scaffoldSpec.js';
+import { hashPlanReviewSnapshot } from '../agents/planReview/planReviewRuntime.js';
 
 const userId = '64b000000000000000000010';
 const profileId = '64b000000000000000000001';
@@ -51,6 +53,7 @@ const run = {
   userId,
   profileId,
   recommendationId,
+  planReviewSnapshotHash: 'c'.repeat(64),
   status: 'WAITING_FOR_APPROVAL',
   recommendedAction: 'RECOMPUTE_PLAN',
   agentVersion: 'plan-review-agent-2.0.0',
@@ -115,6 +118,63 @@ test('snapshot binding changes when profile or recommendation version changes', 
   const first = buildSnapshotFingerprint({ profile, recommendation });
   assert.notEqual(first.financialSnapshotHash, buildSnapshotFingerprint({ profile: { ...profile, version: 15 }, recommendation }).financialSnapshotHash);
   assert.notEqual(first.financialSnapshotHash, buildSnapshotFingerprint({ profile, recommendation: { ...recommendation, _id: '64b000000000000000000003' } }).financialSnapshotHash);
+});
+
+test('PlanReview approval is minted only for the exact current snapshot and reviewed recommendation', async () => {
+  const sourceBinding = {
+    schemaVersion: 'plan-review-source-binding-1.0.0',
+    userId,
+    profileId,
+    profileVersion: profile.version,
+    recommendationId,
+  };
+  const sourceHash = hashPlanReviewSnapshot(sourceBinding);
+  const boundRun = { ...run, planReviewSnapshotHash: sourceHash, sourceBinding };
+  const calls = [];
+  const saved = [];
+  const result = await createMandateForPlanReview({
+    runId: boundRun.runId,
+    userId,
+    dependencies: {
+      agentIdentity: { agentType: 'PLAN_REVIEW', provider: 'development', subject: 'plan-review:test', authenticated: true },
+      approvalProvider: { name: 'DEVELOPMENT' },
+      planReviewSnapshotResolver: async () => ({ planReviewSnapshotHash: sourceHash }),
+      agentRunModel: { findOne: filter => ({ lean: async () => (calls.push(['run', filter]), boundRun) }) },
+      profileModel: { findOne: filter => ({ lean: async () => (calls.push(['profile', filter]), profile) }) },
+      recommendationModel: { findOne: filter => ({ lean: async () => (calls.push(['recommendation', filter]), recommendation) }) },
+      mandateModel: { create: async value => (saved.push(value), value) },
+    },
+    runtimeConfig: { env: { NODE_ENV: 'test' } },
+  });
+
+  assert.equal(result.recommendationId, recommendationId);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].planReviewSnapshotHash, sourceHash);
+  assert.deepEqual(calls.find(([name]) => name === 'recommendation')[1], { _id: recommendationId, profileId, userId });
+});
+
+test('PlanReview approval fails stale and never substitutes a newer timestamp-selected recommendation', async () => {
+  const sourceBinding = { schemaVersion: 'plan-review-source-binding-1.0.0', userId, profileId, profileVersion: profile.version, recommendationId };
+  const sourceHash = hashPlanReviewSnapshot(sourceBinding);
+  const boundRun = { ...run, planReviewSnapshotHash: sourceHash, sourceBinding };
+  let recommendationLookupCount = 0;
+  let mandateCreateCount = 0;
+  await assert.rejects(() => createMandateForPlanReview({
+    runId: boundRun.runId,
+    userId,
+    dependencies: {
+      agentIdentity: { agentType: 'PLAN_REVIEW', provider: 'development', subject: 'plan-review:test', authenticated: true },
+      approvalProvider: { name: 'DEVELOPMENT' },
+      planReviewSnapshotResolver: async () => ({ planReviewSnapshotHash: 'd'.repeat(64) }),
+      agentRunModel: { findOne: () => ({ lean: async () => boundRun }) },
+      profileModel: { findOne: () => ({ lean: async () => profile }) },
+      recommendationModel: { findOne: () => { recommendationLookupCount += 1; return { lean: async () => recommendation }; } },
+      mandateModel: { create: async value => { mandateCreateCount += 1; return value; } },
+    },
+    runtimeConfig: { env: { NODE_ENV: 'test' } },
+  }), error => error.code === 'PLAN_REVIEW_SOURCE_SUPERSEDED' && error.status === 409);
+  assert.equal(recommendationLookupCount, 0);
+  assert.equal(mandateCreateCount, 0);
 });
 
 test('execution receipts are tamper-evident and delegation cannot expand privileges', () => {

@@ -5,6 +5,8 @@ import { planReviewLimiter } from '../middleware/rateLimiter.js';
 import { planReviewRequestSchema } from '../agents/planReview/planReviewSchemas.js';
 import { planReviewActionSchema } from '../agents/planReview/planReviewSchemas.js';
 import { enqueuePlanReviewRun, getCurrentPlanReviewRun, getPlanReviewRun } from '../agents/planReview/planReviewService.js';
+import { persistPlanReviewAction } from '../agents/planReview/planReviewApproval.js';
+import { completePlanReviewMandateAction } from '../agents/planReview/planReviewApproval.js';
 import AgentRunModel from '../models/AgentRun.js';
 import { buildApprovalAction } from '../agents/planReview/planReviewRuntime.js';
 import { acknowledgePlanHealthEvent, inspectPlanHealth, listPlanHealthEvents } from '../services/planHealthMonitor.js';
@@ -28,6 +30,7 @@ import ExecutionReceipt from '../models/ExecutionReceipt.js';
 import { appendAuthorizationEvent } from '../agents/authorization/authorizationEvents.js';
 import { PrometheusMetrics } from '../services/metricsCollector.js';
 import { verifyExecutionReceiptForUser } from '../agents/authorization/receiptVerification.js';
+import logger from '../utils/logger.js';
 
 const router = Router();
 
@@ -118,7 +121,7 @@ router.get('/plan-review/:runId/events', verifyJWT, asyncHandler(async (req, res
       res.write(`id: ${event.sequence}\nevent: ${event.eventType}\ndata: ${JSON.stringify(event.data || {})}\n\n`);
     }
     const currentRun = await AgentRunModel.findOne({ userId: req.user.userId, runId: req.params.runId }).lean();
-    if (['COMPLETED', 'WAITING_FOR_APPROVAL', 'FAILED', 'CANCELLED', 'BUDGET_EXCEEDED'].includes(currentRun?.status)) {
+    if (['COMPLETED', 'WAITING_FOR_APPROVAL', 'FAILED', 'CANCELLED', 'SUPERSEDED', 'BUDGET_EXCEEDED', 'FEATURE_UNAVAILABLE'].includes(currentRun?.status)) {
       cleanup();
       res.end();
     }
@@ -172,9 +175,12 @@ router.post('/plan-review/:runId/action', verifyJWT, validateStrict(planReviewAc
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.runId)) {
     throw createError(400, 'Invalid plan review run ID.', 'Invalid plan review run ID.');
   }
-  const run = await AgentRunModel.findOne({ userId: req.user.userId, runId: req.params.runId }).lean();
+  const run = await getPlanReviewRun({ userId: req.user.userId, runId: req.params.runId });
   if (!run) throw createError(404, 'Plan review run not found or access denied.', 'Plan review run not found.');
-  if (run.status !== 'WAITING_FOR_APPROVAL' && req.body.action === 'APPROVE_RECOMPUTE') {
+  if (run.currentStateMatch !== true || run.status === 'SUPERSEDED') {
+    throw createError(409, 'This review is bound to an outdated financial state.', 'Refresh the plan review before taking action.', { code: 'PLAN_REVIEW_SOURCE_SUPERSEDED' });
+  }
+  if (['APPROVE_RECOMPUTE', 'REJECT_RECOMPUTE'].includes(req.body.action) && run.status !== 'WAITING_FOR_APPROVAL') {
     throw createError(409, 'This plan review is not waiting for approval.', 'Plan review approval is not available.');
   }
   const descriptor = buildApprovalAction(req.body.action, run);
@@ -187,19 +193,27 @@ router.post('/plan-review/:runId/action', verifyJWT, validateStrict(planReviewAc
       ttlSeconds: req.app.locals.runtimeConfig.authorization.mandateTtlSeconds,
       runtimeConfig: authorizationConfig(req),
     });
-    await AgentRunModel.updateOne(
-      { userId: req.user.userId, runId: req.params.runId },
-      { $set: { approval: { status: 'MANDATE_CREATED', action: req.body.action, mandateId: mandate.mandateId, at: new Date() } } },
-    );
+    const updatedRun = await persistPlanReviewAction({
+      userId: req.user.userId,
+      runId: req.params.runId,
+      planReviewSnapshotHash: run.planReviewSnapshotHash,
+      action: req.body.action,
+      mandate,
+    });
+    if (!updatedRun) {
+      await revokeMandate({ mandateId: mandate.mandateId, userId: req.user.userId, reason: 'PlanReview state changed before mandate binding.' });
+      throw createError(409, 'The review changed before approval could be bound.', 'Refresh the plan review before requesting approval.', { code: 'PLAN_REVIEW_SOURCE_SUPERSEDED' });
+    }
     await appendAuthorizationEvent({ runId: req.params.runId, userId: req.user.userId, eventType: 'MANDATE_CREATED', data: { mandateId: mandate.mandateId, action: mandate.action } });
     return res.status(201).json({ ...descriptor, authorization: { enabled: true, status: mandate.status }, mandate });
   }
-  const approvalStatus = req.body.action === 'APPROVE_RECOMPUTE' ? 'USER_APPROVED'
-    : req.body.action === 'REJECT_RECOMPUTE' ? 'USER_REJECTED' : 'USER_OPENED';
-  await AgentRunModel.updateOne(
-    { userId: req.user.userId, runId: req.params.runId },
-    { $set: { approval: { status: approvalStatus, action: req.body.action, at: new Date() } } },
-  );
+  const updatedRun = await persistPlanReviewAction({
+    userId: req.user.userId,
+    runId: req.params.runId,
+    planReviewSnapshotHash: run.planReviewSnapshotHash,
+    action: req.body.action,
+  });
+  if (!updatedRun) throw createError(409, 'The review changed before the action could be recorded.', 'Refresh the plan review before taking action.', { code: 'PLAN_REVIEW_SOURCE_SUPERSEDED' });
   return res.json(descriptor);
 }));
 
@@ -243,6 +257,7 @@ router.post('/mandates/:mandateId/approval/verify', verifyJWT, validateStrict(ma
 router.post('/mandates/:mandateId/revoke', verifyJWT, validateStrict(mandateRevokeSchema), asyncHandler(async (req, res) => {
   if (!authorizationEnabled(req)) return featureUnavailable();
   const mandate = await revokeMandate({ mandateId: req.params.mandateId, userId: req.user.userId, reason: req.body.reason });
+  await completePlanReviewMandateAction({ userId: req.user.userId, runId: mandate.runId, mandateId: mandate.mandateId, outcome: 'REVOKED' });
   await appendAuthorizationEvent({ runId: mandate.runId, userId: req.user.userId, eventType: 'MANDATE_REVOKED', data: { mandateId: mandate.mandateId, action: mandate.action } });
   return res.json(mandate);
 }));
@@ -253,6 +268,11 @@ router.post('/mandates/:mandateId/execute', verifyJWT, asyncHandler(async (req, 
   const startedAt = Date.now();
   try {
     const result = await createAuthorizedActionExecutor({ runtimeConfig: authorizationConfig(req) }).execute({ mandateId: req.params.mandateId, userId: req.user.userId, correlationId: req.correlationId });
+    const runId = result.receipt?.runId;
+    if (runId) {
+      await completePlanReviewMandateAction({ userId: req.user.userId, runId, mandateId: req.params.mandateId, outcome: 'EXECUTED' })
+        .catch(error => logger.error('PlanReview action lifecycle reconciliation failed after committed authorized execution.', { code: error.code || 'LIFECYCLE_UPDATE_FAILED' }));
+    }
     return res.json({ receipt: result.receipt, response: result.response });
   } finally {
     PrometheusMetrics.recordAuthorizationLatency(Date.now() - startedAt);
