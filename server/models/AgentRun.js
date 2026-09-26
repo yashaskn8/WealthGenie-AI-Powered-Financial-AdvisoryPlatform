@@ -14,7 +14,11 @@ const agentRunSchema = new mongoose.Schema({
   planReviewSnapshotHash: { type: String, required: true, immutable: true, match: /^[a-f0-9]{64}$/ },
   sourceBinding: { type: mongoose.Schema.Types.Mixed, required: true, immutable: true },
   status: { type: String, enum: PLAN_REVIEW_RUN_STATES, required: true, index: true },
-  priority: { type: String, enum: ['INTERACTIVE_PLAN_REVIEW', 'PLAN_HEALTH_BACKGROUND'], default: 'INTERACTIVE_PLAN_REVIEW', index: true },
+  // AgentRuns are currently admitted only by the interactive PlanReview API.
+  // PlanHealth is a separate scheduler and does not enqueue this collection.
+  // Keep the legacy class readable, but order through an explicit numeric rank.
+  priority: { type: String, enum: ['INTERACTIVE_PLAN_REVIEW', 'PLAN_HEALTH_BACKGROUND'], default: 'INTERACTIVE_PLAN_REVIEW', immutable: true },
+  priorityRank: { type: Number, enum: [0, 100], default: 0, immutable: true, index: true },
   recommendedAction: { type: String, default: 'INSUFFICIENT_EVIDENCE' },
   findingCodes: { type: [String], default: [] },
   evidenceIds: { type: [String], default: [] },
@@ -59,7 +63,15 @@ const agentRunSchema = new mongoose.Schema({
   cancellationRequested: { type: Boolean, default: false },
   approval: { type: mongoose.Schema.Types.Mixed, default: null },
   failure: { type: mongoose.Schema.Types.Mixed, default: null },
-  deadLetter: { type: mongoose.Schema.Types.Mixed, default: null },
+  deadLetter: {
+    code: { type: String, maxlength: 80 },
+    attempt: { type: Number, min: 1, max: 2 },
+    executionGeneration: { type: Number, min: 1 },
+    lastNode: { type: String, maxlength: 80, default: null },
+    traceId: { type: String, maxlength: 128, default: null },
+    correlationId: { type: String, maxlength: 128, default: null },
+    at: { type: Date },
+  },
 }, {
   strict: 'throw',
   timestamps: true,
@@ -73,6 +85,11 @@ agentRunSchema.index({ activeDedupeKey: 1 }, {
   // null and would incorrectly make all terminal runs collide.
   partialFilterExpression: { activeDedupeKey: { $type: 'string' } },
 });
-agentRunSchema.index({ status: 1, priority: 1, queuedAt: 1 });
+agentRunSchema.index({ status: 1, priorityRank: 1, queuedAt: 1 });
+agentRunSchema.pre('validate', function setPriorityRank() {
+  if (this.isNew || this.isModified('priority')) {
+    this.priorityRank = this.priority === 'PLAN_HEALTH_BACKGROUND' ? 100 : 0;
+  }
+});
 
 export default mongoose.model('AgentRun', agentRunSchema);

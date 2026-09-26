@@ -145,6 +145,8 @@ export function getRuntimeConfig(env = process.env) {
       batchSize: positiveInteger(env.PLAN_HEALTH_BATCH_SIZE, 100, { min: 1, max: 1000 }),
       intervalMs: positiveInteger(env.PLAN_HEALTH_INTERVAL_MS, 86400000, { min: 3600000, max: 604800000 }),
       leaseMs: positiveInteger(env.PLAN_HEALTH_LEASE_MS, 300000, { min: 30000, max: 3600000 }),
+      heartbeatMs: positiveInteger(env.PLAN_HEALTH_HEARTBEAT_MS, 60000, { min: 1000, max: 1800000 }),
+      profileTimeoutMs: positiveInteger(env.PLAN_HEALTH_PROFILE_TIMEOUT_MS, 30000, { min: 1000, max: 120000 }),
       jitterMs: positiveInteger(env.PLAN_HEALTH_JITTER_MS, 900000, { min: 0, max: 3600000 }),
       concurrency: positiveInteger(env.PLAN_HEALTH_CONCURRENCY, 4, { min: 1, max: 20 }),
     }),
@@ -233,5 +235,8 @@ export function assertValidRuntimeConfig(config) {
   }
   if (config.agentPlanReview.heartbeatMs >= config.agentPlanReview.leaseMs) {
     throw new Error('AGENT_HEARTBEAT_MS must be less than AGENT_LEASE_MS');
+  }
+  if (config.planHealth.heartbeatMs >= config.planHealth.leaseMs) {
+    throw new Error('PLAN_HEALTH_HEARTBEAT_MS must be less than PLAN_HEALTH_LEASE_MS');
   }
 }

@@ -33,10 +33,16 @@ const required = [
     { name: 'unique_run', key: { runId: 1 }, options: { unique: true } },
     { name: 'uniq_agent_run_active_dedupe_key', key: { activeDedupeKey: 1 }, options: { unique: true, partialFilterExpression: { activeDedupeKey: { $type: 'string' } } } },
   ], { collectionIndexes: [{ name: 'activeDedupeKey_1', key: { activeDedupeKey: 1 }, unique: true, partialFilterExpression: { activeDedupeKey: { $exists: true } } }] }),
-  fixtureModel('AgentCheckpoint', [{ name: 'unique_checkpoint', key: { runId: 1, executionGeneration: 1, sequence: 1 }, options: { unique: true } }], {
+  fixtureModel('AgentCheckpoint', [
+    { name: 'unique_checkpoint', key: { runId: 1, executionGeneration: 1, sequence: 1 }, options: { unique: true } },
+    { name: 'ttl_terminal_agent_checkpoints', key: { expiresAt: 1 }, options: { expireAfterSeconds: 0 } },
+  ], {
     collectionIndexes: [{ name: 'legacy_checkpoint', key: { runId: 1, sequence: -1 }, unique: true }],
   }),
-  fixtureModel('AgentGraphCheckpoint', [{ name: 'unique_graph_checkpoint', key: { threadId: 1, checkpointId: 1 }, options: { unique: true } }]),
+  fixtureModel('AgentGraphCheckpoint', [
+    { name: 'unique_graph_checkpoint', key: { threadId: 1, checkpointId: 1 }, options: { unique: true } },
+    { name: 'ttl_terminal_agent_graph_checkpoints', key: { expiresAt: 1 }, options: { expireAfterSeconds: 0 } },
+  ]),
   fixtureModel('AgentRunEvent', [{ name: 'unique_event', key: { runId: 1, sequence: 1 }, options: { unique: true } }]),
 ];
 

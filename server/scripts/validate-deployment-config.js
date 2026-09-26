@@ -61,6 +61,23 @@ if (phase4Spec.template.spec.restartPolicy !== 'Never'
   throw new Error('Phase 4 migration Job must run its explicit script with the configured database URI');
 }
 
+const phase5MigrationJobs = docs.filter(item => item.value?.kind === 'Job'
+  && item.value?.metadata?.labels?.app === 'wealthgenie-phase5-agent-runtime-migration');
+if (phase5MigrationJobs.length !== 1) throw new Error('Exactly one Phase 5 durable agent runtime migration Job must be defined');
+const phase5Spec = phase5MigrationJobs[0].value.spec;
+const phase5Container = phase5Spec.template.spec.containers.find(item => item.name === 'phase5-agent-runtime-migration');
+if (phase5Spec.parallelism !== 1 || phase5Spec.completions !== 1 || phase5Spec.backoffLimit !== 0) {
+  throw new Error('Phase 5 durable agent runtime migration must be a single, non-parallel, fail-closed Job');
+}
+if (phase5Spec.template.spec.restartPolicy !== 'Never'
+    || phase5Container?.image !== 'wealthgenie-server:latest'
+    || phase5Container?.command?.join(' ') !== 'node scripts/migratePhase5AgentRuntimeIndexes.js'
+    || !phase5Container.env?.some(item => item.name === 'MONGODB_MIGRATION_URI'
+      && item.valueFrom?.secretKeyRef?.name === 'wealthgenie-secrets'
+      && item.valueFrom?.secretKeyRef?.key === 'MONGODB_URI')) {
+  throw new Error('Phase 5 migration Job must run the explicit migration with the configured database URI');
+}
+
 const phase3MigrationJobs = docs.filter(item => item.value?.kind === 'Job'
   && item.value?.metadata?.labels?.app === 'wealthgenie-phase3-state-migration');
 if (phase3MigrationJobs.length !== 1) throw new Error('Exactly one Phase 3 ML/RAG state migration Job must be defined');
@@ -81,7 +98,8 @@ if (phase3Spec.template.spec.restartPolicy !== 'Never'
 const kustomization = parse(read('k8s/kustomization.yaml'));
 if (kustomization.resources?.some(resource => resource.includes('phase2-index-migration')
     || resource.includes('phase3-state-migration')
-    || resource.includes('phase4-plan-review-migration'))) {
+    || resource.includes('phase4-plan-review-migration')
+    || resource.includes('phase5-agent-runtime-migration'))) {
   throw new Error('One-shot database migration Jobs must only be created by ordered deployment steps');
 }
 
@@ -98,6 +116,7 @@ const browserInstall = namedStep(browserSteps, 'Install application and browser 
 const browserPhase2Migration = namedStep(browserSteps, 'Migrate Phase 2 persistence indexes');
 const browserPhase3Migration = namedStep(browserSteps, 'Migrate Phase 3 ML/RAG shared-state indexes');
 const browserPhase4Migration = namedStep(browserSteps, 'Migrate Phase 4 PlanReview persistence indexes');
+const browserPhase5Migration = namedStep(browserSteps, 'Migrate Phase 5 durable agent runtime persistence');
 const browserModelActivation = namedStep(browserSteps, 'Verify transactional ML model activation');
 const browserArtifactVerification = namedStep(browserSteps, 'Verify trusted serving artifact bundles');
 const browserStart = namedStep(browserSteps, 'Start real application services');
@@ -105,14 +124,16 @@ if (!(browserMongo.index < browserInstall.index
     && browserInstall.index < browserPhase2Migration.index
     && browserPhase2Migration.index < browserPhase3Migration.index
     && browserPhase3Migration.index < browserPhase4Migration.index
-    && browserPhase4Migration.index < browserModelActivation.index
+    && browserPhase4Migration.index < browserPhase5Migration.index
+    && browserPhase5Migration.index < browserModelActivation.index
     && browserModelActivation.index < browserArtifactVerification.index
     && browserArtifactVerification.index < browserStart.index)
     || !browserPhase2Migration.step.run?.includes('MONGODB_MIGRATION_URI="$MONGODB_URI" npm run migrate:phase2-indexes --prefix server')
     || browserPhase3Migration.step['working-directory'] !== 'ml-service'
     || !browserPhase3Migration.step.run?.includes('python scripts/migrate_phase3_state.py')
-    || !browserPhase4Migration.step.run?.includes('MONGODB_MIGRATION_URI="$MONGODB_URI" npm run migrate:phase4-plan-review-indexes --prefix server')) {
-  throw new Error('Browser CI must run both database migrations and artifact checks before starting application services');
+    || !browserPhase4Migration.step.run?.includes('MONGODB_MIGRATION_URI="$MONGODB_URI" npm run migrate:phase4-plan-review-indexes --prefix server')
+    || !browserPhase5Migration.step.run?.includes('MONGODB_MIGRATION_URI="$MONGODB_URI" npm run migrate:phase5-agent-runtime --prefix server')) {
+  throw new Error('Browser CI must run all ordered database migrations and artifact checks before starting application services');
 }
 
 const cd = parse(read('.github/workflows/cd.yml'));
@@ -123,6 +144,7 @@ const dbReady = namedStep(cdSteps, 'Wait for Database and Redis to be Ready');
 const cdPhase2Migration = namedStep(cdSteps, 'Run the one-shot Phase 2 index migration');
 const cdPhase3Migration = namedStep(cdSteps, 'Run the one-shot Phase 3 ML/RAG state migration');
 const cdPhase4Migration = namedStep(cdSteps, 'Run the one-shot Phase 4 PlanReview persistence migration');
+const cdPhase5Migration = namedStep(cdSteps, 'Run the one-shot Phase 5 durable agent runtime migration');
 const appApply = namedStep(cdSteps, 'Apply application manifests after database migrations');
 const appReady = namedStep(cdSteps, 'Wait for Microservices to be Ready');
 if (!(dbApply.index < secrets.index
@@ -130,7 +152,8 @@ if (!(dbApply.index < secrets.index
     && dbReady.index < cdPhase2Migration.index
     && cdPhase2Migration.index < cdPhase3Migration.index
     && cdPhase3Migration.index < cdPhase4Migration.index
-    && cdPhase4Migration.index < appApply.index
+    && cdPhase4Migration.index < cdPhase5Migration.index
+    && cdPhase5Migration.index < appApply.index
     && appApply.index < appReady.index)
     || !cdPhase2Migration.step.run?.includes('kubectl create -f k8s/phase2-index-migration/job.yaml')
     || !cdPhase2Migration.step.run?.includes('kubectl wait --for=condition=complete')
@@ -138,7 +161,9 @@ if (!(dbApply.index < secrets.index
     || !cdPhase3Migration.step.run?.includes('kubectl wait --for=condition=complete')
     || !cdPhase4Migration.step.run?.includes('kubectl create -f k8s/phase4-plan-review-migration/job.yaml')
     || !cdPhase4Migration.step.run?.includes('kubectl wait --for=condition=complete')
+    || !cdPhase5Migration.step.run?.includes('kubectl create -f k8s/phase5-agent-runtime-migration/job.yaml')
+    || !cdPhase5Migration.step.run?.includes('kubectl wait --for=condition=complete')
     || !appApply.step.run?.includes('kubectl apply -k k8s/')) {
-  throw new Error('Kind CD must wait for both one-shot database migrations before applying application workloads');
+  throw new Error('Kind CD must wait for all ordered one-shot database migrations before applying application workloads');
 }
-console.log(`Validated ${deploymentFiles.length} deployment YAML files, ordered Phase 2/3/4 migrations in browser CI and Kind CD, Compose API/worker separation, and worker probes.`);
+console.log(`Validated ${deploymentFiles.length} deployment YAML files, ordered Phase 2/3/4/5 migrations in browser CI and Kind CD, Compose API/worker separation, and worker probes.`);

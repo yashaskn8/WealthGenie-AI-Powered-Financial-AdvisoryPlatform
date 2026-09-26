@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
+import mongoose from 'mongoose';
 import FinancialProfile from '../models/FinancialProfile.js';
 import PlanHealthEvent from '../models/PlanHealthEvent.js';
+import PlanHealthSchedulerLease from '../models/PlanHealthSchedulerLease.js';
 import { loadPlanReviewContext } from '../agents/planReview/planReviewTools.js';
 import { PrometheusMetrics } from './metricsCollector.js';
 import logger from '../utils/logger.js';
@@ -16,9 +18,15 @@ const SEVERITY = Object.freeze({
   REGULATORY_VERSION_UNAVAILABLE: 'BLOCKED',
 });
 
-function fingerprint({ userId, recommendationId, reason }) {
+export function planHealthEventFingerprint({ userId, profileId, recommendationId, reason }) {
   return crypto.createHash('sha256')
-    .update(JSON.stringify({ userId: String(userId), recommendationId: recommendationId ? String(recommendationId) : null, reason, version: PLAN_HEALTH_MONITOR_VERSION }))
+    .update(JSON.stringify({
+      userId: String(userId),
+      profileId: String(profileId),
+      recommendationId: recommendationId ? String(recommendationId) : null,
+      reason,
+      version: PLAN_HEALTH_MONITOR_VERSION,
+    }))
     .digest('hex');
 }
 
@@ -30,15 +38,62 @@ function eventCopy(reason) {
   return 'The saved plan needs a review before it can be treated as current.';
 }
 
-export async function inspectPlanHealth({ userId, profileId, profileModel = FinancialProfile, eventModel = PlanHealthEvent, dependencies = {} }) {
+function leaseLostError() {
+  return Object.assign(new Error('Plan Health scan lease was lost before its event write.'), { code: 'PLAN_HEALTH_LEASE_LOST' });
+}
+
+async function withLeaseFence({ leaseFence, leaseModel, mongo, action }) {
+  if (!leaseFence) return action(null);
+  const session = await mongo.startSession();
+  let result;
+  try {
+    if (typeof session?.withTransaction !== 'function') {
+      throw Object.assign(new Error('Plan Health event writes require transaction-capable MongoDB.'), {
+        code: 'TRANSACTION_REQUIRED',
+      });
+    }
+    await session.withTransaction(async () => {
+      const nowValue = new Date();
+      const fence = await leaseModel.updateOne({
+        _id: leaseFence.periodKey,
+        owner: leaseFence.owner,
+        executionGeneration: leaseFence.executionGeneration,
+        status: 'RUNNING',
+        leaseUntil: { $gt: nowValue },
+      }, { $inc: { mutationFence: 1 } }, { session });
+      if (Number(fence?.modifiedCount ?? fence?.nModified ?? 0) !== 1) throw leaseLostError();
+      result = await action(session);
+    });
+    return result;
+  } finally {
+    await session.endSession();
+  }
+}
+
+export async function inspectPlanHealth({
+  userId,
+  profileId,
+  profileModel = FinancialProfile,
+  eventModel = PlanHealthEvent,
+  dependencies = {},
+  signal,
+  assertLease = async () => undefined,
+  leaseFence = null,
+  leaseModel = PlanHealthSchedulerLease,
+  mongo = mongoose,
+}) {
   const context = await loadPlanReviewContext({ userId, profileId, dependencies: { ...dependencies, profileModel } });
+  if (signal?.aborted) throw signal.reason;
   const reason = context.freshness?.reasonCodes?.[0] || null;
   if (!context.profile) return { status: 'HEALTHY', event: null };
   if (!reason) {
-    await eventModel.updateMany?.(
+    await assertLease();
+    if (signal?.aborted) throw signal.reason;
+    await withLeaseFence({ leaseFence, leaseModel, mongo, action: session => eventModel.updateMany?.(
       { userId, profileId, status: { $in: ['UNREAD', 'READ', 'OPEN', 'ACKNOWLEDGED'] } },
       { $set: { status: 'RESOLVED', resolvedAt: new Date() } },
-    );
+      session ? { session } : undefined,
+    ) });
     return { status: 'HEALTHY', event: null };
   }
   const recommendationId = context.recommendation?._id || null;
@@ -50,35 +105,49 @@ export async function inspectPlanHealth({ userId, profileId, profileModel = Fina
     severity: SEVERITY[reason] || 'ATTENTION',
     recommendation: eventCopy(reason),
     detectedAt: new Date(),
-    fingerprint: fingerprint({ userId, recommendationId, reason }),
+    fingerprint: planHealthEventFingerprint({ userId, profileId, recommendationId, reason }),
     monitorVersion: PLAN_HEALTH_MONITOR_VERSION,
   };
   const activeStatuses = ['UNREAD', 'READ', 'OPEN', 'ACKNOWLEDGED'];
-  await eventModel.updateMany?.(
-    { userId, profileId, fingerprint: { $ne: event.fingerprint }, status: { $in: activeStatuses } },
-    { $set: { status: 'SUPERSEDED', supersededAt: event.detectedAt } },
-  );
+  await assertLease();
+  if (signal?.aborted) throw signal.reason;
   try {
-    const persisted = await eventModel.create(event);
+    await assertLease();
+    if (signal?.aborted) throw signal.reason;
+    const persisted = await withLeaseFence({ leaseFence, leaseModel, mongo, action: async session => {
+      const options = session ? { session } : undefined;
+      await eventModel.updateMany(
+        { userId, profileId, fingerprint: { $ne: event.fingerprint }, status: { $in: activeStatuses } },
+        { $set: { status: 'SUPERSEDED', supersededAt: event.detectedAt } },
+        options,
+      );
+      const created = session
+        ? await eventModel.create([event], options)
+        : await eventModel.create(event);
+      return Array.isArray(created) ? created[0] : created;
+    } });
     PrometheusMetrics.inc('plan_health_events_created_total');
     PrometheusMetrics.inc('plan_health_events_total');
     return { status: 'ATTENTION', event: persisted.toObject ? persisted.toObject() : persisted };
   } catch (error) {
+    if (signal?.aborted) throw signal.reason;
     if (error?.code !== 11000) throw error;
     PrometheusMetrics.inc('plan_health_events_deduplicated_total');
     const existing = await eventModel.findOne({ fingerprint: event.fingerprint }).lean();
     if (existing?.status === 'RESOLVED' || existing?.status === 'SUPERSEDED') {
-      const reopened = await eventModel.findOneAndUpdate(
-        { fingerprint: event.fingerprint },
-        {
-          $set: {
-            status: 'UNREAD',
-            detectedAt: event.detectedAt,
+      await assertLease();
+      if (signal?.aborted) throw signal.reason;
+      const reopened = await withLeaseFence({ leaseFence, leaseModel, mongo, action: async session => {
+        const query = eventModel.findOneAndUpdate(
+          { fingerprint: event.fingerprint },
+          {
+            $set: { status: 'UNREAD', detectedAt: event.detectedAt },
+            $unset: { acknowledgedAt: 1, resolvedAt: 1, supersededAt: 1 },
           },
-          $unset: { acknowledgedAt: 1, resolvedAt: 1, supersededAt: 1 },
-        },
-        { new: true },
-      ).lean();
+          { new: true, ...(session ? { session } : {}) },
+        );
+        return query.lean ? query.lean() : query;
+      } });
       return { status: 'ATTENTION', event: reopened || existing };
     }
     return { status: 'ATTENTION', event: existing };

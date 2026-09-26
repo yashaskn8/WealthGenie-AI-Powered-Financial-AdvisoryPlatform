@@ -40,6 +40,8 @@ spec:
               value: "true"
             - name: AGENT_WORKER_HEALTH_PORT
               value: "5050"
+            - name: AGENT_SHUTDOWN_GRACE_MS
+              value: "20000"
             - name: TRACE_LOG_PATH
               value: "/tmp/traces-worker.jsonl"
             - name: MONGODB_URI

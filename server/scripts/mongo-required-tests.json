@@ -1,5 +1,6 @@
 [
   "test/advisoryPersistence.test.js",
+  "test/agentRuntimeCapacityMongo.integration.test.js",
   "test/auditChain.test.js",
   "test/auditTrail.test.js",
   "test/chatSessionStore.integration.test.js",
@@ -13,6 +14,7 @@
   "test/idempotencyHttp.test.js",
   "test/observability.integration.test.js",
   "test/profileCompletion.integration.test.js",
+  "test/planHealthRuntimeMongo.integration.test.js",
   "test/planReviewIndexMongo.integration.test.js",
   "test/planReviewMandateMongo.integration.test.js",
   "test/rbacRole.test.js",

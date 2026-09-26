@@ -2,6 +2,9 @@ import { BaseCheckpointSaver } from '@langchain/langgraph';
 import AgentGraphCheckpoint from '../../models/AgentGraphCheckpoint.js';
 import { planReviewGraphThreadId } from './planReviewRuntime.js';
 
+const MAX_PENDING_WRITE_COUNT = 100;
+const MAX_PENDING_WRITE_BYTES = 256 * 1024;
+
 function threadIdOf(config) {
   const value = config?.configurable?.thread_id;
   if (!value) throw new Error('LangGraph checkpoint thread_id is required.');
@@ -90,10 +93,42 @@ export class MongoPlanReviewCheckpointer extends BaseCheckpointSaver {
     if (!checkpointId) return;
     const serialized = [];
     for (const [channel, value] of writes) {
+      if (typeof taskId !== 'string' || taskId.length === 0 || taskId.length > 128
+          || typeof channel !== 'string' || channel.length === 0 || channel.length > 128) {
+        const error = new Error('PlanReview graph checkpoint write identity is invalid.');
+        error.code = 'AGENT_GRAPH_CHECKPOINT_BUDGET_EXCEEDED';
+        throw error;
+      }
       const [type, bytes] = await this.serde.dumpsTyped(value);
       serialized.push([taskId, channel, type, encoded(bytes)]);
     }
-    const updated = await this.model.updateOne({ ...scope, checkpointId }, { $push: { pendingWrites: { $each: serialized } } });
+    const incomingBytes = serialized.reduce((total, row) => total + row.reduce((sum, value) => sum + Buffer.byteLength(value), 0), 0);
+    if (serialized.length > MAX_PENDING_WRITE_COUNT || incomingBytes > MAX_PENDING_WRITE_BYTES) {
+      const error = new Error('PlanReview graph checkpoint pending writes exceeded the bounded recovery limit.');
+      error.code = 'AGENT_GRAPH_CHECKPOINT_BUDGET_EXCEEDED';
+      throw error;
+    }
+    const currentQuery = this.model.findOne({ ...scope, checkpointId });
+    const selectedQuery = currentQuery.select ? currentQuery.select({ pendingWrites: 1 }) : currentQuery;
+    const current = await (selectedQuery.lean ? selectedQuery.lean() : selectedQuery);
+    if (!current) {
+      const error = new Error('PlanReview checkpoint target is unavailable in this execution generation.');
+      error.code = 'CHECKPOINT_SCOPE_MISMATCH';
+      throw error;
+    }
+    const existingWrites = current.pendingWrites || [];
+    const existingBytes = existingWrites.reduce((total, row) => total + row.reduce((sum, value) => sum + Buffer.byteLength(String(value)), 0), 0);
+    if (existingWrites.length + serialized.length > MAX_PENDING_WRITE_COUNT
+        || existingBytes + incomingBytes > MAX_PENDING_WRITE_BYTES) {
+      const error = new Error('PlanReview graph checkpoint pending writes exceeded the bounded recovery limit.');
+      error.code = 'AGENT_GRAPH_CHECKPOINT_BUDGET_EXCEEDED';
+      throw error;
+    }
+    const updated = await this.model.updateOne({
+      ...scope,
+      checkpointId,
+      pendingWrites: existingWrites,
+    }, { $push: { pendingWrites: { $each: serialized } } });
     if (!Number(updated?.matchedCount ?? updated?.modifiedCount ?? updated?.n ?? 0)) {
       const error = new Error('PlanReview checkpoint target is unavailable in this execution generation.');
       error.code = 'CHECKPOINT_SCOPE_MISMATCH';

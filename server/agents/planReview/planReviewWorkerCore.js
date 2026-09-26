@@ -4,12 +4,14 @@ import { trace } from '../../config/tracing.js';
 import AgentRun from '../../models/AgentRun.js';
 import UserIntentMandate from '../../models/UserIntentMandate.js';
 import AgentCheckpoint from '../../models/AgentCheckpoint.js';
+import AgentGraphCheckpoint from '../../models/AgentGraphCheckpoint.js';
+import AgentRunEvent from '../../models/AgentRunEvent.js';
 import FinancialProfile from '../../models/FinancialProfile.js';
 import RecommendationState from '../../models/RecommendationState.js';
 import { PrometheusMetrics } from '../../services/metricsCollector.js';
 import { runPlanReview } from './planReviewService.js';
 import { MongoPlanReviewCheckpointer } from './mongoPlanReviewCheckpointer.js';
-import { PLAN_REVIEW_BUDGETS, hashPlanReviewSnapshot } from './planReviewRuntime.js';
+import { PLAN_REVIEW_BUDGETS, PLAN_REVIEW_CHECKPOINT_RETENTION_MS, hashPlanReviewSnapshot } from './planReviewRuntime.js';
 import { canonicalSha256 } from '../../utils/canonicalJson.js';
 import { resolvePlanReviewSnapshot } from './planReviewSnapshot.js';
 import { allocateAgentRunEventSequence } from '../../services/agentEventSequence.js';
@@ -150,6 +152,12 @@ function classifyFailure(error) {
   return 'INTERNAL_RUNTIME_FAILURE';
 }
 
+function isRetryableFailure(error) {
+  return error?.retryable === true
+    || ['PROVIDER_UNAVAILABLE', 'MODEL_TIMEOUT', 'PLAN_REVIEW_TIMEOUT', 'TOOL_TIMEOUT', 'MONGO_TRANSIENT_TRANSACTION_ERROR']
+      .includes(error?.code);
+}
+
 export async function claimNextPlanReviewRun({ model = AgentRun, leaseMs = 60000, worker = crypto.randomUUID(), nowValue = now() } = {}) {
   const span = tracer.startSpan('agent.queue.claim', { attributes: { 'agent.type': 'PLAN_REVIEW', 'worker.operation': 'claim' } });
   try {
@@ -170,7 +178,7 @@ export async function claimNextPlanReviewRun({ model = AgentRun, leaseMs = 60000
         retryAt: null,
       },
       $inc: { attempt: 1, executionGeneration: 1 },
-    }, { sort: { priority: 1, queuedAt: 1 }, new: true });
+    }, { sort: { priorityRank: 1, queuedAt: 1 }, new: true });
     if (claimed) PrometheusMetrics.setGauge('agent_worker_jobs_active', 1);
     if (claimed?.attempt > 1) PrometheusMetrics.inc('agent_worker_recovered_runs_total');
     span.setAttribute('run.state', claimed ? 'RUNNING' : 'EMPTY');
@@ -180,24 +188,95 @@ export async function claimNextPlanReviewRun({ model = AgentRun, leaseMs = 60000
   }
 }
 
-export async function recoverExpiredPlanReviewRuns({ model = AgentRun, nowValue = now() } = {}) {
-  const result = await model.updateMany({
+export async function recoverExpiredPlanReviewRuns({
+  model = AgentRun,
+  eventModel = AgentRunEvent,
+  checkpointModel = AgentCheckpoint,
+  graphCheckpointModel = AgentGraphCheckpoint,
+  mongo = mongoose,
+  nowValue = now(),
+} = {}) {
+  const candidatesQuery = model.find({
     agentType: 'PLAN_REVIEW',
     status: 'RUNNING',
     leaseUntil: { $lt: nowValue },
     attempt: { $gte: PLAN_REVIEW_BUDGETS.maxAttempts },
-  }, {
-    $set: {
-      status: 'FAILED',
-      failure: { code: 'INTERNAL_RUNTIME_FAILURE', message: 'Worker lease expired after the maximum retry attempts.' },
-      deadLetter: { code: 'INTERNAL_RUNTIME_FAILURE', at: nowValue },
-      completedAt: nowValue,
-      leaseUntil: null,
-      currentNode: null,
-    },
-    $unset: { activeDedupeKey: 1 },
   });
-  return Number(result?.modifiedCount ?? result?.nModified ?? 0);
+  const candidates = await (candidatesQuery.lean ? candidatesQuery.lean() : candidatesQuery);
+  let recovered = 0;
+  for (const candidate of candidates || []) {
+    const session = await mongo.startSession();
+    let candidateRecovered = false;
+    try {
+      if (typeof session?.withTransaction !== 'function') {
+        const error = new Error('Expired PlanReview recovery requires transaction-capable MongoDB.');
+        error.code = 'TRANSACTION_REQUIRED';
+        throw error;
+      }
+      await session.withTransaction(async () => {
+        // Mongo may retry this callback after a transient transaction error.
+        // Keep the return count tied to the final committed attempt, not to
+        // provisional writes from an aborted callback invocation.
+        candidateRecovered = false;
+        const eventSequence = Number(candidate.eventSequence || 0) + 1;
+        const update = {
+          $set: {
+            status: 'FAILED',
+            failure: { code: 'INTERNAL_RUNTIME_FAILURE', message: 'Worker lease expired after the maximum retry attempts.' },
+            deadLetter: {
+              code: 'INTERNAL_RUNTIME_FAILURE',
+              attempt: Number(candidate.attempt || 0),
+              executionGeneration: Number(candidate.executionGeneration || 0),
+              lastNode: candidate.currentNode || null,
+              traceId: candidate.traceId || null,
+              correlationId: candidate.correlationId || null,
+              at: nowValue,
+            },
+            completedAt: nowValue,
+            leaseUntil: null,
+            currentNode: null,
+          },
+          $unset: { activeDedupeKey: 1 },
+          ...(eventModel?.create ? { $inc: { eventSequence: 1 } } : {}),
+        };
+        const fence = Number(candidate.eventSequence || 0) === 0
+          ? { $or: [{ eventSequence: { $exists: false } }, { eventSequence: 0 }] }
+          : { eventSequence: Number(candidate.eventSequence) };
+        const write = await model.updateOne({
+          _id: candidate._id,
+          runId: candidate.runId,
+          workerId: candidate.workerId,
+          executionGeneration: candidate.executionGeneration,
+          agentType: 'PLAN_REVIEW',
+          status: 'RUNNING',
+          leaseUntil: { $lt: nowValue },
+          attempt: { $gte: PLAN_REVIEW_BUDGETS.maxAttempts },
+          ...fence,
+        }, update, { session });
+        if (!isModified(write)) return;
+        const expiresAt = new Date(nowValue.getTime() + PLAN_REVIEW_CHECKPOINT_RETENTION_MS);
+        await checkpointModel.updateMany({ runId: candidate.runId, userId: candidate.userId }, { $set: { expiresAt } }, { session });
+        await graphCheckpointModel.updateMany({ runId: candidate.runId, userId: candidate.userId }, { $set: { expiresAt } }, { session });
+        if (eventModel?.create) {
+          await eventModel.create([{
+            runId: candidate.runId,
+            userId: candidate.userId,
+            executionGeneration: candidate.executionGeneration,
+            sequence: eventSequence,
+            eventType: 'RUN_FAILED',
+            node: candidate.currentNode || null,
+            data: { type: 'RUN_FAILED', code: 'INTERNAL_RUNTIME_FAILURE', at: nowValue.toISOString() },
+          }], { session });
+        }
+        candidateRecovered = true;
+      });
+      if (candidateRecovered) recovered += 1;
+    } finally {
+      await session.endSession();
+    }
+  }
+  for (let index = 0; index < recovered; index += 1) PrometheusMetrics.recordAgentDeadLetter('INTERNAL_RUNTIME_FAILURE');
+  return recovered;
 }
 
 async function updateQueueMetrics(model) {
@@ -212,6 +291,7 @@ class PlanReviewWorker {
   constructor({
     model = AgentRun,
     checkpointModel = AgentCheckpoint,
+    graphCheckpointModel = AgentGraphCheckpoint,
     eventModel = null,
     mandateModel = UserIntentMandate,
     profileModel = FinancialProfile,
@@ -221,9 +301,16 @@ class PlanReviewWorker {
     runtimeConfig = null,
     worker = null,
     runPlanReviewImpl = runPlanReview,
+    setTimeoutImpl = setTimeout,
+    clearTimeoutImpl = clearTimeout,
+    setIntervalImpl = setInterval,
+    clearIntervalImpl = clearInterval,
+    recoverExpiredRunsImpl = recoverExpiredPlanReviewRuns,
+    reconcileMandatesImpl = reconcileTerminalPlanReviewMandates,
   } = {}) {
     this.model = model;
     this.checkpointModel = checkpointModel;
+    this.graphCheckpointModel = graphCheckpointModel;
     this.eventModel = eventModel;
     this.mandateModel = mandateModel;
     this.profileModel = profileModel;
@@ -232,12 +319,19 @@ class PlanReviewWorker {
     this.mongo = mongo;
     this.runtimeConfig = runtimeConfig;
     this.runPlanReviewImpl = runPlanReviewImpl;
+    this.setTimeoutImpl = setTimeoutImpl;
+    this.clearTimeoutImpl = clearTimeoutImpl;
+    this.setIntervalImpl = setIntervalImpl;
+    this.clearIntervalImpl = clearIntervalImpl;
+    this.recoverExpiredRunsImpl = recoverExpiredRunsImpl;
+    this.reconcileMandatesImpl = reconcileMandatesImpl;
     this.workerId = worker || `plan-review-worker-${crypto.randomUUID()}`;
     this.leaseMs = runtimeConfig?.agentPlanReview?.leaseMs || 60000;
     this.heartbeatMs = runtimeConfig?.agentPlanReview?.heartbeatMs || Math.floor(this.leaseMs / 4);
     this.timer = null;
     this.heartbeatTimer = null;
     this.mandateReconciliationTimer = null;
+    this.expiredRunRecoveryTimer = null;
     this.activePromise = null;
     this.activeRun = null;
     this.activeAbortController = null;
@@ -293,62 +387,110 @@ class PlanReviewWorker {
   }
 
   startHeartbeat() {
-    this.heartbeatTimer = setInterval(() => { void this.heartbeat().catch(() => { this.leaseLost = true; }); }, this.heartbeatMs);
+    this.heartbeatTimer = this.setIntervalImpl(() => {
+      void this.heartbeat().catch(error => {
+        if (this.leaseLost) return;
+        this.leaseLost = true;
+        this.activeAbortController?.abort(staleLeaseError());
+        PrometheusMetrics.inc('agent_worker_heartbeat_failures_total');
+        PrometheusMetrics.inc('agent_worker_stale_write_rejections_total');
+        logger.error('PlanReview worker heartbeat failed; active work was fenced', {
+          code: error?.code || 'WORKER_HEARTBEAT_FAILED',
+          runId: this.activeRun?.runId || null,
+          executionGeneration: Number(this.activeRun?.executionGeneration) || null,
+        });
+      });
+    }, this.heartbeatMs);
     this.heartbeatTimer.unref?.();
   }
 
   stopHeartbeat() {
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    if (this.heartbeatTimer) this.clearIntervalImpl(this.heartbeatTimer);
     this.heartbeatTimer = null;
   }
 
   async updateProgress(run, payload) {
     await this.assertLease(run);
-    const current = await this.model.findOne(leaseFilter(run)).lean();
-    if (current?.cancellationRequested) {
-      const error = new Error('AGENT_RUN_CANCELLED');
-      error.code = 'AGENT_RUN_CANCELLED';
-      throw error;
-    }
-    const completedNodes = [...new Set([...(current?.progress?.completedNodes || []), ...(payload.node && payload.event?.type !== 'TOOL_FAILED' ? [payload.node] : [])])];
-    const sequence = Number(current?.checkpointSequence || 0) + 1;
     const safeState = checkpointState(payload.state || {});
-    await this.checkpointModel.findOneAndUpdate(
-      { runId: run.runId, userId: run.userId, executionGeneration: run.executionGeneration, sequence },
-      {
-        $setOnInsert: { runId: run.runId, userId: run.userId, executionGeneration: run.executionGeneration, sequence, createdAt: now() },
-        $set: { workerId: run.workerId, node: payload.node || 'unknown', state: safeState },
-      },
-      { upsert: true, new: true },
-    );
+    const session = await this.mongo.startSession();
+    let sequence = null;
+    try {
+      if (typeof session?.withTransaction !== 'function') {
+        const error = new Error('PlanReview checkpoint publication requires transaction-capable MongoDB.');
+        error.code = 'TRANSACTION_REQUIRED';
+        throw error;
+      }
+      await session.withTransaction(async () => {
+        const currentQuery = this.model.findOne({
+          ...leaseFilter(run),
+          status: 'RUNNING',
+          leaseUntil: { $gt: now() },
+        });
+        currentQuery.session?.(session);
+        const current = await (currentQuery.lean ? currentQuery.lean() : currentQuery);
+        if (!current) throw staleLeaseError();
+        if (current.cancellationRequested) {
+          const error = new Error('AGENT_RUN_CANCELLED');
+          error.code = 'AGENT_RUN_CANCELLED';
+          throw error;
+        }
+        const previousSequence = Number(current.checkpointSequence || 0);
+        sequence = previousSequence + 1;
+        const completedNodes = [...new Set([
+          ...(current.progress?.completedNodes || []),
+          ...(payload.node && payload.event?.type !== 'TOOL_FAILED' ? [payload.node] : []),
+        ])];
+        const options = { upsert: true, new: true, session };
+        await this.checkpointModel.findOneAndUpdate(
+          { runId: run.runId, userId: run.userId, executionGeneration: run.executionGeneration, sequence },
+          {
+            $setOnInsert: { runId: run.runId, userId: run.userId, executionGeneration: run.executionGeneration, sequence, createdAt: now() },
+            $set: { workerId: run.workerId, node: payload.node || 'unknown', state: safeState },
+          },
+          options,
+        );
+        const set = {
+          currentNode: payload.node || null,
+          lastHeartbeatAt: now(),
+          leaseUntil: new Date(Date.now() + this.leaseMs),
+          checkpoint: { state: safeState },
+          checkpointSequence: sequence,
+          progress: progressFor(payload.node, completedNodes),
+        };
+        if (payload.event) set.trajectory = addTrajectory(current.trajectory, payload.event, payload.node);
+        if (payload.event?.type === 'TOOL_SUCCEEDED' || payload.event?.type === 'TOOL_FAILED') {
+          const has = key => Object.prototype.hasOwnProperty.call(payload.event, key);
+          const ledger = {
+            sequence,
+            tool: payload.event.tool || null,
+            success: payload.event.type === 'TOOL_SUCCEEDED',
+            code: payload.event.code || null,
+            inputHash: has('input') ? canonicalSha256(payload.event.input) : null,
+            outputHash: has('output') ? canonicalSha256(payload.event.output) : null,
+            startedAt: payload.event.at || now().toISOString(),
+            completedAt: now().toISOString(),
+          };
+          set.toolExecutionLedger = [...(current.toolExecutionLedger || []), ledger].slice(-50);
+        }
+        const sequenceFilter = previousSequence === 0
+          ? { $or: [{ checkpointSequence: 0 }, { checkpointSequence: { $exists: false } }] }
+          : { checkpointSequence: previousSequence };
+        const result = await this.model.updateOne({
+          ...leaseFilter(run),
+          status: 'RUNNING',
+          cancellationRequested: { $ne: true },
+          leaseUntil: { $gt: now() },
+          ...sequenceFilter,
+        }, { $set: set }, { session });
+        if (!isModified(result)) {
+          PrometheusMetrics.inc('agent_worker_stale_write_rejections_total');
+          throw staleLeaseError();
+        }
+      });
+    } finally {
+      await session.endSession();
+    }
     PrometheusMetrics.inc('agent_checkpoint_writes_total');
-    const set = {
-      currentNode: payload.node || null,
-      lastHeartbeatAt: now(),
-      leaseUntil: new Date(Date.now() + this.leaseMs),
-      checkpoint: { state: safeState },
-      checkpointSequence: sequence,
-      progress: progressFor(payload.node, completedNodes),
-    };
-    if (payload.event) set.trajectory = addTrajectory(current?.trajectory, payload.event, payload.node);
-    if (payload.event?.type === 'TOOL_SUCCEEDED' || payload.event?.type === 'TOOL_FAILED') {
-      const ledger = {
-        sequence,
-        tool: payload.event.tool || null,
-        success: payload.event.type === 'TOOL_SUCCEEDED',
-        code: payload.event.code || null,
-        inputHash: null,
-        outputHash: null,
-        startedAt: payload.event.at || now().toISOString(),
-        completedAt: now().toISOString(),
-      };
-      set.toolExecutionLedger = [...(current?.toolExecutionLedger || []), ledger].slice(-50);
-    }
-    const result = await this.model.updateOne({ ...leaseFilter(run), status: 'RUNNING' }, { $set: set });
-    if (!isModified(result)) {
-      PrometheusMetrics.inc('agent_worker_stale_write_rejections_total');
-      throw staleLeaseError();
-    }
     await this.appendEvent(run, sequence, payload.event, payload.node);
   }
 
@@ -543,6 +685,11 @@ class PlanReviewWorker {
             data: { type: terminalEvent, node: 'persist_agent_run', at: now().toISOString() },
           }], { session });
         }
+        if (status === 'COMPLETED') {
+          const expiresAt = new Date(Date.now() + PLAN_REVIEW_CHECKPOINT_RETENTION_MS);
+          await this.checkpointModel.updateMany({ runId: run.runId, userId: run.userId }, { $set: { expiresAt } }, { session });
+          await this.graphCheckpointModel.updateMany({ runId: run.runId, userId: run.userId }, { $set: { expiresAt } }, { session });
+        }
       });
       committed = true;
     } finally {
@@ -555,7 +702,8 @@ class PlanReviewWorker {
 
   async failRun(run, error) {
     if (error?.code === 'AGENT_LEASE_LOST') return;
-    const terminal = Number(run.attempt || 0) >= Number(run.maxAttempts || PLAN_REVIEW_BUDGETS.maxAttempts);
+    const retryable = isRetryableFailure(error);
+    const terminal = !retryable || Number(run.attempt || 0) >= Number(run.maxAttempts || PLAN_REVIEW_BUDGETS.maxAttempts);
     const cancelled = error?.code === 'AGENT_RUN_CANCELLED';
     const budgetExceeded = error?.code === 'AGENT_BUDGET_EXCEEDED';
     const superseded = error?.code === 'PLAN_REVIEW_SOURCE_SUPERSEDED';
@@ -564,9 +712,17 @@ class PlanReviewWorker {
       $set: {
         status: superseded ? 'SUPERSEDED' : (cancelled ? 'CANCELLED' : (budgetExceeded ? 'BUDGET_EXCEEDED' : (terminal ? 'FAILED' : 'QUEUED'))),
         retryAt: terminal || cancelled || budgetExceeded || superseded ? null : new Date(Date.now() + Math.min(30000, 1000 * (2 ** Math.max(0, Number(run.attempt || 1) - 1)))),
-        failure: { code: classification, message: String(error?.message || 'Agent run failed').slice(0, 240) },
+        failure: { code: classification, message: classification },
         deadLetter: terminal && !cancelled && !budgetExceeded && !superseded
-          ? { code: classification, at: now() }
+          ? {
+            code: classification,
+            attempt: Number(run.attempt || 0),
+            executionGeneration: Number(run.executionGeneration || 0),
+            lastNode: run.currentNode || null,
+            traceId: run.traceId || null,
+            correlationId: run.correlationId || null,
+            at: now(),
+          }
           : null,
         leaseUntil: null,
         completedAt: terminal || cancelled || budgetExceeded || superseded ? now() : null,
@@ -585,18 +741,79 @@ class PlanReviewWorker {
       update.$max = { ...(update.$max || {}), tokenUsage: measuredUsage.tokenUsage };
     }
     if (terminal || cancelled || budgetExceeded || superseded) update.$unset = { activeDedupeKey: 1 };
-    const written = await this.model.updateOne({ ...leaseFilter(run), status: 'RUNNING' }, update);
-    if (!isModified(written)) {
-      PrometheusMetrics.inc('agent_worker_stale_write_rejections_total');
-      throw staleLeaseError();
+    let current;
+    let session;
+    let persistedEventSequence = null;
+    try {
+      session = await this.mongo.startSession();
+      if (typeof session?.withTransaction !== 'function') {
+        const transactionError = new Error('PlanReview failure publication requires transaction-capable MongoDB.');
+        transactionError.code = 'TRANSACTION_REQUIRED';
+        throw transactionError;
+      }
+      await session.withTransaction(async () => {
+        const currentQuery = this.model.findOne({
+          ...leaseFilter(run),
+          status: 'RUNNING',
+          leaseUntil: { $gt: now() },
+        });
+        currentQuery.session?.(session);
+        current = await (currentQuery.lean ? currentQuery.lean() : currentQuery);
+        if (!current) throw staleLeaseError();
+        if (update.$set.deadLetter) {
+          Object.assign(update.$set.deadLetter, {
+            attempt: Number(current.attempt || run.attempt || 0),
+            executionGeneration: Number(current.executionGeneration || run.executionGeneration || 0),
+            lastNode: current.currentNode || run.currentNode || null,
+            traceId: current.traceId || run.traceId || null,
+            correlationId: current.correlationId || run.correlationId || null,
+          });
+        }
+        const previousEventSequence = Number(current.eventSequence || 0);
+        persistedEventSequence = previousEventSequence + 1;
+        const expectedEventSequence = previousEventSequence === 0
+          ? { $or: [{ eventSequence: { $exists: false } }, { eventSequence: 0 }] }
+          : { eventSequence: previousEventSequence };
+        const written = await this.model.updateOne({
+          ...leaseFilter(run),
+          status: 'RUNNING',
+          leaseUntil: { $gt: now() },
+          ...expectedEventSequence,
+        }, {
+          ...update,
+          ...(this.eventModel?.create ? { $inc: { ...(update.$inc || {}), eventSequence: 1 } } : {}),
+        }, { session });
+        if (!isModified(written)) {
+          PrometheusMetrics.inc('agent_worker_stale_write_rejections_total');
+          throw staleLeaseError();
+        }
+        if (this.eventModel?.create) {
+          const eventType = superseded ? 'RUN_SUPERSEDED'
+            : (cancelled ? 'RUN_CANCELLED'
+              : (budgetExceeded ? 'RUN_BUDGET_EXCEEDED'
+                : (terminal ? 'RUN_FAILED' : 'RUN_RETRY_SCHEDULED')));
+          await this.eventModel.create([{
+            runId: run.runId,
+            userId: run.userId,
+            executionGeneration: run.executionGeneration,
+            sequence: persistedEventSequence,
+            eventType,
+            node: current.currentNode || run.currentNode || null,
+            data: { type: eventType, code: classification, at: now().toISOString() },
+          }], { session });
+        }
+        if (terminal || cancelled || budgetExceeded || superseded) {
+          const expiresAt = new Date(Date.now() + PLAN_REVIEW_CHECKPOINT_RETENTION_MS);
+          await this.checkpointModel.updateMany({ runId: run.runId, userId: run.userId }, { $set: { expiresAt } }, { session });
+          await this.graphCheckpointModel.updateMany({ runId: run.runId, userId: run.userId }, { $set: { expiresAt } }, { session });
+        }
+      });
+    } finally {
+      await session?.endSession();
     }
     if (cancelled) PrometheusMetrics.inc('agent_cancellation_total');
     if (budgetExceeded) PrometheusMetrics.inc('agent_budget_exceeded_total');
-    await this.appendEvent(run, Number(run.checkpointSequence || 0) + 1, {
-      type: superseded ? 'RUN_SUPERSEDED' : (cancelled ? 'RUN_CANCELLED' : 'RUN_FAILED'),
-      code: classification,
-      at: now().toISOString(),
-    }, run.currentNode);
+    if (terminal && !cancelled && !budgetExceeded && !superseded) PrometheusMetrics.recordAgentDeadLetter(classification);
     return {
       persisted: true,
       status: update.$set.status,
@@ -695,37 +912,68 @@ class PlanReviewWorker {
   start({ intervalMs = 500 } = {}) {
     if (this.timer) return this;
     this.draining = false;
-    this.timer = setInterval(() => { void this.processNext().catch(() => {}); }, intervalMs);
+    this.timer = this.setIntervalImpl(() => {
+      void this.processNext().catch(error => {
+        PrometheusMetrics.inc('agent_worker_poll_failures_total');
+        logger.error('PlanReview worker poll failed', { code: error?.code || 'WORKER_POLL_FAILED' });
+      });
+    }, intervalMs);
     this.timer.unref?.();
-    void reconcileTerminalPlanReviewMandates({ runModel: this.model, mandateModel: this.mandateModel }).catch(error => {
+    void this.reconcileMandatesImpl({ runModel: this.model, mandateModel: this.mandateModel }).catch(error => {
       PrometheusMetrics.inc('agent_mandate_reconciliation_failures_total');
       logger.warn('PlanReview mandate reconciliation sweep failed', { code: error.code || 'MANDATE_RECONCILIATION_FAILED' });
     });
-    this.mandateReconciliationTimer = setInterval(() => {
-      void reconcileTerminalPlanReviewMandates({ runModel: this.model, mandateModel: this.mandateModel }).catch(error => {
+    this.mandateReconciliationTimer = this.setIntervalImpl(() => {
+      void this.reconcileMandatesImpl({ runModel: this.model, mandateModel: this.mandateModel }).catch(error => {
         PrometheusMetrics.inc('agent_mandate_reconciliation_failures_total');
         logger.warn('PlanReview mandate reconciliation sweep failed', { code: error.code || 'MANDATE_RECONCILIATION_FAILED' });
       });
     }, 30000);
     this.mandateReconciliationTimer.unref?.();
-    void recoverExpiredPlanReviewRuns({ model: this.model }).catch(() => {});
-    void this.processNext().catch(() => {});
+    const recover = () => this.recoverExpiredRunsImpl({ model: this.model, eventModel: this.eventModel, checkpointModel: this.checkpointModel, graphCheckpointModel: this.graphCheckpointModel, mongo: this.mongo }).catch(error => {
+      PrometheusMetrics.inc('agent_worker_recovery_failures_total');
+      logger.error('PlanReview expired-run recovery failed', { code: error?.code || 'EXPIRED_RUN_RECOVERY_FAILED' });
+    });
+    void recover();
+    this.expiredRunRecoveryTimer = this.setIntervalImpl(() => { void recover(); }, Math.max(5000, Math.min(this.leaseMs, 30000)));
+    this.expiredRunRecoveryTimer.unref?.();
+    void this.processNext().catch(error => {
+      PrometheusMetrics.inc('agent_worker_poll_failures_total');
+      logger.error('Initial PlanReview worker poll failed', { code: error?.code || 'WORKER_POLL_FAILED' });
+    });
     return this;
   }
 
   async stop({ graceMs = this.runtimeConfig?.agentPlanReview?.shutdownGraceMs || 10000 } = {}) {
     this.draining = true;
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) this.clearIntervalImpl(this.timer);
     this.timer = null;
-    if (this.mandateReconciliationTimer) clearInterval(this.mandateReconciliationTimer);
+    if (this.mandateReconciliationTimer) this.clearIntervalImpl(this.mandateReconciliationTimer);
     this.mandateReconciliationTimer = null;
+    if (this.expiredRunRecoveryTimer) this.clearIntervalImpl(this.expiredRunRecoveryTimer);
+    this.expiredRunRecoveryTimer = null;
     if (this.activePromise) {
-      await Promise.race([
-        this.activePromise,
-        new Promise(resolve => { const timer = setTimeout(resolve, graceMs); timer.unref?.(); }),
+      let timeout;
+      const drained = await Promise.race([
+        this.activePromise.then(() => true),
+        new Promise(resolve => { timeout = this.setTimeoutImpl(() => resolve(false), graceMs); timeout?.unref?.(); }),
       ]);
+      this.clearTimeoutImpl(timeout);
+      if (!drained) {
+        const error = new Error('Agent worker shutdown deadline exceeded.');
+        error.code = 'AGENT_WORKER_SHUTDOWN';
+        this.activeAbortController?.abort(error);
+        let abortTimer;
+        const abortedDrain = await Promise.race([
+          this.activePromise.then(() => true),
+          new Promise(resolve => { abortTimer = this.setTimeoutImpl(() => resolve(false), Math.min(1000, Math.max(100, graceMs))); abortTimer?.unref?.(); }),
+        ]);
+        this.clearTimeoutImpl(abortTimer);
+        if (!abortedDrain) return { drained: false };
+      }
     }
     if (!this.activePromise) this.stopHeartbeat();
+    return { drained: !this.activePromise };
   }
 }
 

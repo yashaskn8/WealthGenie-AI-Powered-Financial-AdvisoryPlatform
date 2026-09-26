@@ -38,10 +38,10 @@ function writeYaml(root, relativePath, value) {
   fs.writeFileSync(path.join(root, relativePath), stringify(value), 'utf8');
 }
 
-test('deployment validator accepts the complete Phase 2, Phase 3, and Phase 4 migration sequence', () => {
+test('deployment validator accepts the complete Phase 2 through Phase 5 migration sequence', () => {
   const result = validate(repositoryRoot);
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /ordered Phase 2\/3\/4 migrations/);
+  assert.match(result.stdout, /ordered Phase 2\/3\/4\/5 migrations/);
 });
 
 test('deployment validator rejects CD application before the Phase 3 migration', () => {
@@ -97,6 +97,37 @@ test('deployment validator rejects Browser application startup before Phase 3 mi
 
     const result = validate(root);
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /Browser CI must run both database migrations/);
+    assert.match(result.stderr, /Browser CI must run all ordered database migrations/);
+  });
+});
+
+test('deployment validator rejects Browser application startup before Phase 5 runtime migration', () => {
+  withDeploymentFixture(root => {
+    const workflowPath = '.github/workflows/ci.yml';
+    const workflow = readYaml(root, workflowPath);
+    const steps = workflow.jobs['browser-real-dependencies'].steps;
+    const [migration] = steps.splice(steps.findIndex(step => step.name === 'Migrate Phase 5 durable agent runtime persistence'), 1);
+    steps.splice(steps.findIndex(step => step.name === 'Start real application services'), 0, migration);
+    writeYaml(root, workflowPath, workflow);
+
+    const result = validate(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Browser CI must run all ordered database migrations/);
+  });
+});
+
+test('deployment validator rejects Kind application rollout before Phase 5 runtime migration', () => {
+  withDeploymentFixture(root => {
+    const workflowPath = '.github/workflows/cd.yml';
+    const workflow = readYaml(root, workflowPath);
+    const steps = workflow.jobs['deploy-and-verify-kind'].steps;
+    const [migration] = steps.splice(steps.findIndex(step => step.name === 'Run the one-shot Phase 5 durable agent runtime migration'), 1);
+    const applyIndex = steps.findIndex(step => step.name === 'Apply application manifests after database migrations');
+    steps.splice(applyIndex + 1, 0, migration);
+    writeYaml(root, workflowPath, workflow);
+
+    const result = validate(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Kind CD must wait for all ordered one-shot database migrations/);
   });
 });

@@ -29,7 +29,7 @@ jobs:
       - name: Run worker, scheduler, fencing, and evaluation gates
         env:
           JWT_SECRET: ci-agent-runtime-secret-with-more-than-32-characters
-        run: node --test --test-concurrency=1 server/test/planReviewRuntime.test.js server/test/planReviewPersistence.test.js server/test/planReviewTokenBudget.test.js server/test/agentWorkerRuntime.test.js
+        run: node --test --test-concurrency=1 server/test/planReviewRuntime.test.js server/test/planReviewPersistence.test.js server/test/planReviewTokenBudget.test.js server/test/agentWorkerRuntime.test.js server/test/planHealthPersistence.test.js server/test/workerShutdown.test.js
       - name: Syntax-check standalone worker
         run: node --check server/worker.js
       - name: Validate Compose and Kubernetes worker configuration
@@ -64,6 +64,11 @@ jobs:
         run: |
           cd server
           npm ci
+
+      - name: Run explicit Phase 5 Mongo durable-runtime gates
+        env:
+          MONGODB_URI: 'mongodb://127.0.0.1:27017/wealthgenie_phase5_test'
+        run: node --test --test-concurrency=1 server/test/planHealthRuntimeMongo.integration.test.js
 
       - name: Run Backend ESLint Check
         run: |
@@ -274,6 +279,9 @@ jobs:
 
       - name: Migrate Phase 4 PlanReview persistence indexes
         run: MONGODB_MIGRATION_URI="$MONGODB_URI" npm run migrate:phase4-plan-review-indexes --prefix server
+
+      - name: Migrate Phase 5 durable agent runtime persistence
+        run: MONGODB_MIGRATION_URI="$MONGODB_URI" npm run migrate:phase5-agent-runtime --prefix server
 
       - name: Bootstrap the shared RAG corpus generation
         working-directory: ml-service

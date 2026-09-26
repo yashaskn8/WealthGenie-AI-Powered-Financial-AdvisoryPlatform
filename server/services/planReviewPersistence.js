@@ -12,8 +12,30 @@ export const PHASE4_PLAN_REVIEW_INDEX_MODELS = Object.freeze([
 ]);
 
 /** Runtime gate: read-only index verification; never creates or repairs indexes. */
-export function verifyPlanReviewPersistenceIndexes({ models = PHASE4_PLAN_REVIEW_INDEX_MODELS, force = false } = {}) {
-  return verifyPersistenceIndexes({ models, force });
+export async function verifyPlanReviewPersistenceIndexes({ models = PHASE4_PLAN_REVIEW_INDEX_MODELS, force = false } = {}) {
+  const result = await verifyPersistenceIndexes({ models, force });
+  const requiredTtlIndexes = [
+    ['AgentCheckpoint', { expiresAt: 1 }, 'ttl_terminal_agent_checkpoints'],
+    ['AgentGraphCheckpoint', { expiresAt: 1 }, 'ttl_terminal_agent_graph_checkpoints'],
+  ];
+  const missing = [];
+  for (const [modelName, key, name] of requiredTtlIndexes) {
+    const model = models.find(candidate => candidate.modelName === modelName);
+    if (!model) continue;
+    const indexes = await model.collection.indexes().catch(() => []);
+    if (!indexes.some(index => JSON.stringify(Object.entries(index.key || {})) === JSON.stringify(Object.entries(key))
+        && index.expireAfterSeconds === 0 && index.name === name)) {
+      missing.push(`${model.collection.collectionName}:${name}`);
+    }
+  }
+  if (missing.length) {
+    throw Object.assign(new Error('Required terminal checkpoint retention indexes are unavailable.'), {
+      status: 503,
+      code: 'PERSISTENCE_INDEXES_UNAVAILABLE',
+      details: { missing },
+    });
+  }
+  return result;
 }
 
 /** Explicit deployment migration. Index DDL is never run by API/worker startup. */

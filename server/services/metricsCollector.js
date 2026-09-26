@@ -57,10 +57,19 @@ class MetricsCollector {
       agent_worker_lease_conflicts_total: 0,
       agent_worker_stale_write_rejections_total: 0,
       agent_worker_recovered_runs_total: 0,
+      agent_worker_heartbeat_failures_total: 0,
       plan_health_scans_total: 0,
       plan_health_users_scanned_total: 0,
       plan_health_events_created_total: 0,
       plan_health_events_deduplicated_total: 0,
+      plan_health_profile_timeouts_total: 0,
+      plan_health_scan_failures_total: 0,
+      plan_health_scan_errors_total: 0,
+      plan_health_scheduler_failures_total: 0,
+      plan_health_lease_conflicts_total: 0,
+      plan_health_lease_renewal_failures_total: 0,
+      agent_worker_poll_failures_total: 0,
+      agent_worker_recovery_failures_total: 0,
       agent_live_eval_failures_total: 0,
       mandates_created_total: 0,
       mandates_authorized_total: 0,
@@ -95,6 +104,16 @@ class MetricsCollector {
       agent_worker_jobs_active: 0,
       agent_queue_oldest_age_seconds: 0,
     };
+
+    this.deadLetterReasons = Object.fromEntries([
+      'INTERNAL_RUNTIME_FAILURE',
+      'PROVIDER_UNAVAILABLE',
+      'PLAN_REVIEW_TIMEOUT',
+      'CHECKPOINT_FAILURE',
+      'TOOL_FAILURE',
+      'BUDGET_RESERVATION_UNAVAILABLE',
+      'OTHER',
+    ].map(reason => [reason, 0]));
 
     this.toolUsage = {}; // tool_name -> count
     this.latencies = []; // rolling window of latency entries
@@ -154,6 +173,11 @@ class MetricsCollector {
   recordAgentRun(status) {
     if (status === 'completed') this.inc('agent_runs_completed_total');
     else this.inc('agent_runs_failed_total');
+  }
+
+  recordAgentDeadLetter(reason) {
+    const key = Object.hasOwn(this.deadLetterReasons, reason) ? reason : 'OTHER';
+    this.deadLetterReasons[key] += 1;
   }
 
   recordAgentToolCall(_toolName, success) {
@@ -258,16 +282,32 @@ class MetricsCollector {
       'agent_worker_lease_conflicts_total',
       'agent_worker_stale_write_rejections_total',
       'agent_worker_recovered_runs_total',
+      'agent_worker_heartbeat_failures_total',
+      'agent_worker_poll_failures_total',
+      'agent_worker_recovery_failures_total',
       'plan_health_scans_total',
       'plan_health_users_scanned_total',
       'plan_health_events_created_total',
       'plan_health_events_deduplicated_total',
+      'plan_health_scheduler_failures_total',
+      'plan_health_profile_timeouts_total',
+      'plan_health_scan_failures_total',
+      'plan_health_scan_errors_total',
+      'plan_health_lease_conflicts_total',
+      'plan_health_lease_renewal_failures_total',
+      'agent_worker_poll_failures_total',
+      'agent_worker_recovery_failures_total',
       'agent_live_eval_failures_total',
       'post_commit_reconciled_to_newer_recommendation_total',
     ];
     for (const name of workerCounters) {
       lines.push(`# TYPE wealthgenie_${name} counter`);
       lines.push(`wealthgenie_${name} ${this.counters[name]}`);
+    }
+    lines.push('# HELP wealthgenie_agent_dead_letter_total Terminal PlanReview runs by bounded failure reason');
+    lines.push('# TYPE wealthgenie_agent_dead_letter_total counter');
+    for (const [reason, count] of Object.entries(this.deadLetterReasons)) {
+      lines.push(`wealthgenie_agent_dead_letter_total{reason="${reason}"} ${count}`);
     }
     const authorizationCounters = [
       'mandates_created_total', 'mandates_authorized_total', 'mandates_rejected_total',
@@ -376,6 +416,7 @@ class MetricsCollector {
 
     return {
       counters: { ...this.counters },
+      agent_dead_letter: { ...this.deadLetterReasons },
       gauges: { ...this.gauges },
       tool_usage: { ...this.toolUsage },
       average_latency_ms: parseFloat(avgLatency),

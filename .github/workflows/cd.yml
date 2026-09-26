@@ -145,6 +145,19 @@ jobs:
             exit 1
           fi
 
+      - name: Run the one-shot Phase 5 durable agent runtime migration
+        run: |
+          set -euo pipefail
+          JOB_NAME=$(kubectl create -f k8s/phase5-agent-runtime-migration/job.yaml -o jsonpath='{.metadata.name}')
+          echo "Waiting for migration Job ${JOB_NAME} to complete..."
+          if kubectl wait --for=condition=complete "job/${JOB_NAME}" -n wealthgenie --timeout=300s; then
+            kubectl logs "job/${JOB_NAME}" -n wealthgenie
+          else
+            kubectl describe "job/${JOB_NAME}" -n wealthgenie || true
+            kubectl logs "job/${JOB_NAME}" -n wealthgenie --all-containers=true || true
+            exit 1
+          fi
+
       - name: Bootstrap and verify the shared RAG corpus generation
         run: |
           set -euo pipefail

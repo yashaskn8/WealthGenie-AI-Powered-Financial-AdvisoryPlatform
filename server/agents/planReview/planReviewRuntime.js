@@ -5,6 +5,13 @@ export const PLAN_REVIEW_GRAPH_VERSION = 'plan-review-graph-1.1.0';
 export const PLAN_REVIEW_GROUNDING_VERSION = 'grounded-financial-evidence-1.0.0';
 export const PLAN_REVIEW_TOOL_CATALOG_VERSION = 'plan-review-tools-1.0.0';
 
+// PlanHealth runs in its own bounded scheduler, not in the AgentRun queue.
+// The numeric values are explicit persisted scheduling policy, not lexical enum ordering.
+export const PLAN_REVIEW_PRIORITY_RANK = Object.freeze({
+  INTERACTIVE_PLAN_REVIEW: 0,
+  PLAN_HEALTH_BACKGROUND: 100,
+});
+
 export const PLAN_REVIEW_RUN_STATES = Object.freeze([
   'QUEUED',
   'RUNNING',
@@ -83,6 +90,7 @@ export const PLAN_REVIEW_BUDGETS = Object.freeze({
   maxDurationMs: 30000,
   maxAttempts: 2,
 });
+export const PLAN_REVIEW_CHECKPOINT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 export function buildPlanReviewSnapshotBinding({ userId, profileId, currentState = null, freshness = null }) {
   const recommendation = currentState?.recommendation || null;
