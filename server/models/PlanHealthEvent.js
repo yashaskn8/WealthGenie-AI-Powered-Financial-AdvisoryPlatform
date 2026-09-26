@@ -18,6 +18,13 @@ const planHealthEventSchema = new mongoose.Schema({
 }, { strict: 'throw', timestamps: true });
 
 planHealthEventSchema.index({ userId: 1, detectedAt: -1 });
-planHealthEventSchema.index({ fingerprint: 1 }, { unique: true });
+planHealthEventSchema.index(
+  { fingerprint: 1 },
+  {
+    unique: true,
+    name: 'uniq_active_plan_health_fingerprint',
+    partialFilterExpression: { status: { $in: ['UNREAD', 'READ', 'OPEN', 'ACKNOWLEDGED'] } },
+  },
+);
 
 export default mongoose.model('PlanHealthEvent', planHealthEventSchema);

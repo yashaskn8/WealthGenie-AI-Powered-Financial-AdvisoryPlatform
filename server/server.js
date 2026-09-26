@@ -15,6 +15,7 @@ import logger from './utils/logger.js';
 import { createRuntimeState } from './services/runtimeState.js';
 import { warmAdvisoryPersistence } from './services/advisoryPersistence.js';
 import { verifyPlanReviewPersistenceIndexes } from './services/planReviewPersistence.js';
+import { verifyAgentRuntimePersistence } from './services/planHealthPersistence.js';
 import AgentRunEvent from './models/AgentRunEvent.js';
 import { warmAuthorizationPersistence } from './services/authorizationPersistence.js';
 import { reconcileAuthorizedExecutions } from './agents/authorization/executionRecovery.js';
@@ -25,6 +26,11 @@ let processHandlersInstalled = false;
 const runtimeState = createRuntimeState();
 let activeConfig = null;
 let authorizedRecoveryTimer = null;
+
+export async function verifyEnabledApiAgentPersistence(config, verifier = verifyAgentRuntimePersistence) {
+  if (!config.agenticPlanReviewEnabled) return { ready: true, skipped: true };
+  return verifier({ force: true });
+}
 
 function configureHttpServer(httpServer, config) {
   httpServer.requestTimeout = config.http.requestTimeoutMs;
@@ -84,7 +90,10 @@ export async function startServer({ env = process.env } = {}) {
       requireTransactions: true,
     });
     await warmAdvisoryPersistence();
-    if (config.agenticPlanReviewEnabled) await verifyPlanReviewPersistenceIndexes();
+    if (config.agenticPlanReviewEnabled) {
+      await verifyPlanReviewPersistenceIndexes();
+      await verifyEnabledApiAgentPersistence(config);
+    }
     if (config.authorization.verifiableActionsEnabled) await warmAuthorizationPersistence();
     await connectRedis({ url: env.REDIS_URL });
     if (config.requireRedis && !redisAvailable) {

@@ -14,7 +14,6 @@ import { MongoPlanReviewCheckpointer } from './mongoPlanReviewCheckpointer.js';
 import { PLAN_REVIEW_BUDGETS, PLAN_REVIEW_CHECKPOINT_RETENTION_MS, hashPlanReviewSnapshot } from './planReviewRuntime.js';
 import { canonicalSha256 } from '../../utils/canonicalJson.js';
 import { resolvePlanReviewSnapshot } from './planReviewSnapshot.js';
-import { allocateAgentRunEventSequence } from '../../services/agentEventSequence.js';
 import { SAFE_PLAN_REVIEW_TOOLS } from './planReviewSchemas.js';
 import { reconcileTerminalPlanReviewMandates } from './planReviewApproval.js';
 import logger from '../../utils/logger.js';
@@ -529,33 +528,77 @@ class PlanReviewWorker {
 
   async appendEvent(run, sequence, event, node = null) {
     if (!this.eventModel?.create || !event?.type) return;
+    let session;
     try {
-      const eventSequence = await allocateAgentRunEventSequence({
-        runModel: this.model,
-        eventModel: this.eventModel,
-        runId: run.runId,
-        userId: run.userId,
-        executionGeneration: run.executionGeneration,
-      }) || sequence;
-      await this.eventModel.create({
-        runId: run.runId,
-        userId: run.userId,
-        executionGeneration: run.executionGeneration,
-        sequence: eventSequence,
-        eventType: event.type,
-        node: node || null,
-        data: {
-          type: event.type,
+      session = await this.mongo.startSession();
+      if (typeof session?.withTransaction !== 'function') {
+        const error = new Error('PlanReview progress event publication requires transaction-capable MongoDB.');
+        error.code = 'TRANSACTION_REQUIRED';
+        throw error;
+      }
+      await session.withTransaction(async () => {
+        const leaseAt = now();
+        const currentQuery = this.model.findOne({
+          ...leaseFilter(run),
+          status: 'RUNNING',
+          cancellationRequested: { $ne: true },
+          leaseUntil: { $gt: leaseAt },
+        });
+        currentQuery.session?.(session);
+        const current = await (currentQuery.lean ? currentQuery.lean() : currentQuery);
+        if (!current) throw staleLeaseError();
+
+        let latestSequence = 0;
+        if (this.eventModel.findOne) {
+          let latestQuery = this.eventModel.findOne({ runId: run.runId, userId: run.userId });
+          if (latestQuery?.sort) latestQuery = latestQuery.sort({ sequence: -1 });
+          latestQuery.session?.(session);
+          const latest = await (latestQuery.lean ? latestQuery.lean() : latestQuery);
+          latestSequence = Number(latest?.sequence) || 0;
+        }
+        const previousSequence = Number(current.eventSequence) || 0;
+        const eventSequence = Math.max(previousSequence, latestSequence) + 1;
+        const sequenceFence = previousSequence === 0
+          ? { $or: [{ eventSequence: 0 }, { eventSequence: { $exists: false } }] }
+          : { eventSequence: previousSequence };
+        const write = await this.model.updateOne({
+          ...leaseFilter(run),
+          status: 'RUNNING',
+          cancellationRequested: { $ne: true },
+          leaseUntil: { $gt: now() },
+          ...sequenceFence,
+        }, { $set: { eventSequence } }, { session });
+        if (!isModified(write)) throw staleLeaseError();
+
+        await this.eventModel.create([{
+          runId: run.runId,
+          userId: run.userId,
+          executionGeneration: run.executionGeneration,
+          sequence: eventSequence,
+          eventType: event.type,
           node: node || null,
-          tool: event.tool || null,
-          code: event.code || null,
-          at: event.at || now().toISOString(),
-        },
+          data: {
+            type: event.type,
+            node: node || null,
+            tool: event.tool || null,
+            code: event.code || null,
+            at: event.at || now().toISOString(),
+          },
+        }], { session });
       });
     } catch (error) {
       // Event streaming is a progress surface. A transient event write must
       // never change the authoritative AgentRun result or financial outcome.
       if (error?.code !== 11000) PrometheusMetrics.inc('agent_event_persistence_failures_total');
+    } finally {
+      try {
+        await session?.endSession();
+      } catch {
+        // Session cleanup is also best-effort for progress events. In
+        // particular, cleanup after a committed event must not turn the
+        // checkpoint/result path into a reported worker failure.
+        PrometheusMetrics.inc('agent_event_persistence_failures_total');
+      }
     }
   }
 

@@ -5,6 +5,7 @@ import { checkMLHealth } from '../services/mlClient.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import logger from '../utils/logger.js';
 import { verifyPersistenceIndexes } from '../services/persistenceIndexReadiness.js';
+import { verifyAgentRuntimePersistence } from '../services/planHealthPersistence.js';
 
 function withTimeout(promise, timeoutMs, label) {
   let timer;
@@ -17,7 +18,13 @@ function withTimeout(promise, timeoutMs, label) {
   ]).finally(() => clearTimeout(timer));
 }
 
-export function createHealthRouter({ runtimeState = null, requireRedis = false, timeoutMs = 3000 } = {}) {
+export function createHealthRouter({
+  runtimeState = null,
+  requireRedis = false,
+  requireAgentRuntimePersistence = false,
+  timeoutMs = 3000,
+  verifyAgentRuntime = verifyAgentRuntimePersistence,
+} = {}) {
   const router = Router();
 
 /**
@@ -122,6 +129,15 @@ export function createHealthRouter({ runtimeState = null, requireRedis = false, 
       } catch {
         reasons.push('Required persistence indexes are not ready');
       }
+      if (requireAgentRuntimePersistence) {
+        try {
+          await verifyAgentRuntime({ force: true });
+        } catch {
+          reasons.push('Required agent queue-admission persistence is not ready');
+        }
+      }
+    } else if (requireAgentRuntimePersistence) {
+      reasons.push('Required agent queue-admission persistence is not ready');
     }
     if (reasons.length > 0) {
       return res.status(503).json({

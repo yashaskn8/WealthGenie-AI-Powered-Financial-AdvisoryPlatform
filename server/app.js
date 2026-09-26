@@ -130,6 +130,7 @@ export function createApp({ env = process.env, runtimeState = null } = {}) {
   const healthRoutes = createHealthRouter({
     runtimeState: lifecycle,
     requireRedis: config.requireRedis,
+    requireAgentRuntimePersistence: config.agenticPlanReviewEnabled,
     timeoutMs: config.deepHealthTimeoutMs,
   });
   app.use('/health', healthRoutes);

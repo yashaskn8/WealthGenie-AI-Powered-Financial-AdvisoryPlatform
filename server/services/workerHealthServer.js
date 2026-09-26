@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import mongoose from 'mongoose';
 import { redisAvailable, redisClient } from '../config/redis.js';
 import { verifyPlanReviewPersistenceIndexes } from './planReviewPersistence.js';
-import { verifyPlanHealthPersistence } from './planHealthPersistence.js';
+import { verifyAgentRuntimePersistence, verifyPlanHealthPersistence } from './planHealthPersistence.js';
 
 function json(res, status, body) {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
@@ -25,7 +25,10 @@ export function createWorkerHealthServer({
   requireRedis = false,
   requirePlanReviewIndexes = false,
   requirePlanHealthPersistence = false,
-  requirePhase5Persistence = requirePlanHealthPersistence,
+  requireAgentRuntimePersistence: configuredAgentRuntimePersistence = false,
+  requirePhase5Persistence = false,
+  verifyAgentRuntime = verifyAgentRuntimePersistence,
+  verifyPlanHealth = verifyPlanHealthPersistence,
 } = {}) {
   const server = createServer(async (req, res) => {
     if (req.url === '/health/live') return json(res, 200, { status: 'ALIVE' });
@@ -42,26 +45,33 @@ export function createWorkerHealthServer({
       }
     }
     let planHealthPersistenceReady = !requirePlanHealthPersistence;
-    let phase5PersistenceReady = !requirePhase5Persistence;
-    if ((requirePlanHealthPersistence || requirePhase5Persistence) && mongoose.connection.readyState === 1) {
+    const requireAgentRuntimePersistence = configuredAgentRuntimePersistence || requirePhase5Persistence;
+    let agentRuntimePersistenceReady = !requireAgentRuntimePersistence;
+    if (requireAgentRuntimePersistence && mongoose.connection.readyState === 1) {
       try {
-        await verifyPlanHealthPersistence();
-        phase5PersistenceReady = true;
-        if (requirePlanHealthPersistence) planHealthPersistenceReady = true;
+        await verifyAgentRuntime({ force: true });
+        agentRuntimePersistenceReady = true;
       } catch {
-        if (requirePlanHealthPersistence) planHealthPersistenceReady = false;
-        phase5PersistenceReady = false;
+        agentRuntimePersistenceReady = false;
+      }
+    }
+    if (requirePlanHealthPersistence && mongoose.connection.readyState === 1) {
+      try {
+        await verifyPlanHealth({ force: true });
+        planHealthPersistenceReady = true;
+      } catch {
+        planHealthPersistenceReady = false;
       }
     }
     const checks = {
       mongo: await mongoReady(),
       checkpointStore: mongoose.connection.readyState === 1 && checkpointIndexesReady,
-      queue: mongoose.connection.readyState === 1,
+      queue: mongoose.connection.readyState === 1 && (!requirePlanReviewIndexes || agentRuntimePersistenceReady),
       redis: !requireRedis || Boolean(redisAvailable && redisClient?.isReady),
       worker: Boolean(state.ready) && !state.draining,
       planHealthPersistence: mongoose.connection.readyState === 1 && planHealthPersistenceReady,
-      agentRuntimePersistence: !requirePhase5Persistence
-        || mongoose.connection.readyState === 1 && phase5PersistenceReady,
+      agentRuntimePersistence: !requireAgentRuntimePersistence
+        || mongoose.connection.readyState === 1 && agentRuntimePersistenceReady,
       planHealthScheduler: !requirePlanHealthPersistence || Boolean(state.planHealth?.ready)
         && Boolean(state.planHealth?.schedulerHealthy) && !state.planHealth?.draining,
     };
@@ -75,7 +85,7 @@ export function createWorkerHealthServer({
           enabled: requirePlanReviewIndexes,
           pollerRunning: Boolean(state.running),
           draining: Boolean(state.draining),
-          indexesReady: checkpointIndexesReady && (!requirePlanReviewIndexes || phase5PersistenceReady),
+          indexesReady: checkpointIndexesReady && (!requirePlanReviewIndexes || agentRuntimePersistenceReady),
         },
         planHealth: {
           enabled: requirePlanHealthPersistence,

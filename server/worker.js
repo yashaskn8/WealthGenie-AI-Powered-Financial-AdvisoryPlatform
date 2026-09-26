@@ -10,7 +10,7 @@ import AgentRunEvent from './models/AgentRunEvent.js';
 import { createWorkerHealthServer } from './services/workerHealthServer.js';
 import { verifyPlanReviewPersistenceIndexes } from './services/planReviewPersistence.js';
 import { getPlanHealthSchedulerState, startPlanHealthScheduler, stopPlanHealthScheduler } from './services/planHealthScheduler.js';
-import { verifyPlanHealthPersistence } from './services/planHealthPersistence.js';
+import { verifyAgentRuntimePersistence, verifyPlanHealthPersistence } from './services/planHealthPersistence.js';
 import logger from './utils/logger.js';
 
 let healthServer = null;
@@ -103,7 +103,8 @@ export async function startWorker({ env = process.env } = {}) {
     requireTransactions: true,
   });
   if (config.agenticPlanReviewEnabled) await verifyPlanReviewPersistenceIndexes();
-  if (config.planHealth.enabled || config.agenticPlanReviewEnabled) await verifyPlanHealthPersistence();
+  if (config.agenticPlanReviewEnabled) await verifyAgentRuntimePersistence({ force: true });
+  if (config.planHealth.enabled) await verifyPlanHealthPersistence({ force: true });
   await connectRedis({ url: env.REDIS_URL });
   if (config.requireRedis && !redisAvailable) throw new Error('Redis is required in this environment but is unavailable');
 
@@ -116,7 +117,7 @@ export async function startWorker({ env = process.env } = {}) {
     requireRedis: config.requireRedis,
     requirePlanReviewIndexes: config.agenticPlanReviewEnabled,
     requirePlanHealthPersistence: config.planHealth.enabled,
-    requirePhase5Persistence: config.planHealth.enabled || config.agenticPlanReviewEnabled,
+    requireAgentRuntimePersistence: config.agenticPlanReviewEnabled,
   });
   await healthServer.listen();
   logger.info('WealthGenie agent worker started', { healthPort: config.agentPlanReview.healthPort });

@@ -52,6 +52,25 @@ function leaseModelFixture() {
   };
 }
 
+function publicationFenceModelFixture() {
+  const rows = new Map();
+  return {
+    rows,
+    async create(document) {
+      rows.set(document._id, { ...document });
+      return rows.get(document._id);
+    },
+    async updateOne(filter, update) {
+      const row = rows.get(filter._id);
+      if (!row || (filter.status && row.status !== filter.status)) return { modifiedCount: 0 };
+      if (filter.deadlineAt?.$gt && !(row.deadlineAt > filter.deadlineAt.$gt)) return { modifiedCount: 0 };
+      Object.assign(row, update.$set || {});
+      return { modifiedCount: 1 };
+    },
+    findOne(filter) { return lean(rows.get(filter._id) || null); },
+  };
+}
+
 test('two worker instances race atomically and exactly one claims a queued run', async () => {
   let run = {
     runId: 'run-race',
@@ -76,6 +95,44 @@ test('two worker instances race atomically and exactly one claims a queued run',
     claimNextPlanReviewRun({ model, worker: 'worker-b' }),
   ]);
   assert.equal(Boolean(first) + Boolean(second), 1);
+});
+
+test('best-effort progress event cleanup failure cannot escape after its transaction', async () => {
+  const run = {
+    runId: 'run-event-cleanup-failure',
+    userId,
+    workerId: 'worker-a',
+    executionGeneration: 3,
+    status: 'RUNNING',
+    cancellationRequested: false,
+    leaseUntil: new Date(Date.now() + 60000),
+    eventSequence: 0,
+  };
+  const session = {
+    withTransaction: async callback => callback(),
+    endSession: async () => { throw new Error('injected session cleanup failure'); },
+  };
+  const events = [];
+  const worker = createPlanReviewWorker({
+    model: {
+      findOne() {
+        const query = { session() { return query; }, lean: async () => run };
+        return query;
+      },
+      async updateOne() {
+        run.eventSequence += 1;
+        return { modifiedCount: 1 };
+      },
+    },
+    mongo: { startSession: async () => session },
+    eventModel: { async create(rows) { events.push(...rows); } },
+    worker: run.workerId,
+  });
+
+  await assert.doesNotReject(worker.appendEvent(run, 0, { type: 'NODE_COMPLETED' }));
+  assert.equal(run.eventSequence, 1, 'the transactional event append completed before cleanup failed');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].sequence, 1);
 });
 
 test('50 workers use explicit numeric queue priority and exactly one claims one queued run', async () => {
@@ -293,6 +350,51 @@ test('failed-run usage reconciliation cannot reduce already durable provider-bud
   assert.equal(run.modelCallCount, 2);
   assert.equal(run.tokenUsage, 640);
   assert.equal(run.status, 'QUEUED');
+});
+
+test('retryable failure on the final permitted attempt terminalizes and dead-letters exactly once', async () => {
+  const run = {
+    runId: 'run-final-retryable-attempt', userId, workerId: 'worker-final-retry', executionGeneration: 5,
+    status: 'RUNNING', leaseUntil: new Date(Date.now() + 60000), attempt: 2, maxAttempts: 2,
+    activeDedupeKey: 'owned-active-run', eventSequence: 0,
+  };
+  const events = [];
+  const session = { withTransaction: async callback => callback(), endSession: async () => {} };
+  const model = {
+    findOne() {
+      const query = { session() { return query; }, lean: async () => ({ ...run }) };
+      return query;
+    },
+    async updateOne(_filter, update, options) {
+      assert.equal(options.session, session);
+      Object.assign(run, update.$set || {});
+      for (const key of Object.keys(update.$unset || {})) delete run[key];
+      for (const [key, amount] of Object.entries(update.$inc || {})) run[key] = Number(run[key] || 0) + amount;
+      return { modifiedCount: 1 };
+    },
+  };
+  const worker = createPlanReviewWorker({
+    model,
+    checkpointModel: noCheckpointRetention,
+    graphCheckpointModel: noCheckpointRetention,
+    eventModel: { async create(rows) { events.push(...rows); } },
+    mongo: { startSession: async () => session },
+    worker: run.workerId,
+  });
+  const retryableError = Object.assign(new Error('provider unavailable on final attempt'), { retryable: true });
+
+  await worker.failRun(run, retryableError);
+
+  assert.equal(run.status, 'FAILED');
+  assert.equal(run.retryAt, null);
+  assert.equal(run.leaseUntil, null);
+  assert.ok(run.completedAt instanceof Date);
+  assert.equal(run.activeDedupeKey, undefined);
+  assert.equal(run.deadLetter.attempt, 2);
+  assert.equal(run.deadLetter.executionGeneration, 5);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].eventType, 'RUN_FAILED');
+  assert.equal(events[0].sequence, 1);
 });
 
 test('non-retryable runtime corruption dead-letters on attempt one with bounded operational lineage', async () => {
@@ -878,16 +980,28 @@ test('one timed-out Plan Health profile is recorded while later profiles still c
     },
   };
   const inspected = [];
+  const timeoutCallbacks = [];
+  const publicationFenceModel = publicationFenceModelFixture();
   const result = await runPlanHealthScan({
     profileModel,
     leaseModel: lease,
     owner: 'scheduler-timeout-test',
     batchSize: 2,
     concurrency: 2,
-    profileTimeoutMs: 10,
+    profileTimeoutMs: 60000,
+    publicationFenceModel,
+    setTimeoutImpl(callback) {
+      const timer = { callback, unref() {} };
+      timeoutCallbacks.push(timer);
+      return timer;
+    },
+    clearTimeoutImpl() {},
     inspect: async ({ profileId }) => {
       inspected.push(String(profileId));
-      if (String(profileId) === ids[0]) return new Promise(() => {});
+      if (String(profileId) === ids[0]) {
+        timeoutCallbacks[0].callback();
+        return new Promise(() => {});
+      }
       return { status: 'HEALTHY' };
     },
   });
@@ -897,6 +1011,43 @@ test('one timed-out Plan Health profile is recorded while later profiles still c
   assert.equal(lease.row.status, 'COMPLETED_WITH_ERRORS');
   assert.equal(lease.row.cursor, ids[1]);
   assert.equal(lease.row.failureCount, 1);
+  assert.deepEqual([...publicationFenceModel.rows.values()].map(row => row.status).sort(), ['PUBLISHED', 'TIMED_OUT']);
+});
+
+test('a poison Plan Health profile is counted and does not prevent later profiles from completing', async () => {
+  const lease = leaseModelFixture();
+  const profiles = ['profile-a', 'profile-b', 'profile-c', 'profile-d'].map(_id => ({ _id, userId }));
+  const inspected = [];
+  const profileModel = {
+    find(filter = {}) {
+      const remaining = profiles.filter(profile => !filter._id || profile._id > filter._id.$gt);
+      const query = { sort() { return query; }, limit() { return query; }, lean: async () => remaining };
+      return query;
+    },
+  };
+  const result = await runPlanHealthScan({
+    profileModel,
+    leaseModel: lease,
+    publicationFenceModel: publicationFenceModelFixture(),
+    periodKey: 'poison-profile-isolation',
+    owner: 'poison-profile-test',
+    batchSize: 4,
+    concurrency: 2,
+    profileTimeoutMs: 60000,
+    inspect: async ({ profileId }) => {
+      inspected.push(profileId);
+      if (profileId === 'profile-b') {
+        throw Object.assign(new Error('synthetic provider failure'), { code: 'INJECTED_PROFILE_FAILURE' });
+      }
+      return { status: 'HEALTHY' };
+    },
+  });
+  assert.deepEqual(inspected.sort(), ['profile-a', 'profile-b', 'profile-c', 'profile-d']);
+  assert.equal(result.scanned, 4);
+  assert.equal(result.failures, 1);
+  assert.equal(lease.row.status, 'COMPLETED_WITH_ERRORS');
+  assert.equal(lease.row.failureCount, 1);
+  assert.equal(lease.row.cursor, 'profile-d');
 });
 
 test('Plan Health shutdown aborts a hung scan and returns without awaiting the provider forever', async () => {

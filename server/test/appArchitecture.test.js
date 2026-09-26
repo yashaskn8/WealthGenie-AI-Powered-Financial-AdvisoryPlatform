@@ -97,3 +97,16 @@ test('runtime lifecycle makes draining instances reject application traffic', as
     assert.equal(live.response.status, 200);
   });
 });
+
+test('API readiness fails closed when PlanReview is enabled but Phase 5 queue persistence is unavailable', async () => {
+  const app = createApp({
+    env: { ...process.env, NODE_ENV: 'test', AGENTIC_PLAN_REVIEW_ENABLED: 'true' },
+  });
+
+  await withServer(app, async baseUrl => {
+    const response = await jsonRequest(`${baseUrl}/health/ready`);
+    assert.equal(response.response.status, 503);
+    assert.equal(response.body.status, 'NOT_READY');
+    assert.ok(response.body.reasons.includes('Required agent queue-admission persistence is not ready'));
+  });
+});

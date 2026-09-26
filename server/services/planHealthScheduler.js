@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { trace } from '../config/tracing.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import PlanHealthInspectionFence from '../models/PlanHealthInspectionFence.js';
 import PlanHealthSchedulerLease from '../models/PlanHealthSchedulerLease.js';
 import { inspectPlanHealth } from './planHealthMonitor.js';
 import { PrometheusMetrics } from './metricsCollector.js';
@@ -9,6 +10,7 @@ import logger from '../utils/logger.js';
 const tracer = trace.getTracer('wealthgenie-plan-health');
 let schedulerInstance = null;
 const MAX_CONSECUTIVE_SCAN_FAILURES_BEFORE_UNREADY = 3;
+const PUBLICATION_FENCE_RETENTION_MS = 8 * 24 * 60 * 60 * 1000;
 
 export function planHealthPeriodKey(date = new Date()) {
   return date.toISOString().slice(0, 10);
@@ -81,13 +83,106 @@ function timeoutError() {
   return error;
 }
 
-async function inspectWithDeadline({ inspect, profile, profileTimeoutMs, signal, assertLease, leaseFence }) {
+function publicationFenceUnavailableError() {
+  return Object.assign(new Error('Plan Health publication validity could not be durably reconciled.'), {
+    code: 'PLAN_HEALTH_PUBLICATION_FENCE_UNAVAILABLE',
+  });
+}
+
+async function transitionPublicationFence({ model, fence, status, result = null }) {
+  const now = new Date();
+  const filter = { _id: fence.tokenId, status: 'RUNNING' };
+  if (status === 'PUBLISHED') filter.deadlineAt = { $gt: now };
+  try {
+    const changed = await model.updateOne(filter, {
+      $set: {
+        status,
+        invalidatedAt: status === 'PUBLISHED' ? null : now,
+        publishedAt: status === 'PUBLISHED' ? now : null,
+        resultStatus: result?.status || null,
+        eventId: result?.event?._id || null,
+      },
+    });
+    if (isModified(changed)) return { status, result };
+    const current = await model.findOne({ _id: fence.tokenId }).lean();
+    if (!current) throw publicationFenceUnavailableError();
+    if (current.status === 'PUBLISHED') {
+      return {
+        status: 'PUBLISHED',
+        result: {
+          status: current.resultStatus,
+          event: current.eventId ? { _id: current.eventId } : null,
+        },
+      };
+    }
+    if (current.status === status || ['TIMED_OUT', 'CANCELLED', 'STALE', 'FAILED'].includes(current.status)) {
+      return { status: current.status, result: null };
+    }
+    throw publicationFenceUnavailableError();
+  } catch (error) {
+    if (error?.code === 'PLAN_HEALTH_PUBLICATION_FENCE_UNAVAILABLE') throw error;
+    throw Object.assign(publicationFenceUnavailableError(), { cause: error });
+  }
+}
+
+async function inspectWithDeadline({
+  inspect,
+  profile,
+  profileTimeoutMs,
+  signal,
+  assertLease,
+  leaseFence,
+  publicationFenceModel,
+  setTimeoutImpl,
+  clearTimeoutImpl,
+}) {
   throwIfAborted(signal);
+  const startedAt = new Date();
+  const publicationFence = {
+    tokenId: crypto.randomUUID(),
+    periodKey: leaseFence.periodKey,
+    profileId: profile._id,
+    owner: leaseFence.owner,
+    executionGeneration: leaseFence.executionGeneration,
+  };
+  await publicationFenceModel.create({
+    _id: publicationFence.tokenId,
+    periodKey: publicationFence.periodKey,
+    profileId: profile._id,
+    owner: publicationFence.owner,
+    executionGeneration: publicationFence.executionGeneration,
+    status: 'RUNNING',
+    startedAt,
+    deadlineAt: new Date(startedAt.getTime() + profileTimeoutMs),
+    expiresAt: new Date(startedAt.getTime() + profileTimeoutMs + PUBLICATION_FENCE_RETENTION_MS),
+  });
   const controller = new AbortController();
-  const abort = () => controller.abort(signal.reason || leaseLostError());
+  let resolveDeadline;
+  const deadline = new Promise(resolve => { resolveDeadline = resolve; });
+  let invalidationInFlight = null;
+  const invalidate = (status, reason) => {
+    if (invalidationInFlight) return invalidationInFlight;
+    invalidationInFlight = transitionPublicationFence({ model: publicationFenceModel, fence: publicationFence, status })
+      .then(outcome => {
+        if (outcome.status === 'PUBLISHED') resolveDeadline({ ok: true, result: outcome.result });
+        else resolveDeadline({ ok: false, error: reason });
+        return outcome;
+      })
+      .catch(error => {
+        controller.abort(error);
+        resolveDeadline({ ok: false, error });
+        return { status: 'UNAVAILABLE', error };
+      });
+    return invalidationInFlight;
+  };
+  const abort = () => {
+    const reason = signal.reason || leaseLostError();
+    controller.abort(reason);
+    const status = reason?.code === 'PLAN_HEALTH_LEASE_LOST' ? 'STALE' : 'CANCELLED';
+    void invalidate(status, reason);
+  };
   signal?.addEventListener('abort', abort, { once: true });
   const combinedSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
-  let timer;
   const operation = Promise.resolve().then(async () => {
     const result = await inspect({
       userId: profile.userId,
@@ -95,33 +190,69 @@ async function inspectWithDeadline({ inspect, profile, profileTimeoutMs, signal,
       signal: combinedSignal,
       assertLease,
       leaseFence,
+      publicationFence,
     });
     throwIfAborted(combinedSignal);
+    const settled = await transitionPublicationFence({
+      model: publicationFenceModel,
+      fence: publicationFence,
+      status: 'PUBLISHED',
+      result,
+    });
+    if (settled.status !== 'PUBLISHED') throw Object.assign(new Error('Plan Health inspection publication was invalidated.'), { code: 'PLAN_HEALTH_PUBLICATION_FENCE_LOST' });
     return { ok: true, result };
+  }).catch(async error => {
+    if (controller.signal.aborted) {
+      const reason = controller.signal.reason || error;
+      const invalidStatus = reason?.code === 'PLAN_HEALTH_PROFILE_TIMEOUT'
+        ? 'TIMED_OUT'
+        : (reason?.code === 'PLAN_HEALTH_LEASE_LOST' ? 'STALE' : 'CANCELLED');
+      const outcome = await invalidate(invalidStatus, reason);
+      return outcome.status === 'PUBLISHED'
+        ? { ok: true, result: outcome.result }
+        : { ok: false, error: reason };
+    }
+    if (!['PLAN_HEALTH_PROFILE_TIMEOUT', 'PLAN_HEALTH_LEASE_LOST'].includes(error?.code)) {
+      await transitionPublicationFence({ model: publicationFenceModel, fence: publicationFence, status: 'FAILED' }).catch(() => {});
+    }
+    return { ok: false, error };
   });
-  const deadline = new Promise(resolve => {
-    timer = setTimeout(() => {
-      controller.abort(timeoutError());
-      resolve({ ok: false, error: timeoutError() });
-    }, profileTimeoutMs);
-    timer.unref?.();
-  });
+  const timer = setTimeoutImpl(() => {
+    const error = timeoutError();
+    controller.abort(error);
+    void invalidate('TIMED_OUT', error);
+  }, profileTimeoutMs);
   try {
+    timer?.unref?.();
     return await Promise.race([operation, deadline]);
   } finally {
-    clearTimeout(timer);
+    clearTimeoutImpl(timer);
     signal?.removeEventListener('abort', abort);
   }
 }
 
-async function runBoundedBatch({ profiles, concurrency, profileTimeoutMs, signal, assertLease, inspect, leaseFence }) {
+async function runBoundedBatch({
+  profiles,
+  concurrency,
+  profileTimeoutMs,
+  signal,
+  assertLease,
+  inspect,
+  leaseFence,
+  publicationFenceModel,
+  setTimeoutImpl,
+  clearTimeoutImpl,
+}) {
   const results = [];
   for (let offset = 0; offset < profiles.length; offset += concurrency) {
     throwIfAborted(signal);
     const group = profiles.slice(offset, offset + concurrency);
     const settled = await Promise.all(group.map(async profile => {
       try {
-        return await inspectWithDeadline({ inspect, profile, profileTimeoutMs, signal, assertLease, leaseFence });
+        return await inspectWithDeadline({
+          inspect, profile, profileTimeoutMs, signal, assertLease, leaseFence,
+          publicationFenceModel, setTimeoutImpl, clearTimeoutImpl,
+        });
       } catch (error) {
         if (signal?.aborted) throw signal.reason || error;
         return { ok: false, error };
@@ -135,6 +266,7 @@ async function runBoundedBatch({ profiles, concurrency, profileTimeoutMs, signal
 export async function runPlanHealthScan({
   profileModel = FinancialProfile,
   leaseModel = PlanHealthSchedulerLease,
+  publicationFenceModel = PlanHealthInspectionFence,
   inspect = inspectPlanHealth,
   batchSize = 100,
   concurrency = 4,
@@ -147,6 +279,8 @@ export async function runPlanHealthScan({
   signal: parentSignal = null,
   setIntervalImpl = setInterval,
   clearIntervalImpl = clearInterval,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
 } = {}) {
   const lease = await claimPlanHealthSchedulerLease({ model: leaseModel, periodKey, owner, leaseMs, nowValue });
   if (!lease) return { claimed: false, scanned: 0, events: 0, failures: 0, periodKey };
@@ -225,6 +359,9 @@ export async function runPlanHealthScan({
         assertLease,
         inspect,
         leaseFence: { periodKey, owner, executionGeneration: generation },
+        publicationFenceModel,
+        setTimeoutImpl,
+        clearTimeoutImpl,
       });
       batchSpan.end();
       throwIfAborted(signal);
