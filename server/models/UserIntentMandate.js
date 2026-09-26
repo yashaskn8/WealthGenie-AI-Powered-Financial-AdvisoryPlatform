@@ -77,6 +77,12 @@ const schema = new mongoose.Schema({
   failureCode: { type: String, default: null, maxlength: 120 },
   revokedAt: { type: Date, default: null },
   revocationReason: { type: String, default: null, maxlength: 240 },
+  sourceRunReconciliationStatus: {
+    type: String,
+    enum: ['RECONCILED', 'ALREADY_TERMINAL', 'SOURCE_RUN_MISSING', 'BINDING_MISMATCH', 'SOURCE_RUN_STATE_CONFLICT'],
+    default: null,
+  },
+  sourceRunReconciledAt: { type: Date, default: null },
 }, { strict: 'throw', timestamps: true });
 
 schema.index({ userId: 1, createdAt: -1 });

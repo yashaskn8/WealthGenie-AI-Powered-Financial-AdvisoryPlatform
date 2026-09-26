@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import AgentRun from '../models/AgentRun.js';
 import { migratePlanReviewPersistenceIndexes, verifyPlanReviewPersistenceIndexes } from '../services/planReviewPersistence.js';
 
 function fixtureModel(modelName, indexes, { collectionIndexes = [] } = {}) {
@@ -28,7 +29,10 @@ function fixtureModel(modelName, indexes, { collectionIndexes = [] } = {}) {
 }
 
 const required = [
-  fixtureModel('AgentRun', [{ name: 'unique_run', key: { runId: 1 }, options: { unique: true } }]),
+  fixtureModel('AgentRun', [
+    { name: 'unique_run', key: { runId: 1 }, options: { unique: true } },
+    { name: 'uniq_agent_run_active_dedupe_key', key: { activeDedupeKey: 1 }, options: { unique: true, partialFilterExpression: { activeDedupeKey: { $type: 'string' } } } },
+  ], { collectionIndexes: [{ name: 'activeDedupeKey_1', key: { activeDedupeKey: 1 }, unique: true, partialFilterExpression: { activeDedupeKey: { $exists: true } } }] }),
   fixtureModel('AgentCheckpoint', [{ name: 'unique_checkpoint', key: { runId: 1, executionGeneration: 1, sequence: 1 }, options: { unique: true } }], {
     collectionIndexes: [{ name: 'legacy_checkpoint', key: { runId: 1, sequence: -1 }, unique: true }],
   }),
@@ -54,5 +58,13 @@ test('explicit PlanReview migration drops only the obsolete checkpoint index and
   assert.equal(first.ready, true);
   assert.equal(second.ready, true);
   assert.deepEqual(required[1].ddl.dropped, ['legacy_checkpoint']);
+  assert.deepEqual(required[0].ddl.dropped, ['activeDedupeKey_1']);
   assert.ok(required.every(model => model.ddl.createIndexes === 2));
+});
+
+test('AgentRun schema partial unique dedupe index excludes explicit null and missing values', () => {
+  const activeIndex = AgentRun.schema.indexes().find(([key, options]) => (
+    key.activeDedupeKey === 1 && options.unique === true
+  ));
+  assert.deepEqual(activeIndex?.[1].partialFilterExpression, { activeDedupeKey: { $type: 'string' } });
 });

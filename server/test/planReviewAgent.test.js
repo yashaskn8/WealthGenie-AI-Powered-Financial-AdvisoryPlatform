@@ -4,6 +4,8 @@ import { buildRecommendationProfileHash } from '../services/recommendationProfil
 import { invokePlanReviewGraph } from '../agents/planReview/planReviewGraph.js';
 import { deriveRecommendedAction, policyGuardReview, safeFallbackAfterPolicyRejection } from '../agents/planReview/planReviewPolicy.js';
 import { hashGroundedEvidence } from '../services/groundedEvidence.js';
+import { advancePlanReviewStep } from '../agents/planReview/planReviewGraph.js';
+import { createModelGateway } from '../agents/modelGateway.js';
 
 const profileId = '64b000000000000000000001';
 const userId = '64b000000000000000000010';
@@ -60,6 +62,118 @@ test('unknown and missing stale-freshness evidence fails closed instead of repor
   assert.equal(deriveRecommendedAction({ profile, freshness: null, goalSummary: { status: 'NONE' }, evidenceStatus: 'AVAILABLE' }), 'INSUFFICIENT_EVIDENCE');
   assert.equal(deriveRecommendedAction({ profile, freshness: { fresh: false, reasonCodes: ['PROFILE_VERSION_CHANGED'] }, goalSummary: { status: 'NONE' }, evidenceStatus: 'AVAILABLE' }), 'RECOMPUTE_PLAN');
   assert.equal(deriveRecommendedAction({ profile: null, freshness: { fresh: false, reasonCodes: ['PROFILE_MISSING'] }, goalSummary: { status: 'UNAVAILABLE' }, evidenceStatus: 'UNAVAILABLE' }), 'REVIEW_PROFILE');
+});
+
+test('PlanReview step budget has an exact hard boundary and rejects step N+1', () => {
+  assert.equal(advancePlanReviewStep({ stepCount: 0 }, { maxSteps: 1 }), 1);
+  assert.equal(advancePlanReviewStep({ stepCount: 5 }, { maxSteps: 6 }), 6);
+  assert.throws(() => advancePlanReviewStep({ stepCount: 6 }, { maxSteps: 6 }), error => (
+    error.code === 'AGENT_BUDGET_EXCEEDED' && error.reason === 'STEPS'
+  ));
+  assert.throws(() => advancePlanReviewStep({ stepCount: 1 }, { maxSteps: 1 }), error => error.code === 'AGENT_BUDGET_EXCEEDED');
+});
+
+test('exhausted PlanReview steps stop before planner/provider or tool execution', async () => {
+  let providerCalls = 0;
+  let toolCalls = 0;
+  await assert.rejects(invokePlanReviewGraph({
+    userId,
+    profileId,
+    dependencies: dependencies({
+      maxSteps: 1,
+      plannerProvider: { name: 'should-not-run', async generate() { providerCalls += 1; return { text: '{"checks":[]}' }; } },
+      loadPlanReviewContext: async () => ({
+        profile,
+        profileContext: {},
+        recommendation,
+        recommendationSummary: { status: 'CURRENT' },
+        freshness: { fresh: true, reasonCodes: [] },
+        sourceBinding: {},
+        planReviewSnapshotHash: 'a'.repeat(64),
+      }),
+      toolOverrides: Object.fromEntries(['get_current_profile_context', 'get_current_recommendation_summary', 'check_recommendation_freshness', 'get_plan_evidence_snapshot', 'get_goal_status_summary']
+        .map(name => [name, async () => { toolCalls += 1; return {}; }])),
+    }),
+  }), error => error.code === 'AGENT_BUDGET_EXCEEDED' && error.reason === 'STEPS');
+  assert.equal(providerCalls, 0);
+  assert.equal(toolCalls, 0);
+});
+
+test('resumed PlanReview rejects the next graph step when the saved budget is already consumed', async () => {
+  let providerCalls = 0;
+  let toolCalls = 0;
+  await assert.rejects(invokePlanReviewGraph({
+    userId,
+    profileId,
+    resumeCheckpoint: { counters: { stepCount: 5 } },
+    dependencies: dependencies({
+      maxSteps: 6,
+      plannerProvider: { name: 'must-not-run', async generate() { providerCalls += 1; return null; } },
+      toolOverrides: Object.fromEntries(['get_current_profile_context', 'get_current_recommendation_summary', 'check_recommendation_freshness', 'get_plan_evidence_snapshot', 'get_goal_status_summary']
+        .map(name => [name, async () => { toolCalls += 1; return {}; }])),
+    }),
+  }), error => error.code === 'AGENT_BUDGET_EXCEEDED' && error.reason === 'STEPS');
+  assert.equal(providerCalls, 0);
+  assert.equal(toolCalls, 0);
+});
+
+test('PlanReview completes at the exact configured hard-step limit', async () => {
+  const result = await invokePlanReviewGraph({
+    userId,
+    profileId,
+    dependencies: dependencies({ maxSteps: 6 }),
+  });
+  assert.equal(result.review.status, 'COMPLETED');
+  assert.equal(result.stepCount, 6);
+  assert.equal(result.review.execution.stepCount, 6);
+});
+
+test('tool timeout aborts the downstream operation and ignores its late result', async () => {
+  let signalObserved = false;
+  let releaseLateResult;
+  const neverFinishesUntilAborted = context => new Promise(resolve => {
+    releaseLateResult = resolve;
+    context.dependencies.signal.addEventListener('abort', () => { signalObserved = true; }, { once: true });
+  });
+  const result = await invokePlanReviewGraph({
+    userId,
+    profileId,
+    dependencies: dependencies({
+      toolTimeoutMs: 25,
+      toolOverrides: { get_current_profile_context: neverFinishesUntilAborted },
+    }),
+  });
+  assert.equal(signalObserved, true);
+  assert.ok(result.repeatedRequests.some(item => item.includes('TOOL_TIMEOUT')));
+  assert.equal(result.toolResults.get_current_profile_context.status, 'UNAVAILABLE');
+  releaseLateResult?.({ profile: 'late result must not be published' });
+  assert.equal(result.toolResults.get_current_profile_context.profile, undefined);
+});
+
+test('CI mock-provider configuration uses deterministic PlanReview fallback without spending model budget', async () => {
+  const previous = process.env.LLM_DEFAULT_PROVIDER;
+  process.env.LLM_DEFAULT_PROVIDER = 'mock';
+  try {
+    const result = await invokePlanReviewGraph({
+      userId,
+      profileId,
+      dependencies: dependencies({
+        modelGateway: createModelGateway(),
+        modelPlannerEnabled: false,
+        maxInputTokens: 64,
+        maxOutputTokens: 8,
+        maxTotalTokens: 72,
+        maxModelCalls: 1,
+      }),
+    });
+    assert.equal(result.review.status, 'COMPLETED');
+    assert.equal(result.review.execution.modelCallCount, 0);
+    assert.equal(result.review.execution.tokenUsage, 0);
+    assert.equal(result.review.provider.fallback, true);
+  } finally {
+    if (previous === undefined) delete process.env.LLM_DEFAULT_PROVIDER;
+    else process.env.LLM_DEFAULT_PROVIDER = previous;
+  }
 });
 
 function lean(value) { return { lean: async () => value }; }

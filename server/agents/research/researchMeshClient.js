@@ -11,6 +11,16 @@ function clientError(code, message, status = 502) {
   return error;
 }
 
+function throwIfAborted(signal) {
+  if (signal?.aborted) {
+    if (signal.reason instanceof Error) throw signal.reason;
+    const error = new Error('Research request was canceled.');
+    error.name = 'AbortError';
+    error.code = 'ABORT_ERR';
+    throw error;
+  }
+}
+
 function authenticatedFetch(token, fetchImpl = globalThis.fetch) {
   return async (input, init = {}) => {
     const headers = new Headers(init.headers || {});
@@ -19,12 +29,13 @@ function authenticatedFetch(token, fetchImpl = globalThis.fetch) {
   };
 }
 
-async function resolvePublicKey({ kid, jku, baseUrl, fetchImpl, configuredJwk }) {
+async function resolvePublicKey({ kid, jku, baseUrl, fetchImpl, configuredJwk, signal }) {
   const jwksUrl = jku || `${baseUrl.replace(/\/$/, '')}/.well-known/jwks.json`;
   const parsed = new URL(jwksUrl);
   const base = new URL(baseUrl);
   if (parsed.origin !== base.origin) throw clientError('A2A_CARD_KEY_ORIGIN_REJECTED', 'Agent Card signing key origin is not trusted.', 502);
-  const response = await fetchImpl(parsed);
+  const response = await fetchImpl(parsed, { signal });
+  throwIfAborted(signal);
   if (!response.ok) throw clientError('A2A_CARD_KEY_UNAVAILABLE', 'Agent Card signing keys are unavailable.', 502);
   const body = await response.json();
   const jwk = configuredJwk || body?.keys?.find(key => key.kid === kid);
@@ -32,19 +43,24 @@ async function resolvePublicKey({ kid, jku, baseUrl, fetchImpl, configuredJwk })
   return crypto.createPublicKey({ key: jwk, format: 'jwk' });
 }
 
-async function fetchAndVerifyCard({ baseUrl, fetchImpl, requireSignedCard, configuredJwk }) {
+async function fetchAndVerifyCard({ baseUrl, fetchImpl, requireSignedCard, configuredJwk, signal }) {
   const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/.well-known/agent-card.json`, {
     headers: { accept: 'application/json' },
+    signal,
   });
+  throwIfAborted(signal);
   if (!response.ok) throw clientError('A2A_AGENT_CARD_UNAVAILABLE', 'ResearchAgent Agent Card is unavailable.', 502);
   const card = AgentCard.fromJSON(await response.json());
   if (requireSignedCard && !card.signatures?.length) throw clientError('A2A_AGENT_CARD_UNSIGNED', 'A signed Agent Card is required.', 502);
   if (card.signatures?.length) {
-    const verifier = verifyAgentCardSignature((kid, jku) => resolvePublicKey({ kid, jku, baseUrl, fetchImpl, configuredJwk }));
-    try { await verifier(card); } catch {
+    const verifier = verifyAgentCardSignature((kid, jku) => resolvePublicKey({ kid, jku, baseUrl, fetchImpl, configuredJwk, signal }));
+    try { await verifier(card); } catch (error) {
+      throwIfAborted(signal);
+      if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR') throw error;
       throw clientError('A2A_AGENT_CARD_SIGNATURE_INVALID', 'ResearchAgent Agent Card signature verification failed.', 502);
     }
   }
+  throwIfAborted(signal);
   const interfaceCard = card.supportedInterfaces?.find(item => item.protocolBinding === 'HTTP+JSON' && item.protocolVersion === '1.0');
   if (!interfaceCard) throw clientError('A2A_HTTP_JSON_INTERFACE_MISSING', 'ResearchAgent does not advertise HTTP+JSON A2A v1.0.', 502);
   return card;
@@ -92,14 +108,16 @@ export class ResearchMeshClient {
     this.configuredJwk = configuredJwk;
   }
 
-  async resolve() {
+  async resolve({ signal } = {}) {
     const cardFetch = authenticatedFetch(this.token, this.fetchImpl);
     const card = await fetchAndVerifyCard({
       baseUrl: this.baseUrl,
       fetchImpl: cardFetch,
       requireSignedCard: this.requireSignedCard,
       configuredJwk: this.configuredJwk,
+      signal,
     });
+    throwIfAborted(signal);
     const factory = new ClientFactory({
       transports: [new RestTransportFactory({ fetchImpl: cardFetch })],
       preferredTransports: ['HTTP+JSON'],
@@ -111,8 +129,11 @@ export class ResearchMeshClient {
   async sendResearch({ brief, signal } = {}) {
     const validation = validateResearchBrief(brief);
     if (validation.error) throw clientError('INVALID_RESEARCH_BRIEF', 'ResearchBrief failed client boundary validation.', 400);
-    const { card, client } = await this.resolve();
+    throwIfAborted(signal);
+    const { card, client } = await this.resolve({ signal });
+    throwIfAborted(signal);
     const result = await client.sendMessage(buildRequest(validation.value), { signal });
+    throwIfAborted(signal);
     const task = taskFromResult(result);
     if (!task) throw clientError('A2A_TASK_MISSING', 'ResearchAgent did not return an A2A Task.', 502);
     if (task.status.state === TaskState.TASK_STATE_CANCELED) throw clientError('RESEARCH_CANCELED', 'Research task was canceled.', 499);

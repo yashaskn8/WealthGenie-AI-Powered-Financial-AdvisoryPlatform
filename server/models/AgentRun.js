@@ -68,7 +68,10 @@ const agentRunSchema = new mongoose.Schema({
 agentRunSchema.index({ userId: 1, createdAt: -1 });
 agentRunSchema.index({ activeDedupeKey: 1 }, {
   unique: true,
-  partialFilterExpression: { activeDedupeKey: { $exists: true } },
+  name: 'uniq_agent_run_active_dedupe_key',
+  // Inactive runs intentionally persist null here. `$exists: true` includes
+  // null and would incorrectly make all terminal runs collide.
+  partialFilterExpression: { activeDedupeKey: { $type: 'string' } },
 });
 agentRunSchema.index({ status: 1, priority: 1, queuedAt: 1 });
 

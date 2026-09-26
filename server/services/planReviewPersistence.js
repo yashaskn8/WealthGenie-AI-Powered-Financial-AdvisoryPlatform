@@ -18,6 +18,22 @@ export function verifyPlanReviewPersistenceIndexes({ models = PHASE4_PLAN_REVIEW
 
 /** Explicit deployment migration. Index DDL is never run by API/worker startup. */
 export async function migratePlanReviewPersistenceIndexes({ models = PHASE4_PLAN_REVIEW_INDEX_MODELS } = {}) {
+  const runModel = models.find(model => model.modelName === AgentRun.modelName);
+  const runIndexes = await runModel?.collection.indexes().catch(error => {
+    if (error.code === 26 || error.codeName === 'NamespaceNotFound') return [];
+    throw error;
+  }) || [];
+  for (const index of runIndexes) {
+    const key = index.key || {};
+    const isActiveDedupeIndex = index.unique === true
+      && Object.keys(key).length === 1
+      && key.activeDedupeKey === 1;
+    const hasCorrectStringPartial = index.partialFilterExpression?.activeDedupeKey?.$type === 'string';
+    if (isActiveDedupeIndex && !hasCorrectStringPartial) {
+      await runModel.collection.dropIndex(index.name);
+    }
+  }
+
   const checkpointModel = models.find(model => model.modelName === AgentCheckpoint.modelName);
   const obsoleteCheckpointIndexes = await checkpointModel?.collection.indexes().catch(error => {
     if (error.code === 26 || error.codeName === 'NamespaceNotFound') return [];

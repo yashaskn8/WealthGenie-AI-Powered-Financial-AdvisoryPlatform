@@ -269,3 +269,29 @@ test('official A2A client/server boundary resolves card, returns artifact, and c
     await started.close();
   }
 });
+
+test('ResearchMesh cancellation reaches Agent Card resolution and fences late card responses', async () => {
+  const controller = new AbortController();
+  let receivedSignal;
+  let releaseResponse;
+  let parsedCard = false;
+  const client = new ResearchMeshClient({
+    baseUrl: 'https://research.example',
+    fetchImpl: async (_input, init = {}) => {
+      receivedSignal = init.signal;
+      return new Promise(resolve => { releaseResponse = resolve; });
+    },
+  });
+
+  const pending = client.sendResearch({ brief: brief(), signal: controller.signal });
+  await Promise.resolve();
+  assert.equal(receivedSignal, controller.signal);
+  controller.abort(new DOMException('Canceled by caller', 'AbortError'));
+  releaseResponse({
+    ok: true,
+    json: async () => { parsedCard = true; return {}; },
+  });
+
+  await assert.rejects(pending, error => error.name === 'AbortError');
+  assert.equal(parsedCard, false, 'a response arriving after cancellation is never parsed or used');
+});

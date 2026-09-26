@@ -1,3 +1,5 @@
+import { PLAN_REVIEW_RUN_STATES } from '../planReview/planReviewRuntime.js';
+
 export const A2UI_VERSION = 'a2ui-inspired-internal-1.0.0';
 const COMPONENT_TYPES = new Set(['status', 'finding', 'evidence', 'action_descriptor', 'verifiable_action_approval']);
 const INTENTS = new Set(['plan_review_status', 'plan_review_finding', 'plan_review_evidence', 'plan_review_action', 'verifiable_action_approval']);
@@ -30,12 +32,16 @@ export function validateA2UIMessage(message) {
   return true;
 }
 
-export function buildPlanReviewA2UI(review = null) {
+export function buildPlanReviewA2UI(runOrReview = null) {
+  const hasRunShape = Boolean(runOrReview && PLAN_REVIEW_RUN_STATES.includes(runOrReview.status)
+    && ('runId' in runOrReview || 'result' in runOrReview || 'progress' in runOrReview));
+  const status = hasRunShape ? runOrReview.status : (runOrReview?.status || 'UNAVAILABLE');
+  const review = hasRunShape && status === 'COMPLETED' ? runOrReview.result : runOrReview;
   const components = [{
     id: 'a2ui_status',
     type: 'status',
     intent: 'plan_review_status',
-    state: review?.status || 'UNAVAILABLE',
+    state: status,
     label: 'Plan review status',
   }];
   for (const [index, finding] of (review?.findings || []).slice(0, 8).entries()) {
@@ -45,7 +51,7 @@ export function buildPlanReviewA2UI(review = null) {
       intent: 'plan_review_finding',
       state: finding?.severity || 'INFO',
       label: String(finding?.code || 'PLAN_REVIEW_FINDING').slice(0, 80),
-      text: String(finding?.message || '').slice(0, 240),
+      text: String(finding?.detail || finding?.message || '').slice(0, 240),
       evidenceIds: Array.isArray(finding?.evidenceIds) ? finding.evidenceIds.slice(0, 8) : [],
     });
   }

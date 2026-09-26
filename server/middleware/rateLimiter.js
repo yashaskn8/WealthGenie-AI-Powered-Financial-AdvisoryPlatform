@@ -140,12 +140,76 @@ export function createEndpointRateLimiter(options = {}) {
   });
 }
 
-export const planReviewLimiter = createEndpointRateLimiter({
-  windowMs: 15 * 60 * 1000,
-  max: 12,
-  message: 'Plan review limit reached. Try again later.',
-  prefix: 'rl:ep:plan-review:',
-  keyGenerator: req => `user:${req.user?.userId || ipKeyGenerator(req.ip)}`,
-});
+const PLAN_REVIEW_WINDOW_MS = 15 * 60 * 1000;
+const PLAN_REVIEW_MAX = 12;
+const PLAN_REVIEW_REDIS_SCRIPT = `
+local hits = redis.call('INCR', KEYS[1])
+if hits == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]) end
+return { hits, redis.call('PTTL', KEYS[1]) }
+`;
+
+/**
+ * PlanReview is costly work, so production quota enforcement must be shared
+ * across replicas. Only local/test environments may use the explicit bounded
+ * in-memory fallback. This policy is intentionally separate from apiLimiter.
+ */
+export function createPlanReviewRateLimiter({
+  getRedisState = () => ({ available: redisAvailable, client: redisClient }),
+  env = process.env,
+  windowMs = PLAN_REVIEW_WINDOW_MS,
+  max = PLAN_REVIEW_MAX,
+  localHits = new Map(),
+  now = () => Date.now(),
+} = {}) {
+  return async function planReviewRateLimiter(req, res, next) {
+    const production = env.NODE_ENV === 'production';
+    if (!production && env.DISABLE_RATE_LIMIT === 'true') return next();
+    const principal = req.user?.userId || ipKeyGenerator(req.ip || req.socket?.remoteAddress || 'unknown');
+    const key = `rl:ep:plan-review:${principal}`;
+    const redis = getRedisState();
+    let totalHits;
+    let resetTime;
+    if (redis?.available && redis.client) {
+      try {
+        const result = await redis.client.eval(PLAN_REVIEW_REDIS_SCRIPT, {
+          keys: [key],
+          arguments: [String(windowMs)],
+        });
+        totalHits = Number(result?.[0]);
+        const ttl = Number(result?.[1]);
+        if (!Number.isInteger(totalHits) || totalHits < 1 || !Number.isFinite(ttl) || ttl < 0) throw new Error('Invalid PlanReview Redis limiter response.');
+        resetTime = new Date(now() + ttl);
+      } catch {
+        if (production || env.REQUIRE_REDIS === 'true') {
+          return sendError(req, res, 503, 'Plan review is temporarily unavailable because distributed capacity could not be verified.', 'PLAN_REVIEW_RATE_LIMIT_UNAVAILABLE');
+        }
+      }
+    } else if (production || env.REQUIRE_REDIS === 'true') {
+      return sendError(req, res, 503, 'Plan review is temporarily unavailable because distributed capacity could not be verified.', 'PLAN_REVIEW_RATE_LIMIT_UNAVAILABLE');
+    }
+
+    // Development/test fallback is explicit and never used in production.
+    if (totalHits === undefined) {
+      const at = now();
+      const current = localHits.get(key);
+      if (!current || at >= current.resetAt) localHits.set(key, { hits: 1, resetAt: at + windowMs });
+      else current.hits += 1;
+      const local = localHits.get(key);
+      totalHits = local.hits;
+      resetTime = new Date(local.resetAt);
+    }
+    res.set?.('RateLimit-Limit', String(max));
+    res.set?.('RateLimit-Remaining', String(Math.max(0, max - totalHits)));
+    res.set?.('RateLimit-Reset', String(Math.ceil(resetTime.getTime() / 1000)));
+    if (totalHits > max) {
+      const retryAfter = Math.max(1, Math.ceil((resetTime.getTime() - now()) / 1000));
+      res.set?.('Retry-After', String(retryAfter));
+      return sendError(req, res, 429, 'Plan review limit reached. Try again later.', 'PLAN_REVIEW_RATE_LIMIT_EXCEEDED', { retryAfterSeconds: retryAfter });
+    }
+    return next();
+  };
+}
+
+export const planReviewLimiter = createPlanReviewRateLimiter();
 
 export { HybridStore, ipKeyGenerator };

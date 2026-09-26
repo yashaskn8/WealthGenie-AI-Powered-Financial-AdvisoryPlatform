@@ -13,6 +13,8 @@
   "test/idempotencyHttp.test.js",
   "test/observability.integration.test.js",
   "test/profileCompletion.integration.test.js",
+  "test/planReviewIndexMongo.integration.test.js",
+  "test/planReviewMandateMongo.integration.test.js",
   "test/rbacRole.test.js",
   "test/recommendationAllocationRevisionBehavior.test.js",
   "test/recommendRestore.test.js",

@@ -23,6 +23,10 @@ export const ACTIVE_PLAN_REVIEW_STATES = Object.freeze([
   'WAITING_FOR_APPROVAL',
 ]);
 
+// Any run retaining active dedupe/workflow ownership consumes per-user
+// capacity. Keep queue admission, dedupe, and UI lifecycle aligned.
+export const CAPACITY_CONSUMING_PLAN_REVIEW_STATES = ACTIVE_PLAN_REVIEW_STATES;
+
 export const TERMINAL_PLAN_REVIEW_STATES = Object.freeze([
   'COMPLETED',
   'FAILED',
@@ -63,7 +67,9 @@ export const PLAN_REVIEW_TRAJECTORY_EVENTS = Object.freeze([
   'POLICY_REJECTED',
   'FALLBACK_USED',
   'APPROVAL_REQUESTED',
+  'RESULT_READY',
   'RUN_COMPLETED',
+  'RUN_WAITING_FOR_APPROVAL',
 ]);
 
 export const PLAN_REVIEW_BUDGETS = Object.freeze({

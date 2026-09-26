@@ -4,6 +4,7 @@ import {
   assertPlanReviewTransition,
   buildApprovalAction,
   buildPlanReviewSnapshotBinding,
+  CAPACITY_CONSUMING_PLAN_REVIEW_STATES,
   canTransitionPlanReviewState,
   hashPlanReviewSnapshot,
   planReviewGraphThreadId,
@@ -13,7 +14,7 @@ import { enqueuePlanReviewRun } from '../agents/planReview/planReviewService.js'
 import { assertPlanReviewGates, gradePlanReviewTrajectory } from '../agents/evals/planReviewEvals.js';
 import { emptyCheckpoint } from '@langchain/langgraph';
 import { MongoPlanReviewCheckpointer } from '../agents/planReview/mongoPlanReviewCheckpointer.js';
-import { completePlanReviewMandateAction, persistPlanReviewAction } from '../agents/planReview/planReviewApproval.js';
+import { completePlanReviewMandateAction, persistPlanReviewAction, reconcileTerminalPlanReviewMandates } from '../agents/planReview/planReviewApproval.js';
 import { createPlanReviewGraph } from '../agents/planReview/planReviewGraph.js';
 
 const userId = '64b000000000000000000010';
@@ -92,6 +93,89 @@ test('mandate action keeps a review pending and terminalization is bound to its 
   assert.equal('activeDedupeKey' in completed, false);
 });
 
+test('expired mandates reconcile a waiting run durably and restart sweeps do not repeat work', async () => {
+  const now = new Date('2026-09-26T00:00:00.000Z');
+  const mandate = {
+    mandateId: 'mandate-expired', userId, runId: 'run-expired', agentType: 'PLAN_REVIEW',
+    status: 'AUTHORIZED', expiresAt: new Date(now.getTime() - 1000),
+    sourceRunReconciliationStatus: null,
+  };
+  const run = {
+    userId, runId: mandate.runId, status: 'WAITING_FOR_APPROVAL', activeDedupeKey: 'dedupe-expired',
+    approval: { mandateId: mandate.mandateId, status: 'MANDATE_CREATED' },
+  };
+  const mandateModel = {
+    async updateMany(filter, update) {
+      assert.deepEqual(filter.status.$in, ['DRAFT', 'PENDING_USER_VERIFICATION', 'AUTHORIZED']);
+      if (['DRAFT', 'PENDING_USER_VERIFICATION', 'AUTHORIZED'].includes(mandate.status) && mandate.expiresAt <= now) {
+        Object.assign(mandate, update.$set);
+        return { modifiedCount: 1 };
+      }
+      return { modifiedCount: 0 };
+    },
+    find(filter) {
+      const query = {
+        sort() { return query; },
+        limit() { return query; },
+        lean: async () => filter.status.$in.includes(mandate.status)
+          && !filter.sourceRunReconciliationStatus.$nin.includes(mandate.sourceRunReconciliationStatus)
+          ? [mandate]
+          : [],
+      };
+      return query;
+    },
+    async updateOne(filter, update) {
+      if (filter.mandateId !== mandate.mandateId || filter.status !== mandate.status || filter.sourceRunReconciliationStatus !== null) return { modifiedCount: 0 };
+      Object.assign(mandate, update.$set);
+      return { modifiedCount: 1 };
+    },
+  };
+  const runModel = {
+    async findOneAndUpdate(filter, update) {
+      if (filter.userId !== run.userId || filter.runId !== run.runId || filter.status !== run.status
+          || filter['approval.mandateId'] !== run.approval.mandateId) return null;
+      for (const [path, value] of Object.entries(update.$set || {})) {
+        const parts = path.split('.');
+        const key = parts.pop();
+        const target = parts.reduce((current, part) => (current[part] ||= {}), run);
+        target[key] = value;
+      }
+      for (const key of Object.keys(update.$unset || {})) delete run[key];
+      return run;
+    },
+    findOne: filter => ({
+      select() { return this; },
+      lean: async () => filter.userId === run.userId && filter.runId === run.runId ? run : null,
+    }),
+  };
+
+  const first = await reconcileTerminalPlanReviewMandates({ mandateModel, runModel, now });
+  assert.deepEqual(first, { scanned: 1, reconciled: 1, processed: 1 });
+  assert.equal(mandate.status, 'EXPIRED');
+  assert.equal(mandate.sourceRunReconciliationStatus, 'RECONCILED');
+  assert.equal(run.status, 'FAILED');
+  assert.equal(run.failure.code, 'MANDATE_EXPIRED');
+  assert.equal('activeDedupeKey' in run, false);
+  assert.equal(await completePlanReviewMandateAction({
+    model: runModel, userId, runId: mandate.runId, mandateId: mandate.mandateId, outcome: 'EXECUTED', now,
+  }), null, 'a stale approval completion cannot reopen an expired source run');
+
+  // A fresh worker/process instance can safely resume the sweep from shared state.
+  const restarted = await reconcileTerminalPlanReviewMandates({ mandateModel, runModel, now });
+  assert.deepEqual(restarted, { scanned: 0, reconciled: 0, processed: 0 });
+
+  let freshRun;
+  const freshModel = {
+    async updateMany() { return { modifiedCount: 0 }; },
+    findOne() { return { lean: async () => null }; },
+    async countDocuments() { return 0; },
+    async create(document) { freshRun = document; return document; },
+  };
+  const fresh = await enqueuePlanReviewRun({ userId, profileId, model: freshModel, snapshotResolver });
+  assert.equal(fresh.created, true, 'reconciliation releases active capacity for the same canonical financial snapshot');
+  assert.equal(freshRun.status, 'QUEUED');
+});
+
 test('enqueue is idempotent for an active owned profile run bound to the same source snapshot', async () => {
   const active = { runId: 'run-existing', status: 'RUNNING', profileId, planReviewSnapshotHash: snapshotHash, agentVersion: PLAN_REVIEW_AGENT_VERSION };
   const model = {
@@ -124,6 +208,30 @@ test('enqueue applies per-user and global queue backpressure before creating a r
     error => error.status === 429 && error.code === 'AGENT_QUEUE_SATURATED' && error.retryAfterMs === 5000,
   );
   assert.equal(createCalled, false);
+});
+
+test('WAITING_FOR_APPROVAL consumes active-user capacity in the canonical state set', async () => {
+  assert.deepEqual(CAPACITY_CONSUMING_PLAN_REVIEW_STATES, ['QUEUED', 'RUNNING', 'WAITING_FOR_APPROVAL']);
+  let activeFilter;
+  const model = {
+    findOne() { return { lean: async () => null }; },
+    async countDocuments(filter) {
+      if (Array.isArray(filter.status?.$in)) {
+        activeFilter = filter.status.$in;
+        return filter.status.$in.includes('WAITING_FOR_APPROVAL') ? 1 : 0;
+      }
+      return 0;
+    },
+    async create() { assert.fail('Capacity must reject before creating another run.'); },
+  };
+  await assert.rejects(enqueuePlanReviewRun({
+    userId,
+    profileId,
+    model,
+    snapshotResolver,
+    runtimeConfig: { agentPlanReview: { maxQueuedRunsPerUser: 5, maxActiveRunsPerUser: 1, maxGlobalQueuedRuns: 20 } },
+  }), error => error.status === 429 && error.code === 'AGENT_QUEUE_SATURATED');
+  assert.deepEqual(activeFilter, ['QUEUED', 'RUNNING', 'WAITING_FOR_APPROVAL']);
 });
 
 test('deterministic evaluation gates enforce every reported quality and hard gate', () => {

@@ -39,6 +39,81 @@ test('provider fallback attempts share one hard total-token budget', async () =>
   assert.equal(budget.modelCalls, 1, 'only the provider actually entered is counted');
 });
 
+test('known unconfigured providers are skipped before token reservation and provider execution', async () => {
+  let configuredCalls = 0;
+  const unconfigured = {
+    name: 'unconfigured',
+    isConfigured: () => false,
+    async generate() { throw new Error('must not be called'); },
+  };
+  const configured = {
+    name: 'configured',
+    isConfigured: () => true,
+    async generate() { configuredCalls += 1; return { text: 'ok', tokensUsed: 5, provider: 'configured' }; },
+  };
+  const budget = createPlanReviewTokenBudget({ maxInputTokens: 64, maxOutputTokens: 8, maxTotalTokens: 100, maxModelCalls: 2 });
+  const gateway = createModelGateway({ providers: [unconfigured, configured], maxOutputTokens: 8 });
+  const result = await gateway.generate({ role: 'EXPLAINER', systemPrompt: 'safe', requestBudget: budget });
+  assert.equal(result.text, 'ok');
+  assert.equal(configuredCalls, 1);
+  assert.equal(budget.modelCalls, 1);
+  assert.equal(budget.accountedTokens, 5);
+});
+
+test('provider cancellation is signalled and cannot fall through to another model', async () => {
+  let signalObserved = false;
+  let started;
+  const providerStarted = new Promise(resolve => { started = resolve; });
+  const provider = {
+    name: 'cancellable',
+    async generate({ signal }) {
+      started();
+      return new Promise((_, reject) => {
+        signal.addEventListener('abort', () => {
+          signalObserved = true;
+          reject(signal.reason || Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        }, { once: true });
+      });
+    },
+  };
+  let fallbackCalls = 0;
+  const fallback = { name: 'must-not-run', async generate() { fallbackCalls += 1; return { text: 'unsafe late fallback' }; } };
+  const budget = createPlanReviewTokenBudget({ maxInputTokens: 64, maxOutputTokens: 8, maxTotalTokens: 100, maxModelCalls: 2 });
+  const controller = new AbortController();
+  const gateway = createModelGateway({ providers: [provider, fallback], maxOutputTokens: 8 });
+  const pending = gateway.generate({ role: 'EXPLAINER', systemPrompt: 'safe', requestBudget: budget, signal: controller.signal });
+  await providerStarted;
+  const cancellation = Object.assign(new Error('run cancelled'), { name: 'AbortError' });
+  controller.abort(cancellation);
+  await assert.rejects(pending, error => error === cancellation);
+  assert.equal(signalObserved, true);
+  assert.equal(fallbackCalls, 0);
+});
+
+test('provider that ignores abort cannot publish a late planner result', async () => {
+  let releaseProvider;
+  let started;
+  const providerStarted = new Promise(resolve => { started = resolve; });
+  const provider = {
+    name: 'non-cancellable',
+    async generate() {
+      started();
+      return new Promise(resolve => { releaseProvider = resolve; });
+    },
+  };
+  const budget = createPlanReviewTokenBudget({ maxInputTokens: 64, maxOutputTokens: 8, maxTotalTokens: 100, maxModelCalls: 2 });
+  const controller = new AbortController();
+  const wrapped = createBudgetedPlanReviewProvider(provider, budget);
+  const pending = wrapped.generate({ systemPrompt: 'safe', maxTokens: 8, signal: controller.signal });
+  await providerStarted;
+  const cancellation = Object.assign(new Error('run timed out'), { name: 'AbortError' });
+  controller.abort(cancellation);
+  releaseProvider({ text: 'late result must not be used', tokensUsed: 1 });
+  await assert.rejects(pending, error => error === cancellation);
+  assert.equal(budget.modelCalls, 1);
+  assert.ok(budget.accountedTokens > 0, 'reserved cost remains conservatively charged despite the late response');
+});
+
 test('provider fallback cannot exceed the hard model-call ceiling', async () => {
   let secondProviderCalls = 0;
   const first = {

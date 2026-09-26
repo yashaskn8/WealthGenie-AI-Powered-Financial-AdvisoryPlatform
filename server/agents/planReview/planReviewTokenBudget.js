@@ -99,8 +99,14 @@ export function createBudgetedPlanReviewProvider(provider, budget) {
   return {
     ...provider,
     async generate(args = {}) {
+      if (typeof provider.isConfigured === 'function' && !provider.isConfigured()) {
+        return null;
+      }
       const reservation = await budget.reserve(args);
       const response = await provider.generate({ ...args, maxTokens: reservation.outputTokens });
+      if (args.signal?.aborted) {
+        throw args.signal.reason || Object.assign(new Error('PlanReview provider result arrived after cancellation.'), { name: 'AbortError' });
+      }
       const usage = response?.tokensUsed ?? response?.routing?.tokensUsed ?? response?.usage?.totalTokens;
       budget.settle(reservation, usage);
       return response ? { ...response, tokensUsed: Number(usage) > 0 ? Math.max(reservation.inputTokens, Number(usage)) : reservation.reservedTokens } : response;

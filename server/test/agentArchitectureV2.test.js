@@ -105,6 +105,20 @@ test('A2A verifier and A2UI renderer contracts are allowlisted', () => {
   assert.throws(() => validateA2UIMessage({ ...ui, components: [...ui.components, { id: 'a2ui_bad', type: 'html', intent: 'plan_review_status' }] }), /unsupported/i);
 });
 
+test('PlanReview A2UI preserves lifecycle states and canonical finding detail', () => {
+  for (const status of ['QUEUED', 'RUNNING', 'WAITING_FOR_APPROVAL', 'FAILED', 'CANCELLED', 'SUPERSEDED', 'BUDGET_EXCEEDED', 'FEATURE_UNAVAILABLE']) {
+    const ui = buildPlanReviewA2UI({ runId: 'run-a2ui', status, result: null });
+    assert.equal(ui.components[0].state, status);
+  }
+  const completed = buildPlanReviewA2UI({
+    runId: 'run-a2ui-completed',
+    status: 'COMPLETED',
+    result: { status: 'COMPLETED', findings: [{ code: 'SOURCE_STALE', detail: 'Regulatory source is stale.', message: 'legacy text' }] },
+  });
+  assert.equal(completed.components[0].state, 'COMPLETED');
+  assert.equal(completed.components.find(component => component.type === 'finding')?.text, 'Regulatory source is stale.');
+});
+
 test('agent identity, workflow, sandbox, and research defaults fail closed', async () => {
   const identity = createAgentIdentity({ agentType: 'PLAN_REVIEW', provider: 'development', env: { NODE_ENV: 'test' } });
   assert.doesNotThrow(() => assertAgentCapability(identity, 'read_evidence'));

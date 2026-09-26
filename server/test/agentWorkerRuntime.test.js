@@ -10,6 +10,7 @@ import { claimPlanHealthSchedulerLease, runPlanHealthScan } from '../services/pl
 import { inspectPlanHealth } from '../services/planHealthMonitor.js';
 import { buildPlanReviewSnapshotBinding, hashPlanReviewSnapshot } from '../agents/planReview/planReviewRuntime.js';
 import { canonicalSha256 } from '../utils/canonicalJson.js';
+import { PrometheusMetrics } from '../services/metricsCollector.js';
 
 const userId = '64b000000000000000000010';
 
@@ -228,6 +229,188 @@ test('worker publication fences the exact profile and recommendation pointer in 
   assert.equal(writes[0].update.$inc.planReviewPublicationFence, 1);
   assert.equal(writes[1].filter.currentAllocationRevisionId, pointer.currentAllocationRevisionId);
   assert.equal(writes[2].filter.planReviewSnapshotHash, sourceHash);
+});
+
+test('RUN_COMPLETED and success metrics are written only with the durable terminal CAS', async () => {
+  const profileId = '64b000000000000000000031';
+  const binding = buildPlanReviewSnapshotBinding({ userId, profileId, currentState: { profileVersion: 1 }, freshness: { fresh: false, reasonCodes: ['RECOMMENDATION_MISSING'] } });
+  const hash = hashPlanReviewSnapshot(binding);
+  const run = {
+    runId: 'run-terminal-event', userId, profileId, workerId: 'worker-a', executionGeneration: 1,
+    status: 'RUNNING', leaseUntil: new Date(Date.now() + 60000), sourceBinding: binding, planReviewSnapshotHash: hash,
+    eventSequence: 0, trajectory: [],
+  };
+  const events = [];
+  let insideTransaction = false;
+  const session = {
+    async withTransaction(callback) {
+      insideTransaction = true;
+      await callback();
+      insideTransaction = false;
+    },
+    async endSession() {},
+  };
+  const model = {
+    findOne(filter) { return lean(!filter.status || run.status === filter.status ? run : null); },
+    async updateOne(filter, update, options) {
+      if (run.status !== filter.status || options.session !== session) return { modifiedCount: 0 };
+      Object.assign(run, update.$set || {});
+      for (const [key, amount] of Object.entries(update.$inc || {})) run[key] = Number(run[key] || 0) + amount;
+      if (update.$push?.trajectory?.$each) run.trajectory.push(...update.$push.trajectory.$each);
+      return { modifiedCount: 1 };
+    },
+  };
+  const worker = createPlanReviewWorker({
+    model,
+    profileModel: { updateOne: async () => ({ modifiedCount: 1 }) },
+    stateModel: { updateOne: async () => ({ modifiedCount: 1 }) },
+    eventModel: { async create(rows, options) { assert.equal(insideTransaction, true); assert.equal(options.session, session); events.push(...rows); } },
+    mongo: { startSession: async () => session },
+    snapshotResolver: async () => ({ sourceBinding: binding, planReviewSnapshotHash: hash, currentState: {} }),
+    worker: 'worker-a',
+  });
+  const beforeCompleted = PrometheusMetrics.counters.agent_runs_completed_total;
+  const result = await worker.finishRun(run, {
+    recommendedAction: 'NONE', findings: [], evidence: { entries: [] },
+    execution: { stepCount: 5, toolCallCount: 0, modelCallCount: 0, tokenUsage: 0 },
+  });
+
+  assert.deepEqual(result, { committed: true, status: 'COMPLETED', runId: run.runId });
+  assert.equal(run.status, 'COMPLETED');
+  assert.equal(run.eventSequence, 1);
+  assert.equal(run.trajectory.at(-1).type, 'RUN_COMPLETED');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].eventType, 'RUN_COMPLETED');
+  assert.equal(events[0].sequence, 1);
+  assert.equal(PrometheusMetrics.counters.agent_runs_completed_total, beforeCompleted + 1);
+  await assert.rejects(worker.finishRun(run, { recommendedAction: 'NONE' }), error => error.code === 'AGENT_LEASE_LOST');
+  assert.equal(events.length, 1, 'replay after terminalization cannot emit another completion event');
+});
+
+test('cancellation winning immediately before worker terminal CAS suppresses success metrics and event', async () => {
+  const profileId = '64b000000000000000000032';
+  const binding = buildPlanReviewSnapshotBinding({ userId, profileId, currentState: { profileVersion: 1 }, freshness: { fresh: false, reasonCodes: ['RECOMMENDATION_MISSING'] } });
+  const hash = hashPlanReviewSnapshot(binding);
+  const run = {
+    runId: 'run-cancel-wins-finalization', userId, profileId, status: 'QUEUED', queuedAt: new Date(0),
+    priority: 'INTERACTIVE_PLAN_REVIEW', attempt: 0, executionGeneration: 0, maxAttempts: 2,
+    sourceBinding: binding, planReviewSnapshotHash: hash,
+  };
+  const events = [];
+  const session = { withTransaction: async callback => callback(), endSession: async () => {} };
+  const model = {
+    findOne(filter) {
+      const matches = (!filter.status || filter.status === run.status)
+        && (!filter.runId || filter.runId === run.runId)
+        && (!filter.workerId || filter.workerId === run.workerId)
+        && (!filter.executionGeneration || filter.executionGeneration === run.executionGeneration);
+      return { sort() { return this; }, lean: async () => matches ? run : null };
+    },
+    async findOneAndUpdate(_filter, update) {
+      Object.assign(run, update.$set || {});
+      for (const [key, amount] of Object.entries(update.$inc || {})) run[key] = Number(run[key] || 0) + amount;
+      return run;
+    },
+    async updateOne(filter, update) {
+      if (filter.status !== run.status) return { modifiedCount: 0 };
+      if (filter.status === 'RUNNING' && run.status === 'CANCELLED') return { modifiedCount: 0 };
+      Object.assign(run, update.$set || {});
+      return { modifiedCount: 1 };
+    },
+  };
+  const beforeJobs = PrometheusMetrics.counters.agent_worker_jobs_completed_total;
+  const beforeQueue = PrometheusMetrics.counters.agent_queue_runs_completed_total;
+  const worker = createPlanReviewWorker({
+    model,
+    worker: 'worker-cancel-test',
+    runtimeConfig: { agentPlanReview: { leaseMs: 60000, heartbeatMs: 60000 } },
+    profileModel: {
+      async updateOne() {
+        run.status = 'CANCELLED';
+        return { modifiedCount: 1 };
+      },
+    },
+    stateModel: { updateOne: async () => ({ modifiedCount: 1 }) },
+    eventModel: { async create(rows) { events.push(...rows); } },
+    mongo: { startSession: async () => session },
+    snapshotResolver: async () => ({ sourceBinding: binding, planReviewSnapshotHash: hash, currentState: {} }),
+    runPlanReviewImpl: async ({ dependencies }) => {
+      assert.ok(dependencies.signal instanceof AbortSignal);
+      return { recommendedAction: 'NONE', findings: [], evidence: { entries: [] }, execution: { stepCount: 5, toolCallCount: 0, modelCallCount: 0, tokenUsage: 0 } };
+    },
+  });
+
+  await worker.processNext();
+  assert.equal(run.status, 'CANCELLED');
+  assert.equal(PrometheusMetrics.counters.agent_worker_jobs_completed_total, beforeJobs);
+  assert.equal(PrometheusMetrics.counters.agent_queue_runs_completed_total, beforeQueue);
+  assert.equal(events.filter(event => event.eventType === 'RUN_COMPLETED').length, 0);
+});
+
+test('source supersession winning before terminal publication is counted as superseded, never successful or failed', async () => {
+  const profileId = '64b000000000000000000034';
+  const binding = buildPlanReviewSnapshotBinding({ userId, profileId, currentState: { profileVersion: 1 }, freshness: { fresh: false, reasonCodes: ['RECOMMENDATION_MISSING'] } });
+  const hash = hashPlanReviewSnapshot(binding);
+  const supersedingBinding = { ...binding, profileVersion: 2 };
+  const run = {
+    runId: 'run-supersede-wins-finalization', userId, profileId, status: 'QUEUED', queuedAt: new Date(0),
+    priority: 'INTERACTIVE_PLAN_REVIEW', attempt: 0, executionGeneration: 0, maxAttempts: 2,
+    activeDedupeKey: 'active-snapshot-key', sourceBinding: binding, planReviewSnapshotHash: hash,
+  };
+  const events = [];
+  const session = { withTransaction: async callback => callback(), endSession: async () => {} };
+  const model = {
+    findOne(filter) {
+      const matches = (!filter.status || filter.status === run.status)
+        && (!filter.runId || filter.runId === run.runId)
+        && (!filter.workerId || filter.workerId === run.workerId)
+        && (!filter.executionGeneration || filter.executionGeneration === run.executionGeneration);
+      return { sort() { return this; }, lean: async () => matches ? run : null };
+    },
+    findOneAndUpdate(_filter, update) {
+      Object.assign(run, update.$set || {});
+      for (const [key, amount] of Object.entries(update.$inc || {})) run[key] = Number(run[key] || 0) + amount;
+      return { lean: async () => ({ ...run }) };
+    },
+    async updateOne(filter, update) {
+      if (filter.status !== run.status || filter.runId !== run.runId) return { modifiedCount: 0 };
+      Object.assign(run, update.$set || {});
+      for (const key of Object.keys(update.$unset || {})) delete run[key];
+      return { modifiedCount: 1 };
+    },
+  };
+  const beforeCompleted = PrometheusMetrics.counters.agent_worker_jobs_completed_total;
+  const beforeFailed = PrometheusMetrics.counters.agent_worker_jobs_failed_total;
+  const beforeSuperseded = PrometheusMetrics.counters.agent_worker_jobs_superseded_total;
+  const worker = createPlanReviewWorker({
+    model,
+    worker: 'worker-supersede-test',
+    runtimeConfig: { agentPlanReview: { leaseMs: 60000, heartbeatMs: 60000 } },
+    profileModel: { updateOne: async () => ({ modifiedCount: 1 }) },
+    stateModel: { updateOne: async () => ({ modifiedCount: 1 }) },
+    eventModel: { async create(rows) { events.push(...(Array.isArray(rows) ? rows : [rows])); } },
+    mongo: { startSession: async () => session },
+    snapshotResolver: async () => ({
+      sourceBinding: supersedingBinding,
+      planReviewSnapshotHash: hashPlanReviewSnapshot(supersedingBinding),
+      currentState: {},
+    }),
+    runPlanReviewImpl: async () => ({
+      recommendedAction: 'NONE', findings: [], evidence: { entries: [] },
+      execution: { stepCount: 4, toolCallCount: 0, modelCallCount: 0, tokenUsage: 0 },
+    }),
+  });
+
+  await worker.processNext();
+
+  assert.equal(run.status, 'SUPERSEDED');
+  assert.equal(run.activeDedupeKey, undefined);
+  assert.equal(run.deadLetter, null, 'supersession is not a failed/dead-letter job');
+  assert.equal(PrometheusMetrics.counters.agent_worker_jobs_completed_total, beforeCompleted);
+  assert.equal(PrometheusMetrics.counters.agent_worker_jobs_failed_total, beforeFailed);
+  assert.equal(PrometheusMetrics.counters.agent_worker_jobs_superseded_total, beforeSuperseded + 1);
+  assert.equal(events.filter(event => event.eventType === 'RUN_COMPLETED').length, 0);
+  assert.ok(events.some(event => event.eventType === 'RUN_SUPERSEDED'));
 });
 
 test('worker refuses to publish a review after its bound source snapshot is superseded', async () => {

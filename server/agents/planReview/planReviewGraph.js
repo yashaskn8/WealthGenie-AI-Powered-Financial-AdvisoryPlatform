@@ -54,25 +54,42 @@ function scaffoldLimit(dependencies, key, fallback, hardMaximum) {
   );
 }
 
-function incrementStep(state, dependencies = {}) {
+export function advancePlanReviewStep(state, dependencies = {}) {
   const limit = configuredLimit(dependencies.maxSteps, MAX_AGENT_STEPS, MAX_AGENT_STEPS);
-  return Math.min(limit, Number(state.stepCount || 0) + 1);
+  const previous = state.stepCount === undefined || state.stepCount === null ? 0 : Number(state.stepCount);
+  if (!Number.isInteger(previous) || previous < 0 || previous >= limit) {
+    const error = new Error('PlanReview execution step budget exceeded.');
+    error.code = 'AGENT_BUDGET_EXCEEDED';
+    error.reason = 'STEPS';
+    throw error;
+  }
+  return previous + 1;
 }
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))];
 }
 
-function withTimeout(promise, timeoutMs) {
+function withTimeout(promise, timeoutMs, onTimeout = null, signal = null) {
   let timer;
+  let abortListener;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
       const error = new Error('TOOL_TIMEOUT');
       error.code = 'TOOL_TIMEOUT';
+      onTimeout?.(error);
       reject(error);
     }, timeoutMs);
   });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  const aborted = signal ? new Promise((_, reject) => {
+    abortListener = () => reject(signal.reason || Object.assign(new Error('PlanReview operation aborted.'), { name: 'AbortError' }));
+    if (signal.aborted) abortListener();
+    else signal.addEventListener('abort', abortListener, { once: true });
+  }) : new Promise(() => {});
+  return Promise.race([promise, timeout, aborted]).finally(() => {
+    clearTimeout(timer);
+    if (abortListener) signal?.removeEventListener('abort', abortListener);
+  });
 }
 
 async function reportProgress(dependencies, payload) {
@@ -114,7 +131,7 @@ function plannerPrompt(freshness, profileContext, tools = SAFE_PLAN_REVIEW_TOOLS
   ].join('\n');
 }
 
-export async function planWithProvider({ freshness, profileContext, provider, tools = SAFE_PLAN_REVIEW_TOOLS, promptBundle = null }) {
+export async function planWithProvider({ freshness, profileContext, provider, tools = SAFE_PLAN_REVIEW_TOOLS, promptBundle = null, signal }) {
   if (!provider || typeof provider.generate !== 'function') return null;
   const response = await withAgentSpan('gen_ai.chat', {
     'agent.type': 'PLAN_REVIEW',
@@ -127,6 +144,7 @@ export async function planWithProvider({ freshness, profileContext, provider, to
       maxTokens: 240,
       jsonMode: true,
       tools: null,
+      signal,
     });
     if (value?.model) span.setAttribute('gen_ai.response.model', value.model);
     if (value?.tokensUsed) span.setAttribute('gen_ai.usage.total_tokens', Number(value.tokensUsed));
@@ -144,6 +162,9 @@ export async function planWithProvider({ freshness, profileContext, provider, to
 }
 
 async function loadContextNode(state, dependencies) {
+  const checkpointCounters = state.resumeCheckpoint?.counters || {};
+  const previousStepCount = Number(checkpointCounters.stepCount ?? state.stepCount ?? 0);
+  const stepCount = advancePlanReviewStep({ stepCount: previousStepCount }, dependencies);
   const contextLoader = dependencies.loadPlanReviewContext || loadPlanReviewContext;
   const context = await contextLoader({
     userId: state.userId,
@@ -177,7 +198,6 @@ async function loadContextNode(state, dependencies) {
     }
     counters = replay.counters || {};
   }
-  const maxSteps = configuredLimit(dependencies.maxSteps, MAX_AGENT_STEPS, MAX_AGENT_STEPS);
   const maxToolCalls = configuredLimit(dependencies.maxToolCalls, MAX_TOOL_CALLS, MAX_TOOL_CALLS);
   const toolCallCounts = Object.fromEntries(Object.entries(counters.toolCallCounts || {})
     .filter(([name, count]) => SAFE_PLAN_REVIEW_TOOLS.includes(name) && Number.isInteger(Number(count)) && Number(count) >= 0)
@@ -198,7 +218,7 @@ async function loadContextNode(state, dependencies) {
   dependencies.modelBudget?.restore(tokenUsage);
   dependencies.modelBudget?.restoreModelCalls(modelCallCount);
   return {
-    stepCount: Math.min(maxSteps, Math.max(0, Number(counters.stepCount) || 0) + 1),
+    stepCount,
     toolCallCount: Math.min(maxToolCalls, Math.max(0, Number(counters.toolCallCount) || 0)),
     toolCallCounts,
     modelCallCount,
@@ -245,6 +265,7 @@ async function determineChecksNode(state, dependencies) {
         provider: plannerProvider,
         tools,
         promptBundle,
+        signal: dependencies.signal,
       });
       if (modelPlan) {
         planner = modelPlan;
@@ -253,13 +274,14 @@ async function determineChecksNode(state, dependencies) {
       }
       modelCallCount = dependencies.modelBudget?.modelCalls ?? modelCallCount + 1;
     } catch (error) {
+      if (dependencies.signal?.aborted || error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') throw error;
       if (error?.code === 'AGENT_BUDGET_EXCEEDED' || error?.code === 'AGENT_BUDGET_PERSISTENCE_UNAVAILABLE') throw error;
       planner = { provider: 'DETERMINISTIC', model: null, fallback: true };
       modelCallCount = dependencies.modelBudget?.modelCalls ?? modelCallCount + 1;
     }
   }
   return {
-    stepCount: incrementStep(state, dependencies),
+    stepCount: state.stepCount,
     requestedChecks,
     planner,
     modelCallCount,
@@ -307,14 +329,29 @@ async function executeSafeToolsNode(state, dependencies) {
     toolCallCounts[toolName] = (toolCallCounts[toolName] || 0) + 1;
     try {
       const timeoutMs = Number(dependencies.toolTimeoutMs) || 5000;
+      const toolAbortController = new AbortController();
+      const parentSignal = dependencies.signal;
+      const relayParentAbort = () => toolAbortController.abort(parentSignal.reason);
+      if (parentSignal?.aborted) relayParentAbort();
+      else parentSignal?.addEventListener('abort', relayParentAbort, { once: true });
       const result = await withAgentSpan('agent.tool', {
         'agent.type': 'PLAN_REVIEW',
         'agent.tool_name': toolName,
       }, async span => {
-        const value = await withTimeout(executePlanReviewTool(toolName, context), timeoutMs);
+        if (parentSignal?.aborted) throw parentSignal.reason || Object.assign(new Error('PlanReview operation aborted.'), { name: 'AbortError' });
+        const toolContext = {
+          ...context,
+          dependencies: { ...dependencies, signal: toolAbortController.signal },
+        };
+        const value = await withTimeout(
+          executePlanReviewTool(toolName, toolContext),
+          timeoutMs,
+          error => toolAbortController.abort(error),
+          parentSignal,
+        );
         span.setAttribute('agent.tool_outcome', 'SUCCEEDED');
         return value;
-      });
+      }).finally(() => parentSignal?.removeEventListener('abort', relayParentAbort));
       toolResults[toolName] = result;
       PrometheusMetrics.recordAgentToolCall(toolName, true);
       await reportProgress(dependencies, {
@@ -323,6 +360,7 @@ async function executeSafeToolsNode(state, dependencies) {
         event: trajectoryEvent('TOOL_SUCCEEDED', { tool: toolName }),
       });
     } catch (error) {
+      if (dependencies.signal?.aborted) throw dependencies.signal.reason || error;
       toolResults[toolName] = { status: 'UNAVAILABLE', unavailableFacts: [error.code || 'TOOL_FAILED'] };
       repeatedRequests.push(`${toolName}:${error.code || 'TOOL_FAILED'}`);
       PrometheusMetrics.recordAgentToolCall(toolName, false);
@@ -334,6 +372,7 @@ async function executeSafeToolsNode(state, dependencies) {
     }
   }
   return {
+    stepCount: state.stepCount,
     toolResults,
     toolCallCounts,
     toolCallCount,
@@ -405,7 +444,10 @@ async function researchMeshNode(state, dependencies) {
   try {
     await reportProgress(dependencies, { node: 'research_mesh', state: { ...state, researchNeed }, event: trajectoryEvent('RESEARCH_REQUIRED', { mode: researchNeed.mode }) });
     await reportProgress(dependencies, { node: 'research_mesh', state: { ...state, researchNeed, researchBrief: brief }, event: trajectoryEvent('RESEARCH_TASK_STARTED') });
-    const result = await dependencies.researchMeshClient.sendResearch({ brief });
+    const result = await dependencies.researchMeshClient.sendResearch({ brief, signal: dependencies.signal });
+    if (dependencies.signal?.aborted) {
+      throw dependencies.signal.reason || Object.assign(new Error('Research result arrived after PlanReview cancellation.'), { name: 'AbortError' });
+    }
     const verification = verifyResearchArtifact(result.artifact, { brief });
     if (!verification.valid) {
       return { ...base, researchBrief: brief, researchFailure: 'RESEARCH_ARTIFACT_REJECTED', researchVerification: verification };
@@ -437,6 +479,7 @@ async function researchMeshNode(state, dependencies) {
       evidencePacket: mergedPacket,
     };
   } catch (error) {
+    if (dependencies.signal?.aborted || error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') throw error;
     await reportProgress(dependencies, { node: 'research_mesh', state: { ...state, researchNeed, researchBrief: brief }, event: trajectoryEvent('RESEARCH_FAILED', { code: error.code || 'RESEARCH_FAILED' }) });
     return { ...base, researchBrief: brief, researchFailure: error.code || 'RESEARCH_FAILED' };
   }
@@ -482,6 +525,7 @@ async function synthesizeNode(state, dependencies) {
           evidencePacket: evidence,
         }, {
           providers: explanationProviders,
+          signal: dependencies.signal,
           getCache: async () => null,
           setCache: async () => undefined,
         });
@@ -493,6 +537,7 @@ async function synthesizeNode(state, dependencies) {
       provider = { provider: explanation.provider, model: explanation.model, fallback: explanation.fallback };
       modelCallCount = dependencies.modelBudget?.modelCalls ?? modelCallCount + 1;
     } catch (error) {
+      if (dependencies.signal?.aborted || error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') throw error;
       if (error?.code === 'AGENT_BUDGET_EXCEEDED' || error?.code === 'AGENT_BUDGET_PERSISTENCE_UNAVAILABLE') throw error;
       explanation = null;
       provider = safeProvider;
@@ -520,7 +565,7 @@ async function synthesizeNode(state, dependencies) {
     modelCallCount,
     tokenUsage,
     review,
-    stepCount: incrementStep(state, dependencies),
+    stepCount: state.stepCount,
   };
 }
 
@@ -556,7 +601,15 @@ async function validateAgentOutputNode(state, dependencies = {}) {
 async function policyGuardNode(state, dependencies = {}) {
   const policy = policyGuardReview(state.review, state.evidencePacket, state.explanation);
   if (policy.allowed && state.validation?.valid) {
-    return { policy, status: 'COMPLETED' };
+    return {
+      policy,
+      status: 'COMPLETED',
+      stepCount: state.stepCount,
+      review: {
+        ...state.review,
+        execution: { ...(state.review.execution || {}), stepCount: state.stepCount },
+      },
+    };
   }
   PrometheusMetrics.recordAgentPolicyRejection();
   const fallback = safeFallbackAfterPolicyRejection({
@@ -572,7 +625,7 @@ async function policyGuardNode(state, dependencies = {}) {
     modelCallCount: state.modelCallCount,
     tokenUsage: dependencies.modelBudget?.accountedTokens ?? state.tokenUsage,
   });
-  return { policy: { ...policy, allowed: false }, review: fallback, status: 'COMPLETED' };
+  return { policy: { ...policy, allowed: false }, review: fallback, status: 'COMPLETED', stepCount: state.stepCount };
 }
 
 async function persistNode(state, dependencies) {
@@ -596,7 +649,6 @@ async function persistNode(state, dependencies) {
       tokenUsage: dependencies.modelBudget?.accountedTokens ?? state.tokenUsage,
     });
   }
-  PrometheusMetrics.recordAgentRun(state.status === 'COMPLETED' ? 'completed' : 'failed');
   return { status: state.status || 'COMPLETED' };
 }
 
@@ -618,16 +670,16 @@ export function createPlanReviewGraph(dependencies = {}) {
       return next;
     })
     .addNode('check_recommendation_freshness', async state => {
-      const next = { freshness: state.freshness, stepCount: incrementStep(state, runtimeDependencies) };
+      const next = { freshness: state.freshness, stepCount: advancePlanReviewStep(state, runtimeDependencies) };
       await reportProgress(runtimeDependencies, { node: 'check_recommendation_freshness', state: { ...state, ...next }, event: trajectoryEvent('NODE_ENTERED', { node: 'check_recommendation_freshness' }) });
       return next;
     })
     .addNode('determine_required_checks', async state => {
-      const next = await determineChecksNode(state, runtimeDependencies);
+      const next = await determineChecksNode({ ...state, stepCount: advancePlanReviewStep(state, runtimeDependencies) }, runtimeDependencies);
       await reportProgress(runtimeDependencies, { node: 'determine_required_checks', state: { ...state, ...next }, event: trajectoryEvent('NODE_ENTERED', { node: 'determine_required_checks' }) });
       return next;
     })
-    .addNode('execute_safe_tools', async state => executeSafeToolsNode(state, runtimeDependencies))
+    .addNode('execute_safe_tools', async state => executeSafeToolsNode({ ...state, stepCount: advancePlanReviewStep(state, runtimeDependencies) }, runtimeDependencies))
     .addNode('validate_evidence', async state => {
       const next = await validateEvidenceNode(state);
       await reportProgress(runtimeDependencies, { node: 'validate_evidence', state: { ...state, ...next }, event: trajectoryEvent('EVIDENCE_VALIDATED') });
@@ -639,7 +691,7 @@ export function createPlanReviewGraph(dependencies = {}) {
       return next;
     })
     .addNode('synthesize_review', async state => {
-      const next = await synthesizeNode(state, runtimeDependencies);
+      const next = await synthesizeNode({ ...state, stepCount: advancePlanReviewStep(state, runtimeDependencies) }, runtimeDependencies);
       await reportProgress(runtimeDependencies, { node: 'synthesize_review', state: { ...state, ...next }, event: trajectoryEvent(next.explanation?.fallback ? 'FALLBACK_USED' : 'NODE_ENTERED', { node: 'synthesize_review' }) });
       return next;
     })
@@ -649,13 +701,13 @@ export function createPlanReviewGraph(dependencies = {}) {
       return next;
     })
     .addNode('policy_guard', async state => {
-      const next = await policyGuardNode(state, runtimeDependencies);
+      const next = await policyGuardNode({ ...state, stepCount: advancePlanReviewStep(state, runtimeDependencies) }, runtimeDependencies);
       await reportProgress(runtimeDependencies, { node: 'policy_guard', state: { ...state, ...next }, event: trajectoryEvent(next.policy?.allowed === false ? 'POLICY_REJECTED' : 'NODE_ENTERED', { node: 'policy_guard' }) });
       return next;
     })
     .addNode('persist_agent_run', async state => {
       const next = await persistNode(state, runtimeDependencies);
-      await reportProgress(runtimeDependencies, { node: 'persist_agent_run', state: { ...state, ...next }, event: trajectoryEvent('RUN_COMPLETED') });
+      await reportProgress(runtimeDependencies, { node: 'persist_agent_run', state: { ...state, ...next }, event: trajectoryEvent('RESULT_READY') });
       return next;
     })
     .addEdge(START, 'load_context')
@@ -693,7 +745,17 @@ export async function invokePlanReviewGraph({
     maxModelCalls: scaffoldLimit(dependencies, 'maxModelCalls', PLAN_REVIEW_BUDGETS.maxModelCalls, PLAN_REVIEW_BUDGETS.maxModelCalls),
     onReserve: dependencies.onModelBudgetReservation,
   });
-  const executionDependencies = { ...dependencies, modelBudget };
+  const runAbortController = new AbortController();
+  const upstreamSignal = dependencies.signal;
+  const onUpstreamAbort = () => runAbortController.abort(upstreamSignal.reason);
+  if (upstreamSignal?.aborted) onUpstreamAbort();
+  else upstreamSignal?.addEventListener('abort', onUpstreamAbort, { once: true });
+  const executionDependencies = {
+    ...dependencies,
+    signal: runAbortController.signal,
+    abortRun: reason => { if (!runAbortController.signal.aborted) runAbortController.abort(reason); },
+    modelBudget,
+  };
   const graph = createPlanReviewGraph(executionDependencies);
   const state = {
     runId,
@@ -720,14 +782,23 @@ export async function invokePlanReviewGraph({
       'agent.version': 'plan-review-agent-2.0.0',
     },
   }, async span => {
+    let timeoutHandle;
+    let abortListener;
     try {
+      const aborted = new Promise((_, reject) => {
+        abortListener = () => reject(runAbortController.signal.reason || Object.assign(new Error('PlanReview execution aborted.'), { name: 'AbortError' }));
+        if (runAbortController.signal.aborted) abortListener();
+        else runAbortController.signal.addEventListener('abort', abortListener, { once: true });
+      });
       const result = await Promise.race([
         invoke,
-        new Promise((_, reject) => setTimeout(() => {
+        aborted,
+        new Promise((_, reject) => { timeoutHandle = setTimeout(() => {
           const error = new Error('PLAN_REVIEW_TIMEOUT');
           error.code = 'PLAN_REVIEW_TIMEOUT';
+          runAbortController.abort(error);
           reject(error);
-        }, timeoutMs)),
+        }, timeoutMs); }),
       ]);
       span.setAttribute('agent.step_count', Number(result.stepCount || 0));
       span.setAttribute('agent.tool_call_count', Number(result.toolCallCount || 0));
@@ -744,6 +815,9 @@ export async function invokePlanReviewGraph({
       recordAgentError(span, error);
       throw error;
     } finally {
+      clearTimeout(timeoutHandle);
+      runAbortController.signal.removeEventListener('abort', abortListener);
+      upstreamSignal?.removeEventListener('abort', onUpstreamAbort);
       span.end();
     }
   });

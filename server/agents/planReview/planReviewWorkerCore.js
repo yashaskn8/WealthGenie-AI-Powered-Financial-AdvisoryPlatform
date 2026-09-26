@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import { trace } from '../../config/tracing.js';
 import AgentRun from '../../models/AgentRun.js';
+import UserIntentMandate from '../../models/UserIntentMandate.js';
 import AgentCheckpoint from '../../models/AgentCheckpoint.js';
 import FinancialProfile from '../../models/FinancialProfile.js';
 import RecommendationState from '../../models/RecommendationState.js';
@@ -13,6 +14,8 @@ import { canonicalSha256 } from '../../utils/canonicalJson.js';
 import { resolvePlanReviewSnapshot } from './planReviewSnapshot.js';
 import { allocateAgentRunEventSequence } from '../../services/agentEventSequence.js';
 import { SAFE_PLAN_REVIEW_TOOLS } from './planReviewSchemas.js';
+import { reconcileTerminalPlanReviewMandates } from './planReviewApproval.js';
+import logger from '../../utils/logger.js';
 
 const NODE_LABELS = Object.freeze({
   load_context: 'Loading your saved plan',
@@ -32,22 +35,34 @@ let defaultWorker = null;
 function now() { return new Date(); }
 
 function checkpointState(state) {
+  const boundedCounter = (name, value, max) => {
+    const count = value === undefined || value === null ? 0 : Number(value);
+    if (!Number.isInteger(count) || count < 0 || count > max) {
+      const error = new Error(`PlanReview checkpoint ${name} is outside its hard budget.`);
+      error.code = 'AGENT_BUDGET_EXCEEDED';
+      error.reason = name.toUpperCase();
+      throw error;
+    }
+    return count;
+  };
+  const tokenUsage = boundedCounter('tokenUsage', state.tokenUsage, PLAN_REVIEW_BUDGETS.maxTotalTokens);
   const payload = {
     schemaVersion: 'plan-review-replay-checkpoint-1.0.0',
     runId: state.runId,
     planReviewSnapshotHash: state.planReviewSnapshotHash,
     sourceBinding: state.sourceBinding,
     counters: {
-      stepCount: Math.min(PLAN_REVIEW_BUDGETS.maxSteps, Math.max(0, Number(state.stepCount) || 0)),
-      toolCallCount: Math.min(PLAN_REVIEW_BUDGETS.maxToolCalls, Math.max(0, Number(state.toolCallCount) || 0)),
-      modelCallCount: Math.min(PLAN_REVIEW_BUDGETS.maxModelCalls, Math.max(0, Number(state.modelCallCount) || 0)),
-      tokenUsage: Number.isInteger(state.tokenUsage) && state.tokenUsage >= 0
-        ? Math.min(PLAN_REVIEW_BUDGETS.maxTotalTokens, state.tokenUsage)
-        : 0,
+      stepCount: boundedCounter('stepCount', state.stepCount, PLAN_REVIEW_BUDGETS.maxSteps),
+      toolCallCount: boundedCounter('toolCallCount', state.toolCallCount, PLAN_REVIEW_BUDGETS.maxToolCalls),
+      modelCallCount: boundedCounter('modelCallCount', state.modelCallCount, PLAN_REVIEW_BUDGETS.maxModelCalls),
+      tokenUsage,
       toolCallCounts: Object.fromEntries(Object.entries(state.toolCallCounts || {})
         .filter(([name, count]) => SAFE_PLAN_REVIEW_TOOLS.includes(name) && Number.isInteger(Number(count)) && Number(count) >= 0)
         .slice(0, SAFE_PLAN_REVIEW_TOOLS.length)
-        .map(([name, count]) => [name, Math.min(PLAN_REVIEW_BUDGETS.maxToolCallsPerTool, Number(count))])),
+        .map(([name, count]) => {
+          const bounded = boundedCounter(`toolCallCounts.${name}`, count, PLAN_REVIEW_BUDGETS.maxToolCallsPerTool);
+          return [name, bounded];
+        })),
     },
   };
   return { ...payload, checkpointHash: canonicalSha256(payload) };
@@ -127,7 +142,8 @@ function classifyFailure(error) {
   if (error?.code === 'PLAN_REVIEW_SOURCE_SUPERSEDED') return 'PLAN_REVIEW_SOURCE_SUPERSEDED';
   if (error?.code === 'AGENT_BUDGET_EXCEEDED') return 'BUDGET_EXCEEDED';
   if (error?.code === 'AGENT_BUDGET_PERSISTENCE_UNAVAILABLE') return 'BUDGET_RESERVATION_UNAVAILABLE';
-  if (error?.code === 'AGENT_LEASE_LOST') return 'INTERNAL_RUNTIME_FAILURE';
+  if (error?.code === 'PLAN_REVIEW_TIMEOUT' || error?.code === 'TOOL_TIMEOUT') return 'PLAN_REVIEW_TIMEOUT';
+  if (error?.code === 'AGENT_LEASE_LOST') return 'STALE_FINALIZATION_REJECTED';
   if (error?.code === 'CHECKPOINT_FAILURE') return 'CHECKPOINT_FAILURE';
   if (error?.code === 'UNKNOWN_TOOL' || error?.code?.startsWith?.('TOOL_')) return 'TOOL_FAILURE';
   if (error?.retryable || error?.code === 'PROVIDER_UNAVAILABLE' || error?.code === 'MODEL_TIMEOUT') return 'PROVIDER_UNAVAILABLE';
@@ -197,6 +213,7 @@ class PlanReviewWorker {
     model = AgentRun,
     checkpointModel = AgentCheckpoint,
     eventModel = null,
+    mandateModel = UserIntentMandate,
     profileModel = FinancialProfile,
     stateModel = RecommendationState,
     snapshotResolver = resolvePlanReviewSnapshot,
@@ -208,6 +225,7 @@ class PlanReviewWorker {
     this.model = model;
     this.checkpointModel = checkpointModel;
     this.eventModel = eventModel;
+    this.mandateModel = mandateModel;
     this.profileModel = profileModel;
     this.stateModel = stateModel;
     this.snapshotResolver = snapshotResolver;
@@ -219,8 +237,10 @@ class PlanReviewWorker {
     this.heartbeatMs = runtimeConfig?.agentPlanReview?.heartbeatMs || Math.floor(this.leaseMs / 4);
     this.timer = null;
     this.heartbeatTimer = null;
+    this.mandateReconciliationTimer = null;
     this.activePromise = null;
     this.activeRun = null;
+    this.activeAbortController = null;
     this.draining = false;
     this.leaseLost = false;
   }
@@ -249,11 +269,17 @@ class PlanReviewWorker {
     if (!this.activeRun || this.leaseLost) return false;
     const span = tracer.startSpan('agent.queue.heartbeat', { attributes: { 'agent.type': 'PLAN_REVIEW', 'worker.operation': 'heartbeat' } });
     try {
-      const result = await this.model.updateOne({ ...leaseFilter(this.activeRun), status: 'RUNNING', leaseUntil: { $gt: now() } }, {
+      const result = await this.model.updateOne({
+        ...leaseFilter(this.activeRun),
+        status: 'RUNNING',
+        cancellationRequested: { $ne: true },
+        leaseUntil: { $gt: now() },
+      }, {
         $set: { lastHeartbeatAt: now(), leaseUntil: new Date(Date.now() + this.leaseMs) },
       });
       if (!isModified(result)) {
         this.leaseLost = true;
+        this.activeAbortController?.abort(staleLeaseError());
         PrometheusMetrics.inc('agent_worker_lease_conflicts_total');
         PrometheusMetrics.inc('agent_worker_stale_write_rejections_total');
         span.setAttribute('run.state', 'LEASE_LOST');
@@ -400,6 +426,17 @@ class PlanReviewWorker {
     }
     const result = review || null;
     const status = result?.recommendedAction === 'RECOMPUTE_PLAN' ? 'WAITING_FOR_APPROVAL' : 'COMPLETED';
+    const exactCounter = (name, value, max) => {
+      const count = value === undefined || value === null ? 0 : Number(value);
+      if (!Number.isInteger(count) || count < 0 || count > max) {
+        const error = new Error(`PlanReview ${name} exceeded its hard execution budget.`);
+        error.code = 'AGENT_BUDGET_EXCEEDED';
+        error.reason = name.toUpperCase();
+        throw error;
+      }
+      return count;
+    };
+    const terminalEvent = status === 'COMPLETED' ? 'RUN_COMPLETED' : 'RUN_WAITING_FOR_APPROVAL';
     const update = {
       $set: {
         status,
@@ -409,18 +446,24 @@ class PlanReviewWorker {
         evidenceIds: (result?.evidence?.entries || []).map(item => item.id).filter(Boolean),
         provider: result?.provider?.name || 'DETERMINISTIC_FALLBACK',
         model: result?.provider?.model || null,
-        stepCount: Math.min(PLAN_REVIEW_BUDGETS.maxSteps, Number(result?.execution?.stepCount) || 0),
-        toolCallCount: Math.min(PLAN_REVIEW_BUDGETS.maxToolCalls, Number(result?.execution?.toolCallCount) || 0),
-        modelCallCount: Math.min(PLAN_REVIEW_BUDGETS.maxModelCalls, Number(result?.execution?.modelCallCount) || 0),
-        tokenUsage: Math.min(PLAN_REVIEW_BUDGETS.maxTotalTokens, Number(result?.execution?.tokenUsage) || 0),
+        stepCount: exactCounter('stepCount', result?.execution?.stepCount, PLAN_REVIEW_BUDGETS.maxSteps),
+        toolCallCount: exactCounter('toolCallCount', result?.execution?.toolCallCount, PLAN_REVIEW_BUDGETS.maxToolCalls),
+        modelCallCount: exactCounter('modelCallCount', result?.execution?.modelCallCount, PLAN_REVIEW_BUDGETS.maxModelCalls),
+        tokenUsage: exactCounter('tokenUsage', result?.execution?.tokenUsage, PLAN_REVIEW_BUDGETS.maxTotalTokens),
         completedAt: now(),
         leaseUntil: null,
         currentNode: null,
         progress: { completedNodes: Object.keys(NODE_LABELS), percent: 100, label: 'Review ready' },
       },
-      $push: { trajectory: { $each: [{ type: 'RUN_COMPLETED', at: now().toISOString() }], $slice: -100 } },
+      $push: { trajectory: { $each: [{ type: terminalEvent, at: now().toISOString() }], $slice: -100 } },
     };
     if (status === 'COMPLETED') update.$unset = { activeDedupeKey: 1 };
+    const terminalSequence = Number(current?.eventSequence || 0) + 1;
+    const eventSequenceFence = current?.eventSequence === undefined
+      ? { $or: [{ eventSequence: { $exists: false } }, { eventSequence: 0 }] }
+      : { eventSequence: current.eventSequence };
+    if (this.eventModel?.create) update.$inc = { eventSequence: 1 };
+    let committed = false;
     const session = await this.mongo.startSession();
     try {
       if (typeof session.withTransaction !== 'function') {
@@ -480,6 +523,8 @@ class PlanReviewWorker {
         const written = await this.model.updateOne({
           ...leaseFilter(run),
           status: 'RUNNING',
+          cancellationRequested: { $ne: true },
+          ...eventSequenceFence,
           planReviewSnapshotHash: run.planReviewSnapshotHash,
           leaseUntil: { $gt: now() },
         }, update, { session });
@@ -487,14 +532,25 @@ class PlanReviewWorker {
           PrometheusMetrics.inc('agent_worker_stale_write_rejections_total');
           throw staleLeaseError();
         }
+        if (this.eventModel?.create) {
+          await this.eventModel.create([{
+            runId: run.runId,
+            userId: run.userId,
+            executionGeneration: run.executionGeneration,
+            sequence: terminalSequence,
+            eventType: terminalEvent,
+            node: 'persist_agent_run',
+            data: { type: terminalEvent, node: 'persist_agent_run', at: now().toISOString() },
+          }], { session });
+        }
       });
+      committed = true;
     } finally {
       await session.endSession();
     }
-    await this.appendEvent(run, Number(current?.checkpointSequence || 0) + 1, {
-      type: 'RUN_COMPLETED',
-      at: now().toISOString(),
-    }, 'persist_agent_run');
+    if (!committed) return { committed: false, status: null };
+    if (status === 'COMPLETED') PrometheusMetrics.recordAgentRun('completed');
+    return { committed: true, status, runId: run.runId };
   }
 
   async failRun(run, error) {
@@ -504,14 +560,14 @@ class PlanReviewWorker {
     const budgetExceeded = error?.code === 'AGENT_BUDGET_EXCEEDED';
     const superseded = error?.code === 'PLAN_REVIEW_SOURCE_SUPERSEDED';
     const classification = classifyFailure(error);
-    if (cancelled) PrometheusMetrics.inc('agent_cancellation_total');
-    if (budgetExceeded) PrometheusMetrics.inc('agent_budget_exceeded_total');
     const update = {
       $set: {
         status: superseded ? 'SUPERSEDED' : (cancelled ? 'CANCELLED' : (budgetExceeded ? 'BUDGET_EXCEEDED' : (terminal ? 'FAILED' : 'QUEUED'))),
         retryAt: terminal || cancelled || budgetExceeded || superseded ? null : new Date(Date.now() + Math.min(30000, 1000 * (2 ** Math.max(0, Number(run.attempt || 1) - 1)))),
         failure: { code: classification, message: String(error?.message || 'Agent run failed').slice(0, 240) },
-        deadLetter: terminal && !cancelled ? { code: classification, at: now() } : null,
+        deadLetter: terminal && !cancelled && !budgetExceeded && !superseded
+          ? { code: classification, at: now() }
+          : null,
         leaseUntil: null,
         completedAt: terminal || cancelled || budgetExceeded || superseded ? now() : null,
         currentNode: terminal || cancelled || budgetExceeded || superseded ? null : run.currentNode,
@@ -534,11 +590,18 @@ class PlanReviewWorker {
       PrometheusMetrics.inc('agent_worker_stale_write_rejections_total');
       throw staleLeaseError();
     }
+    if (cancelled) PrometheusMetrics.inc('agent_cancellation_total');
+    if (budgetExceeded) PrometheusMetrics.inc('agent_budget_exceeded_total');
     await this.appendEvent(run, Number(run.checkpointSequence || 0) + 1, {
       type: superseded ? 'RUN_SUPERSEDED' : (cancelled ? 'RUN_CANCELLED' : 'RUN_FAILED'),
       code: classification,
       at: now().toISOString(),
     }, run.currentNode);
+    return {
+      persisted: true,
+      status: update.$set.status,
+      terminal: terminal || cancelled || budgetExceeded || superseded,
+    };
   }
 
   async processNext() {
@@ -548,6 +611,7 @@ class PlanReviewWorker {
     if (!run) return false;
     this.activeRun = run;
     this.leaseLost = false;
+    this.activeAbortController = new AbortController();
     this.startHeartbeat();
     const span = tracer.startSpan('agent.worker.execute', { attributes: { 'agent.type': 'PLAN_REVIEW', attempt: run.attempt || 0, 'queue.priority': run.priority || 'INTERACTIVE_PLAN_REVIEW' } });
     this.activePromise = (async () => {
@@ -563,6 +627,7 @@ class PlanReviewWorker {
           returnInternalResult: true,
           runtimeConfig: this.runtimeConfig,
           dependencies: {
+            signal: this.activeAbortController.signal,
             checkpointer: new MongoPlanReviewCheckpointer({ runId: run.runId, userId: run.userId, workerId: run.workerId, executionGeneration: run.executionGeneration, assertLease: () => this.assertLease(run) }),
             onNodeProgress: payload => this.updateProgress(run, payload),
             onModelBudgetReservation: usage => this.persistModelBudgetReservation(run, usage),
@@ -574,21 +639,50 @@ class PlanReviewWorker {
           },
         });
         const latest = await this.model.findOne({ ...leaseFilter(run) }).lean();
-        if (latest?.status === 'RUNNING') await this.finishRun(run, review);
-        PrometheusMetrics.inc('agent_worker_jobs_completed_total');
-        PrometheusMetrics.inc('agent_queue_runs_completed_total');
-        span.setAttribute('run.state', 'COMPLETED');
+        if (latest?.status !== 'RUNNING') {
+          PrometheusMetrics.inc('agent_worker_stale_write_rejections_total');
+          span.setAttribute('run.state', latest?.status || 'STALE_FINALIZATION_REJECTED');
+        } else {
+          const finalization = await this.finishRun(run, review);
+          if (finalization?.committed && finalization.status === 'COMPLETED') {
+            PrometheusMetrics.inc('agent_worker_jobs_completed_total');
+            PrometheusMetrics.inc('agent_queue_runs_completed_total');
+            span.setAttribute('run.state', 'COMPLETED');
+          } else if (finalization?.committed && finalization.status === 'WAITING_FOR_APPROVAL') {
+            PrometheusMetrics.inc('agent_worker_jobs_waiting_for_approval_total');
+            span.setAttribute('run.state', 'WAITING_FOR_APPROVAL');
+          } else {
+            PrometheusMetrics.inc('agent_worker_stale_write_rejections_total');
+            span.setAttribute('run.state', 'STALE_FINALIZATION_REJECTED');
+          }
+        }
       } catch (error) {
-        await this.failRun(run, error).catch(failureError => {
+        const failureResult = await this.failRun(run, error).catch(failureError => {
           if (failureError?.code !== 'AGENT_LEASE_LOST') throw failureError;
+          return null;
         });
-        PrometheusMetrics.inc('agent_worker_jobs_failed_total');
-        PrometheusMetrics.inc('agent_queue_runs_failed_total');
-        span.setAttribute('run.state', classifyFailure(error));
+        if (failureResult?.persisted) {
+          if (error?.code === 'PLAN_REVIEW_TIMEOUT' || error?.code === 'TOOL_TIMEOUT') {
+            PrometheusMetrics.inc('agent_worker_jobs_timed_out_total');
+          }
+          if (failureResult.status === 'FAILED') {
+            PrometheusMetrics.inc('agent_worker_jobs_failed_total');
+            PrometheusMetrics.inc('agent_queue_runs_failed_total');
+            PrometheusMetrics.recordAgentRun('failed');
+          } else if (failureResult.status === 'CANCELLED') {
+            PrometheusMetrics.inc('agent_worker_jobs_cancelled_total');
+          } else if (failureResult.status === 'SUPERSEDED') {
+            PrometheusMetrics.inc('agent_worker_jobs_superseded_total');
+          } else if (failureResult.status === 'BUDGET_EXCEEDED') {
+            PrometheusMetrics.inc('agent_worker_jobs_budget_exceeded_total');
+          }
+        }
+        span.setAttribute('run.state', failureResult?.status || classifyFailure(error));
       } finally {
         PrometheusMetrics.setGauge('agent_worker_jobs_active', 0);
         this.stopHeartbeat();
         this.activeRun = null;
+        this.activeAbortController = null;
         this.leaseLost = false;
         this.activePromise = null;
         span.end();
@@ -603,6 +697,17 @@ class PlanReviewWorker {
     this.draining = false;
     this.timer = setInterval(() => { void this.processNext().catch(() => {}); }, intervalMs);
     this.timer.unref?.();
+    void reconcileTerminalPlanReviewMandates({ runModel: this.model, mandateModel: this.mandateModel }).catch(error => {
+      PrometheusMetrics.inc('agent_mandate_reconciliation_failures_total');
+      logger.warn('PlanReview mandate reconciliation sweep failed', { code: error.code || 'MANDATE_RECONCILIATION_FAILED' });
+    });
+    this.mandateReconciliationTimer = setInterval(() => {
+      void reconcileTerminalPlanReviewMandates({ runModel: this.model, mandateModel: this.mandateModel }).catch(error => {
+        PrometheusMetrics.inc('agent_mandate_reconciliation_failures_total');
+        logger.warn('PlanReview mandate reconciliation sweep failed', { code: error.code || 'MANDATE_RECONCILIATION_FAILED' });
+      });
+    }, 30000);
+    this.mandateReconciliationTimer.unref?.();
     void recoverExpiredPlanReviewRuns({ model: this.model }).catch(() => {});
     void this.processNext().catch(() => {});
     return this;
@@ -612,6 +717,8 @@ class PlanReviewWorker {
     this.draining = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.mandateReconciliationTimer) clearInterval(this.mandateReconciliationTimer);
+    this.mandateReconciliationTimer = null;
     if (this.activePromise) {
       await Promise.race([
         this.activePromise,

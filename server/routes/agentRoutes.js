@@ -153,7 +153,7 @@ router.get('/plan-review/:runId/ui', verifyJWT, asyncHandler(async (req, res) =>
   }
   const run = await AgentRunModel.findOne({ userId: req.user.userId, runId: req.params.runId }).lean();
   if (!run) throw createError(404, 'Plan review run not found or access denied.', 'Plan review run not found.');
-  return res.json(buildPlanReviewA2UI(run.result));
+  return res.json(buildPlanReviewA2UI(run));
 }));
 
 router.post('/plan-review/:runId/cancel', verifyJWT, asyncHandler(async (req, res) => {

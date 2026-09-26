@@ -56,6 +56,8 @@ export class BaseProviderAdapter {
   supportsJSON() { return true; }
   supportsStreaming() { return false; }
 
+  isConfigured() { return true; }
+
   configuredModel() { return null; }
 }
 
@@ -81,13 +83,15 @@ export class NvidiaNimProviderAdapter extends BaseProviderAdapter {
     return String(process.env.NVIDIA_NIM_MODEL || NVIDIA_NIM_DEFAULT_MODEL).trim();
   }
 
+  isConfigured() { return Boolean(process.env.NVIDIA_API_KEY); }
+
   configuredBaseUrl() {
     return String(process.env.NVIDIA_NIM_BASE_URL || NVIDIA_NIM_DEFAULT_BASE_URL).trim().replace(/\/+$/, '');
   }
 
   supportsTools() { return false; }
 
-  async generate({ systemPrompt, recentHistory, maxTokens = 1200, jsonMode = false }) {
+  async generate({ systemPrompt, recentHistory, maxTokens = 1200, jsonMode = false, signal }) {
     this.lastFailureReason = null;
     if (!this.isHealthy()) {
       this.lastFailureReason = 'PROVIDER_CIRCUIT_OPEN';
@@ -115,6 +119,7 @@ export class NvidiaNimProviderAdapter extends BaseProviderAdapter {
       try {
         const response = await axios.post(endpoint, body, {
           timeout: 20000,
+          signal,
           headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
         });
         const choice = response.data?.choices?.[0];
@@ -140,6 +145,7 @@ export class NvidiaNimProviderAdapter extends BaseProviderAdapter {
           estimatedCostUSD: null,
         };
       } catch (error) {
+        if (signal?.aborted || error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') throw error;
         const status = Number(error?.response?.status);
         this.lastFailureReason = error?.code === 'ECONNABORTED'
           ? 'PROVIDER_TIMEOUT'
@@ -168,7 +174,9 @@ export class GeminiProviderAdapter extends BaseProviderAdapter {
 
   configuredModel() { return 'gemini-3.6-flash'; }
 
-  async generate({ systemPrompt, recentHistory, maxTokens = 4096, tools = null, jsonMode = false }) {
+  isConfigured() { return Boolean(process.env.GEMINI_API_KEY); }
+
+  async generate({ systemPrompt, recentHistory, maxTokens = 4096, tools = null, jsonMode = false, signal }) {
     this.lastFailureReason = null;
     if (!this.isHealthy()) {
       this.lastFailureReason = 'PROVIDER_CIRCUIT_OPEN';
@@ -202,6 +210,7 @@ export class GeminiProviderAdapter extends BaseProviderAdapter {
     try {
       const res = await axios.post(GEMINI_API_URL, payload, {
         timeout: 30000,
+        signal,
         headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
       });
 
@@ -240,7 +249,8 @@ export class GeminiProviderAdapter extends BaseProviderAdapter {
         wasCompleted: candidate.finishReason === 'STOP' || toolCalls.length > 0,
         estimatedCostUSD: (tokensUsed / 1000) * this.costPer1kTokens,
       };
-    } catch {
+    } catch (error) {
+      if (signal?.aborted || error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') throw error;
       this.lastFailureReason = 'PROVIDER_REQUEST_FAILED';
       this.recordFailure();
       PrometheusMetrics.inc('gemini_failure_total');
@@ -257,7 +267,9 @@ export class GroqProviderAdapter extends BaseProviderAdapter {
 
   configuredModel() { return String(process.env.GROQ_MODEL || GROQ_DEFAULT_MODEL).trim(); }
 
-  async generate({ systemPrompt, recentHistory, maxTokens = 4096, tools = null, jsonMode = false }) {
+  isConfigured() { return Boolean(process.env.GROQ_API_KEY); }
+
+  async generate({ systemPrompt, recentHistory, maxTokens = 4096, tools = null, jsonMode = false, signal }) {
     this.lastFailureReason = null;
     if (!this.isHealthy()) {
       this.lastFailureReason = 'PROVIDER_CIRCUIT_OPEN';
@@ -343,6 +355,7 @@ export class GroqProviderAdapter extends BaseProviderAdapter {
     try {
       const res = await axios.post(GROQ_API_URL, body, {
         timeout: 30000,
+        signal,
         headers: {
           'Authorization': `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
@@ -389,7 +402,8 @@ export class GroqProviderAdapter extends BaseProviderAdapter {
         wasCompleted: choice?.finish_reason === 'stop' || toolCalls.length > 0,
         estimatedCostUSD: (tokensUsed / 1000) * this.costPer1kTokens,
       };
-    } catch {
+    } catch (error) {
+      if (signal?.aborted || error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') throw error;
       this.lastFailureReason = 'PROVIDER_REQUEST_FAILED';
       this.recordFailure();
       PrometheusMetrics.inc('groq_failure_total');

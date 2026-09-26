@@ -10,6 +10,7 @@ import {
   PLAN_REVIEW_GRAPH_VERSION,
   PLAN_REVIEW_TOOL_CATALOG_VERSION,
   PLAN_REVIEW_BUDGETS,
+  CAPACITY_CONSUMING_PLAN_REVIEW_STATES,
   hashPlanReviewRequest,
   isActivePlanReviewState,
 } from './planReviewRuntime.js';
@@ -18,6 +19,7 @@ import { createModelGateway } from '../modelGateway.js';
 import { createResearchMeshClient } from '../research/researchMeshClient.js';
 
 function primaryProvider() {
+  if (String(process.env.LLM_DEFAULT_PROVIDER || '').trim().toLowerCase() === 'mock') return null;
   const configured = String(process.env.LLM_PRIMARY_PROVIDER || 'NVIDIA_NIM').trim().toUpperCase();
   return {
     NVIDIA_NIM: ProviderManager.nvidia,
@@ -33,6 +35,16 @@ function publicReview(review) {
 }
 
 export async function persistPlanReviewRun({ review, userId, profileId, recommendationId, planReviewSnapshotHash, sourceBinding, traceId, correlationId, startedAt, completedAt, _planner, stepCount, toolCallCount, modelCallCount, tokenUsage, model = AgentRun }) {
+  const exactCounter = (name, value, max) => {
+    const count = value === undefined || value === null ? 0 : Number(value);
+    if (!Number.isInteger(count) || count < 0 || count > max) {
+      const error = new Error(`PlanReview ${name} exceeded its hard execution budget.`);
+      error.code = 'AGENT_BUDGET_EXCEEDED';
+      error.reason = name.toUpperCase();
+      throw error;
+    }
+    return count;
+  };
   const document = await model.create({
     runId: review.runId,
     agentType: 'PLAN_REVIEW',
@@ -55,10 +67,10 @@ export async function persistPlanReviewRun({ review, userId, profileId, recommen
     toolCatalogVersion: PLAN_REVIEW_TOOL_CATALOG_VERSION,
     traceId: traceId || null,
     correlationId: correlationId || null,
-    stepCount: Math.min(6, Number(stepCount) || 0),
-    toolCallCount: Math.min(8, Number(toolCallCount) || 0),
-    modelCallCount: Math.min(2, Number(modelCallCount) || 0),
-    tokenUsage: Math.min(PLAN_REVIEW_BUDGETS.maxTotalTokens, Number(tokenUsage) || 0),
+    stepCount: exactCounter('stepCount', stepCount, PLAN_REVIEW_BUDGETS.maxSteps),
+    toolCallCount: exactCounter('toolCallCount', toolCallCount, PLAN_REVIEW_BUDGETS.maxToolCalls),
+    modelCallCount: exactCounter('modelCallCount', modelCallCount, PLAN_REVIEW_BUDGETS.maxModelCalls),
+    tokenUsage: exactCounter('tokenUsage', tokenUsage, PLAN_REVIEW_BUDGETS.maxTotalTokens),
     result: publicReview(review),
     startedAt: new Date(startedAt),
     completedAt,
@@ -98,7 +110,7 @@ export async function runPlanReview({ userId, profileId, runId = null, execution
       maxTotalTokens: runtimeConfig.agentPlanReview.maxTotalTokens,
       toolTimeoutMs: Math.min(5000, runtimeConfig.agentPlanReview.timeoutMs),
       plannerProvider: process.env.AGENT_USE_MODEL_PLANNER === 'true' ? primaryProvider() : null,
-      modelPlannerEnabled: process.env.AGENT_USE_MODEL_PLANNER === 'true',
+      modelPlannerEnabled: process.env.AGENT_USE_MODEL_PLANNER === 'true' && primaryProvider() !== null,
       modelGateway: createModelGateway({ maxOutputTokens: runtimeConfig.agentPlanReview.maxOutputTokens }),
       persistAgentRun: payload => persistPlanReviewRun(payload),
       researchAdaptiveEnabled: researchEnabled,
@@ -158,7 +170,7 @@ export async function enqueuePlanReviewRun({
     userId,
     profileId,
     agentType: 'PLAN_REVIEW',
-    status: { $in: ['QUEUED', 'RUNNING', 'WAITING_FOR_APPROVAL'] },
+    status: { $in: CAPACITY_CONSUMING_PLAN_REVIEW_STATES },
     planReviewSnapshotHash: { $ne: planReviewSnapshotHash },
   }, {
     $set: {
@@ -174,7 +186,7 @@ export async function enqueuePlanReviewRun({
     userId,
     profileId,
     agentType: 'PLAN_REVIEW',
-    status: { $in: ['QUEUED', 'RUNNING', 'WAITING_FOR_APPROVAL'] },
+    status: { $in: CAPACITY_CONSUMING_PLAN_REVIEW_STATES },
     activeDedupeKey: dedupeKey,
   }).lean();
   if (active) return { created: false, run: publicRun(active, { currentStateMatch: true }) };
@@ -182,7 +194,7 @@ export async function enqueuePlanReviewRun({
   if (typeof model.countDocuments === 'function') {
     const [queuedForUser, activeForUser, globalQueued] = await Promise.all([
       model.countDocuments({ userId, agentType: 'PLAN_REVIEW', status: 'QUEUED' }),
-      model.countDocuments({ userId, agentType: 'PLAN_REVIEW', status: 'RUNNING' }),
+      model.countDocuments({ userId, agentType: 'PLAN_REVIEW', status: { $in: CAPACITY_CONSUMING_PLAN_REVIEW_STATES } }),
       model.countDocuments({ agentType: 'PLAN_REVIEW', status: 'QUEUED' }),
     ]);
     if (queuedForUser >= runtimeConfig.agentPlanReview.maxQueuedRunsPerUser
@@ -241,7 +253,7 @@ export async function getPlanReviewRun({
 }) {
   const run = await model.findOne({ userId, runId }).lean();
   if (!run) return null;
-  const activeStatus = ['QUEUED', 'RUNNING', 'WAITING_FOR_APPROVAL'].includes(run.status);
+  const activeStatus = isActivePlanReviewState(run.status);
   let match = false;
   if (run.profileId && run.planReviewSnapshotHash) {
     const currentHash = await currentSnapshotHash({ userId, profileId: run.profileId, profileModel, snapshotResolver, snapshotDependencies });
