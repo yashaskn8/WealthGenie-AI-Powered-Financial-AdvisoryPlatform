@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import React from 'react';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import GoalTracker from '../GoalTracker';
 import api from '../../services/api';
@@ -61,6 +61,20 @@ const savedGoal = {
   gemini_advice: 'Increase the goal contribution when cash flow allows.',
 };
 
+const createDeferred = () => {
+  let resolve;
+  const promise = new Promise((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+};
+
+const secondGoal = {
+  ...savedGoal,
+  _id: 'goal-2',
+  goal_name: 'Emergency Reserve',
+};
+
 describe('GoalTracker custom-goal boundary', () => {
   afterEach(() => {
     cleanup();
@@ -68,7 +82,9 @@ describe('GoalTracker custom-goal boundary', () => {
   });
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    // clearAllMocks preserves mockResolvedValueOnce queues. A failed test can
+    // otherwise leak a queued HTTP response into a later test in the file.
+    vi.resetAllMocks();
     api.getGoals.mockResolvedValue({ goals: [] });
     api.updateGoal.mockResolvedValue({ success: true });
     api.deleteGoal.mockResolvedValue({ deleted: true });
@@ -170,7 +186,11 @@ describe('GoalTracker custom-goal boundary', () => {
     render(<GoalTracker profile={profile} />);
 
     await screen.findByText('Dream Studio');
-    fireEvent.change(screen.getAllByRole('spinbutton')[0], { target: { value: '550000' } });
+    const targetInput = screen.getAllByRole('spinbutton')[0];
+    await act(async () => {
+      fireEvent.change(targetInput, { target: { value: '550000' } });
+    });
+    expect(targetInput).toHaveValue(550000);
     fireEvent.click(await screen.findByRole('button', { name: /save changes & update projections/i }));
 
     await waitFor(() => expect(api.getGoals).toHaveBeenCalledTimes(2));
@@ -190,7 +210,10 @@ describe('GoalTracker custom-goal boundary', () => {
 
     await screen.findByText('Dream Studio');
     const [targetInput] = screen.getAllByRole('spinbutton');
-    fireEvent.change(targetInput, { target: { value: '550000' } });
+    await act(async () => {
+      fireEvent.change(targetInput, { target: { value: '550000' } });
+    });
+    expect(targetInput).toHaveValue(550000);
     fireEvent.click(await screen.findByRole('button', { name: /save changes & update projections/i }));
 
     await waitFor(() => expect(api.updateGoal).toHaveBeenCalledWith('goal-1', {
@@ -203,13 +226,98 @@ describe('GoalTracker custom-goal boundary', () => {
 
   it('deletes only the selected custom goal after confirmation', async () => {
     api.getGoals
-      .mockResolvedValueOnce({ goals: [savedGoal] })
-      .mockResolvedValueOnce({ goals: [] });
+      .mockResolvedValueOnce({ goals: [savedGoal, secondGoal] })
+      .mockResolvedValueOnce({ goals: [secondGoal] });
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     render(<GoalTracker profile={profile} />);
 
-    fireEvent.click(await screen.findByTitle('Delete Goal'));
+    await screen.findByText('Dream Studio');
+    expect(screen.getByText('Emergency Reserve')).toBeTruthy();
+    fireEvent.click(screen.getAllByTitle('Delete Goal')[0]);
     await waitFor(() => expect(api.deleteGoal).toHaveBeenCalledWith('goal-1', 1));
     await waitFor(() => expect(screen.queryByText('Dream Studio')).toBeNull());
+    expect(await screen.findByText('Emergency Reserve')).toBeTruthy();
+  });
+
+  it('does not let an older delete refresh resurrect a goal after a newer delete refresh', async () => {
+    const earlierRefresh = createDeferred();
+    const laterRefresh = createDeferred();
+    const firstDelete = createDeferred();
+    const secondDelete = createDeferred();
+    api.getGoals
+      .mockResolvedValueOnce({ goals: [savedGoal, secondGoal] })
+      .mockImplementationOnce(() => earlierRefresh.promise)
+      .mockImplementationOnce(() => laterRefresh.promise);
+    api.deleteGoal
+      .mockImplementationOnce(() => firstDelete.promise)
+      .mockImplementationOnce(() => secondDelete.promise);
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<GoalTracker profile={profile} />);
+
+    await screen.findByText('Dream Studio');
+    const deleteButtons = screen.getAllByTitle('Delete Goal');
+    fireEvent.click(deleteButtons[0]);
+    fireEvent.click(deleteButtons[1]);
+    await waitFor(() => expect(api.deleteGoal).toHaveBeenCalledTimes(2));
+
+    await act(async () => { firstDelete.resolve({ deleted: true }); });
+    await waitFor(() => expect(api.getGoals).toHaveBeenCalledTimes(2));
+    await act(async () => { secondDelete.resolve({ deleted: true }); });
+    await waitFor(() => expect(api.getGoals).toHaveBeenCalledTimes(3));
+
+    await act(async () => { laterRefresh.resolve({ goals: [] }); });
+    expect(await screen.findByText('No Custom Goals Yet')).toBeTruthy();
+
+    await act(async () => {
+      earlierRefresh.resolve({ goals: [secondGoal] });
+      await earlierRefresh.promise;
+    });
+    expect(screen.queryByText('Emergency Reserve')).toBeNull();
+    expect(screen.getByText('No Custom Goals Yet')).toBeTruthy();
+  });
+
+  it('keeps the newest update refresh when update responses complete out of order', async () => {
+    const earlierRefresh = createDeferred();
+    const laterRefresh = createDeferred();
+    const firstUpdate = createDeferred();
+    const secondUpdate = createDeferred();
+    api.getGoals
+      .mockResolvedValueOnce({ goals: [savedGoal, secondGoal] })
+      .mockImplementationOnce(() => earlierRefresh.promise)
+      .mockImplementationOnce(() => laterRefresh.promise);
+    api.updateGoal
+      .mockImplementationOnce(() => firstUpdate.promise)
+      .mockImplementationOnce(() => secondUpdate.promise);
+    render(<GoalTracker profile={profile} />);
+
+    await screen.findByText('Dream Studio');
+    const targetInputs = screen.getAllByRole('spinbutton').filter((_, index) => index % 2 === 0);
+    await act(async () => {
+      fireEvent.change(targetInputs[0], { target: { value: '550000' } });
+      fireEvent.change(targetInputs[1], { target: { value: '650000' } });
+    });
+    const saveButtons = screen.getAllByRole('button', { name: /save changes & update projections/i });
+    fireEvent.click(saveButtons[0]);
+    fireEvent.click(saveButtons[1]);
+    await waitFor(() => expect(api.updateGoal).toHaveBeenCalledTimes(2));
+
+    await act(async () => { firstUpdate.resolve({ success: true }); });
+    await waitFor(() => expect(api.getGoals).toHaveBeenCalledTimes(2));
+    await act(async () => { secondUpdate.resolve({ success: true }); });
+    await waitFor(() => expect(api.getGoals).toHaveBeenCalledTimes(3));
+
+    const newestGoals = [
+      { ...savedGoal, target_amount: 650000 },
+      { ...secondGoal, target_amount: 750000 },
+    ];
+    await act(async () => { laterRefresh.resolve({ goals: newestGoals }); });
+    await screen.findAllByText('₹6.5L');
+
+    await act(async () => {
+      earlierRefresh.resolve({ goals: [savedGoal, secondGoal] });
+      await earlierRefresh.promise;
+    });
+    const finalTargetInputs = screen.getAllByRole('spinbutton').filter((_, index) => index % 2 === 0);
+    expect(finalTargetInputs.map(input => Number(input.value))).toEqual([650000, 750000]);
   });
 });

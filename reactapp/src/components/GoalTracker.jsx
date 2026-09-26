@@ -84,9 +84,17 @@ const GoalCard = ({
   const [target, setTarget] = useState(initialTarget);
   const [currentSaved, setCurrentSaved] = useState(initialSaved);
   const [isUpdating, setIsUpdating] = useState(false);
+  const syncedGoalFacts = useRef({ target: initialTarget, currentSaved: initialSaved });
 
-  // Re-sync with state changes
+  // State is initialized from these facts on mount. Only a later authoritative
+  // prop change should reset the edit buffer; a no-op mount effect must not
+  // overwrite a user edit that happens before passive effects are flushed.
   useEffect(() => {
+    const previous = syncedGoalFacts.current;
+    const targetChanged = !Object.is(previous.target, initialTarget);
+    const savingsChanged = !Object.is(previous.currentSaved, initialSaved);
+    if (!targetChanged && !savingsChanged) return;
+    syncedGoalFacts.current = { target: initialTarget, currentSaved: initialSaved };
     setTarget(initialTarget);
     setCurrentSaved(initialSaved);
   }, [initialTarget, initialSaved]);
@@ -398,8 +406,9 @@ const GoalTracker = ({ profile, onNavigate }) => {
 
   const totalSavings = isPresentFiniteNumber(profile?.monthly_savings) ? Number(profile.monthly_savings) : NaN;
 
-  const fetchActiveGoals = useCallback(async () => {
+  const fetchActiveGoals = useCallback(async ({ clearCurrent = false } = {}) => {
     const generation = ++goalsFetchGeneration.current;
+    if (clearCurrent) setDbGoals([]);
     try {
       setLoading(true);
       setBootstrapResult(null);
@@ -422,8 +431,7 @@ const GoalTracker = ({ profile, onNavigate }) => {
   useEffect(() => {
     // A changed financial profile invalidates the freshness proof held by the
     // previously loaded DTO until the backend re-resolves the source state.
-    setDbGoals([]);
-    void fetchActiveGoals();
+    void fetchActiveGoals({ clearCurrent: true });
     return () => { goalsFetchGeneration.current += 1; };
   }, [fetchActiveGoals, profile]);
 
@@ -442,33 +450,34 @@ const GoalTracker = ({ profile, onNavigate }) => {
   };
 
   const handleGoalCardUpdate = async (goalId, patchData) => {
+    // Fence any list read that started before this mutation. Once the
+    // authoritative mutation settles, a new fenced read becomes the sole
+    // writer of the visible list.
+    goalsFetchGeneration.current += 1;
     try {
       const res = await api.updateGoal(goalId, patchData);
-      if (res.success) {
-        // Fetch list to ensure recalculations are pulled
-        setDbGoals([]);
-        const freshList = await api.getGoals();
-        setDbGoals(Array.isArray(freshList?.goals) ? freshList.goals : []);
-      }
+      if (!res?.success) throw new Error('The goal update was not confirmed by the server.');
     } catch (err) {
-      setDbGoals([]);
       alert("Failed to save changes: " + (err.message || "Unknown error"));
+    } finally {
+      // Even a lost/ambiguous mutation response must reconcile from the
+      // backend. Clearing first prevents old projections/advice from being
+      // presented as current while the authoritative DTO is fetched.
+      await fetchActiveGoals({ clearCurrent: true });
     }
   };
 
   const handleDeleteGoal = async (goalId) => {
     if (!window.confirm("Are you sure you want to delete this goal? This will permanently remove it from your tracker.")) return;
+    goalsFetchGeneration.current += 1;
     try {
       const goal = dbGoals.find(item => String(item._id || item.goalId) === String(goalId));
       const res = await api.deleteGoal(goalId, goal?.version ?? 1);
-      if (res.deleted) {
-        setDbGoals([]);
-        const freshList = await api.getGoals();
-        setDbGoals(Array.isArray(freshList?.goals) ? freshList.goals : []);
-      }
+      if (!res?.deleted) throw new Error('The goal deletion was not confirmed by the server.');
     } catch (err) {
-      setDbGoals([]);
       alert("Failed to delete goal: " + (err.message || "Unknown error"));
+    } finally {
+      await fetchActiveGoals({ clearCurrent: true });
     }
   };
 
