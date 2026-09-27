@@ -87,15 +87,134 @@ async function createRunningRun({ userId, profileId, runId }) {
   });
 }
 
-function collectExplainStages(node, stages = [], indexNames = []) {
-  if (!node || typeof node !== 'object') return { stages, indexNames };
-  if (typeof node.stage === 'string') stages.push(node.stage);
-  if (typeof node.indexName === 'string') indexNames.push(node.indexName);
-  for (const value of Object.values(node)) {
-    if (value && typeof value === 'object') collectExplainStages(value, stages, indexNames);
+function collectPlanNodes(node, nodes = []) {
+  if (Array.isArray(node)) {
+    for (const value of node) collectPlanNodes(value, nodes);
+    return nodes;
   }
-  return { stages, indexNames };
+  if (!node || typeof node !== 'object') return nodes;
+  if (typeof node.stage === 'string') nodes.push(node);
+  for (const value of Object.values(node)) collectPlanNodes(value, nodes);
+  return nodes;
 }
+
+function indexPatternStartsWith(actual, requiredPrefix) {
+  const actualEntries = Object.entries(actual || {});
+  const requiredEntries = Object.entries(requiredPrefix || {});
+  return requiredEntries.length > 0 && requiredEntries.every(([field, direction], index) => (
+    actualEntries[index]?.[0] === field && actualEntries[index]?.[1] === direction
+  ));
+}
+
+function assertEfficientQueryPlan(explain, {
+  label,
+  allowedIndexPrefixes = [],
+  allowedIndexNames = [],
+  expectedReturned,
+  maxDocsExamined = 100,
+  maxKeysExamined = 100,
+} = {}) {
+  const winningNodes = collectPlanNodes(explain?.queryPlanner?.winningPlan);
+  const executedNodes = collectPlanNodes(explain?.executionStats?.executionStages);
+  const planNodes = [...winningNodes, ...executedNodes];
+  const stages = planNodes.map(node => node.stage);
+  const winningIndexScans = winningNodes.filter(node => node.stage === 'IXSCAN');
+
+  assert.ok(!stages.includes('COLLSCAN'), `${label} unexpectedly performed a collection scan; stages=${stages}`);
+  assert.ok(!stages.includes('SORT'), `${label} unexpectedly used a blocking sort; stages=${stages}`);
+  assert.ok(winningIndexScans.length > 0, `${label} must use IXSCAN; stages=${stages}`);
+
+  const everyIndexScanIsSuitable = winningIndexScans.every(scan => (
+    allowedIndexNames.includes(scan.indexName)
+    || allowedIndexPrefixes.some(prefix => indexPatternStartsWith(scan.keyPattern, prefix))
+  ));
+  assert.ok(everyIndexScanIsSuitable, `${label} selected an unrelated or unsuitable index; IXSCANs=${JSON.stringify(winningIndexScans.map(({ indexName, keyPattern }) => ({ indexName, keyPattern })))}`);
+
+  const stats = explain.executionStats;
+  assert.ok(Number.isFinite(stats?.totalDocsExamined), `${label} explain is missing totalDocsExamined`);
+  assert.ok(Number.isFinite(stats?.totalKeysExamined), `${label} explain is missing totalKeysExamined`);
+  assert.ok(stats.totalDocsExamined <= maxDocsExamined,
+    `${label} examined too many documents: ${stats.totalDocsExamined} > ${maxDocsExamined}`);
+  assert.ok(stats.totalKeysExamined <= maxKeysExamined,
+    `${label} examined too many index keys: ${stats.totalKeysExamined} > ${maxKeysExamined}`);
+  assert.equal(stats.nReturned, expectedReturned, `${label} returned an unexpected number of rows`);
+}
+
+const graphGenerationIndexPrefixes = [
+  { runId: 1 }, // Run-scoped fallback is permitted only while its measured scan stays bounded.
+  { threadId: 1 }, // Thread-scoped lookup is likewise scan-bounded by executionStats.
+  { threadId: 1, checkpointId: 1 }, // Exact checkpoint lookup index.
+  { runId: 1, userId: 1, executionGeneration: 1, threadId: 1, checkpointId: 1 }, // Full generation identity.
+];
+
+test('query-plan contract accepts compatible indexes and rejects scans, unsuitable indexes, and amplification', () => {
+  const compoundIndex = {
+    stage: 'FETCH',
+    inputStage: {
+      stage: 'IXSCAN',
+      indexName: 'runId_1_userId_1_executionGeneration_1_threadId_1_checkpointId_1',
+      keyPattern: { runId: 1, userId: 1, executionGeneration: 1, threadId: 1, checkpointId: 1 },
+    },
+  };
+  const makeExplain = (winningPlan, overrides = {}) => ({
+    queryPlanner: { winningPlan },
+    executionStats: {
+      nReturned: 1,
+      totalDocsExamined: 1,
+      totalKeysExamined: 1,
+      executionStages: winningPlan,
+      ...overrides,
+    },
+  });
+  const contract = {
+    label: 'graph checkpoint generation retrieval',
+    allowedIndexPrefixes: graphGenerationIndexPrefixes,
+    expectedReturned: 1,
+  };
+
+  assert.doesNotThrow(() => assertEfficientQueryPlan(makeExplain(compoundIndex), contract),
+    'FETCH + IXSCAN through the full compound identity index is a valid plan');
+
+  for (const keyPattern of [
+    { runId: 1 },
+    { threadId: 1 },
+    { threadId: 1, checkpointId: 1 },
+  ]) {
+    assert.doesNotThrow(() => assertEfficientQueryPlan(makeExplain({
+      stage: 'IXSCAN', indexName: Object.keys(keyPattern).join('_'), keyPattern,
+    }), contract), `supported index prefix ${JSON.stringify(keyPattern)} should not depend on a Mongo version-specific index name`);
+  }
+
+  assert.throws(() => assertEfficientQueryPlan(makeExplain({
+    stage: 'FETCH', inputStage: { stage: 'IXSCAN', indexName: 'userId_1', keyPattern: { userId: 1 } },
+  }), contract), /unrelated or unsuitable index/);
+  assert.throws(() => assertEfficientQueryPlan(makeExplain({
+    stage: 'FETCH', inputStage: { stage: 'IXSCAN', indexName: 'runId_1', keyPattern: { runId: 1 } },
+  }, { totalDocsExamined: 101 }), contract), /too many documents/);
+  assert.throws(() => assertEfficientQueryPlan(makeExplain({
+    stage: 'IXSCAN', indexName: 'runId_1', keyPattern: { runId: 1 },
+  }, { totalKeysExamined: 101 }), contract), /too many index keys/);
+  assert.doesNotThrow(() => assertEfficientQueryPlan(makeExplain({
+    stage: 'OR', inputStages: [
+      compoundIndex.inputStage,
+      { stage: 'IXSCAN', indexName: 'threadId_1_checkpointId_1', keyPattern: { threadId: 1, checkpointId: 1 } },
+    ],
+  }), contract), 'multiple compatible index scans remain valid when their aggregate scan stays bounded');
+  assert.throws(() => assertEfficientQueryPlan(makeExplain({
+    stage: 'OR', inputStages: [
+      compoundIndex.inputStage,
+      { stage: 'IXSCAN', indexName: 'userId_1', keyPattern: { userId: 1 } },
+    ],
+  }), contract), /unsuitable index/);
+  assert.throws(() => assertEfficientQueryPlan(makeExplain({
+    stage: 'FETCH', inputStage: { stage: 'COLLSCAN' },
+  }), contract), /COLLSCAN/);
+  assert.throws(() => assertEfficientQueryPlan(makeExplain({
+    stage: 'FETCH', inputStage: { stage: 'IXSCAN', indexName: 'runId_1', keyPattern: { runId: 1 } },
+    extraStage: { stage: 'COLLSCAN' },
+  }), contract), /COLLSCAN/);
+  assert.throws(() => assertEfficientQueryPlan(makeExplain({ stage: 'EOF' }), contract), /must use IXSCAN/);
+});
 
 test('Mongo checkpoint insert rolls back when the AgentRun progress CAS fails afterward', async () => {
   await setupRuntimeMongo();
@@ -1050,38 +1169,105 @@ test('Mongo hot queue, scheduler, event, and checkpoint reads use their intended
       state: { bounded: true },
       createdAt: new Date(nowValue.getTime() - index * 1000),
     })));
-    await AgentGraphCheckpoint.collection.insertMany(Array.from({ length: 600 }, (_, index) => ({
-      threadId: index < 12 ? targetThreadId : `query-plan-thread-${index}`,
-      checkpointId: `checkpoint-${String(index).padStart(4, '0')}`,
-      parentCheckpointId: null,
-      runId: index < 12 ? targetRunId : `graph-run-${index}`,
-      userId: index < 12 ? targetUserId : new mongoose.Types.ObjectId(),
-      executionGeneration: index < 12 ? 2 : (index % 5) + 1,
-      checkpointType: 'json',
-      checkpoint: '{}',
-      metadataType: 'json',
-      metadata: '{}',
-      pendingWrites: [],
-    })));
+    await AgentGraphCheckpoint.collection.insertMany(Array.from({ length: 600 }, (_, index) => {
+      const targetRunRow = index < 60;
+      const targetUserRow = index < 120;
+      const targetThreadRow = index < 12 || index === 59;
+      return {
+        threadId: targetThreadRow ? targetThreadId : `query-plan-thread-${index}`,
+        // Place the exact target last in the run-scoped index so the runId-only
+        // plan must examine the whole bounded run generation in this fixture.
+        checkpointId: `checkpoint-${String(index === 59 ? 0 : index + 1).padStart(4, '0')}`,
+        parentCheckpointId: null,
+        runId: targetRunRow ? targetRunId : `graph-run-${index}`,
+        userId: targetUserRow ? targetUserId : new mongoose.Types.ObjectId(),
+        executionGeneration: targetThreadRow ? 2 : (index % 5) + 1,
+        checkpointType: 'json',
+        checkpoint: '{}',
+        metadataType: 'json',
+        metadata: '{}',
+        pendingWrites: [],
+        createdAt: new Date(nowValue.getTime() - index * 1000),
+      };
+    }));
+
+    const generationRetrievalFilter = {
+      runId: targetRunId,
+      userId: targetUserId,
+      executionGeneration: 2,
+      threadId: targetThreadId,
+      checkpointId: 'checkpoint-0000',
+    };
+    const exactGraphCheckpoint = await AgentGraphCheckpoint.findOne(generationRetrievalFilter).lean();
+    assert.equal(exactGraphCheckpoint?.checkpointId, 'checkpoint-0000',
+      'generation-scoped point retrieval must return the requested checkpoint');
+
+    const listedGraphCheckpoints = await AgentGraphCheckpoint.find({
+      runId: targetRunId,
+      userId: targetUserId,
+      executionGeneration: 2,
+      threadId: targetThreadId,
+    }).sort({ createdAt: -1 }).limit(20).lean();
+    assert.equal(listedGraphCheckpoints.length, 13,
+      'generation listing should return only the 13 checkpoints in the requested thread/generation');
+    assert.ok(listedGraphCheckpoints.every(row => row.runId === targetRunId
+      && String(row.userId) === String(targetUserId)
+      && row.executionGeneration === 2
+      && row.threadId === targetThreadId));
+    assert.ok(listedGraphCheckpoints.every((row, index) => index === 0
+      || listedGraphCheckpoints[index - 1].createdAt >= row.createdAt),
+    'generation listing must retain descending createdAt ordering');
 
     const plans = [
-      ['AgentRun queue claim', AgentRun.find({ status: 'QUEUED' }).sort({ priorityRank: 1, queuedAt: 1 }).limit(10), 'status_1_priorityRank_1_queuedAt_1'],
-      ['PlanHealth scheduler lease', PlanHealthSchedulerLease.find({ status: 'RUNNING', leaseUntil: { $lte: nowValue } }).sort({ leaseUntil: 1 }).limit(10), 'status_1_leaseUntil_1'],
-      ['PlanHealth active event identity', PlanHealthEvent.findOne({ fingerprint: targetFingerprint, status: { $in: ['UNREAD', 'READ', 'OPEN', 'ACKNOWLEDGED'] } }), 'uniq_active_plan_health_fingerprint'],
-      ['PlanHealth event history', PlanHealthEvent.find({ userId: targetUserId }).sort({ detectedAt: -1 }).limit(20), 'userId_1_detectedAt_-1'],
-      ['durable checkpoint retrieval', AgentCheckpoint.find({ runId: targetRunId, executionGeneration: 2 }).sort({ sequence: -1 }).limit(10), 'runId_1_executionGeneration_1_sequence_1'],
-      // The checkpointer scopes every lookup by a generation-specific thread ID;
-      // exact checkpoint reads therefore use the unique thread/checkpoint index.
-      ['graph checkpoint generation retrieval', AgentGraphCheckpoint.findOne({ runId: targetRunId, userId: targetUserId, executionGeneration: 2, threadId: targetThreadId, checkpointId: 'checkpoint-0000' }), 'runId_1'],
-      ['graph checkpoint generation listing', AgentGraphCheckpoint.find({ runId: targetRunId, userId: targetUserId, executionGeneration: 2, threadId: targetThreadId }).sort({ createdAt: -1 }).limit(20), 'threadId_1_createdAt_-1'],
+      {
+        label: 'AgentRun queue claim',
+        query: AgentRun.find({ status: 'QUEUED' }).sort({ priorityRank: 1, queuedAt: 1 }).limit(10),
+        allowedIndexPrefixes: [{ status: 1, priorityRank: 1, queuedAt: 1 }],
+        expectedReturned: 10,
+      },
+      {
+        label: 'PlanHealth scheduler lease',
+        query: PlanHealthSchedulerLease.find({ status: 'RUNNING', leaseUntil: { $lte: nowValue } }).sort({ leaseUntil: 1 }).limit(10),
+        allowedIndexPrefixes: [{ status: 1, leaseUntil: 1 }],
+        expectedReturned: 10,
+      },
+      {
+        label: 'PlanHealth active event identity',
+        query: PlanHealthEvent.findOne({ fingerprint: targetFingerprint, status: { $in: ['UNREAD', 'READ', 'OPEN', 'ACKNOWLEDGED'] } }),
+        // This named partial unique index is itself the active-event dedupe contract.
+        allowedIndexNames: ['uniq_active_plan_health_fingerprint'],
+        expectedReturned: 1,
+      },
+      {
+        label: 'PlanHealth event history',
+        query: PlanHealthEvent.find({ userId: targetUserId }).sort({ detectedAt: -1 }).limit(20),
+        allowedIndexPrefixes: [{ userId: 1, detectedAt: -1 }],
+        expectedReturned: 20,
+      },
+      {
+        label: 'durable checkpoint retrieval',
+        query: AgentCheckpoint.find({ runId: targetRunId, executionGeneration: 2 }).sort({ sequence: -1 }).limit(10),
+        // Mongo may scan the ascending compound index backwards for sequence:-1.
+        allowedIndexPrefixes: [{ runId: 1, executionGeneration: 1, sequence: 1 }],
+        expectedReturned: 10,
+      },
+      {
+        label: 'graph checkpoint generation retrieval',
+        query: AgentGraphCheckpoint.findOne(generationRetrievalFilter),
+        allowedIndexPrefixes: graphGenerationIndexPrefixes,
+        expectedReturned: 1,
+      },
+      {
+        label: 'graph checkpoint generation listing',
+        query: AgentGraphCheckpoint.find({ runId: targetRunId, userId: targetUserId, executionGeneration: 2, threadId: targetThreadId }).sort({ createdAt: -1 }).limit(20),
+        allowedIndexPrefixes: [{ threadId: 1, createdAt: -1 }],
+        expectedReturned: 13,
+      },
     ];
 
-    for (const [label, query, expectedIndex] of plans) {
+    for (const { query, ...contract } of plans) {
       const explain = await query.explain('executionStats');
-      const { stages, indexNames } = collectExplainStages(explain.queryPlanner?.winningPlan);
-      assert.ok(indexNames.includes(expectedIndex), `${label} must use ${expectedIndex}; got stages=${stages} indexes=${indexNames}`);
-      assert.ok(!stages.includes('COLLSCAN'), `${label} unexpectedly performed a collection scan`);
-      assert.ok(explain.executionStats.totalDocsExamined < 100, `${label} examined too many documents: ${explain.executionStats.totalDocsExamined}`);
+      assertEfficientQueryPlan(explain, contract);
     }
   } finally {
     await teardownTestDatabase();
