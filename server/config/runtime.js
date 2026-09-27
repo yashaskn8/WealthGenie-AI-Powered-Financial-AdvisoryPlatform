@@ -1,6 +1,7 @@
 import { getMongoFlavor } from './mongoCompatibility.js';
 
 const LOCAL_DEVELOPMENT_ORIGINS = ['http://localhost:5173', 'http://localhost:3000'];
+const LOCAL_MCP_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
 
 function positiveInteger(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
   const parsed = Number(value);
@@ -41,6 +42,7 @@ export function getRuntimeConfig(env = process.env) {
   const agentIdentityProvider = enumValue(env.AGENT_IDENTITY_PROVIDER, 'development', ['development', 'oidc', 'spiffe']);
   const agentWorkflowBackend = enumValue(env.AGENT_WORKFLOW_BACKEND, 'mongo', ['mongo', 'temporal']);
   const agentApprovalProvider = enumValue(env.AGENT_APPROVAL_PROVIDER, isProduction ? 'webauthn' : 'development', ['development', 'webauthn']);
+  const mcpEnabled = booleanValue(env.MCP_ENABLED, !isProduction);
   return Object.freeze({
     nodeEnv,
     isProduction,
@@ -53,6 +55,34 @@ export function getRuntimeConfig(env = process.env) {
     slowRequestMs: positiveInteger(env.SLOW_REQUEST_MS, 3000, { min: 100 }),
     maxInFlightRequests: positiveInteger(env.MAX_IN_FLIGHT_REQUESTS, 250, { min: 1, max: 10000 }),
     requireRedis: booleanValue(env.REQUIRE_REDIS, isProduction),
+    mcp: Object.freeze({
+      enabled: mcpEnabled,
+      // Remote execution is opt-in in production, even if MCP's local or
+      // stdio tooling is enabled. In development it follows MCP_ENABLED.
+      remoteEnabled: booleanValue(env.MCP_REMOTE_ENABLED, mcpEnabled && !isProduction),
+      legacySseEnabled: booleanValue(env.MCP_LEGACY_SSE_ENABLED, false),
+      jwtAudience: env.MCP_JWT_AUDIENCE?.trim() || null,
+      requiredScope: env.MCP_REQUIRED_SCOPE?.trim() || null,
+      allowedHosts: (env.MCP_ALLOWED_HOSTS || (isProduction ? '' : LOCAL_MCP_HOSTS.join(',')))
+        .split(',').map(value => value.trim().toLowerCase()).filter(Boolean),
+      allowedOrigins: (env.MCP_ALLOWED_ORIGINS || (isProduction ? '' : LOCAL_DEVELOPMENT_ORIGINS.join(',')))
+        .split(',').map(value => value.trim().replace(/\/+$/, '')).filter(Boolean),
+      maxRequestBytes: positiveInteger(env.MCP_MAX_REQUEST_BYTES, 32768, { min: 1024, max: 131072 }),
+      rateWindowMs: positiveInteger(env.MCP_RATE_WINDOW_MS, 60000, { min: 1000, max: 3600000 }),
+      maxRequestsPerWindow: positiveInteger(env.MCP_MAX_REQUESTS_PER_WINDOW, 120, { min: 1, max: 10000 }),
+      maxToolCallsPerWindow: Object.freeze({
+        LOW: positiveInteger(env.MCP_MAX_LOW_COST_CALLS_PER_WINDOW, 60, { min: 1, max: 10000 }),
+        MEDIUM: positiveInteger(env.MCP_MAX_MEDIUM_COST_CALLS_PER_WINDOW, 30, { min: 1, max: 10000 }),
+        HIGH: positiveInteger(env.MCP_MAX_HIGH_COST_CALLS_PER_WINDOW, 10, { min: 1, max: 10000 }),
+      }),
+      maxConcurrentPerUser: positiveInteger(env.MCP_MAX_CONCURRENT_PER_USER, 3, { min: 1, max: 100 }),
+      maxConcurrentGlobal: positiveInteger(env.MCP_MAX_CONCURRENT_GLOBAL, 100, { min: 1, max: 10000 }),
+      permitTtlMs: positiveInteger(env.MCP_PERMIT_TTL_MS, 90000, { min: 1000, max: 300000 }),
+      toolTimeoutMs: positiveInteger(env.MCP_TOOL_TIMEOUT_MS, 30000, { min: 100, max: 120000 }),
+      shutdownGraceMs: positiveInteger(env.MCP_SHUTDOWN_GRACE_MS, 10000, { min: 0, max: 60000 }),
+      maxXirrCashflows: positiveInteger(env.MCP_XIRR_MAX_CASHFLOWS, 600, { min: 2, max: 600 }),
+      maxXirrAbsAmount: positiveInteger(env.MCP_XIRR_MAX_ABS_AMOUNT, 1000000000000, { min: 1, max: 1000000000000 }),
+    }),
     // Plan Review is read-only and opt-in in production. Local development can
     // exercise the feature without requiring an extra .env entry.
     agenticPlanReviewEnabled: booleanValue(env.AGENTIC_PLAN_REVIEW_ENABLED, !isProduction),
@@ -183,6 +213,29 @@ export function assertValidRuntimeConfig(config) {
   assertValidHttpTimeouts(config);
   if (config.mongo.minPoolSize > config.mongo.maxPoolSize) {
     throw new Error('MONGODB_MIN_POOL_SIZE must be less than or equal to MONGODB_MAX_POOL_SIZE');
+  }
+  if (config.mcp.remoteEnabled && !config.mcp.enabled) {
+    throw new Error('MCP_REMOTE_ENABLED requires MCP_ENABLED=true');
+  }
+  if (config.mcp.legacySseEnabled) {
+    throw new Error('Legacy MCP SSE has been removed; MCP_LEGACY_SSE_ENABLED must remain false');
+  }
+  if (config.isProduction && config.mcp.remoteEnabled) {
+    if (!config.mcp.jwtAudience || !config.mcp.requiredScope) {
+      throw new Error('Production remote MCP requires MCP_JWT_AUDIENCE and MCP_REQUIRED_SCOPE');
+    }
+    if (config.mcp.allowedHosts.length === 0) {
+      throw new Error('Production remote MCP requires MCP_ALLOWED_HOSTS');
+    }
+    if (!config.requireRedis) {
+      throw new Error('Production remote MCP requires REQUIRE_REDIS=true for distributed capacity control');
+    }
+    if (config.mcp.allowedOrigins.some(origin => !config.allowedOrigins.includes(origin))) {
+      throw new Error('MCP_ALLOWED_ORIGINS must be a subset of CORS_ORIGINS');
+    }
+  }
+  if (config.mcp.permitTtlMs <= config.mcp.toolTimeoutMs + 5000) {
+    throw new Error('MCP_PERMIT_TTL_MS must exceed MCP_TOOL_TIMEOUT_MS by at least 5 seconds');
   }
   if (config.isProduction && config.agentWorkerMode !== 'external') {
     throw new Error('AGENT_WORKER_MODE must be external in production');

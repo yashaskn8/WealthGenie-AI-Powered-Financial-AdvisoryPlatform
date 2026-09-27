@@ -24,7 +24,9 @@ import chatRoutes from './routes/chatRoutes.js';
 import portfolioRoutes from './routes/portfolio.js';
 import regimeRoutes from './routes/regime.js';
 import metricsRoutes from './routes/metricsRoutes.js';
-import mcpRoutes from './routes/mcpRouter.js';
+import { createMcpRouter } from './routes/mcpRouter.js';
+import { createMcpCapacityController } from './mcp/mcpCapacity.js';
+import { createMcpRuntime } from './mcp/mcpRuntime.js';
 import agentRoutes from './routes/agentRoutes.js';
 import { createHealthRouter } from './routes/health.js';
 import { createRuntimeState } from './services/runtimeState.js';
@@ -75,9 +77,15 @@ function detailedHealth(_req, res) {
   });
 }
 
-export function createApp({ env = process.env, runtimeState = null } = {}) {
+export function createApp({ env = process.env, runtimeState = null, mcpRuntime = null } = {}) {
   const config = getRuntimeConfig(env);
   const lifecycle = runtimeState || createRuntimeState();
+  const mcpLifecycle = mcpRuntime || createMcpRuntime({
+    toolTimeoutMs: config.mcp.toolTimeoutMs,
+    shutdownGraceMs: config.mcp.shutdownGraceMs,
+  });
+  if (!mcpRuntime) mcpLifecycle.markReady();
+  const mcpCapacity = createMcpCapacityController({ config: config.mcp, env });
   // Standalone app instances are considered ready; the process bootstrap passes
   // an explicit lifecycle and owns its transitions around dependency startup.
   if (!runtimeState) lifecycle.markReady();
@@ -87,6 +95,8 @@ export function createApp({ env = process.env, runtimeState = null } = {}) {
   app.set('trust proxy', config.trustProxy);
   app.locals.runtimeConfig = config;
   app.locals.runtimeState = lifecycle;
+  app.locals.mcpRuntime = mcpLifecycle;
+  app.locals.mcpCapacity = mcpCapacity;
   app.use(helmet({
     crossOriginResourcePolicy: { policy: 'cross-origin' },
     crossOriginOpenerPolicy: { policy: 'same-origin' },
@@ -100,6 +110,10 @@ export function createApp({ env = process.env, runtimeState = null } = {}) {
     runtimeState: lifecycle,
     maxInFlightRequests: config.maxInFlightRequests,
   }));
+  // MCP owns a smaller JSON limit and rejects dangerous keys before the global
+  // sanitizer can remove evidence of an attack. It also uses Bearer auth and
+  // its own distributed quotas, not cookie CSRF or the general API limiter.
+  app.use('/api/mcp', createMcpRouter({ config, runtime: mcpLifecycle, capacity: mcpCapacity, env }));
   app.use(enforceJsonContentType);
   app.use(express.json({ limit: config.bodyLimit, strict: true }));
   app.use(mongoSanitize());
@@ -131,6 +145,9 @@ export function createApp({ env = process.env, runtimeState = null } = {}) {
     runtimeState: lifecycle,
     requireRedis: config.requireRedis,
     requireAgentRuntimePersistence: config.agenticPlanReviewEnabled,
+    requireMcp: config.isProduction && config.mcp.enabled && config.mcp.remoteEnabled,
+    mcpRuntime: mcpLifecycle,
+    mcpCapacity,
     timeoutMs: config.deepHealthTimeoutMs,
   });
   app.use('/health', healthRoutes);
@@ -154,7 +171,6 @@ export function createApp({ env = process.env, runtimeState = null } = {}) {
   app.use('/api/portfolio', portfolioRoutes);
   app.use('/api/regime', regimeRoutes);
   app.use('/api/metrics', metricsRoutes);
-  app.use('/api/mcp', mcpRoutes);
   app.use('/api/agent', agentRoutes);
   app.get('/api/health', detailedHealth);
 

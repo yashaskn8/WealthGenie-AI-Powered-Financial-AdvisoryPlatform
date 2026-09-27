@@ -12,6 +12,80 @@ export function validateEnvironmentConfig(env = process.env) {
   const errors = [];
   errors.push(...validateMongoCompatibilityConfig(env).errors);
 
+  for (const name of ['MCP_ENABLED', 'MCP_REMOTE_ENABLED', 'MCP_LEGACY_SSE_ENABLED']) {
+    if (env[name] !== undefined && !['true', 'false'].includes(env[name])) {
+      errors.push(`${name} must be true or false`);
+    }
+  }
+  const mcpEnabled = env.MCP_ENABLED === undefined ? !isProduction : env.MCP_ENABLED === 'true';
+  const mcpRemoteEnabled = env.MCP_REMOTE_ENABLED === undefined
+    ? (mcpEnabled && !isProduction)
+    : env.MCP_REMOTE_ENABLED === 'true';
+  if (mcpRemoteEnabled && !mcpEnabled) errors.push('MCP_REMOTE_ENABLED requires MCP_ENABLED=true');
+  if (env.MCP_LEGACY_SSE_ENABLED === 'true') errors.push('Legacy MCP SSE has been removed; MCP_LEGACY_SSE_ENABLED must remain false');
+  if (isProduction && mcpRemoteEnabled) {
+    if (!env.MCP_JWT_AUDIENCE?.trim()) errors.push('MCP_JWT_AUDIENCE is required when production remote MCP is enabled');
+    if (!env.MCP_REQUIRED_SCOPE?.trim()) errors.push('MCP_REQUIRED_SCOPE is required when production remote MCP is enabled');
+    if (env.MCP_JWT_AUDIENCE && (env.MCP_JWT_AUDIENCE.length > 255 || /\s/.test(env.MCP_JWT_AUDIENCE))) {
+      errors.push('MCP_JWT_AUDIENCE must be a single value of at most 255 characters');
+    }
+    if (env.MCP_REQUIRED_SCOPE && !/^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/.test(env.MCP_REQUIRED_SCOPE)) {
+      errors.push('MCP_REQUIRED_SCOPE must be one bounded scope token');
+    }
+    const hosts = String(env.MCP_ALLOWED_HOSTS || '').split(',').map(value => value.trim()).filter(Boolean);
+    if (hosts.length === 0) errors.push('MCP_ALLOWED_HOSTS is required when production remote MCP is enabled');
+    for (const host of hosts) {
+      if (host.includes('://') || /[\s/@?#]/.test(host)) errors.push(`MCP_ALLOWED_HOSTS contains an invalid host: ${host}`);
+    }
+    if (env.REQUIRE_REDIS === 'false') errors.push('Production remote MCP requires REQUIRE_REDIS=true');
+    if (!env.REDIS_URL?.trim()) {
+      errors.push('REDIS_URL is required when production remote MCP is enabled');
+    } else {
+      let redisUrl;
+      try { redisUrl = new URL(env.REDIS_URL); } catch { redisUrl = null; }
+      if (!redisUrl || !['redis:', 'rediss:'].includes(redisUrl.protocol) || !redisUrl.hostname) {
+        errors.push('REDIS_URL must be a valid redis:// or rediss:// URL when production remote MCP is enabled');
+      }
+    }
+  }
+  const boundedIntegers = [
+    ['MCP_MAX_REQUEST_BYTES', 1024, 131072], ['MCP_RATE_WINDOW_MS', 1000, 3600000],
+    ['MCP_MAX_REQUESTS_PER_WINDOW', 1, 10000], ['MCP_MAX_LOW_COST_CALLS_PER_WINDOW', 1, 10000],
+    ['MCP_MAX_MEDIUM_COST_CALLS_PER_WINDOW', 1, 10000], ['MCP_MAX_HIGH_COST_CALLS_PER_WINDOW', 1, 10000],
+    ['MCP_MAX_CONCURRENT_PER_USER', 1, 100], ['MCP_MAX_CONCURRENT_GLOBAL', 1, 10000],
+    ['MCP_PERMIT_TTL_MS', 1000, 300000], ['MCP_TOOL_TIMEOUT_MS', 100, 120000],
+    ['MCP_SHUTDOWN_GRACE_MS', 0, 60000], ['MCP_XIRR_MAX_CASHFLOWS', 2, 600],
+    ['MCP_XIRR_MAX_ABS_AMOUNT', 1, 1000000000000],
+  ];
+  for (const [name, min, max] of boundedIntegers) {
+    if (env[name] === undefined || env[name] === '') continue;
+    const parsed = Number(env[name]);
+    if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+      errors.push(`${name} must be an integer from ${min} to ${max}`);
+    }
+  }
+  const permitTtl = Number(env.MCP_PERMIT_TTL_MS || 90000);
+  const toolTimeout = Number(env.MCP_TOOL_TIMEOUT_MS || 30000);
+  if (Number.isSafeInteger(permitTtl) && Number.isSafeInteger(toolTimeout) && permitTtl <= toolTimeout + 5000) {
+    errors.push('MCP_PERMIT_TTL_MS must exceed MCP_TOOL_TIMEOUT_MS by at least 5 seconds');
+  }
+  const mcpOrigins = String(env.MCP_ALLOWED_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean);
+  const appOrigins = env.CORS_ORIGINS
+    ? String(env.CORS_ORIGINS).split(',').map(value => value.trim().replace(/\/+$/, '')).filter(Boolean)
+    : (isProduction ? [] : ['http://localhost:5173', 'http://localhost:3000']);
+  for (const origin of mcpOrigins) {
+    let parsed;
+    try { parsed = new URL(origin); } catch { parsed = null; }
+    if (!parsed || parsed.origin !== origin || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) {
+      errors.push(`MCP_ALLOWED_ORIGINS contains an invalid origin: ${origin}`);
+    } else if (isProduction && parsed.protocol !== 'https:') {
+      errors.push(`Production MCP origin must use HTTPS: ${origin}`);
+    }
+    if (!appOrigins.includes(origin)) {
+      errors.push(`MCP origin must also be included in CORS_ORIGINS: ${origin}`);
+    }
+  }
+
   const workerMode = String(env.AGENT_WORKER_MODE || (isProduction ? 'external' : 'embedded')).toLowerCase();
   if (!['embedded', 'external'].includes(workerMode)) {
     errors.push('AGENT_WORKER_MODE must be embedded or external');

@@ -1,4 +1,4 @@
-import { test, describe, it } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { WealthGenieMcpServer } from '../mcp/wealthgenieMcpServer.js';
 import { FinancialToolRegistry } from '../services/financialToolRegistry.js';
@@ -128,93 +128,64 @@ describe('Phase 1: WealthGenie MCP Server Core & Schema Parity Tests', () => {
   });
 });
 
-describe('MCP Endpoint Auth & Router Integration Tests', () => {
-  it('GET /api/mcp/sse rejects unauthenticated request with 401', async () => {
-    const express = (await import('express')).default;
-    const mcpRouter = (await import('../routes/mcpRouter.js')).default;
-    const { errorHandler } = await import('../middleware/errorHandler.js');
-    const { withServer, rawRequest } = await import('../test-utils/httpTestUtils.js');
-
-    const app = express();
-    app.use(express.json());
-    app.use('/api/mcp', mcpRouter);
-    app.use(errorHandler);
-
-    await withServer(app, async (baseUrl) => {
-      const res = await rawRequest(`${baseUrl}/api/mcp/sse`, { method: 'GET' });
-      assert.equal(res.status, 401);
+describe('MCP explicit exposure policy', () => {
+  it('does not expose a registry tool that lacks an explicit MCP policy', () => {
+    const name = 'private_internal_probe';
+    FinancialToolRegistry.registerTool(name, {
+      description: 'internal test only',
+      schema: FinancialToolRegistry.getTool('sip_projection').schema,
+      executor: async () => ({ ok: true }),
     });
+    try {
+      assert.equal(FinancialToolRegistry.hasTool(name), true);
+      assert.equal(FinancialToolRegistry.listMcpTools().some(tool => tool.name === name), false);
+      assert.equal(WealthGenieMcpServer.getToolDefinitions().some(tool => tool.name === name), false);
+    } finally {
+      FinancialToolRegistry.tools.delete(name);
+    }
   });
 
-  it('POST /api/mcp/messages rejects unauthenticated request with 401', async () => {
-    const express = (await import('express')).default;
-    const mcpRouter = (await import('../routes/mcpRouter.js')).default;
-    const { errorHandler } = await import('../middleware/errorHandler.js');
-    const { withServer, rawRequest } = await import('../test-utils/httpTestUtils.js');
-
-    const app = express();
-    app.use(express.json());
-    app.use('/api/mcp', mcpRouter);
-    app.use(errorHandler);
-
-    await withServer(app, async (baseUrl) => {
-      const res = await rawRequest(`${baseUrl}/api/mcp/messages`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: 'test' }),
-      });
-      assert.equal(res.status, 401);
+  it('requires explicit read-only, non-mutating policy metadata even for an exposed tool', () => {
+    const name = 'unsafe_policy_probe';
+    FinancialToolRegistry.registerTool(name, {
+      description: 'test-only unsafe metadata',
+      schema: FinancialToolRegistry.getTool('sip_projection').schema,
+      executor: async () => ({ ok: true }),
+      mcpPolicy: {
+        exposed: true, authority: 'NON_AUTHORITATIVE', profileContext: 'none',
+        costClass: 'LOW', remoteAllowed: true, stdioAllowed: true,
+      },
     });
-  });
-});
-
-describe('MCP SSE ownership and capacity controls', () => {
-  function responseRecorder() {
-    return {
-      statusCode: 200,
-      body: null,
-      status(code) { this.statusCode = code; return this; },
-      json(body) { this.body = body; return this; },
-    };
-  }
-
-  it('allows the owning user and safely denies another user', async () => {
-    const server = new WealthGenieMcpServer({ maxGlobalSessions: 10, maxSessionsPerUser: 2 });
-    let messages = 0;
-    server.sseTransports.set('session-a', {
-      userId: 'user-a',
-      createdAt: new Date(),
-      transport: { handlePostMessage: async () => { messages += 1; } },
-    });
-
-    const ownerResponse = responseRecorder();
-    await server.handleSseMessage({ query: { sessionId: 'session-a' }, user: { userId: 'user-a' } }, ownerResponse);
-    assert.equal(messages, 1);
-
-    const foreignResponse = responseRecorder();
-    await server.handleSseMessage({ query: { sessionId: 'session-a' }, user: { userId: 'user-b' } }, foreignResponse);
-    assert.equal(foreignResponse.statusCode, 404);
-    assert.deepEqual(foreignResponse.body, { error: 'MCP session not found.' });
-
-    const unknownResponse = responseRecorder();
-    await server.handleSseMessage({ query: { sessionId: 'missing' }, user: { userId: 'user-a' } }, unknownResponse);
-    assert.equal(unknownResponse.statusCode, 404);
+    try {
+      assert.equal(FinancialToolRegistry.listMcpTools().some(tool => tool.name === name), false);
+    } finally {
+      FinancialToolRegistry.tools.delete(name);
+    }
   });
 
-  it('returns 429 at per-user and global caps without evicting another user', () => {
-    const perUser = new WealthGenieMcpServer({ maxGlobalSessions: 10, maxSessionsPerUser: 1 });
-    perUser.sseTransports.set('a-1', { userId: 'user-a', transport: {}, createdAt: new Date() });
-    assert.deepEqual(perUser.checkSseCapacity('user-a'), {
-      allowed: false, status: 429, code: 'MCP_USER_SESSION_LIMIT',
+  it('does not let an ad-hoc policy bypass the central MCP tool allowlist', () => {
+    const name = 'unlisted_but_fully_annotated_probe';
+    FinancialToolRegistry.registerTool(name, {
+      description: 'test-only rogue MCP registration',
+      schema: FinancialToolRegistry.getTool('sip_projection').schema,
+      executor: async () => ({ ok: true }),
+      mcpPolicy: {
+        exposed: true, authority: 'NON_AUTHORITATIVE', readOnly: true, nonMutating: true,
+        profileContext: 'none', costClass: 'LOW', remoteAllowed: true, stdioAllowed: true,
+      },
     });
+    try {
+      assert.equal(FinancialToolRegistry.listMcpTools().some(tool => tool.name === name), false);
+      assert.equal(WealthGenieMcpServer.getToolDefinitions().some(tool => tool.name === name), false);
+    } finally {
+      FinancialToolRegistry.tools.delete(name);
+    }
+  });
 
-    const global = new WealthGenieMcpServer({ maxGlobalSessions: 2, maxSessionsPerUser: 5 });
-    global.sseTransports.set('a-1', { userId: 'user-a', transport: {}, createdAt: new Date() });
-    global.sseTransports.set('b-1', { userId: 'user-b', transport: {}, createdAt: new Date() });
-    assert.deepEqual(global.checkSseCapacity('user-c'), {
-      allowed: false, status: 429, code: 'MCP_GLOBAL_SESSION_LIMIT',
-    });
-    assert.equal(global.sseTransports.has('a-1'), true);
-    assert.equal(global.sseTransports.has('b-1'), true);
+  it('marks portfolio-sensitive calculators profile-required and excludes them from stdio', () => {
+    const remote = WealthGenieMcpServer.getToolDefinitions();
+    assert.equal(remote.find(tool => tool.name === 'portfolio_optimizer').version, '2.1.0');
+    assert.equal(FinancialToolRegistry.listMcpTools({ transport: 'stdio' }).some(tool => tool.name === 'portfolio_optimizer'), false);
+    assert.equal(FinancialToolRegistry.listMcpTools({ transport: 'stdio' }).some(tool => tool.name === 'rebalance_calculator'), false);
   });
 });

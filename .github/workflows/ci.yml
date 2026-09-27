@@ -105,6 +105,40 @@ jobs:
           cd server
           npm audit --omit=dev --audit-level=low
 
+  mcp-redis-capacity-contract:
+    name: MCP Redis distributed capacity contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    services:
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install backend dependencies
+        run: npm ci --prefix server
+
+      - name: Verify Redis-backed MCP rate and lease fencing
+        env:
+          MCP_TEST_REDIS_URL: redis://127.0.0.1:6379
+        run: node server/scripts/testMcpRedisCapacity.js
+
   backend-unit-windows:
     name: Backend Windows (Node ${{ matrix.node-version }})
     runs-on: windows-latest

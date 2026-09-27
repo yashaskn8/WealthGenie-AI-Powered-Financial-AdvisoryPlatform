@@ -12,6 +12,7 @@ import { buildRecommendationProfile } from './recommendationProfile.js';
 import {
   assertPortfolioSuitable, enforceAllocationTargets, resolveConcentrationCap,
 } from './RecommendationPipeline.js';
+import { MCP_TOOL_POLICY, isMcpToolAllowed } from '../mcp/toolPolicy.js';
 
 /**
  * WealthGenie Centralized Financial Tool Registry
@@ -28,6 +29,17 @@ const VALID_ASSET_KEYS = [
 ];
 
 const SAFE_ALLOCATION_KEY_REGEX = /^(?!__proto__|constructor|prototype|toString|valueOf)[a-zA-Z0-9_-]{1,50}$/;
+
+function validateIsoCalendarDate(value, helpers) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return helpers.error('string.pattern.base');
+  const [year, month, day] = value.split('-').map(Number);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthLengths = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > monthLengths[month - 1]) {
+    return helpers.error('string.isoDate');
+  }
+  return value;
+}
 
 function canonicalContextProfile(context) {
   return context?.profile ? buildRecommendationProfile(context.profile) : null;
@@ -112,6 +124,9 @@ class ToolRegistry {
       schema: config.schema,
       executor: config.executor,
       version: config.version || '1.0.0',
+      // Explicit metadata is required for remote exposure. New tools remain
+      // private unless the central allowlist and registry policy both permit it.
+      mcpPolicy: config.mcpPolicy || MCP_TOOL_POLICY[name] || null,
     });
   }
 
@@ -135,6 +150,12 @@ class ToolRegistry {
       description: t.description,
       version: t.version,
     }));
+  }
+
+  listMcpTools({ transport = 'remote' } = {}) {
+    return Array.from(this.tools.values())
+      .filter(tool => isMcpToolAllowed(tool, { transport }))
+      .map(({ name, description, version, mcpPolicy }) => ({ name, description, version, mcpPolicy }));
   }
 
   /**
@@ -187,7 +208,11 @@ class ToolRegistry {
         execution_time_ms: Date.now() - startTime,
       };
     } catch (execErr) {
-      console.error(`[ToolRegistry] Error executing tool '${name}':`, execErr.message);
+      if (context?.mcpRequest === true) {
+        console.warn('[ToolRegistry] MCP calculator rejected or failed', { tool: name, code: 'MCP_CALCULATION_REJECTED' });
+      } else {
+        console.error(`[ToolRegistry] Error executing tool '${name}':`, execErr.message);
+      }
       PrometheusMetrics.recordToolExecution(name, false);
       return {
         success: false,
@@ -310,10 +335,10 @@ class ToolRegistry {
       schema: Joi.object({
         cashflows: Joi.array().items(
           Joi.object({
-            amount: Joi.number().required(),
-            date: Joi.string().required(),
+            amount: Joi.number().min(-1000000000000).max(1000000000000).required(),
+            date: Joi.string().max(10).pattern(/^\d{4}-\d{2}-\d{2}$/).custom(validateIsoCalendarDate).required(),
           })
-        ).min(2).required(),
+        ).min(2).max(600).required(),
       }),
       executor: async ({ cashflows }) => {
         return { ...computeXIRR(cashflows), classification: 'HISTORICAL_RETURN_CALCULATION' };

@@ -22,6 +22,9 @@ export function createHealthRouter({
   runtimeState = null,
   requireRedis = false,
   requireAgentRuntimePersistence = false,
+  requireMcp = false,
+  mcpRuntime = null,
+  mcpCapacity = null,
   timeoutMs = 3000,
   verifyAgentRuntime = verifyAgentRuntimePersistence,
 } = {}) {
@@ -42,6 +45,7 @@ export function createHealthRouter({
     database: { status: 'DOWN', critical: true },
     redis:    { status: 'DOWN', critical: false },
     ml:       { status: 'DOWN', critical: false },
+    mcp:      { status: requireMcp ? 'DOWN' : 'DISABLED', critical: requireMcp },
   };
 
   // 1. Check MongoDB (critical)
@@ -81,12 +85,16 @@ export function createHealthRouter({
     logger.warn('ML service health check failed', { message: err.message });
   }
 
+  if (requireMcp) {
+    checks.mcp.status = mcpRuntime?.isReady() && mcpCapacity?.isReady() ? 'UP' : 'DOWN';
+  }
+
   // Determine overall status
   checks.redis.critical = requireRedis;
   const criticalDown = Object.values(checks).some(svc => svc.critical && svc.status === 'DOWN');
   const lifecycleReady = runtimeState ? runtimeState.isReady() : true;
 
-  const allUp = Object.values(checks).every(svc => svc.status === 'UP');
+  const allUp = Object.values(checks).every(svc => svc.status === 'UP' || svc.status === 'DISABLED');
 
   // Build backward-compatible response (flat strings for services)
   const health = {
@@ -98,6 +106,7 @@ export function createHealthRouter({
       database: checks.database.status,
       redis: checks.redis.status,
       ml: checks.ml.status,
+      mcp: checks.mcp.status,
     }
   };
 
@@ -123,6 +132,7 @@ export function createHealthRouter({
     if (runtimeState && !runtimeState.isReady()) reasons.push(`Application lifecycle is ${runtimeState.snapshot().phase}`);
     if (mongoose.connection.readyState !== 1) reasons.push('Database not connected');
     if (requireRedis && (!redisAvailable || !redisClient?.isReady)) reasons.push('Redis not connected');
+    if (requireMcp && (!mcpRuntime?.isReady() || !mcpCapacity?.isReady())) reasons.push('Required MCP runtime or distributed capacity control is not ready');
     if (mongoose.connection.readyState === 1) {
       try {
         await verifyPersistenceIndexes();

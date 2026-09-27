@@ -18,6 +18,14 @@ class MetricsCollector {
       tool_execution_total: 0,
       tool_execution_success_total: 0,
       tool_execution_failure_total: 0,
+      mcp_requests_total: 0,
+      mcp_request_failures_total: 0,
+      mcp_tool_calls_total: 0,
+      mcp_tool_successes_total: 0,
+      mcp_tool_failures_total: 0,
+      mcp_tool_timeouts_total: 0,
+      mcp_capacity_rejections_total: 0,
+      mcp_auth_rejections_total: 0,
       arithmetic_corrections_total: 0,
       arithmetic_corrections_post_pass2_total: 0,
       invalid_action_cards_total: 0,
@@ -103,6 +111,7 @@ class MetricsCollector {
     this.gauges = {
       agent_worker_jobs_active: 0,
       agent_queue_oldest_age_seconds: 0,
+      mcp_active_tool_executions: 0,
     };
 
     this.deadLetterReasons = Object.fromEntries([
@@ -128,6 +137,11 @@ class MetricsCollector {
       count: 0,
       sumMs: 0,
       buckets: { 50: 0, 100: 0, 250: 0, 500: 0, 1000: 0, 3000: 0, 10000: 0 },
+    };
+    this.mcpToolDuration = {
+      count: 0,
+      sumMs: 0,
+      buckets: { 10: 0, 50: 0, 100: 0, 250: 0, 500: 0, 1000: 0, 5000: 0, 30000: 0 },
     };
     this.httpInFlight = 0;
     this.httpInFlightPeak = 0;
@@ -167,6 +181,15 @@ class MetricsCollector {
     this.authorizationLatency.sumMs += safeDuration;
     for (const boundary of Object.keys(this.authorizationLatency.buckets).map(Number)) {
       if (safeDuration <= boundary) this.authorizationLatency.buckets[boundary] += 1;
+    }
+  }
+
+  recordMcpToolDuration(durationMs) {
+    const safeDuration = Math.max(0, Number(durationMs) || 0);
+    this.mcpToolDuration.count += 1;
+    this.mcpToolDuration.sumMs += safeDuration;
+    for (const boundary of Object.keys(this.mcpToolDuration.buckets).map(Number)) {
+      if (safeDuration <= boundary) this.mcpToolDuration.buckets[boundary] += 1;
     }
   }
 
@@ -249,6 +272,24 @@ class MetricsCollector {
     lines.push(`wealthgenie_tool_executions_total{status="total"} ${this.counters.tool_execution_total}`);
     lines.push(`wealthgenie_tool_executions_total{status="success"} ${this.counters.tool_execution_success_total}`);
     lines.push(`wealthgenie_tool_executions_total{status="failure"} ${this.counters.tool_execution_failure_total}`);
+
+    lines.push('\n# HELP wealthgenie_mcp_total MCP request and tool outcomes');
+    lines.push('# TYPE wealthgenie_mcp_total counter');
+    for (const [event, counter] of Object.entries({
+      requests: 'mcp_requests_total', request_failures: 'mcp_request_failures_total', calls: 'mcp_tool_calls_total', successes: 'mcp_tool_successes_total',
+      failures: 'mcp_tool_failures_total', timeouts: 'mcp_tool_timeouts_total',
+      capacity_rejections: 'mcp_capacity_rejections_total', auth_rejections: 'mcp_auth_rejections_total',
+    })) lines.push(`wealthgenie_mcp_total{event="${event}"} ${this.counters[counter]}`);
+    lines.push('# TYPE wealthgenie_mcp_active_tool_executions gauge');
+    lines.push(`wealthgenie_mcp_active_tool_executions ${this.gauges.mcp_active_tool_executions}`);
+    lines.push('# HELP wealthgenie_mcp_tool_execution_duration_ms MCP tool execution duration in milliseconds');
+    lines.push('# TYPE wealthgenie_mcp_tool_execution_duration_ms histogram');
+    for (const [boundary, count] of Object.entries(this.mcpToolDuration.buckets)) {
+      lines.push(`wealthgenie_mcp_tool_execution_duration_ms_bucket{le="${boundary}"} ${count}`);
+    }
+    lines.push(`wealthgenie_mcp_tool_execution_duration_ms_bucket{le="+Inf"} ${this.mcpToolDuration.count}`);
+    lines.push(`wealthgenie_mcp_tool_execution_duration_ms_sum ${this.mcpToolDuration.sumMs.toFixed(3)}`);
+    lines.push(`wealthgenie_mcp_tool_execution_duration_ms_count ${this.mcpToolDuration.count}`);
 
     for (const [tool, count] of Object.entries(this.toolUsage)) {
       lines.push(`wealthgenie_tool_usage_total{tool="${tool}"} ${count}`);

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { validateEnvironmentConfig } from '../config/validateEnv.js';
+import { assertValidRuntimeConfig, getRuntimeConfig } from '../config/runtime.js';
 
 test('Config Validation: Missing JWT_SECRET fails validation', () => {
   const result = validateEnvironmentConfig({
@@ -134,4 +135,55 @@ test('Config Validation: Production rejects unsafe browser and metrics settings'
   assert.ok(result.errors.some(error => error.includes('METRICS_TOKEN')));
   assert.ok(result.errors.some(error => error.includes('AUTH_COOKIE_SAME_SITE')));
   assert.ok(result.errors.some(error => error.includes('EXPOSE_AUTH_TOKEN')));
+});
+
+test('MCP runtime defaults keep remote access disabled in production and follow the local feature switch', () => {
+  const production = getRuntimeConfig({ NODE_ENV: 'production' });
+  assert.equal(production.mcp.enabled, false);
+  assert.equal(production.mcp.remoteEnabled, false);
+  const localDisabled = getRuntimeConfig({ NODE_ENV: 'development', MCP_ENABLED: 'false' });
+  assert.equal(localDisabled.mcp.enabled, false);
+  assert.equal(localDisabled.mcp.remoteEnabled, false);
+  assert.doesNotThrow(() => assertValidRuntimeConfig(localDisabled));
+  const validBase = {
+    JWT_SECRET: 'test-secret-at-least-32-chars-long-valid',
+    MONGODB_URI: 'mongodb://localhost:27017/wealthgenie',
+    NODE_ENV: 'development',
+    MCP_ENABLED: 'false',
+  };
+  const localValidation = validateEnvironmentConfig(validBase);
+  assert.equal(localValidation.valid, true, localValidation.errors.join('; '));
+});
+
+test('MCP production remote enablement requires one exact audience and scope plus Redis and trusted origin/host', () => {
+  const productionBase = {
+    JWT_SECRET: '0123456789abcdef0123456789abcdef0123456789abcdef',
+    MONGODB_URI: 'mongodb://mongodb:27017/wealthgenie?replicaSet=rs0',
+    ML_SERVICE_API_KEY: 'production-secret-api-key-value-secure',
+    METRICS_TOKEN: 'production-metrics-token-at-least-32-characters',
+    CORS_ORIGINS: 'https://app.wealthgenie.example',
+    NODE_ENV: 'production',
+    MCP_ENABLED: 'true',
+    MCP_REMOTE_ENABLED: 'true',
+    MCP_JWT_AUDIENCE: 'wealthgenie-mcp',
+    MCP_REQUIRED_SCOPE: 'mcp:tools',
+    MCP_ALLOWED_HOSTS: 'mcp.wealthgenie.example',
+    MCP_ALLOWED_ORIGINS: 'https://app.wealthgenie.example',
+    REQUIRE_REDIS: 'true',
+    REDIS_URL: 'rediss://redis.wealthgenie.example:6379',
+  };
+  assert.equal(validateEnvironmentConfig(productionBase).valid, true);
+  assert.doesNotThrow(() => assertValidRuntimeConfig(getRuntimeConfig(productionBase)));
+  const badScope = validateEnvironmentConfig({ ...productionBase, MCP_REQUIRED_SCOPE: 'mcp:tools admin' });
+  assert.equal(badScope.valid, false);
+  assert.ok(badScope.errors.some(error => error.includes('one bounded scope token')));
+  const noRedis = validateEnvironmentConfig({ ...productionBase, REQUIRE_REDIS: 'false' });
+  assert.equal(noRedis.valid, false);
+  assert.ok(noRedis.errors.some(error => error.includes('requires REQUIRE_REDIS=true')));
+  const missingRedisUrl = validateEnvironmentConfig({ ...productionBase, REDIS_URL: '' });
+  assert.equal(missingRedisUrl.valid, false);
+  assert.ok(missingRedisUrl.errors.some(error => error.includes('REDIS_URL is required')));
+  const malformedRedisUrl = validateEnvironmentConfig({ ...productionBase, REDIS_URL: 'https://redis.example' });
+  assert.equal(malformedRedisUrl.valid, false);
+  assert.ok(malformedRedisUrl.errors.some(error => error.includes('valid redis:// or rediss:// URL')));
 });
