@@ -108,6 +108,10 @@ export async function startServer({ env = process.env } = {}) {
     }
 
     const app = createApp({ env, runtimeState, mcpRuntime });
+    if (config.isProduction && config.mcp.enabled && config.mcp.remoteEnabled
+        && !(await app.locals.mcpCapacity.probe())) {
+      throw new Error('MCP distributed capacity and revocation dependencies failed their readiness contract probe.');
+    }
     server = createHttpServer(app);
     configureHttpServer(server, config);
     await new Promise((resolve, reject) => {

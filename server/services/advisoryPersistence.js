@@ -4,6 +4,8 @@ import Recommendation from '../models/Recommendation.js';
 import AuditRecord from '../models/AuditRecord.js';
 import IdempotencyKey from '../models/IdempotencyKey.js';
 import RecommendationState from '../models/RecommendationState.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
+import PlanHealthEvent from '../models/PlanHealthEvent.js';
 import { prepareAuditChainEntry, advanceAuditChainHead } from './auditChain.js';
 import { omitUnsetOptionalUniqueFields } from '../config/mongoCompatibility.js';
 import { verifyPersistenceIndexes } from './persistenceIndexReadiness.js';
@@ -18,6 +20,7 @@ import { buildRecommendationProfile, buildRecommendationProfileHash, RECOMMENDAT
 import { getCurrentRegulatoryRuleVersion } from './taxEngine.js';
 import {
   buildPostCommitAdvisoryResponse,
+  buildPostCommitProfileResponse,
   committedResponseReconciliationError,
 } from './advisoryResponse.js';
 
@@ -98,15 +101,21 @@ export async function persistAdvisoryAtomically({
   auditRecord,
   response,
   idempotencyClaim,
+  profileStateBinding,
   testHooks = {},
 }) {
   const profileUpdate = requestedProfileUpdate ? validatedProfileUpdate(requestedProfileUpdate) : null;
   if (profile && profileUpdate) throw new TypeError('Profile creation and profile update cannot be combined.');
+  if (!profileStateBinding || !Number.isSafeInteger(Number(profileStateBinding.revision))
+      || Number(profileStateBinding.revision) < 0) {
+    throw new TypeError('A captured canonical FinancialProfileState revision is required.');
+  }
   await ensureAdvisoryPersistenceReady();
   const session = await mongoose.startSession();
   let committedResponse = null;
   let committedRecommendationId = null;
   let committedRecommendationGeneration = null;
+  let committedProfileStateRevision = null;
   let transactionCommitted = false;
   try {
     await session.withTransaction(async () => {
@@ -118,6 +127,30 @@ export async function persistAdvisoryAtomically({
         const error = new Error('The financial profile disappeared before recommendation commit.');
         error.status = 409;
         error.code = 'PROFILE_STATE_CHANGED';
+        throw error;
+      }
+      const expectedStateRevision = Number(profileStateBinding.revision);
+      const expectedCurrentProfileId = profileStateBinding.currentProfileId || null;
+      const observedProfileState = await FinancialProfileState.findOne({ userId: recommendation.userId })
+        .session(session).lean();
+      if (!observedProfileState || observedProfileState.resolutionStatus === 'LEGACY_AMBIGUOUS') {
+        const error = new Error('The user-level canonical profile state is unavailable.');
+        error.status = 503;
+        error.code = 'FINANCIAL_PROFILE_STATE_UNAVAILABLE';
+        throw error;
+      }
+      const observedCurrentProfileId = String(observedProfileState.currentProfileId || '');
+      if (observedCurrentProfileId !== String(expectedCurrentProfileId || '')
+          || Number(observedProfileState.revision) !== expectedStateRevision
+          || (!profile && observedCurrentProfileId !== String(recommendation.profileId))) {
+        const profileUpdateStillTargetsCurrent = Boolean(profileUpdate)
+          && observedCurrentProfileId === String(recommendation.profileId)
+          && observedCurrentProfileId === String(expectedCurrentProfileId || '');
+        const error = new Error(profileUpdateStillTargetsCurrent
+          ? 'The profile changed while its replacement recommendation was being computed.'
+          : 'The user-level canonical profile changed while this financial computation was running.');
+        error.status = 409;
+        error.code = profileUpdateStillTargetsCurrent ? 'PROFILE_VERSION_CONFLICT' : 'PROFILE_STATE_VERSION_CONFLICT';
         throw error;
       }
       await testHooks.afterSourceProfileRead?.(session);
@@ -353,6 +386,38 @@ export async function persistAdvisoryAtomically({
       await testHooks.afterAuditCreate?.(session);
       await advanceAuditChainHead(chainEntry, session);
 
+      const changesCurrentProfile = Boolean(profile || profileUpdate);
+      const nextProfileStateRevision = expectedStateRevision + (changesCurrentProfile ? 1 : 0);
+      const profileStateCas = await FinancialProfileState.updateOne({
+        userId: recommendation.userId,
+        revision: expectedStateRevision,
+        currentProfileId: expectedCurrentProfileId,
+        resolutionStatus: { $ne: 'LEGACY_AMBIGUOUS' },
+      }, {
+        ...(changesCurrentProfile ? {
+          $set: {
+            currentProfileId: recommendation.profileId,
+            revision: nextProfileStateRevision,
+            resolutionStatus: 'CURRENT',
+          },
+        } : {}),
+        $inc: { promotionFence: 1 },
+      }, { session, runValidators: true });
+      if (profileStateCas.matchedCount !== 1) {
+        const error = new Error('The canonical user profile changed before the financial transaction could commit.');
+        error.status = 409;
+        error.code = 'PROFILE_STATE_VERSION_CONFLICT';
+        throw error;
+      }
+      if (changesCurrentProfile && observedProfileState.currentProfileId) {
+        await PlanHealthEvent.updateMany({
+          userId: recommendation.userId,
+          profileId: observedProfileState.currentProfileId,
+          status: { $in: ['UNREAD', 'READ', 'OPEN', 'ACKNOWLEDGED'] },
+        }, { $set: { status: 'SUPERSEDED', supersededAt: new Date() } }, { session });
+      }
+      committedProfileStateRevision = nextProfileStateRevision;
+
       const completion = await IdempotencyKey.updateOne({
         _id: idempotencyClaim.operationId,
         status: 'LOCK',
@@ -385,14 +450,26 @@ export async function persistAdvisoryAtomically({
     await testHooks.afterCommitBeforeReconcile?.({
       recommendationId: committedRecommendationId,
       recommendationGeneration: committedRecommendationGeneration,
+      profileStateRevision: committedProfileStateRevision,
     });
-    return await buildPostCommitAdvisoryResponse({
-      userId: recommendation.userId,
-      profileId: recommendation.profileId,
-      responseTemplate: committedResponse,
-      committedRecommendationId,
-      committedRecommendationGeneration,
-    });
+    const reconciled = (profile || profileUpdate)
+      ? await buildPostCommitProfileResponse({
+        userId: recommendation.userId,
+        responseTemplate: committedResponse,
+        committedProfileId: recommendation.profileId,
+        committedRecommendationId,
+      })
+      : await buildPostCommitAdvisoryResponse({
+        userId: recommendation.userId,
+        profileId: recommendation.profileId,
+        responseTemplate: committedResponse,
+        committedRecommendationId,
+        committedRecommendationGeneration,
+      });
+    return {
+      ...reconciled,
+      financial_profile_state_revision: reconciled.financial_profile_state_revision ?? committedProfileStateRevision,
+    };
   } catch (error) {
     if (transactionCommitted) throw committedResponseReconciliationError(error);
     throw transactionRequirementError(error);

@@ -9,6 +9,7 @@ import AgentRunEvent from '../models/AgentRunEvent.js';
 import PlanHealthEvent from '../models/PlanHealthEvent.js';
 import PlanHealthInspectionFence from '../models/PlanHealthInspectionFence.js';
 import PlanHealthSchedulerLease from '../models/PlanHealthSchedulerLease.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import {
   claimNextPlanReviewRun,
   createPlanReviewWorker,
@@ -379,6 +380,9 @@ test('Mongo unique PlanHealth fingerprint deduplicates concurrent inspections', 
     investmentGoals: ['Wealth Growth'],
     investmentHorizonYears: 10,
   };
+  await FinancialProfileState.create({
+    userId, currentProfileId: profileId, revision: 1, promotionFence: 0, resolutionStatus: 'CURRENT',
+  });
   const profileModel = { findOne: () => ({ lean: async () => profile }) };
   const recommendationModel = {
     findOne() {
@@ -386,12 +390,15 @@ test('Mongo unique PlanHealth fingerprint deduplicates concurrent inspections', 
       return query;
     },
   };
-  const fingerprint = planHealthEventFingerprint({ userId, profileId, recommendationId: null, reason: 'RECOMMENDATION_MISSING' });
+  const fingerprint = planHealthEventFingerprint({
+    userId, profileId, profileStateRevision: 1, recommendationId: null, reason: 'RECOMMENDATION_MISSING',
+  });
   try {
     const results = await Promise.all(Array.from({ length: 12 }, () => inspectPlanHealth({
       userId,
       profileId,
       profileModel,
+      profileStateModel: FinancialProfileState,
       eventModel: PlanHealthEvent,
       dependencies: { profileModel, recommendationModel, auditModel: null },
     })));
@@ -406,6 +413,7 @@ test('Mongo unique PlanHealth fingerprint deduplicates concurrent inspections', 
     });
   } finally {
     await PlanHealthEvent.deleteMany({ fingerprint });
+    await FinancialProfileState.deleteMany({ userId });
     await teardownTestDatabase();
   }
 });
@@ -524,25 +532,32 @@ test('Mongo scheduler lease has one owner, supports expired takeover, and fences
 
 test('Mongo PlanHealth scheduler resumes strictly after the last durably completed batch cursor', async () => {
   await setupRuntimeMongo();
-  const userId = new mongoose.Types.ObjectId();
   const ids = [1, 2, 3, 4].map(value => new mongoose.Types.ObjectId(`00000000000000000000000${value}`));
-  const profiles = ids.map(_id => ({ _id, userId }));
+  const stateUserIds = ids.map((_, index) => new mongoose.Types.ObjectId((0x11 + index).toString(16).padStart(24, '0')));
+  const profileModel = {
+    find(filter = {}) {
+      const wanted = new Set((filter._id?.$in || []).map(String));
+      const rows = ids.map((_id, index) => ({ _id, userId: stateUserIds[index] }))
+        .filter(profile => wanted.has(String(profile._id)));
+      return { lean: async () => rows };
+    },
+  };
   const firstPeriod = `phase5-cursor-${crypto.randomUUID()}`;
   const inspectedByA = [];
   const inspectedByB = [];
   const interruption = Object.assign(new Error('simulated process loss after durable cursor advance'), { code: 'TEST_PROCESS_LOSS' });
   const stopA = new AbortController();
-  const profileModel = {
-    find(filter = {}) {
-      const after = filter._id?.$gt ? String(filter._id.$gt) : null;
-      const rows = profiles.filter(profile => !after || String(profile._id) > after);
-      const query = { sort() { return query; }, limit(count) { this.count = count; return query; }, lean: async () => rows.slice(0, query.count) };
-      return query;
-    },
-  };
   try {
+    await FinancialProfileState.insertMany(ids.map((currentProfileId, index) => ({
+      userId: stateUserIds[index],
+      currentProfileId,
+      revision: 1,
+      promotionFence: 0,
+      resolutionStatus: 'CURRENT',
+    })));
     await assert.rejects(runPlanHealthScan({
       profileModel,
+      profileStateModel: FinancialProfileState,
       leaseModel: PlanHealthSchedulerLease,
       publicationFenceModel: PlanHealthInspectionFence,
       periodKey: firstPeriod,
@@ -558,11 +573,12 @@ test('Mongo PlanHealth scheduler resumes strictly after the last durably complet
     }), error => error.code === 'TEST_PROCESS_LOSS');
 
     const interruptedLease = await PlanHealthSchedulerLease.findOne({ _id: firstPeriod }).lean();
-    assert.equal(String(interruptedLease.cursor), String(ids[1]));
+    assert.equal(String(interruptedLease.profileStateCursor), String(stateUserIds[1]));
     assert.equal(interruptedLease.status, 'FAILED');
 
     const resumed = await runPlanHealthScan({
       profileModel,
+      profileStateModel: FinancialProfileState,
       leaseModel: PlanHealthSchedulerLease,
       publicationFenceModel: PlanHealthInspectionFence,
       periodKey: firstPeriod,
@@ -580,8 +596,9 @@ test('Mongo PlanHealth scheduler resumes strictly after the last durably complet
     assert.deepEqual(inspectedByB, ids.slice(2).map(String));
     const completedLease = await PlanHealthSchedulerLease.findOne({ _id: firstPeriod }).lean();
     assert.equal(completedLease.status, 'COMPLETED');
-    assert.equal(String(completedLease.cursor), String(ids[3]));
+    assert.equal(String(completedLease.profileStateCursor), String(stateUserIds[3]));
   } finally {
+    await FinancialProfileState.deleteMany({ userId: { $in: stateUserIds } });
     await PlanHealthInspectionFence.deleteMany({ periodKey: firstPeriod });
     await PlanHealthSchedulerLease.deleteOne({ _id: firstPeriod });
     await teardownTestDatabase();
@@ -719,6 +736,9 @@ test('Mongo timeout durably invalidates an inspection blocked before publication
     investmentGoals: ['Wealth Growth'],
     investmentHorizonYears: 10,
   };
+  await FinancialProfileState.create({
+    userId, currentProfileId: profileId, revision: 1, promotionFence: 0, resolutionStatus: 'CURRENT',
+  });
   const profileModel = {
     find(filter = {}) {
       const rows = filter._id?.$gt && String(profileId) <= String(filter._id.$gt) ? [] : [profile];
@@ -813,8 +833,85 @@ test('Mongo timeout durably invalidates an inspection blocked before publication
   } finally {
     releasePublication();
     await PlanHealthEvent.deleteMany({ userId, profileId });
+    await FinancialProfileState.deleteMany({ userId });
     await PlanHealthInspectionFence.deleteMany({ periodKey: { $in: [firstPeriod, freshPeriod] } });
     await PlanHealthSchedulerLease.deleteMany({ _id: { $in: [firstPeriod, freshPeriod] } });
+    await teardownTestDatabase();
+  }
+});
+
+test('Mongo user-profile promotion fences a late PlanHealth publication for the superseded profile', async () => {
+  await setupRuntimeMongo();
+  const userId = new mongoose.Types.ObjectId();
+  const profileId = new mongoose.Types.ObjectId();
+  const replacementProfileId = new mongoose.Types.ObjectId();
+  const profile = {
+    _id: profileId,
+    userId,
+    version: 1,
+    monthlyTakeHome: 120000,
+    monthlySavings: 30000,
+    age: 35,
+    riskTolerance: 'Moderate',
+    hasLumpSum: false,
+    lumpSumAmount: 0,
+    investmentGoals: ['Wealth Growth'],
+    investmentHorizonYears: 10,
+  };
+  await FinancialProfileState.create({
+    userId, currentProfileId: profileId, revision: 1, promotionFence: 0, resolutionStatus: 'CURRENT',
+  });
+  const profileModel = { findOne: () => ({ lean: async () => profile }) };
+  const recommendationModel = {
+    findOne() {
+      const query = { sort() { return query; }, lean: async () => null };
+      return query;
+    },
+  };
+  let promotedBetweenInspectionAndPublish = false;
+  const profileStateModel = {
+    findOne: (...args) => FinancialProfileState.findOne(...args),
+    async updateOne(filter, update, options) {
+      if (!promotedBetweenInspectionAndPublish && filter.currentProfileId
+          && String(filter.currentProfileId) === String(profileId)) {
+        promotedBetweenInspectionAndPublish = true;
+        const promoted = await FinancialProfileState.updateOne({
+          userId, currentProfileId: profileId, revision: 1, resolutionStatus: 'CURRENT',
+        }, {
+          $set: { currentProfileId: replacementProfileId, revision: 2 },
+          $inc: { promotionFence: 1 },
+        });
+        assert.equal(promoted.modifiedCount, 1);
+      }
+      return FinancialProfileState.updateOne(filter, update, options);
+    },
+  };
+  try {
+    const pendingInspection = inspectPlanHealth({
+      userId,
+      profileId,
+      profileModel,
+      profileStateModel,
+      eventModel: PlanHealthEvent,
+      mongo: mongoose,
+      dependencies: {
+        profileModel,
+        recommendationModel,
+        auditModel: null,
+      },
+    });
+    await assert.rejects(pendingInspection, error => error.code === 'PLAN_HEALTH_PROFILE_SUPERSEDED');
+    assert.equal(promotedBetweenInspectionAndPublish, true, 'the test switches the canonical profile at the publication CAS boundary');
+    assert.equal(await PlanHealthEvent.countDocuments({ userId, profileId }), 0,
+      'late inspection cannot publish active health against a historical profile');
+    const state = await FinancialProfileState.findOne({ userId }).lean();
+    assert.equal(String(state.currentProfileId), String(replacementProfileId));
+    assert.equal(state.revision, 2);
+  } finally {
+    await Promise.all([
+      PlanHealthEvent.deleteMany({ userId, profileId }),
+      FinancialProfileState.deleteMany({ userId }),
+    ]);
     await teardownTestDatabase();
   }
 });

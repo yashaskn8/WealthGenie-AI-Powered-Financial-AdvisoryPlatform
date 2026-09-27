@@ -64,6 +64,11 @@ export function createMcpRuntime({ toolTimeoutMs = 30000, shutdownGraceMs = 1000
       controller.abort(reason);
       rejectAbort(reason);
     };
+    const abortWithReason = reason => {
+      if (controller.signal.aborted) return;
+      controller.abort(reason);
+      rejectAbort(reason);
+    };
     if (parentSignal) {
       parentAbortHandler = () => abort('MCP_CLIENT_CANCELLED', 'The MCP request was cancelled.');
       if (parentSignal.aborted) parentAbortHandler();
@@ -86,7 +91,7 @@ export function createMcpRuntime({ toolTimeoutMs = 30000, shutdownGraceMs = 1000
       notifyIdle();
     });
     void settled.catch(() => {});
-    return Object.freeze({ result: Promise.race([work, aborted]), settled, signal: controller.signal });
+    return Object.freeze({ result: Promise.race([work, aborted]), settled, signal: controller.signal, abort: abortWithReason });
   }
 
   async function drain({ graceMs = shutdownGraceMs } = {}) {

@@ -92,7 +92,7 @@ export const PLAN_REVIEW_BUDGETS = Object.freeze({
 });
 export const PLAN_REVIEW_CHECKPOINT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
-export function buildPlanReviewSnapshotBinding({ userId, profileId, currentState = null, freshness = null }) {
+export function buildPlanReviewSnapshotBinding({ userId, profileId, currentState = null, freshness = null, financialProfileStateRevision = null }) {
   const recommendation = currentState?.recommendation || null;
   const allocation = currentState?.allocationRevision || currentState?.currentAllocation || null;
   const provenance = currentState?.provenance || {};
@@ -102,6 +102,11 @@ export function buildPlanReviewSnapshotBinding({ userId, profileId, currentState
     schemaVersion: 'plan-review-source-binding-1.0.0',
     userId: String(userId),
     profileId: String(profileId),
+    financialProfileStateRevision: financialProfileStateRevision !== null
+      && financialProfileStateRevision !== undefined
+      && Number.isSafeInteger(Number(financialProfileStateRevision))
+      ? Number(financialProfileStateRevision)
+      : null,
     profileVersion: Number.isInteger(Number(profileVersion)) ? Number(profileVersion) : null,
     profileInputHash: recommendation?.profileInputHash || provenance.profileInputHash || null,
     recommendationId: recommendation?._id ? String(recommendation._id) : null,

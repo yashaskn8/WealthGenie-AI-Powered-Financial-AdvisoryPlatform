@@ -4,6 +4,7 @@ const planHealthInspectionFenceSchema = new mongoose.Schema({
   _id: { type: String, required: true },
   periodKey: { type: String, required: true },
   profileId: { type: mongoose.Schema.Types.ObjectId, ref: 'FinancialProfile', required: true },
+  profileStateRevision: { type: Number, min: 1, required: true, validate: Number.isSafeInteger },
   owner: { type: String, required: true },
   executionGeneration: { type: Number, min: 1, required: true },
   status: {

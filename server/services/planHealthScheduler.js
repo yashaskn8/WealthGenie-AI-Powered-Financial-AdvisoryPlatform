@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { trace } from '../config/tracing.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import PlanHealthInspectionFence from '../models/PlanHealthInspectionFence.js';
 import PlanHealthSchedulerLease from '../models/PlanHealthSchedulerLease.js';
 import { inspectPlanHealth } from './planHealthMonitor.js';
@@ -142,6 +143,7 @@ async function inspectWithDeadline({
     tokenId: crypto.randomUUID(),
     periodKey: leaseFence.periodKey,
     profileId: profile._id,
+    profileStateRevision: profile.financialProfileStateRevision,
     owner: leaseFence.owner,
     executionGeneration: leaseFence.executionGeneration,
   };
@@ -149,6 +151,7 @@ async function inspectWithDeadline({
     _id: publicationFence.tokenId,
     periodKey: publicationFence.periodKey,
     profileId: profile._id,
+    profileStateRevision: profile.financialProfileStateRevision,
     owner: publicationFence.owner,
     executionGeneration: publicationFence.executionGeneration,
     status: 'RUNNING',
@@ -187,6 +190,7 @@ async function inspectWithDeadline({
     const result = await inspect({
       userId: profile.userId,
       profileId: profile._id,
+      profileStateRevision: profile.financialProfileStateRevision,
       signal: combinedSignal,
       assertLease,
       leaseFence,
@@ -265,6 +269,7 @@ async function runBoundedBatch({
 
 export async function runPlanHealthScan({
   profileModel = FinancialProfile,
+  profileStateModel = FinancialProfileState,
   leaseModel = PlanHealthSchedulerLease,
   publicationFenceModel = PlanHealthInspectionFence,
   inspect = inspectPlanHealth,
@@ -340,15 +345,47 @@ export async function runPlanHealthScan({
   let scanned = 0;
   let events = 0;
   let failures = 0;
-  let cursor = lease.cursor || null;
+  // Keep this separate from the legacy profile-ID cursor. A running scan
+  // created before deployment must not reinterpret that cursor as a user ID.
+  let cursor = lease.profileStateCursor || null;
   try {
     while (true) {
       await assertLease();
-      const filter = cursor ? { _id: { $gt: cursor } } : {};
-      const query = profileModel.find(filter).sort({ _id: 1 }).limit(batchSize);
-      const profiles = await (query.lean ? query.lean() : query);
+      const filter = cursor ? { userId: { $gt: cursor } } : {};
+      const query = profileStateModel.find(filter).sort({ userId: 1 }).limit(batchSize);
+      const profileStates = await (query.lean ? query.lean() : query);
       throwIfAborted(signal);
-      if (!profiles?.length) break;
+      if (!profileStates?.length) break;
+      const currentStates = profileStates.filter(state => (
+        state.resolutionStatus === 'CURRENT'
+        && state.currentProfileId
+        && Number.isSafeInteger(Number(state.revision))
+        && Number(state.revision) > 0
+      ));
+      const invalidStateCount = profileStates.filter(state => (
+        !(state.resolutionStatus === 'NO_CURRENT' && !state.currentProfileId)
+        && !(state.resolutionStatus === 'CURRENT' && state.currentProfileId
+          && Number.isSafeInteger(Number(state.revision)) && Number(state.revision) > 0)
+      )).length;
+      const profileIds = currentStates.map(state => state.currentProfileId);
+      const profileQuery = profileIds.length ? profileModel.find({ _id: { $in: profileIds } }) : null;
+      const ownedProfiles = profileQuery
+        ? await (profileQuery.lean ? profileQuery.lean() : profileQuery)
+        : [];
+      const profilesById = new Map((ownedProfiles || []).map(profile => [String(profile._id), profile]));
+      let ownershipFailures = 0;
+      const profiles = currentStates.flatMap(state => {
+        const profile = profilesById.get(String(state.currentProfileId));
+        if (!profile || String(profile.userId) !== String(state.userId)) {
+          ownershipFailures += 1;
+          return [];
+        }
+        return [{
+          _id: state.currentProfileId,
+          userId: state.userId,
+          financialProfileStateRevision: Number(state.revision),
+        }];
+      });
 
       const batchSpan = tracer.startSpan('agent.plan_health.batch', { attributes: { 'agent.type': 'PLAN_HEALTH' } });
       const results = await runBoundedBatch({
@@ -366,7 +403,13 @@ export async function runPlanHealthScan({
       batchSpan.end();
       throwIfAborted(signal);
       const batchEvents = results.filter(item => item.ok && item.result?.status === 'ATTENTION').length;
-      const batchFailures = results.filter(item => !item.ok).length;
+      const batchFailures = results.filter(item => !item.ok).length + invalidStateCount + ownershipFailures;
+      if (invalidStateCount || ownershipFailures) {
+        logger.warn('Plan Health skipped malformed canonical profile state rows', {
+          invalidStateCount,
+          ownershipFailures,
+        });
+      }
       if (batchFailures) {
         for (const item of results.filter(result => !result.ok)) {
           if (item.error?.code === 'PLAN_HEALTH_PROFILE_TIMEOUT') PrometheusMetrics.inc('plan_health_profile_timeouts_total');
@@ -376,7 +419,7 @@ export async function runPlanHealthScan({
         }
       }
 
-      const lastProfileId = profiles[profiles.length - 1]._id;
+      const lastProfileId = profileStates[profileStates.length - 1].userId;
       const progressAt = new Date();
       const progress = await leaseModel.updateOne({
         _id: periodKey,
@@ -386,11 +429,11 @@ export async function runPlanHealthScan({
         leaseUntil: { $gt: progressAt },
       }, {
         $set: {
-          cursor: lastProfileId,
+          profileStateCursor: lastProfileId,
           lastHeartbeatAt: progressAt,
           leaseUntil: new Date(progressAt.getTime() + leaseMs),
         },
-        $inc: { usersScanned: profiles.length, eventsCreated: batchEvents, failureCount: batchFailures },
+        $inc: { usersScanned: profileStates.length, eventsCreated: batchEvents, failureCount: batchFailures },
       });
       if (!isModified(progress)) {
         leaseLost = true;
@@ -398,11 +441,11 @@ export async function runPlanHealthScan({
         throw leaseLostError();
       }
       cursor = lastProfileId;
-      scanned += profiles.length;
+      scanned += profileStates.length;
       events += batchEvents;
       failures += batchFailures;
-      PrometheusMetrics.inc('plan_health_users_scanned_total', profiles.length);
-      if (profiles.length < batchSize) break;
+      PrometheusMetrics.inc('plan_health_users_scanned_total', profileStates.length);
+      if (profileStates.length < batchSize) break;
     }
 
     await heartbeatInFlight;

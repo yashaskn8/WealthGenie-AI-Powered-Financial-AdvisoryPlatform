@@ -10,7 +10,9 @@ import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import RecommendationState from '../models/RecommendationState.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import AuditRecord from '../models/AuditRecord.js';
+import IdempotencyKey from '../models/IdempotencyKey.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
 import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
@@ -150,7 +152,24 @@ test('profile completion persists one profile, recommendation, and audit and rep
       AuditRecord.countDocuments({ userId }),
     ]), [2, 2, 2]);
 
-    const profileId = completed.profile.profileId;
+    const completionReplayAfterPromotion = await fetch(`${baseUrl}/api/profile/complete`, {
+      method: 'POST',
+      headers: completeHeaders,
+      body: JSON.stringify(payload),
+    });
+    const replayAfterPromotion = await completionReplayAfterPromotion.json();
+    assert.equal(completionReplayAfterPromotion.status, 200, JSON.stringify(replayAfterPromotion));
+    assert.equal(replayAfterPromotion.profile.profileId, miss.profile.profileId);
+    assert.equal(replayAfterPromotion.recommendation.profileId, miss.profile.profileId);
+    assert.equal(replayAfterPromotion.recommendation.response_state, 'CURRENT');
+    assert.equal(replayAfterPromotion.operation_result?.committed, true, JSON.stringify(replayAfterPromotion));
+    assert.equal(replayAfterPromotion.operation_result.generated_profile_id, completed.profile.profileId);
+    assert.equal(replayAfterPromotion.operation_result.superseded_before_response, true);
+    const profileState = await FinancialProfileState.findOne({ userId }).lean();
+    assert.equal(String(profileState.currentProfileId), miss.profile.profileId);
+    assert.equal(profileState.revision, 2);
+
+    const profileId = miss.profile.profileId;
     const profileScope = { userId, profileId };
     const profileDocumentScope = { userId, _id: profileId };
     const originalState = await RecommendationState.findOne(profileScope).lean();
@@ -164,7 +183,7 @@ test('profile completion persists one profile, recommendation, and audit and rep
     const updatePayloadAtVersionOne = {
       ...payload,
       monthly_take_home: payload.monthly_take_home + 5000,
-      version: completed.profile.version,
+      version: miss.profile.version,
     };
 
     const failureCases = [
@@ -307,7 +326,7 @@ test('profile completion persists one profile, recommendation, and audit and rep
     });
     const replayFirst = await replayFirstResponse.json();
     assert.equal(replayFirstResponse.status, 200, JSON.stringify(replayFirst));
-    assert.equal(replayFirst.profile.version, 3);
+    assert.equal(replayFirst.profile?.version, 3, JSON.stringify(replayFirst));
     assert.equal(replayFirst.recommendation.recommendationId, secondUpdate.recommendation.recommendationId);
     assert.equal(replayFirst.recommendation.response_state, 'CURRENT');
 
@@ -482,6 +501,99 @@ test('profile completion persists one profile, recommendation, and audit and rep
     await FinancialProfile.deleteMany({ userId }).catch(() => {});
     await Recommendation.deleteMany({ userId }).catch(() => {});
     await AuditRecord.collection.deleteMany({ userId }).catch(() => {});
+    await teardownTestDatabase();
+  }
+});
+
+test('50 concurrent profile completions from one captured state revision produce exactly one canonical promotion', { timeout: 120_000 }, async () => {
+  let server;
+  let baseUrl;
+  let removeTestHook;
+  const userId = new mongoose.Types.ObjectId();
+  const headers = {
+    Authorization: `Bearer ${signToken(userId)}`,
+    'Content-Type': 'application/json',
+  };
+  const requestCount = 50;
+  let capturedCount = 0;
+  let signalAllCaptured;
+  const allCaptured = new Promise(resolve => { signalAllCaptured = resolve; });
+  let releaseRequests;
+  const capturedGate = new Promise(resolve => { releaseRequests = resolve; });
+
+  try {
+    await setupTestDatabase({ requireReplicaSet: true });
+    const app = express();
+    app.use(express.json());
+    app.use('/api/profile', profileRoutes);
+    app.use(errorHandler);
+    await new Promise(resolve => {
+      server = app.listen(0, '127.0.0.1', () => {
+        baseUrl = `http://127.0.0.1:${server.address().port}`;
+        resolve();
+      });
+    });
+
+    removeTestHook = installFinancialStateTestHook(async (boundary, context) => {
+      if (boundary !== 'profile.complete.afterStateCapture') return;
+      assert.equal(context.profileStateBinding.revision, 0);
+      assert.equal(context.profileStateBinding.currentProfileId, null);
+      capturedCount += 1;
+      if (capturedCount === requestCount) signalAllCaptured();
+      await capturedGate;
+    });
+
+    const requests = Array.from({ length: requestCount }, (_, index) => {
+      const payload = canonicalProfilePayload();
+      payload.monthly_savings += index;
+      return fetch(`${baseUrl}/api/profile/complete`, {
+        method: 'POST',
+        headers: { ...headers, 'Idempotency-Key': crypto.randomUUID() },
+        body: JSON.stringify(payload),
+      });
+    });
+    await allCaptured;
+    assert.equal(capturedCount, requestCount, 'all contenders must bind the same pre-computation profile-state revision');
+    releaseRequests();
+
+    const responses = await Promise.all(requests);
+    const bodies = await Promise.all(responses.map(response => response.json()));
+    const winners = responses.map((response, index) => ({ response, body: bodies[index] }))
+      .filter(item => item.response.status === 200);
+    const conflicts = responses.map((response, index) => ({ response, body: bodies[index] }))
+      .filter(item => item.response.status === 409);
+    assert.equal(winners.length, 1, JSON.stringify(bodies.filter((_, index) => responses[index].status !== 200 && responses[index].status !== 409)));
+    assert.equal(conflicts.length, requestCount - 1);
+    assert.ok(conflicts.every(item => item.body.code === 'PROFILE_STATE_VERSION_CONFLICT'), JSON.stringify(conflicts.map(item => item.body)));
+    assert.equal(winners[0].body.recommendation.response_state, 'CURRENT');
+    assert.equal(winners[0].body.profile.profileId, winners[0].body.recommendation.profileId);
+
+    const [profiles, recommendations, revisions, audits, currentState] = await Promise.all([
+      FinancialProfile.countDocuments({ userId }),
+      Recommendation.countDocuments({ userId }),
+      RecommendationAllocationRevision.countDocuments({ userId }),
+      AuditRecord.countDocuments({ userId }),
+      FinancialProfileState.findOne({ userId }).lean(),
+    ]);
+    assert.deepEqual([profiles, recommendations, revisions, audits], [1, 1, 1, 1]);
+    assert.equal(currentState.resolutionStatus, 'CURRENT');
+    assert.equal(currentState.revision, 1);
+    assert.equal(String(currentState.currentProfileId), winners[0].body.profile.profileId);
+    const auditVerification = await verifyAuditChain(userId);
+    assert.equal(auditVerification.valid, true, JSON.stringify(auditVerification));
+  } finally {
+    releaseRequests();
+    removeTestHook?.();
+    if (server) await new Promise(resolve => server.close(resolve));
+    await Promise.all([
+      FinancialProfile.deleteMany({ userId }).catch(() => {}),
+      FinancialProfileState.deleteMany({ userId }).catch(() => {}),
+      Recommendation.deleteMany({ userId }).catch(() => {}),
+      RecommendationAllocationRevision.collection.deleteMany({ userId }).catch(() => {}),
+      RecommendationState.deleteMany({ userId }).catch(() => {}),
+      IdempotencyKey.deleteMany({ userId }).catch(() => {}),
+      AuditRecord.collection.deleteMany({ userId }).catch(() => {}),
+    ]);
     await teardownTestDatabase();
   }
 });

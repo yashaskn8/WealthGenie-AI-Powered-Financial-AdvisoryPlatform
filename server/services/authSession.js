@@ -17,6 +17,7 @@ export function createSessionToken(user, env = process.env) {
       userId: user._id,
       email: user.email,
       role: user.role || 'user',
+      token_use: 'session',
       jti: crypto.randomUUID(),
     },
     env.JWT_SECRET,

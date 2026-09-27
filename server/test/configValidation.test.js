@@ -165,12 +165,15 @@ test('MCP production remote enablement requires one exact audience and scope plu
     NODE_ENV: 'production',
     MCP_ENABLED: 'true',
     MCP_REMOTE_ENABLED: 'true',
+    MCP_JWT_SECRET: 'production-mcp-signing-secret-value-at-least-32-chars',
+    MCP_JWT_ISSUER: 'wealthgenie-mcp',
     MCP_JWT_AUDIENCE: 'wealthgenie-mcp',
     MCP_REQUIRED_SCOPE: 'mcp:tools',
     MCP_ALLOWED_HOSTS: 'mcp.wealthgenie.example',
     MCP_ALLOWED_ORIGINS: 'https://app.wealthgenie.example',
     REQUIRE_REDIS: 'true',
     REDIS_URL: 'rediss://redis.wealthgenie.example:6379',
+    TRUSTED_PROXY_CIDRS: '10.0.0.0/8,2001:db8::/32',
   };
   assert.equal(validateEnvironmentConfig(productionBase).valid, true);
   assert.doesNotThrow(() => assertValidRuntimeConfig(getRuntimeConfig(productionBase)));
@@ -186,4 +189,15 @@ test('MCP production remote enablement requires one exact audience and scope plu
   const malformedRedisUrl = validateEnvironmentConfig({ ...productionBase, REDIS_URL: 'https://redis.example' });
   assert.equal(malformedRedisUrl.valid, false);
   assert.ok(malformedRedisUrl.errors.some(error => error.includes('valid redis:// or rediss:// URL')));
+  const malformedTrustedProxy = validateEnvironmentConfig({ ...productionBase, TRUSTED_PROXY_CIDRS: '10.0.0.0/not-a-mask' });
+  assert.equal(malformedTrustedProxy.valid, false);
+  assert.ok(malformedTrustedProxy.errors.some(error => error.includes('valid proxy CIDR/range')));
+  const missingTransportBoundary = validateEnvironmentConfig({ ...productionBase, TRUSTED_PROXY_CIDRS: '' });
+  assert.equal(missingTransportBoundary.valid, false);
+  assert.ok(missingTransportBoundary.errors.some(error => error.includes('TRUSTED_PROXY_CIDRS')));
+  const directTls = validateEnvironmentConfig({ ...productionBase, TRUSTED_PROXY_CIDRS: '', MCP_DIRECT_TLS: 'true' });
+  assert.equal(directTls.valid, true, directTls.errors.join('; '));
+  const malformedDirectTls = validateEnvironmentConfig({ ...productionBase, MCP_DIRECT_TLS: 'yes' });
+  assert.equal(malformedDirectTls.valid, false);
+  assert.ok(malformedDirectTls.errors.some(error => error.includes('MCP_DIRECT_TLS must be true or false')));
 });

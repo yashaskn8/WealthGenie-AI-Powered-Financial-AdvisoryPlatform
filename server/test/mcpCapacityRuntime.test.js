@@ -81,6 +81,18 @@ describe('MCP capacity fail-closed and lease controls', () => {
           rateCounts.set(keys[0], count);
           return [count, 60000];
         }
+        if (script.includes("redis.call('ZSCORE'")) {
+          const user = sets.get(keys[0]) || new Map();
+          const global = sets.get(keys[1]) || new Map();
+          const [token, ttl] = args;
+          if (user.get(token) !== global.get(token) || Number(user.get(token)) <= now) return 0;
+          const expiry = now + Number(ttl);
+          user.set(token, expiry);
+          global.set(token, expiry);
+          sets.set(keys[0], user);
+          sets.set(keys[1], global);
+          return 1;
+        }
         if (script.includes("local redisTime = redis.call('TIME')")) {
           const maxUser = Number(args[0]);
           const maxGlobal = Number(args[1]);
@@ -118,6 +130,87 @@ describe('MCP capacity fail-closed and lease controls', () => {
     assert.equal(await releaseOld(), false);
     assert.equal([...sets.values()][0].size, 1);
     assert.equal(await releaseNew(), true);
+  });
+
+  it('renews distributed capacity leases past their initial expiry while retaining token fencing', async () => {
+    let now = 1000;
+    let heartbeat;
+    let signalRenewed;
+    const renewed = new Promise(resolve => { signalRenewed = resolve; });
+    const sets = new Map();
+    const rates = new Map();
+    const fakeRedis = {
+      isReady: true,
+      async eval(script, { keys, arguments: args }) {
+        if (script.includes("redis.call('INCR'")) {
+          const count = (rates.get(keys[0]) || 0) + 1;
+          rates.set(keys[0], count);
+          return [count, 60000, `${keys[0]}:window`];
+        }
+        if (script.includes("redis.call('ZSCORE'")) {
+          const [token, ttl] = args;
+          const user = sets.get(keys[0]) || new Map();
+          const global = sets.get(keys[1]) || new Map();
+          if (user.get(token) !== global.get(token) || Number(user.get(token)) <= now) return 0;
+          const expiry = now + Number(ttl);
+          user.set(token, expiry);
+          global.set(token, expiry);
+          sets.set(keys[0], user);
+          sets.set(keys[1], global);
+          signalRenewed();
+          return 1;
+        }
+        if (script.includes('ZREMRANGEBYSCORE')) {
+          const [,, ttl, token] = args;
+          const expiry = now + Number(ttl);
+          for (const key of keys) {
+            const entries = sets.get(key) || new Map();
+            for (const [member, score] of entries) if (score <= now) entries.delete(member);
+            entries.set(token, expiry);
+            sets.set(key, entries);
+          }
+          return 1;
+        }
+        const [token] = args;
+        let removed = 0;
+        for (const key of keys) removed = Math.max(removed, sets.get(key)?.delete(token) ? 1 : 0);
+        return removed;
+      },
+    };
+    const capacity = createMcpCapacityController({
+      config: testConfig({ maxConcurrentPerUser: 1, permitTtlMs: 1000 }),
+      env: { NODE_ENV: 'production' },
+      getRedisState: () => ({ available: true, client: fakeRedis }),
+      now: () => now,
+      scheduleHeartbeat(callback) { heartbeat = callback; return { unref() {} }; },
+      cancelHeartbeat() {},
+      keyPrefix: 'wg:{mcp}:renewal-contract:',
+    });
+    const release = await capacity.acquireToolPermit('user-a', 'sip_projection', 'LOW');
+    now = 1800;
+    heartbeat();
+    await renewed;
+    const owned = [...sets.values()].filter(entries => entries.has(release.token));
+    assert.equal(owned.length, 2);
+    assert.ok(owned.every(entries => entries.get(release.token) === 2800));
+    assert.equal(await release(), true);
+  });
+
+  it('keeps readiness down when Redis revocation GET or a required EVAL fails', async () => {
+    const clients = [
+      { isReady: true, async get() { throw new Error('GET denied'); }, async eval() { return [1, 60000, 'rate-key']; }, async del() {} },
+      { isReady: true, async get() { return null; }, async eval() { throw new Error('EVAL denied'); }, async del() {} },
+    ];
+    for (const [index, client] of clients.entries()) {
+      const capacity = createMcpCapacityController({
+        config: { ...testConfig(), enabled: true, remoteEnabled: true, isProduction: true },
+        env: { NODE_ENV: 'production' },
+        getRedisState: () => ({ available: true, client }),
+        keyPrefix: `wg:{mcp}:readiness-test-${index}:`,
+      });
+      assert.equal(await capacity.probe(), false);
+      assert.equal(capacity.isReady(), false);
+    }
   });
 });
 

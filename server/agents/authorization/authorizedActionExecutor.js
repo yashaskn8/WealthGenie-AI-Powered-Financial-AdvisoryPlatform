@@ -3,6 +3,7 @@ import UserIntentMandate from '../../models/UserIntentMandate.js';
 import ExecutionReceipt from '../../models/ExecutionReceipt.js';
 import AuthorizedExecutionAttempt from '../../models/AuthorizedExecutionAttempt.js';
 import FinancialProfile from '../../models/FinancialProfile.js';
+import { resolveCurrentFinancialProfile } from '../../services/currentFinancialProfile.js';
 import Recommendation from '../../models/Recommendation.js';
 import { buildRecommendationProfile } from '../../services/recommendationProfile.js';
 import { computeCoreRecommendation, assertCoreResultFinalSafety } from '../../services/coreRecommendation.js';
@@ -218,6 +219,11 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
         ? await resolve(models.recommendationModel.findOne({ _id: stored.recommendationId, profileId: stored.profileId, userId }))
         : null;
       if (!profile) throw mandateError('MANDATE_STALE', 'The financial profile required by this authorization is no longer available.');
+      const currentProfileResolver = dependencies.currentProfileResolver || resolveCurrentFinancialProfile;
+      const profileState = await currentProfileResolver({ userId, profileModel: models.profileModel });
+      if (!profileState.profile || String(profileState.profile._id) !== String(stored.profileId)) {
+        throw mandateError('MANDATE_STALE', 'The approved profile is no longer the canonical current profile.');
+      }
       const snapshotResolver = dependencies.planReviewSnapshotResolver || resolvePlanReviewSnapshot;
       const currentPlanReviewSnapshot = await snapshotResolver({
         userId,
@@ -325,7 +331,16 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
               core.recommendationData = await committedOperationRecommendation(models, userId, stored.profileId, mandateId);
               core.profileInputHash = core.recommendationData.profileInputHash;
             } else {
-              persisted = await persistAdvisoryAtomically({ recommendation: core.recommendationData, auditRecord: core.auditRecordData, response: core.response, idempotencyClaim });
+              persisted = await persistAdvisoryAtomically({
+                recommendation: core.recommendationData,
+                auditRecord: core.auditRecordData,
+                response: core.response,
+                idempotencyClaim,
+                profileStateBinding: {
+                  revision: Number(profileState.state.revision),
+                  currentProfileId: String(profileState.profile._id),
+                },
+              });
               core.recommendationData = await committedOperationRecommendation(models, userId, stored.profileId, mandateId);
               core.profileInputHash = core.recommendationData.profileInputHash;
             }

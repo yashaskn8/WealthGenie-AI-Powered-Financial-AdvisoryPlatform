@@ -15,11 +15,15 @@ import { withServer, rawRequest } from '../test-utils/httpTestUtils.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret-wealthgenie-phase6';
 process.env.JWT_SECRET = JWT_SECRET;
+const MCP_JWT_SECRET = 'test-only-mcp-signing-secret-which-is-distinct-and-long';
+const MCP_JWT_ISSUER = 'wealthgenie-test-mcp';
 const userId = '60d5ecb8b3b3a72d9c8e4a11';
-const token = jwt.sign({ userId, jti: 'phase6-test-token' }, JWT_SECRET, { expiresIn: '1h' });
+const token = jwt.sign({ userId, jti: 'phase6-test-token', token_use: 'mcp', scope: 'mcp:tools' }, MCP_JWT_SECRET, {
+  expiresIn: '1h', issuer: MCP_JWT_ISSUER, audience: 'wealthgenie-mcp',
+});
 
 function dependencies(overrides = {}) {
-  const env = { NODE_ENV: 'test', JWT_SECRET };
+  const env = { NODE_ENV: 'test', JWT_SECRET, MCP_JWT_SECRET, MCP_JWT_ISSUER, MCP_JWT_AUDIENCE: 'wealthgenie-mcp', MCP_REQUIRED_SCOPE: 'mcp:tools' };
   const baseConfig = getRuntimeConfig(env);
   const config = {
     ...baseConfig,
@@ -28,6 +32,7 @@ function dependencies(overrides = {}) {
       ...(overrides.maxRequestsPerWindow ? { maxRequestsPerWindow: overrides.maxRequestsPerWindow } : {}),
         ...(overrides.mcp || {}),
     },
+    ...(overrides.toolRegistry ? { toolRegistry: overrides.toolRegistry } : {}),
   };
   const runtime = createMcpRuntime({ toolTimeoutMs: 2000, shutdownGraceMs: 100 });
   runtime.markReady();
@@ -36,7 +41,7 @@ function dependencies(overrides = {}) {
     env,
     getRedisState: () => ({ available: false, client: null }),
   });
-  return { config, env, runtime, capacity };
+  return { config, env, runtime, capacity, ...(overrides.toolRegistry ? { toolRegistry: overrides.toolRegistry } : {}) };
 }
 
 function buildApp(options = {}) {
@@ -143,13 +148,17 @@ describe('MCP stateless Streamable HTTP boundary', () => {
   });
 
   it('propagates an HTTP client disconnect to running tool work and releases its active slot', async () => {
-    const { app, runtime } = buildApp();
-    const original = FinancialToolRegistry.executeTool;
+    const registry = {
+      getTool: (...args) => FinancialToolRegistry.getTool(...args),
+      listMcpTools: (...args) => FinancialToolRegistry.listMcpTools(...args),
+      executeTool: null,
+    };
+    const { app, runtime } = buildApp({ toolRegistry: registry });
     let markStarted;
     let markAborted;
     const started = new Promise(resolve => { markStarted = resolve; });
     const aborted = new Promise(resolve => { markAborted = resolve; });
-    FinancialToolRegistry.executeTool = async (_name, _args, context) => new Promise(resolve => {
+    registry.executeTool = async (_name, _args, context) => new Promise(resolve => {
       const onAbort = () => {
         markAborted(context.signal.reason?.code);
         resolve({ success: true, result: { futureValue: 1 } });
@@ -174,9 +183,7 @@ describe('MCP stateless Streamable HTTP boundary', () => {
         assert.equal(drain.drained, true);
         assert.equal(runtime.snapshot().activeTools, 0);
       });
-    } finally {
-      FinancialToolRegistry.executeTool = original;
-    }
+    } finally { /* isolated injected registry is discarded */ }
   });
 
   it('rejects unknown routes, legacy SSE, non-allowlisted Host and Origin', async () => {
@@ -205,13 +212,16 @@ describe('MCP stateless Streamable HTTP boundary', () => {
   });
 
   it('contains unexpected MCP executor exception text and unrecognized internal codes', async () => {
-    const { app } = buildApp();
-    const original = FinancialToolRegistry.executeTool;
-    FinancialToolRegistry.executeTool = async () => {
+    const registry = {
+      getTool: (...args) => FinancialToolRegistry.getTool(...args),
+      listMcpTools: (...args) => FinancialToolRegistry.listMcpTools(...args),
+      executeTool: async () => {
       const error = new Error('DATABASE_PASSWORD=secret C:/internal/path.js raw investor profile');
       error.code = 'MCP_DATABASE_PASSWORD_SECRET';
       throw error;
+      },
     };
+    const { app } = buildApp({ toolRegistry: registry });
     try {
       await withServer(app, async baseUrl => {
         const { client } = await makeClient(baseUrl);
@@ -229,9 +239,7 @@ describe('MCP stateless Streamable HTTP boundary', () => {
           await client.close();
         }
       });
-    } finally {
-      FinancialToolRegistry.executeTool = original;
-    }
+    } finally { /* isolated injected registry is discarded */ }
   });
 
   it('rejects disabled remote access and returns stable request-limit errors', async () => {

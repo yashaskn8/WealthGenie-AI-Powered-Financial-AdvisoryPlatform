@@ -6,6 +6,8 @@ import { customGoalSchema, customGoalUpdateSchema, goalSimulationSchema, validat
 import Goal from '../models/Goal.js';
 import RecommendationState from '../models/RecommendationState.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
+import { requireCurrentFinancialProfile, resolveCurrentFinancialProfile } from '../services/currentFinancialProfile.js';
 import { reverseSIP, runMonteCarloWithGoal } from '../services/monteCarloEngine.js';
 import { buildCovarianceMatrix, portfolioReturn, portfolioVol } from '../services/portfolioEngine.js';
 import { getGoalAdvisory } from '../services/geminiService.js';
@@ -72,7 +74,7 @@ function toDecimalRate(value) {
 
 /** Uses only the persisted authoritative recommendation for this exact profile. */
 export async function _getBlendedPortfolioMetrics(userId, profileId, profile = undefined) {
-  const state = await requireFreshRecommendationState({ userId, profileId, profile });
+  const state = await resolveCurrentGoalSourceState({ userId, profileId, profile });
   const recommendation = state.currentRecommendationView;
   const instruments = recommendation?.instruments;
   if (!instruments?.length) {
@@ -116,6 +118,18 @@ export async function _getBlendedPortfolioMetrics(userId, profileId, profile = u
     recommendationFingerprint: state.recommendationFingerprint || null,
     state,
   };
+}
+
+async function resolveCurrentGoalSourceState({ userId, profileId, profile } = {}) {
+  const currentProfile = await requireCurrentFinancialProfile({ userId, profileId });
+  const state = await requireFreshRecommendationState({ userId, profileId, profile: profile || currentProfile.profile });
+  state.financialProfileState = {
+    stateId: currentProfile.state._id,
+    currentProfileId: String(currentProfile.state.currentProfileId),
+    revision: Number(currentProfile.state.revision),
+    promotionFence: Number(currentProfile.state.promotionFence),
+  };
+  return state;
 }
 
 function validateMonteCarlo(result) {
@@ -223,8 +237,15 @@ function plannedStateMatches(current, planned) {
 }
 
 async function assertGoalPlanStateCurrent({ userId, profileId, profile, plannedState }) {
-  const current = await requireFreshRecommendationState({ userId, profileId, profile });
+  const current = await resolveCurrentGoalSourceState({ userId, profileId, profile });
   if (!plannedStateMatches(current, plannedState)) throw goalStateConflict();
+  if (!plannedState?.financialProfileState
+      || current.financialProfileState?.currentProfileId !== String(profileId)
+      || Number(current.financialProfileState?.revision) !== Number(plannedState.financialProfileState.revision)) {
+    throw createError(409, 'The canonical financial profile changed while the goal calculation was running.', 'Recalculate the goal before saving it.', {
+      code: 'PROFILE_STATE_VERSION_CONFLICT',
+    });
+  }
   return current;
 }
 
@@ -243,6 +264,15 @@ function committedGoalReconciliationError(goal, cause) {
 }
 
 async function resolveGoalResponseAfterCommit(goal, userId) {
+  let currentProfile;
+  try {
+    currentProfile = await resolveCurrentFinancialProfile({ userId, requireRecommendation: false });
+  } catch (error) {
+    throw committedGoalReconciliationError(goal, error);
+  }
+  if (!currentProfile.profile || String(currentProfile.profile._id) !== String(goal.profileId)) {
+    return { recommendation: null, financialProfileState: currentProfile.state };
+  }
   let state;
   try {
     state = await resolveCurrentRecommendationState({
@@ -258,12 +288,34 @@ async function resolveGoalResponseAfterCommit(goal, userId) {
       code: state.provenance?.reasonCode || state.provenance?.status || 'FINANCIAL_STATE_UNVERIFIABLE',
     }));
   }
+  state.financialProfileState = {
+    stateId: currentProfile.state._id,
+    currentProfileId: String(currentProfile.state.currentProfileId),
+    revision: Number(currentProfile.state.revision),
+    promotionFence: Number(currentProfile.state.promotionFence),
+  };
   return state;
 }
 
 async function holdGoalSourceState(session, { userId, profileId, state }) {
   const stateId = state?.provenance?.stateId;
-  if (!stateId || !state.recommendation?._id || !state.allocationRevision?._id) throw goalStateConflict();
+  const profileBinding = state?.financialProfileState;
+  if (!stateId || !state.recommendation?._id || !state.allocationRevision?._id
+      || !profileBinding?.stateId || Number(profileBinding.revision) < 1
+      || String(profileBinding.currentProfileId) !== String(profileId)) throw goalStateConflict();
+  const profileStateFence = await FinancialProfileState.updateOne({
+    _id: profileBinding.stateId,
+    userId,
+    currentProfileId: profileId,
+    resolutionStatus: 'CURRENT',
+    revision: profileBinding.revision,
+    promotionFence: profileBinding.promotionFence,
+  }, { $inc: { promotionFence: 1 } }).session(session);
+  if (profileStateFence.matchedCount !== 1) {
+    throw createError(409, 'The canonical financial profile changed before the goal write completed.', 'Refresh the current profile and retry.', {
+      code: 'PROFILE_STATE_VERSION_CONFLICT',
+    });
+  }
   if (state.profileVersion !== null && state.profileVersion !== undefined) {
     const profileResult = await FinancialProfile.updateOne({
       _id: profileId,
@@ -336,8 +388,8 @@ async function saveGoalWithSourceState(goal, { userId, profileId, sourceState, e
   let transactionCommitted = false;
   try {
     await session.withTransaction(async () => {
-      await holdGoalSourceState(session, { userId, profileId, state: sourceState });
       updatedGoal = await updateGoalWithCAS(goal, { userId, expectedVersion: expectedGoalVersion, session });
+      await holdGoalSourceState(session, { userId, profileId, state: sourceState });
     });
     transactionCommitted = true;
   } finally {
@@ -457,6 +509,7 @@ router.post('/create', verifyJWT, validateStrict(customGoalSchema), idempotency(
     sourceAllocationRevisionId: plan.metrics.state?.allocationRevision?._id || null,
     sourceProfileInputHash: plan.metrics.state?.recommendation?.profileInputHash || null,
     sourceProfileVersion: plan.metrics.state?.profileVersion || null,
+    sourceFinancialProfileStateRevision: plan.metrics.state?.financialProfileState?.revision ?? null,
     sourceModelVersion: plan.metrics.state?.recommendation?.modelVersion || null,
     sourceRecommendationPolicyVersion: plan.metrics.state?.recommendation?.recommendationPolicyVersion || null,
     sourceRegulatoryRuleVersion: plan.metrics.state?.recommendation?.regulatoryRuleVersion || null,
@@ -524,11 +577,22 @@ router.get('/', verifyJWT, asyncHandler(async (req, res) => {
   const stateByProfile = new Map();
   await Promise.all([...new Set(goals.map(goal => String(goal.profileId)))].map(async profileId => {
     try {
+      const profileState = await resolveCurrentFinancialProfile({ userId: req.user.userId, requireRecommendation: false });
+      if (!profileState.profile || String(profileState.profile._id) !== profileId) {
+        stateByProfile.set(profileId, { recommendation: null, financialProfileState: profileState.state });
+        return;
+      }
       const state = await resolveCurrentRecommendationState({
         userId: req.user.userId,
         profileId,
         requireFresh: false,
       });
+      state.financialProfileState = {
+        stateId: profileState.state._id,
+        currentProfileId: String(profileState.state.currentProfileId),
+        revision: Number(profileState.state.revision),
+        promotionFence: Number(profileState.state.promotionFence),
+      };
       stateByProfile.set(profileId, state);
     } catch (error) {
       stateByProfile.set(profileId, { error });
@@ -613,7 +677,7 @@ router.patch('/:goalId/refresh-advice', verifyJWT, asyncHandler(async (req, res)
   const stored = await findOwnedProfile(goal.profileId, req.user.userId);
   if (!stored) throw createError(409, 'The goal profile is unavailable.', 'Financial profile unavailable.');
   const profile = buildRecommendationProfile(stored);
-  const state = await requireFreshRecommendationState({ userId: req.user.userId, profileId: goal.profileId, profile });
+  const state = await resolveCurrentGoalSourceState({ userId: req.user.userId, profileId: goal.profileId, profile });
   const existingFreshness = assessGoalCalculationFreshness(goal, state);
   if (!existingFreshness.fresh) {
     throw createError(409, 'Goal calculation is stale for the current financial state.', 'Recalculate the goal before refreshing its advisory.', {
@@ -696,6 +760,7 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
     goal.sourceAllocationRevisionId = plan.metrics.state?.allocationRevision?._id || null;
     goal.sourceProfileInputHash = plan.metrics.state?.recommendation?.profileInputHash || null;
     goal.sourceProfileVersion = plan.metrics.state?.profileVersion || null;
+    goal.sourceFinancialProfileStateRevision = plan.metrics.state?.financialProfileState?.revision ?? null;
     goal.sourceModelVersion = plan.metrics.state?.recommendation?.modelVersion || null;
     goal.sourceRecommendationPolicyVersion = plan.metrics.state?.recommendation?.recommendationPolicyVersion || null;
     goal.sourceRegulatoryRuleVersion = plan.metrics.state?.recommendation?.regulatoryRuleVersion || null;
@@ -735,7 +800,17 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
     });
   } else {
     goal.version = expectedGoalVersion + 1;
-    persistedGoal = await updateGoalWithCAS(goal, { userId: req.user.userId, expectedVersion: expectedGoalVersion });
+    const sourceState = await resolveCurrentGoalSourceState({
+      userId: req.user.userId,
+      profileId: goal.profileId,
+      profile,
+    });
+    persistedGoal = await saveGoalWithSourceState(goal, {
+      userId: req.user.userId,
+      profileId: goal.profileId,
+      sourceState,
+      expectedGoalVersion,
+    });
   }
   await reachFinancialStateTestHook('goal.update.afterCommitBeforeResponse', {
     userId: String(req.user.userId), goalId: String(persistedGoal._id),

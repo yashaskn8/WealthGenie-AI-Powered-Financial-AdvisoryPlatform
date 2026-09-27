@@ -14,6 +14,8 @@ import {
 } from '../services/recommendationProfile.js';
 import { assessSuitabilityRisk } from '../services/riskProfiler.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import { captureProfileStateForCompletion, requireCurrentFinancialProfile, resolveCurrentFinancialProfile } from '../services/currentFinancialProfile.js';
+import { buildPostCommitProfileResponse } from '../services/advisoryResponse.js';
 import { requireFreshRecommendationState } from '../services/recommendationState.js';
 import { calculateFinancialHealthScore } from '../services/financialHealthEngine.js';
 import { redisClient, redisAvailable } from '../config/redis.js';
@@ -154,8 +156,22 @@ router.post(
     const idempotencyMs = performance.now() - idempotencyStart;
     if (idempotencyClaim.state === 'REPLAY') {
       res.setHeader('X-Cache-Lookup', 'HIT - Idempotent');
-      return res.status(idempotencyClaim.response.status).json(idempotencyClaim.response.body);
+      const priorBody = idempotencyClaim.response.body;
+      const reconciled = await buildPostCommitProfileResponse({
+        userId: req.user.userId,
+        responseTemplate: priorBody,
+        committedProfileId: priorBody?.completion?.profileId,
+        committedRecommendationId: priorBody?.completion?.recommendationId,
+        replayed: true,
+      });
+      return res.status(idempotencyClaim.response.status).json(reconciled);
     }
+
+    const profileStateBinding = await captureProfileStateForCompletion({ userId: req.user.userId });
+    await reachFinancialStateTestHook('profile.complete.afterStateCapture', {
+      userId: String(req.user.userId),
+      profileStateBinding,
+    });
 
     const profileId = new mongoose.Types.ObjectId();
     const candidateId = req.body.candidateId || null;
@@ -262,6 +278,7 @@ router.post(
         auditRecord: core.auditRecordData,
         response,
         idempotencyClaim,
+        profileStateBinding,
       });
       const transactionMs = performance.now() - transactionStart;
       if (candidateLease) await consumeProfileRecommendationCandidate(candidateLease);
@@ -304,9 +321,7 @@ router.post(
 );
 
 router.get('/current', verifyJWT, asyncHandler(async (req, res) => {
-  const profile = await FinancialProfile.findOne({ userId: req.user.userId })
-    .sort({ createdAt: -1 })
-    .lean();
+  const { profile } = await resolveCurrentFinancialProfile({ userId: req.user.userId });
   if (!profile) {
     throw createError(404, 'Financial profile not found', 'Financial profile not found.');
   }
@@ -314,7 +329,7 @@ router.get('/current', verifyJWT, asyncHandler(async (req, res) => {
 }));
 
 router.get('/:profileId/health-score', verifyJWT, asyncHandler(async (req, res) => {
-  const profile = await FinancialProfile.findOne({ _id: req.params.profileId, userId: req.user.userId }).lean();
+  const { profile } = await requireCurrentFinancialProfile({ userId: req.user.userId, profileId: req.params.profileId });
   if (!profile) throw createError(404, 'Profile not found or access denied', 'Financial profile not found.');
   let instruments = [];
   try {
@@ -408,7 +423,6 @@ router.post(
       operationId: req.idempotencyClaim.operationId,
     });
     res.status(201).json(formatProfileResponse(profile));
-    void triggerPlanHealthCheck({ userId: req.user.userId, profileId: profile._id });
   }),
 );
 
@@ -417,26 +431,57 @@ router.put(
   verifyJWT,
   validateStrict(financialProfileUpdateSchema),
   asyncHandler(async (req, res) => {
-    const existing = await FinancialProfile.findOne({
+    if (!mongoose.isValidObjectId(req.params.profileId)) {
+      throw createError(400, 'Invalid profile ID format.', 'Invalid financial profile ID.', {
+        code: 'PROFILE_ID_INVALID',
+      });
+    }
+    const ownedTarget = await FinancialProfile.exists({
       _id: req.params.profileId,
       userId: req.user.userId,
-    }).lean();
-    if (!existing) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
+    });
+    if (!ownedTarget) {
+      throw createError(404, 'Profile not found or access denied.', 'Financial profile not found.', {
+        code: 'PROFILE_NOT_FOUND',
+      });
+    }
 
     const idempotencyClaim = await claimAdvisoryIdempotency({
       key: req.headers['idempotency-key'],
       userId: req.user.userId,
-      profileId: existing._id,
+      profileId: req.params.profileId,
       payload: req.body,
       operation: 'profile.update_and_recommendation',
       method: 'PUT',
     });
     if (idempotencyClaim.state === 'REPLAY') {
       res.setHeader('X-Cache-Lookup', 'HIT - Idempotent');
-      return res.status(idempotencyClaim.response.status).json(idempotencyClaim.response.body);
+      const priorBody = idempotencyClaim.response.body;
+      const reconciled = await buildPostCommitProfileResponse({
+        userId: req.user.userId,
+        responseTemplate: { ...priorBody, response_kind: 'PROFILE_UPDATE' },
+        committedProfileId: priorBody?.profile?.profileId || priorBody?.profileId,
+        committedRecommendationId: priorBody?.recommendation?.recommendationId || priorBody?.recommendationId,
+        replayed: true,
+      });
+      return res.status(idempotencyClaim.response.status).json(reconciled);
     }
 
     try {
+      const currentProfileState = await resolveCurrentFinancialProfile({ userId: req.user.userId });
+      const existing = currentProfileState.profile;
+      if (existing && String(existing._id) !== String(req.params.profileId)) {
+        throw createError(409, 'The requested profile is no longer current.', 'Refresh the current financial profile before updating it.', {
+          code: 'PROFILE_STATE_VERSION_CONFLICT',
+          details: { currentProfileId: String(existing._id), profileStateRevision: currentProfileState.state.revision },
+        });
+      }
+      if (!existing) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
+      const profileStateBinding = {
+        revision: Number(currentProfileState.state.revision),
+        currentProfileId: String(existing._id),
+      };
+
       const expectedVersion = req.body.version;
       const currentVersion = existing.version ?? 1;
       if (currentVersion !== expectedVersion) {
@@ -470,6 +515,7 @@ router.put(
         auditRecord: core.auditRecordData,
         response: { ...core.response, response_kind: 'PROFILE_UPDATE' },
         idempotencyClaim,
+        profileStateBinding,
         profileUpdate: {
           expectedVersion: currentVersion,
           expectedFinancialStateFence: Number(existing.financialStateFence ?? 0),

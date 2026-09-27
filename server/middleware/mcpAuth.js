@@ -25,12 +25,19 @@ export function verifyMcpBearer({ config, env = process.env, checkRevocation = i
     }
 
     try {
-      const verifyOptions = { algorithms: ['HS256'] };
-      if (config?.jwtAudience) verifyOptions.audience = config.jwtAudience;
-      const payload = jwt.verify(match[1], env.JWT_SECRET, verifyOptions);
+      const secret = config?.jwtSecret || env.MCP_JWT_SECRET;
+      if (typeof secret !== 'string' || secret.length < 32 || secret === env.JWT_SECRET) {
+        throw Object.assign(new Error('MCP signing key is unavailable or not isolated.'), { code: 'MCP_AUTH_CONFIGURATION_INVALID' });
+      }
+      const verifyOptions = { algorithms: ['HS256'], audience: config?.jwtAudience, issuer: config?.jwtIssuer };
+      if (!verifyOptions.audience || !verifyOptions.issuer) {
+        throw Object.assign(new Error('MCP token issuer and audience are required.'), { code: 'MCP_AUTH_CONFIGURATION_INVALID' });
+      }
+      const payload = jwt.verify(match[1], secret, verifyOptions);
       if (!payload || typeof payload !== 'object' || !payload.userId
           || typeof payload.jti !== 'string' || payload.jti.length < 1 || payload.jti.length > 128
           || !Number.isSafeInteger(payload.exp) || payload.exp <= Math.floor(Date.now() / 1000)
+          || payload.token_use !== 'mcp'
           || (config?.requiredScope && !hasRequiredScope(payload, config.requiredScope))) {
         PrometheusMetrics.inc('mcp_auth_rejections_total');
         return sendError(req, res, 401, 'The token is not authorized for MCP access.', 'MCP_AUTH_SCOPE_REQUIRED');

@@ -22,6 +22,13 @@ import { enforceJsonContentType } from '../middleware/contentType.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import { blacklistToken } from '../config/redis.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
+import RecommendationState from '../models/RecommendationState.js';
+import Recommendation from '../models/Recommendation.js';
+import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
+import AuditRecord from '../models/AuditRecord.js';
+import AuditChainHead from '../models/AuditChainHead.js';
+import IdempotencyKey from '../models/IdempotencyKey.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { withServer, jsonRequest as jsonFetch, rawRequest } from '../test-utils/httpTestUtils.js';
 import { canonicalProfile, canonicalProfilePayload } from './helpers/canonicalProfile.js';
@@ -60,6 +67,32 @@ async function ensureDb() {
   await setupTestDatabase();
 }
 
+async function clearUserFinancialState(userId) {
+  await Promise.all([
+    FinancialProfile.deleteMany({ userId }),
+    FinancialProfileState.deleteMany({ userId }),
+    RecommendationState.deleteMany({ userId }),
+    Recommendation.deleteMany({ userId }),
+    // Test teardown may bypass the append-only Mongoose guard; production
+    // paths must continue using the guarded model API.
+    RecommendationAllocationRevision.collection.deleteMany({ userId }),
+    AuditRecord.collection.deleteMany({ userId: new mongoose.Types.ObjectId(userId) }),
+    AuditChainHead.deleteMany({ _id: userId }),
+    IdempotencyKey.deleteMany({ userId }),
+  ]);
+}
+
+async function completeCurrentProfile(baseUrl, token) {
+  const { response, body } = await jsonFetch(`${baseUrl}/api/profile/complete`, {
+    method: 'POST',
+    body: JSON.stringify(VALID_PROFILE_BODY),
+    headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
+  });
+  assert.equal(response.status, 200, `Profile completion failed: ${JSON.stringify(body)}`);
+  assert.ok(body.profile?.profileId);
+  return body;
+}
+
 test.after(async () => {
   try {
     await FinancialProfile.deleteMany({ userId: { $in: [USER_A_ID, USER_B_ID] } });
@@ -95,7 +128,8 @@ test('Security: mass assignment fields are rejected by strict schema validation'
 // ── 2. IDOR Protection ───────────────────────────────────────────────
 test('Security: user B cannot modify user A profile via IDOR', async () => {
   await ensureDb();
-  
+  await clearUserFinancialState(USER_A_ID);
+
   // Create profile A directly in DB
   const profileA = await FinancialProfile.create({
     userId: USER_A_ID,
@@ -105,25 +139,26 @@ test('Security: user B cannot modify user A profile via IDOR', async () => {
 
   const tokenB = signToken(USER_B_ID);
 
-  await withServer(buildApp(), async (baseUrl) => {
-    // Attempt to update Profile A using User B's token
-    const { response, body } = await jsonFetch(`${baseUrl}/api/profile/${profileA._id}`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        ...VALID_PROFILE_BODY,
-        monthly_take_home: 120000,
-        version: profileA.version || 1,
-      }),
-      headers: { authorization: `Bearer ${tokenB}` },
+  try {
+    await withServer(buildApp(), async (baseUrl) => {
+      // Attempt to update Profile A using User B's token
+      const { response } = await jsonFetch(`${baseUrl}/api/profile/${profileA._id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          ...VALID_PROFILE_BODY,
+          monthly_take_home: 120000,
+          version: profileA.version || 1,
+        }),
+        headers: { authorization: `Bearer ${tokenB}`, 'idempotency-key': crypto.randomUUID() },
+      });
+
+      assert.ok(response.status === 403 || response.status === 404, `Expected 403 or 404, got ${response.status}`);
+      const doc = await FinancialProfile.findById(profileA._id).lean();
+      assert.equal(doc.monthlyTakeHome, 80000, 'Profile A monthly take-home must not be updated by User B');
     });
-
-    // Should return 403 Forbidden or 404 Not Found (database-scoped queries)
-    assert.ok(response.status === 403 || response.status === 404, `Expected 403 or 404, got ${response.status}`);
-
-    // Verify DB remains unchanged
-    const doc = await FinancialProfile.findById(profileA._id).lean();
-    assert.equal(doc.monthlyTakeHome, 80000, 'Profile A monthly take-home must not be updated by User B');
-  });
+  } finally {
+    await clearUserFinancialState(USER_A_ID);
+  }
 });
 
 // ── 3. Token Revocation Rejection ────────────────────────────────────
@@ -309,25 +344,20 @@ test('WG-018: GET /api/chat/metrics (old path) returns 404 after relocation', as
 test('WG-003: PUT /api/profile/:profileId updates existing profile in-place', async () => {
   await ensureDb();
   try {
-    await FinancialProfile.deleteMany({ userId: USER_A_ID });
+    await clearUserFinancialState(USER_A_ID);
     const token = signToken(USER_A_ID);
     await withServer(buildApp(), async (baseUrl) => {
-      const { response: postRes, body: postBody } = await jsonFetch(`${baseUrl}/api/profile/build`, {
-        method: 'POST',
-        body: JSON.stringify(VALID_PROFILE_BODY),
-        headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
-      });
-      assert.equal(postRes.status, 201);
-      const profileId = postBody.profileId;
+      const completion = await completeCurrentProfile(baseUrl, token);
+      const profileId = completion.profile.profileId;
 
       const { response: putRes, body: putBody } = await jsonFetch(`${baseUrl}/api/profile/${profileId}`, {
         method: 'PUT',
-        body: JSON.stringify({ ...VALID_PROFILE_BODY, monthly_take_home: 95000, version: postBody.version || 1 }),
+        body: JSON.stringify({ ...VALID_PROFILE_BODY, monthly_take_home: 95000, version: completion.profile.version }),
         headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
       });
       assert.equal(putRes.status, 200, 'PUT /api/profile/:profileId should succeed with valid version');
       assert.equal(putBody.profile.profileId, profileId, 'profileId must remain unchanged');
-      assert.equal(putBody.profile.version, (postBody.version || 1) + 1, 'version must increment by 1');
+      assert.equal(putBody.profile.version, completion.profile.version + 1, 'version must increment by 1');
       assert.equal(putBody.recommendation.profile_version, putBody.profile.version);
       assert.equal(putBody.recommendation.response_state, 'CURRENT');
 
@@ -335,51 +365,51 @@ test('WG-003: PUT /api/profile/:profileId updates existing profile in-place', as
       assert.equal(count, 1, 'Should update existing profile in-place without creating a new document');
     });
   } finally {
-    await FinancialProfile.deleteMany({ userId: USER_A_ID });
+    await clearUserFinancialState(USER_A_ID);
   }
 });
 
 test('WG-007: PUT wraps the unchanged profile DTO with current recommendation state', async () => {
   await ensureDb();
   try {
+    await clearUserFinancialState(USER_A_ID);
     const token = signToken(USER_A_ID);
     await withServer(buildApp(), async (baseUrl) => {
-      const { body: postBody } = await jsonFetch(`${baseUrl}/api/profile/build`, {
-        method: 'POST',
-        body: JSON.stringify(VALID_PROFILE_BODY),
-        headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
-      });
+      const postBody = await completeCurrentProfile(baseUrl, token);
 
-      const { response: putRes, body: putBody } = await jsonFetch(`${baseUrl}/api/profile/${postBody.profileId}`, {
+      const { response: putRes, body: putBody } = await jsonFetch(`${baseUrl}/api/profile/${postBody.profile.profileId}`, {
         method: 'PUT',
-        body: JSON.stringify({ ...VALID_PROFILE_BODY, version: postBody.version }),
+        body: JSON.stringify({ ...VALID_PROFILE_BODY, version: postBody.profile.version }),
         headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
       });
 
       assert.equal(putRes.status, 200);
-      assert.deepEqual(Object.keys(putBody).sort(), ['profile', 'recommendation']);
-      const postKeys = Object.keys(postBody).sort();
+      assert.deepEqual(Object.keys(putBody).sort(), [
+        'current_profile_id',
+        'financial_profile_state_revision',
+        'profile',
+        'recommendation',
+      ]);
+      const postKeys = Object.keys(postBody.profile).sort();
       const putKeys = Object.keys(putBody.profile).sort();
       assert.deepEqual(postKeys, putKeys, 'Profile DTO fields remain stable inside the atomic PUT response');
       assert.equal(putBody.recommendation.response_state, 'CURRENT');
-      assert.equal(postBody.final_suitability_risk, 'Moderate');
-      assert.ok(postBody.final_suitability_level <= 3, 'final suitability must not exceed Moderate preference');
+      assert.equal(postBody.profile.final_suitability_risk, 'Moderate');
+      assert.ok(postBody.profile.final_suitability_level <= 3, 'final suitability must not exceed Moderate preference');
     });
   } finally {
-    await FinancialProfile.deleteMany({ userId: USER_A_ID });
+    await clearUserFinancialState(USER_A_ID);
   }
 });
 
 test('WG-025: PUT /api/profile/:profileId requires version and returns 409 Conflict on version mismatch', async () => {
   await ensureDb();
   try {
+    await clearUserFinancialState(USER_A_ID);
     const token = signToken(USER_A_ID);
     await withServer(buildApp(), async (baseUrl) => {
-      const { body: postBody } = await jsonFetch(`${baseUrl}/api/profile/build`, {
-        method: 'POST',
-        body: JSON.stringify(VALID_PROFILE_BODY),
-        headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
-      });
+      const postBody = await completeCurrentProfile(baseUrl, token);
+      const profileId = postBody.profile.profileId;
 
       // Omitting version should fail validation (400)
       const { response: noVersionRes } = await jsonFetch(`${baseUrl}/api/profile/${postBody.profileId}`, {
@@ -390,7 +420,7 @@ test('WG-025: PUT /api/profile/:profileId requires version and returns 409 Confl
       assert.equal(noVersionRes.status, 400, 'Omitting version on PUT must be rejected with 400');
 
       // Stale version should return 409 Conflict
-      const { response: mismatchRes } = await jsonFetch(`${baseUrl}/api/profile/${postBody.profileId}`, {
+      const { response: mismatchRes } = await jsonFetch(`${baseUrl}/api/profile/${profileId}`, {
         method: 'PUT',
         body: JSON.stringify({ ...VALID_PROFILE_BODY, version: 999 }),
         headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
@@ -398,6 +428,6 @@ test('WG-025: PUT /api/profile/:profileId requires version and returns 409 Confl
       assert.equal(mismatchRes.status, 409, 'Version mismatch must return 409 Conflict');
     });
   } finally {
-    await FinancialProfile.deleteMany({ userId: USER_A_ID });
+    await clearUserFinancialState(USER_A_ID);
   }
 });

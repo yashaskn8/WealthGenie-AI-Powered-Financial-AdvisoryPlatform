@@ -9,6 +9,7 @@ import { ExplainabilityEngine } from '../services/explainabilityEngine.js';
 import { ToolTraceGraph, promptVersion } from '../services/toolTraceGraph.js';
 import { ProviderManager } from '../services/providerAbstraction.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import Recommendation from '../models/Recommendation.js';
 import Goal from '../models/Goal.js';
 import User from '../models/User.js';
@@ -58,6 +59,7 @@ function groundedGeminiPayload(text = 'The final suitability ceiling is Moderate
 describe('GenieChat V3 Enterprise Architecture Tests', () => {
   let originalPost;
   let originalProfileFindOne;
+  let originalProfileStateFindOne;
   let originalRecFindOne;
   let originalGoalFind;
   let originalUserFindById;
@@ -72,6 +74,7 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
   beforeEach(() => {
     originalPost = axios.post;
     originalProfileFindOne = FinancialProfile.findOne;
+    originalProfileStateFindOne = FinancialProfileState.findOne;
     originalRecFindOne = Recommendation.findOne;
     originalGoalFind = Goal.find;
     originalUserFindById = User.findById;
@@ -92,10 +95,18 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
     ProviderManager.groq.recordSuccess();
 
     // Mock DB queries
-    FinancialProfile.findOne = () => ({
-      sort: () => ({
-        lean: async () => mockProfile,
-      }),
+    FinancialProfile.findOne = () => {
+      const query = { sort: () => query, lean: async () => mockProfile };
+      return query;
+    };
+    FinancialProfileState.findOne = query => ({
+      lean: async () => (String(query?.userId) === mockUserId ? {
+        userId: mockUserId,
+        currentProfileId: mockProfile._id,
+        revision: 1,
+        promotionFence: 0,
+        resolutionStatus: 'CURRENT',
+      } : null),
     });
 
     Recommendation.findOne = () => ({
@@ -136,6 +147,7 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
     restoreChatStore?.();
     axios.post = originalPost;
     FinancialProfile.findOne = originalProfileFindOne;
+    FinancialProfileState.findOne = originalProfileStateFindOne;
     Recommendation.findOne = originalRecFindOne;
     Goal.find = originalGoalFind;
     User.findById = originalUserFindById;

@@ -86,7 +86,9 @@ export function createHealthRouter({
   }
 
   if (requireMcp) {
-    checks.mcp.status = mcpRuntime?.isReady() && mcpCapacity?.isReady() ? 'UP' : 'DOWN';
+    let capacityReady = false;
+    try { capacityReady = await withTimeout(mcpCapacity?.probe?.() || Promise.resolve(false), timeoutMs, 'MCP capacity probe'); } catch { capacityReady = false; }
+    checks.mcp.status = mcpRuntime?.isReady() && capacityReady && mcpCapacity?.isReady() ? 'UP' : 'DOWN';
   }
 
   // Determine overall status
@@ -132,7 +134,13 @@ export function createHealthRouter({
     if (runtimeState && !runtimeState.isReady()) reasons.push(`Application lifecycle is ${runtimeState.snapshot().phase}`);
     if (mongoose.connection.readyState !== 1) reasons.push('Database not connected');
     if (requireRedis && (!redisAvailable || !redisClient?.isReady)) reasons.push('Redis not connected');
-    if (requireMcp && (!mcpRuntime?.isReady() || !mcpCapacity?.isReady())) reasons.push('Required MCP runtime or distributed capacity control is not ready');
+    if (requireMcp) {
+      let capacityReady = false;
+      try { capacityReady = await withTimeout(mcpCapacity?.probe?.() || Promise.resolve(false), timeoutMs, 'MCP capacity probe'); } catch { capacityReady = false; }
+      if (!mcpRuntime?.isReady() || !capacityReady || !mcpCapacity?.isReady()) {
+        reasons.push('Required MCP runtime or distributed capacity/auth controls are not ready');
+      }
+    }
     if (mongoose.connection.readyState === 1) {
       try {
         await verifyPersistenceIndexes();

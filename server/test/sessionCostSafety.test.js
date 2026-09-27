@@ -3,8 +3,11 @@ import assert from 'node:assert/strict';
 import { processChat } from '../services/geminiChatService.js';
 import { ProviderManager } from '../services/providerAbstraction.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import ConversationHistory from '../models/ConversationHistory.js';
 import Recommendation from '../models/Recommendation.js';
+import RecommendationState from '../models/RecommendationState.js';
+import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
 import { installMockChatSessionStore } from './helpers/mockChatSessionStore.js';
 
@@ -19,8 +22,11 @@ describe('grounded chat session-cost safety', () => {
   beforeEach(() => {
     originals = {
       profileFindOne: FinancialProfile.findOne,
+      profileStateFindOne: FinancialProfileState.findOne,
       conversationFindOne: ConversationHistory.findOne,
       recommendationFindOne: Recommendation.findOne,
+      recommendationStateFindOne: RecommendationState.findOne,
+      allocationRevisionFindOne: RecommendationAllocationRevision.findOne,
       geminiGenerate: ProviderManager.gemini.generate,
     };
     env = {
@@ -33,11 +39,20 @@ describe('grounded chat session-cost safety', () => {
     process.env.GEMINI_API_KEY = 'unit-test-only';
     process.env.GROQ_API_KEY = '';
     process.env.LLM_PRIMARY_PROVIDER = 'GEMINI';
-    FinancialProfile.findOne = () => ({ sort: () => ({ lean: async () => ({
+    FinancialProfile.findOne = () => ({ sort() { return this; }, lean: async () => ({
       _id: '64b0f0000000000000000002', userId,
       ...canonicalProfile({ age: 32, monthlySavings: 45000, investmentHorizonYears: 15 }),
-    }) }) });
+    }) });
+    FinancialProfileState.findOne = () => ({ lean: async () => ({
+      userId,
+      currentProfileId: '64b0f0000000000000000002',
+      revision: 1,
+      promotionFence: 1,
+      resolutionStatus: 'CURRENT',
+    }) });
     Recommendation.findOne = () => ({ sort: () => ({ lean: async () => null }) });
+    RecommendationState.findOne = () => ({ lean: async () => null });
+    RecommendationAllocationRevision.findOne = () => ({ sort() { return this; }, lean: async () => null });
     session = {
       userId,
       profileId: '64b0f0000000000000000002',
@@ -62,8 +77,11 @@ describe('grounded chat session-cost safety', () => {
   afterEach(() => {
     restoreChatStore?.();
     FinancialProfile.findOne = originals.profileFindOne;
+    FinancialProfileState.findOne = originals.profileStateFindOne;
     ConversationHistory.findOne = originals.conversationFindOne;
     Recommendation.findOne = originals.recommendationFindOne;
+    RecommendationState.findOne = originals.recommendationStateFindOne;
+    RecommendationAllocationRevision.findOne = originals.allocationRevisionFindOne;
     ProviderManager.gemini.generate = originals.geminiGenerate;
     for (const [name, value] of Object.entries({
       NVIDIA_API_KEY: env.nvidia,

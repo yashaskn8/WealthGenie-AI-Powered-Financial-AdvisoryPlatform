@@ -873,10 +873,12 @@ components:
         operation_result: { $ref: '#/components/schemas/CommittedOperationResult' }
     ProfileUpdateResponse:
       type: object
-      required: [profile, recommendation]
+      required: [profile, recommendation, current_profile_id, financial_profile_state_revision]
       properties:
         profile: { $ref: '#/components/schemas/FinancialProfile' }
         recommendation: { $ref: '#/components/schemas/RecommendationResponse' }
+        current_profile_id: { type: string, pattern: '^[0-9a-fA-F]{24}$' }
+        financial_profile_state_revision: { type: integer, minimum: 1 }
         operation_result: { $ref: '#/components/schemas/CommittedOperationResult' }
     FinancialProfileUpdate:
       allOf: [{ $ref: '#/components/schemas/FinancialProfileFields' }, { type: object, required: [version], properties: { version: { type: integer, minimum: 1 } } }]
@@ -1202,6 +1204,7 @@ components:
         sourceAllocationRevisionId: { type: [string, 'null'] }
         sourceProfileInputHash: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }
         sourceProfileVersion: { type: [integer, 'null'] }
+        sourceFinancialProfileStateRevision: { type: [integer, 'null'], minimum: 1 }
         sourceModelVersion: { type: [string, 'null'] }
         sourceRecommendationPolicyVersion: { type: [string, 'null'] }
         sourceRegulatoryRuleVersion: { type: [string, 'null'] }

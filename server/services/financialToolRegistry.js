@@ -102,10 +102,16 @@ function sanitizeToolInputs(obj) {
   return clean;
 }
 
-class ToolRegistry {
-  constructor() {
-    this.tools = new Map();
-    this.registerCoreTools();
+export class ToolRegistry {
+  #tools;
+  #sealed = false;
+
+  constructor({ registerCoreTools = true } = {}) {
+    this.#tools = new Map();
+    if (registerCoreTools) {
+      this.registerCoreTools();
+      this.seal();
+    }
   }
 
   /**
@@ -115,10 +121,12 @@ class ToolRegistry {
    * @param {object} config - { description, schema, executor, version }
    */
   registerTool(name, config) {
+    if (this.#sealed) throw new Error('Tool registry is sealed.');
     if (!name || !config.schema || !config.executor) {
       throw new Error(`Invalid tool registration for '${name}'. Schema and executor are required.`);
     }
-    this.tools.set(name, {
+    if (this.#tools.has(name)) throw new Error(`Tool '${name}' is already registered.`);
+    this.#tools.set(name, Object.freeze({
       name,
       description: config.description || '',
       schema: config.schema,
@@ -126,26 +134,35 @@ class ToolRegistry {
       version: config.version || '1.0.0',
       // Explicit metadata is required for remote exposure. New tools remain
       // private unless the central allowlist and registry policy both permit it.
-      mcpPolicy: config.mcpPolicy || MCP_TOOL_POLICY[name] || null,
-    });
+      mcpPolicy: config.mcpPolicy || null,
+    }));
+  }
+
+  seal() {
+    this.#sealed = true;
+    return this;
+  }
+
+  isSealed() {
+    return this.#sealed;
   }
 
   /**
    * Retrieves a tool definition by name.
    */
   getTool(name) {
-    return this.tools.get(name) || null;
+    return this.#tools.get(name) || null;
   }
 
   hasTool(name) {
-    return this.tools.has(name);
+    return this.#tools.has(name);
   }
 
   /**
    * Returns metadata for all registered tools.
    */
   listTools() {
-    return Array.from(this.tools.values()).map(t => ({
+    return Array.from(this.#tools.values()).map(t => ({
       name: t.name,
       description: t.description,
       version: t.version,
@@ -153,7 +170,7 @@ class ToolRegistry {
   }
 
   listMcpTools({ transport = 'remote' } = {}) {
-    return Array.from(this.tools.values())
+    return Array.from(this.#tools.values())
       .filter(tool => isMcpToolAllowed(tool, { transport }))
       .map(({ name, description, version, mcpPolicy }) => ({ name, description, version, mcpPolicy }));
   }
@@ -226,6 +243,7 @@ class ToolRegistry {
   registerCoreTools() {
     // 1. SIP Projection Tool
     this.registerTool('sip_projection', {
+      mcpPolicy: MCP_TOOL_POLICY.sip_projection,
       description: 'Calculates Future Value of a Systematic Investment Plan (SIP) using monthly annuity-due compounding.',
       version: '2.1.0',
       schema: Joi.object({
@@ -253,6 +271,7 @@ class ToolRegistry {
 
     // 2. Lump Sum Projection Tool
     this.registerTool('lump_sum_projection', {
+      mcpPolicy: MCP_TOOL_POLICY.lump_sum_projection,
       description: 'Calculates Future Value of a one-time lump sum investment using compound interest.',
       version: '2.1.0',
       schema: Joi.object({
@@ -278,6 +297,7 @@ class ToolRegistry {
 
     // 3. Reverse SIP Planner Tool
     this.registerTool('reverse_sip', {
+      mcpPolicy: MCP_TOOL_POLICY.reverse_sip,
       description: 'Calculates required monthly SIP to achieve a target financial goal.',
       version: '2.1.0',
       schema: Joi.object({
@@ -302,6 +322,7 @@ class ToolRegistry {
 
     // 4. Tax Calculator Tool
     this.registerTool('tax_calculator', {
+      mcpPolicy: MCP_TOOL_POLICY.tax_calculator,
       description: 'Computes income tax liability under an explicitly selected supported fiscal-year policy.',
       version: '2.2.0',
       schema: Joi.object({
@@ -330,6 +351,7 @@ class ToolRegistry {
 
     // 5. XIRR Calculator Tool
     this.registerTool('xirr_calculator', {
+      mcpPolicy: MCP_TOOL_POLICY.xirr_calculator,
       description: 'Calculates Exact Internal Rate of Return (XIRR) for irregular cash flows.',
       version: '2.1.0',
       schema: Joi.object({
@@ -347,6 +369,7 @@ class ToolRegistry {
 
     // 6. Portfolio Optimizer Tool
     this.registerTool('portfolio_optimizer', {
+      mcpPolicy: MCP_TOOL_POLICY.portfolio_optimizer,
       description: 'Optimizes asset weights for minimum variance, maximum Sharpe ratio, or risk parity.',
       version: '2.1.0',
       schema: Joi.object({
@@ -384,6 +407,7 @@ class ToolRegistry {
 
     // 7. Portfolio Rebalance Tool
     this.registerTool('rebalance_calculator', {
+      mcpPolicy: MCP_TOOL_POLICY.rebalance_calculator,
       description: 'Computes portfolio drift and rebalance buy/sell directives.',
       version: '2.1.0',
       schema: Joi.object({
@@ -411,4 +435,7 @@ class ToolRegistry {
   }
 }
 
-export const FinancialToolRegistry = new ToolRegistry();
+export const FinancialToolRegistry = Object.freeze(new ToolRegistry());
+export function createIsolatedToolRegistry() {
+  return new ToolRegistry({ registerCoreTools: false });
+}

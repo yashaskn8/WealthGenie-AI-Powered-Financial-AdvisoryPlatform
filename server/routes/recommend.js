@@ -13,6 +13,7 @@ import {
   validateStrict,
 } from '../validation/financialSchemas.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import { requireCurrentFinancialProfile, resolveCurrentFinancialProfile } from '../services/currentFinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import RecommendationState from '../models/RecommendationState.js';
 import AuditRecord from '../models/AuditRecord.js';
@@ -194,8 +195,19 @@ export async function persistAdvisoryIfCurrent({ recommendationId, userId, state
 router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHandler(async (req, res) => {
   const tTotalStart = performance.now();
   const { profileId } = req.body;
+  const ownedProfile = await FinancialProfile.exists({ _id: profileId, userId: req.user.userId });
+  if (!ownedProfile) {
+    throw createError(404, 'Profile not found or access denied', 'Profile not found.', { code: 'PROFILE_NOT_FOUND' });
+  }
   const tProfileStart = performance.now();
-  const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
+  const currentProfileState = await resolveCurrentFinancialProfile({ userId: req.user.userId });
+  const stored = currentProfileState.profile;
+  if (stored && String(stored._id) !== String(profileId)) {
+    throw createError(409, 'The requested profile is no longer current.', 'Refresh the current profile before generating a recommendation.', {
+      code: 'PROFILE_STATE_VERSION_CONFLICT',
+      details: { profileStateRevision: currentProfileState.state.revision },
+    });
+  }
   const tProfile = performance.now() - tProfileStart;
   if (!stored) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
 
@@ -230,6 +242,10 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       auditRecord: core.auditRecordData,
       response: core.response,
       idempotencyClaim,
+      profileStateBinding: {
+        revision: Number(currentProfileState.state.revision),
+        currentProfileId: String(stored._id),
+      },
     });
     const tPersist = performance.now() - tPersistStart;
     const tCacheStart = performance.now();
@@ -269,10 +285,8 @@ router.get('/current', verifyJWT, validateQuery(recommendationCurrentQuerySchema
     throw createError(400, 'Invalid profile ID format', 'Invalid profile ID.');
   }
 
-  const profile = await FinancialProfile.findOne({
-    _id: profileId,
-    userId: req.user.userId,
-  }).lean();
+  const profileState = await requireCurrentFinancialProfile({ userId: req.user.userId, profileId });
+  const profile = profileState.profile;
   if (!profile) {
     throw createError(404, 'Profile not found or access denied', 'Recommendation not found.');
   }
@@ -342,6 +356,8 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
   if (recommendation.userId.toString() !== req.user.userId.toString() && req.user.role !== 'admin') {
     throw createError(403, 'Access denied to recommendation', 'Access denied.');
   }
+
+  await requireCurrentFinancialProfile({ userId: recommendation.userId, profileId: recommendation.profileId });
 
   let recommendationState;
   try {
@@ -618,7 +634,8 @@ router.get('/audit/:id', verifyJWT, asyncHandler(async (req, res) => {
 
 router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), asyncHandler(async (req, res) => {
   const { profileId, recommendationId, weights, expectedAllocationRevision, expectedPortfolioFingerprint } = req.body;
-  const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
+  const currentProfile = await requireCurrentFinancialProfile({ userId: req.user.userId, profileId });
+  const stored = currentProfile.profile;
   if (!stored) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
   const profile = buildRecommendationProfile(stored);
   let state;
@@ -688,6 +705,9 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
     if (error.code === 'PROFILE_STATE_CHANGED') {
       throw createError(409, error.message, 'The Financial Profile changed before the rebalance completed. Refresh and retry.', { code: error.code });
     }
+    if (error.code === 'PROFILE_STATE_VERSION_CONFLICT') {
+      throw createError(409, error.message, 'The current Financial Profile changed before the rebalance completed. Refresh and retry.', { code: error.code });
+    }
     throw error;
   }
   await delCache(buildRecommendationCacheKey(req.user.userId, stored._id, profile, recommendation.modelVersion)).catch(error => {
@@ -710,9 +730,12 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
   try {
     // The write and audit chain have committed. Reconcile against the current
     // canonical pointer; do not treat a valid later revision as a failed write.
+    const currentProfileState = await resolveCurrentFinancialProfile({ userId: req.user.userId });
+    if (!currentProfileState.profile) throw createError(503, 'The canonical current profile is unavailable.', 'Refresh before continuing.', { code: 'FINANCIAL_PROFILE_STATE_UNAVAILABLE' });
     committedState = await requireFreshRecommendationState({
       userId: req.user.userId,
-      profileId: stored._id,
+      profileId: currentProfileState.profile._id,
+      profile: currentProfileState.profile,
     });
   } catch (error) {
     logger.error('Committed allocation revision could not be reconciled to verified current state', {

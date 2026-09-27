@@ -165,6 +165,22 @@ test('IDEMPOTENCY HTTP VERIFICATION: duplicate mutating request returns cached r
   console.log(`[VERIFY] Database record count AFTER duplicate request: ${countAfterDuplicate}`);
   assert.equal(countAfterDuplicate, 1, 'Database record count must remain exactly 1 (increased by 1 total, NOT 2)');
 
+  // /profile/build creates a draft only. Establish canonical current state via
+  // the explicit completion boundary before recommendation-dependent requests.
+  const completionResponse = await fetch(`${baseUrl}/api/profile/complete`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+      'Idempotency-Key': crypto.randomUUID(),
+    },
+    body: JSON.stringify(payload),
+  });
+  const completionBody = await completionResponse.json();
+  assert.equal(completionResponse.status, 200, JSON.stringify(completionBody));
+  assert.notEqual(completionBody.profile.profileId, data1.profileId);
+  assert.equal(await FinancialProfile.countDocuments({ userId }), 2);
+
   const changedPayload = { ...payload, age: payload.age + 1 };
   const conflict = await fetch(`${baseUrl}/api/profile/build`, {
     method: 'POST',
@@ -182,7 +198,7 @@ test('IDEMPOTENCY HTTP VERIFICATION: duplicate mutating request returns cached r
     method: 'POST', path: '/api/profile/build', status: conflict.status,
     contentType: conflict.headers.get('content-type'), body: conflictBody,
   });
-  assert.equal(await FinancialProfile.countDocuments({ userId }), 1);
+  assert.equal(await FinancialProfile.countDocuments({ userId }), 2);
 
   const recommendationResponse = await fetch(`${baseUrl}/api/recommend`, {
     method: 'POST',
@@ -191,11 +207,11 @@ test('IDEMPOTENCY HTTP VERIFICATION: duplicate mutating request returns cached r
       Authorization: `Bearer ${token}`,
       'Idempotency-Key': crypto.randomUUID(),
     },
-    body: JSON.stringify({ profileId: data1.profileId }),
+    body: JSON.stringify({ profileId: completionBody.profile.profileId }),
   });
   const recommendationBody = await recommendationResponse.json();
   assert.ok([200, 201].includes(recommendationResponse.status), JSON.stringify(recommendationBody));
-  assert.equal(await Recommendation.countDocuments({ userId }), 1);
+  assert.equal(await Recommendation.countDocuments({ userId }), 2);
 
   const otherOperation = await fetch(`${baseUrl}/api/goals/create`, {
     method: 'POST',
@@ -206,7 +222,7 @@ test('IDEMPOTENCY HTTP VERIFICATION: duplicate mutating request returns cached r
     },
     body: JSON.stringify({
       goal_name: 'Operation-scope check', target_amount: 100000, target_date: '2035-01-01',
-      current_savings: 10000, profileId: data1.profileId, priority: 'High',
+      current_savings: 10000, profileId: completionBody.profile.profileId, priority: 'High',
     }),
   });
   const otherBody = await otherOperation.json();
@@ -217,9 +233,9 @@ test('IDEMPOTENCY HTTP VERIFICATION: duplicate mutating request returns cached r
   });
   assert.notEqual(otherOperation.headers.get('x-cache-lookup'), 'HIT - Idempotent');
   assert.ok(otherBody.goal?._id || otherBody.goal?.goalId, 'goal operation must create and return its own resource');
-  assert.equal(await FinancialProfile.countDocuments({ userId }), 1);
+  assert.equal(await FinancialProfile.countDocuments({ userId }), 2);
   assert.equal(await Goal.countDocuments({ userId }), 1);
-  assert.equal(await Recommendation.countDocuments({ userId }), 1);
+  assert.equal(await Recommendation.countDocuments({ userId }), 2);
 
   const profileOperation = await IdempotencyKey.findById(mutationOperationId({
     operation: 'profile.build', userId, key: idempotencyKey,

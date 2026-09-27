@@ -27,7 +27,7 @@ export async function verifyJWT(req, res, next, { revocationUnavailableStatus = 
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
-    if (!decoded.userId) {
+    if (!decoded.userId || (decoded.token_use && decoded.token_use !== 'session')) {
       if (usingCookie) clearAuthCookies(res);
       return sendError(req, res, 401, 'Invalid token payload.', 'AUTH_TOKEN_INVALID');
     }

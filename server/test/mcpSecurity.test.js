@@ -101,25 +101,32 @@ describe('MCP schema and payload red-team', () => {
       monthlyTakeHome: 100000, monthlySavings: 20000, age: 35, riskTolerance: 'Moderate',
       hasLumpSum: false, lumpSumAmount: 0, investmentGoals: ['Wealth Growth'], investmentHorizonYears: 12,
     };
-    let query;
     const profileModel = {
-      findOne(filter) {
-        query = filter;
-        return { lean: async () => (filter.userId === ownerId ? rawProfile : null) };
-      },
+      modelName: 'FinancialProfile',
     };
-    const snapshot = await loadOwnedProfile({ profileId, userId: ownerId, profileModel });
-    assert.deepEqual(query, { _id: profileId, userId: ownerId });
+    const observedOwners = [];
+    const resolveCurrent = async ({ userId: requestedOwner }) => {
+      observedOwners.push(requestedOwner);
+      return {
+        state: requestedOwner === ownerId
+          ? { userId: ownerId, currentProfileId: profileId, revision: 7, resolutionStatus: 'CURRENT' }
+          : { userId: requestedOwner, currentProfileId: null, revision: 0, resolutionStatus: 'NO_CURRENT' },
+        profile: requestedOwner === ownerId ? rawProfile : null,
+      };
+    };
+    const snapshot = await loadOwnedProfile({ profileId, userId: ownerId, profileModel, resolveCurrent });
+    assert.deepEqual(observedOwners, [ownerId]);
     assert.equal(snapshot.version, 7);
     assert.match(snapshot.snapshotHash, /^[a-f0-9]{64}$/);
     assert.equal(snapshot.profile.riskTolerance, 'Moderate');
-    await assert.rejects(loadOwnedProfile({ profileId, userId: '60d5ecb8b3b3a72d9c8e4a13', profileModel }), {
+    await assert.rejects(loadOwnedProfile({ profileId, userId: '60d5ecb8b3b3a72d9c8e4a13', profileModel, resolveCurrent }), {
       code: 'MCP_PROFILE_CONTEXT_NOT_FOUND',
     });
-    const missingVersionModel = {
-      findOne() { return { lean: async () => ({ ...rawProfile, version: undefined }) }; },
-    };
-    await assert.rejects(loadOwnedProfile({ profileId, userId: ownerId, profileModel: missingVersionModel }), {
+    const missingVersionResolver = async () => ({
+      state: { userId: ownerId, currentProfileId: profileId, revision: 7, resolutionStatus: 'CURRENT' },
+      profile: { ...rawProfile, version: undefined },
+    });
+    await assert.rejects(loadOwnedProfile({ profileId, userId: ownerId, profileModel, resolveCurrent: missingVersionResolver }), {
       code: 'MCP_PROFILE_CONTEXT_INVALID',
     });
   });
@@ -139,8 +146,10 @@ describe('MCP schema and payload red-team', () => {
       'persistAdvisoryAtomically', 'FinancialProfile.update', 'Goal.update', 'WebAuthn',
       'child_process', 'exec(', 'spawn(', 'writeFile(', 'mongoose.connection.db',
     ]) assert.equal(source.includes(forbidden), false, `unexpected privileged surface: ${forbidden}`);
-    assert.equal(source.includes('profileModel.findOne({ _id: profileId, userId })'), true,
-      'the only data access is an owner-scoped profile snapshot read');
+    assert.equal(source.includes('resolveCurrent({ userId, profileModel })'), true,
+      'profile context must come from the canonical user-scoped current-profile resolver');
+    assert.equal(source.includes('profileModel.findOne('), false,
+      'the MCP boundary must not bypass canonical current-profile resolution');
     assert.equal(FinancialProfile.modelName, 'FinancialProfile');
   });
 });

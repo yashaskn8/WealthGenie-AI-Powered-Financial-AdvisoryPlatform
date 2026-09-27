@@ -7,6 +7,7 @@ import { withServer, jsonRequest } from '../test-utils/httpTestUtils.js';
 import { regimeAdjustSchema } from '../validation/schemas.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import Recommendation from '../models/Recommendation.js';
 import RecommendationState from '../models/RecommendationState.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
@@ -72,11 +73,21 @@ test('market-context adjustment rejects a recommendation from an older profile s
     investmentHorizonYears: 30,
   };
   const oldProfileFind = FinancialProfile.findOne;
+  const oldProfileExists = FinancialProfile.exists;
+  const oldFinancialProfileStateFind = FinancialProfileState.findOne;
   const oldRecommendationFind = Recommendation.findOne;
   const oldStateFind = RecommendationState.findOne;
   const oldRevisionFind = RecommendationAllocationRevision.findOne;
   const oldSecret = process.env.JWT_SECRET;
-  FinancialProfile.findOne = () => ({ lean: async () => profile });
+  FinancialProfile.findOne = () => ({ select() { return this; }, lean: async () => profile });
+  FinancialProfile.exists = async () => ({ _id: profileId });
+  FinancialProfileState.findOne = () => ({ lean: async () => ({
+    userId,
+    currentProfileId: profileId,
+    revision: 1,
+    promotionFence: 1,
+    resolutionStatus: 'CURRENT',
+  }) });
   Recommendation.findOne = () => ({
     sort: () => ({
       lean: async () => ({
@@ -106,6 +117,8 @@ test('market-context adjustment rejects a recommendation from an older profile s
     });
   } finally {
     FinancialProfile.findOne = oldProfileFind;
+    FinancialProfile.exists = oldProfileExists;
+    FinancialProfileState.findOne = oldFinancialProfileStateFind;
     Recommendation.findOne = oldRecommendationFind;
     RecommendationState.findOne = oldStateFind;
     RecommendationAllocationRevision.findOne = oldRevisionFind;

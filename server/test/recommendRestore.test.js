@@ -8,6 +8,7 @@ import recommendRoutes, { persistAdvisoryIfCurrent } from '../routes/recommend.j
 import projectionRoutes from '../routes/projection.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import Recommendation from '../models/Recommendation.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import RecommendationState from '../models/RecommendationState.js';
@@ -100,6 +101,9 @@ async function createFixture({ userId = userA, stale = false, regulatoryRuleVers
     responseSnapshot,
   });
   await createCanonicalState(recommendation);
+  await FinancialProfileState.create({
+    userId, currentProfileId: storedProfile._id, revision: 1, promotionFence: 0, resolutionStatus: 'CURRENT',
+  });
   return storedProfile;
 }
 
@@ -214,6 +218,9 @@ async function createAdvisoryLifecycleFixture() {
     responseSnapshot,
   });
   const state = await createCanonicalState(recommendation);
+  await FinancialProfileState.create({
+    userId: userA, currentProfileId: storedProfile._id, revision: 1, promotionFence: 0, resolutionStatus: 'CURRENT',
+  });
   await Recommendation.updateOne({ _id: recommendationId }, { $set: {
     advisoryMetadata: {
       status: 'READY',
@@ -386,6 +393,7 @@ async function persistNextRecommendation(profile, suffix) {
     },
     response: { recommendationId, audit_id: auditId, advisory_text: advisoryText, model_version: modelVersion },
     idempotencyClaim: claim,
+    profileStateBinding: { revision: 1, currentProfileId: String(profile._id) },
   });
 }
 
@@ -443,6 +451,7 @@ test.beforeEach(async () => {
     FinancialProfile.deleteMany({ userId: { $in: [userA, userB] } }),
     Recommendation.deleteMany({ userId: { $in: [userA, userB] } }),
     RecommendationState.deleteMany({ userId: { $in: [userA, userB] } }),
+    FinancialProfileState.deleteMany({ userId: { $in: [userA, userB] } }),
     Goal.deleteMany({ userId: { $in: [userA, userB] } }),
     AuditRecord.collection.deleteMany({ userId: { $in: [userA, userB] } }),
     AuditChainHead.deleteMany({ _id: { $in: [userA, userB] } }),
@@ -893,6 +902,7 @@ test('transaction aborts at every rebalance write boundary leave no partial fina
   const profile = await createFixture();
   const args = await rebalanceInput(profile, 'fault-injected-rebalance-abort');
   const initialProfile = await FinancialProfile.findById(profile._id).lean();
+  const initialProfileState = await FinancialProfileState.findOne({ userId: userA }).lean();
   const initialState = await RecommendationState.findOne({ userId: userA, profileId: profile._id }).lean();
   const failureBoundaries = [
     'afterProfileFence',
@@ -912,8 +922,9 @@ test('transaction aborts at every rebalance write boundary leave no partial fina
       error => error.code === 'INJECTED_ABORT',
     );
 
-    const [afterProfile, afterState, revisions, audits, auditHead] = await Promise.all([
+    const [afterProfile, afterUserProfileState, afterState, revisions, audits, auditHead] = await Promise.all([
       FinancialProfile.findById(profile._id).lean(),
+      FinancialProfileState.findOne({ userId: userA }).lean(),
       RecommendationState.findOne({ userId: userA, profileId: profile._id }).lean(),
       RecommendationAllocationRevision.find({ recommendationId: args.recommendationId }).sort({ revision: 1 }).lean(),
       AuditRecord.find({ userId: userA, recommendationId: args.recommendationId }).lean(),
@@ -922,6 +933,7 @@ test('transaction aborts at every rebalance write boundary leave no partial fina
 
     assert.equal(afterProfile.version, initialProfile.version, `${boundary}: profile version`);
     assert.equal(afterProfile.financialStateFence || 0, initialProfile.financialStateFence || 0, `${boundary}: profile fence`);
+    assert.equal(afterUserProfileState.promotionFence, initialProfileState.promotionFence, `${boundary}: user profile promotion fence`);
     assert.equal(String(afterState.currentRecommendationId), String(initialState.currentRecommendationId), `${boundary}: recommendation pointer`);
     assert.equal(afterState.currentAllocationRevision, initialState.currentAllocationRevision, `${boundary}: allocation revision`);
     assert.equal(String(afterState.currentAllocationRevisionId), String(initialState.currentAllocationRevisionId), `${boundary}: allocation pointer`);
@@ -989,6 +1001,48 @@ test('barrier-controlled profile edit defeats an in-flight rebalance without fin
   assert.equal(afterState.currentAllocationRevision, beforeState.currentAllocationRevision);
   assert.equal(String(afterState.currentAllocationRevisionId), String(beforeState.currentAllocationRevisionId));
   await assert.rejects(requireFreshRecommendationState({ userId: userA, profileId: profile._id }));
+});
+
+test('manual rebalance refuses a profile that is no longer the user canonical profile', async () => {
+  const profile = await createFixture();
+  const args = await rebalanceInput(profile, 'historical-profile-rebalance-rejected');
+  await FinancialProfileState.updateOne({ userId: userA }, {
+    $set: { currentProfileId: new mongoose.Types.ObjectId() },
+    $inc: { revision: 1, promotionFence: 1 },
+  });
+
+  await assert.rejects(createManualAllocationRevision(args), error => error.code === 'PROFILE_STATE_VERSION_CONFLICT');
+  assert.equal(await RecommendationAllocationRevision.countDocuments({ recommendationId: args.recommendationId }), 1);
+  assert.equal(await AuditRecord.countDocuments({ recommendationId: args.recommendationId }), 0);
+});
+
+test('rebalance transaction is fenced when the canonical profile pointer advances after its read', async () => {
+  const profile = await createFixture();
+  const args = await rebalanceInput(profile, 'profile-pointer-race-rebalance');
+  const barrier = createBarrier();
+  let paused = false;
+  const pending = createManualAllocationRevision({
+    ...args,
+    testHooks: {
+      afterFinancialProfileStateRead: async () => {
+        if (!paused) {
+          paused = true;
+          await barrier.pause();
+        }
+      },
+    },
+  });
+  await barrier.entered;
+  await FinancialProfileState.updateOne({ userId: userA }, {
+    $set: { currentProfileId: new mongoose.Types.ObjectId() },
+    $inc: { revision: 1, promotionFence: 1 },
+  });
+  barrier.release();
+  const result = await Promise.allSettled([pending]);
+  assert.equal(result[0].status, 'rejected');
+  assert.ok(['PROFILE_STATE_VERSION_CONFLICT', 'ALLOCATION_REVISION_CONFLICT'].includes(result[0].reason.code));
+  assert.equal(await RecommendationAllocationRevision.countDocuments({ recommendationId: args.recommendationId }), 1);
+  assert.equal(await AuditRecord.countDocuments({ recommendationId: args.recommendationId }), 0);
 });
 
 test('barrier-controlled recommendation refresh supersedes a paused old-state rebalance', async () => {

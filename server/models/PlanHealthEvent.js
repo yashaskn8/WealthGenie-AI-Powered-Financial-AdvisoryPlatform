@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 const planHealthEventSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   profileId: { type: mongoose.Schema.Types.ObjectId, ref: 'FinancialProfile', required: true, index: true },
+  profileStateRevision: { type: Number, min: 1, required: true, validate: Number.isSafeInteger },
   recommendationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Recommendation', default: null },
   reason: { type: String, required: true, maxlength: 120 },
   severity: { type: String, enum: ['INFO', 'ATTENTION', 'BLOCKED'], required: true },

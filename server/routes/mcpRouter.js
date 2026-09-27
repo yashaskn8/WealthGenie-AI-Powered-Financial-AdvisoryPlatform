@@ -23,19 +23,30 @@ export function createMcpRouter({
   capacity = createMcpCapacityController({ config: config.mcp, env: { NODE_ENV: config.nodeEnv } }),
   env = process.env,
   authenticate = verifyMcpBearer({ config: config.mcp, env }),
+  toolRegistry,
 } = {}) {
   const router = express.Router();
   const boundaryConfig = {
     isProduction: config.isProduction,
     allowedHosts: config.mcp.allowedHosts,
     allowedOrigins: config.mcp.allowedOrigins,
+    trustedProxyCidrs: config.trustedProxyCidrs || [],
+    directTls: config.mcp.directTls === true,
   };
 
   router.use((req, res, next) => {
     PrometheusMetrics.inc('mcp_requests_total');
+    let failureRecorded = false;
+    const recordFailure = () => {
+      if (failureRecorded) return;
+      failureRecorded = true;
+      PrometheusMetrics.inc('mcp_request_failures_total');
+    };
     res.once('finish', () => {
-      if (res.statusCode >= 400) PrometheusMetrics.inc('mcp_request_failures_total');
+      if (res.statusCode >= 400) recordFailure();
     });
+    res.once('close', () => { if (!res.writableEnded) recordFailure(); });
+    req.once('aborted', recordFailure);
     next();
   });
 
@@ -83,6 +94,7 @@ export function createMcpRouter({
         capacity,
         runtime,
         config: config.mcp,
+        ...(toolRegistry ? { toolRegistry } : {}),
       });
       return undefined;
     } catch (error) {

@@ -63,7 +63,7 @@ function advisoryFreshness(goal, state, calculationFreshness) {
     'goalId', 'profileId', 'recommendationId', 'allocationRevision', 'allocationRevisionId',
     'portfolioFingerprint', 'recommendationFingerprint', 'profileInputHash',
     'recommendationPolicyVersion', 'regulatoryRuleVersion', 'returnAssumptionHash',
-    'profileVersion', 'goalVersion', 'goalCalculationFingerprint', 'generatedAt',
+    'profileVersion', 'financialProfileStateRevision', 'goalVersion', 'goalCalculationFingerprint', 'generatedAt',
     'goalCalculationInputFingerprint', 'goalCalculationPolicyVersion',
   ];
   if (required.some(field => metadata[field] === null || metadata[field] === undefined || metadata[field] === '')) {
@@ -81,6 +81,7 @@ function advisoryFreshness(goal, state, calculationFreshness) {
     && metadata.regulatoryRuleVersion === state.recommendation.regulatoryRuleVersion
     && metadata.returnAssumptionHash === state.allocationRevision.returnAssumptionHash
     && Number(metadata.profileVersion) === Number(state.profileVersion)
+    && Number(metadata.financialProfileStateRevision) === Number(state.financialProfileState?.revision)
     && Number(metadata.goalVersion) === Number(goal.version ?? 1)
     && metadata.goalCalculationInputFingerprint === buildGoalCalculationInputFingerprint(goal)
     && metadata.goalCalculationPolicyVersion === GOAL_CALCULATION_POLICY_VERSION
@@ -119,6 +120,7 @@ const GOAL_PUBLIC_FIELDS = Object.freeze([
   'provider_forecast', 'inflation_assumption', 'sourceRecommendationId',
   'sourceAllocationRevision', 'sourceAllocationRevisionId', 'sourceProfileInputHash',
   'sourceProfileVersion', 'sourceModelVersion', 'sourceRecommendationPolicyVersion',
+  'sourceFinancialProfileStateRevision',
   'sourceRegulatoryRuleVersion', 'sourceReturnAssumptionVersion',
   'sourceReturnAssumptionHash', 'sourceReturnAssumptionSource',
   'sourceRecommendationFingerprint', 'sourcePortfolioFingerprint',
@@ -135,7 +137,13 @@ export function buildCurrentGoalResponse(goal, { state = null } = {}) {
   const raw = plain(goal);
   const calculationFreshness = state?.recommendation
     ? assessGoalCalculationFreshness(raw, state)
-    : { fresh: false, reasonCodes: ['SOURCE_MISSING'] };
+    : {
+      fresh: false,
+      reasonCodes: state?.financialProfileState
+        && String(state.financialProfileState.currentProfileId || '') !== String(raw.profileId || '')
+        ? ['STALE_PROFILE']
+        : ['SOURCE_MISSING'],
+    };
   const fresh = calculationFreshness.fresh === true;
   const advisory = advisoryFreshness(raw, state, calculationFreshness);
   const response = Object.fromEntries(GOAL_PUBLIC_FIELDS
@@ -155,6 +163,7 @@ export function buildCurrentGoalResponse(goal, { state = null } = {}) {
       allocationRevisionId: raw.sourceAllocationRevisionId ? String(raw.sourceAllocationRevisionId) : null,
       profileInputHash: raw.sourceProfileInputHash || null,
       profileVersion: raw.sourceProfileVersion ?? null,
+      financialProfileStateRevision: raw.sourceFinancialProfileStateRevision ?? null,
       modelVersion: raw.sourceModelVersion || null,
       recommendationPolicyVersion: raw.sourceRecommendationPolicyVersion || null,
       regulatoryRuleVersion: raw.sourceRegulatoryRuleVersion || null,
@@ -189,6 +198,7 @@ export function buildGoalAdvisoryMetadata({ goal, state, generatedAt = new Date(
     regulatoryRuleVersion: state.recommendation.regulatoryRuleVersion,
     returnAssumptionHash: state.allocationRevision.returnAssumptionHash,
     profileVersion: state.profileVersion,
+    financialProfileStateRevision: state.financialProfileState?.revision ?? null,
     goalVersion: Number(goal.version ?? 1),
     goalCalculationFingerprint: buildGoalCalculationFingerprint(goal),
     goalCalculationInputFingerprint: buildGoalCalculationInputFingerprint(goal),

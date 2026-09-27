@@ -43,3 +43,19 @@ test('verifyJWT rejects missing bearer tokens', () => {
   assert.equal(res.statusCode, 401);
   assert.match(res.body.error, /No token/);
 });
+
+test('verifyJWT rejects an MCP-purpose token even if it is signed with the session key', () => {
+  const token = jwt.sign({
+    userId: '64b000000000000000000001',
+    token_use: 'mcp',
+    aud: 'wealthgenie-mcp',
+    scope: 'mcp:tools',
+  }, process.env.JWT_SECRET, { expiresIn: '1h' });
+  const req = { headers: { authorization: `Bearer ${token}` } };
+  const res = mockResponse();
+  let called = false;
+  verifyJWT(req, res, () => { called = true; });
+  assert.equal(called, false);
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.body.code, 'AUTH_TOKEN_INVALID');
+});

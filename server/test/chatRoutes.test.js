@@ -6,7 +6,10 @@ import chatRouter from '../routes/chatRoutes.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import { withServer, rawRequest } from '../test-utils/httpTestUtils.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import Recommendation from '../models/Recommendation.js';
+import RecommendationState from '../models/RecommendationState.js';
+import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import Goal from '../models/Goal.js';
 import ConversationHistory from '../models/ConversationHistory.js';
 import User from '../models/User.js';
@@ -38,7 +41,10 @@ function buildApp() {
 
 describe('Chat Routes Integration & Input Validation Tests', () => {
   let originalProfileFindOne;
+  let originalProfileStateFindOne;
   let originalRecFindOne;
+  let originalRecommendationStateFindOne;
+  let originalAllocationRevisionFindOne;
   let originalGoalFind;
   let originalConvFindOne;
   let originalConvFind;
@@ -52,16 +58,27 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
     ProviderManager.groq.recordSuccess();
 
     originalProfileFindOne = FinancialProfile.findOne;
+    originalProfileStateFindOne = FinancialProfileState.findOne;
     originalRecFindOne = Recommendation.findOne;
+    originalRecommendationStateFindOne = RecommendationState.findOne;
+    originalAllocationRevisionFindOne = RecommendationAllocationRevision.findOne;
     originalGoalFind = Goal.find;
     originalConvFindOne = ConversationHistory.findOne;
     originalConvFind = ConversationHistory.find;
     originalUserFindById = User.findById;
 
-    FinancialProfile.findOne = (query) => ({
-      sort: () => ({
-        lean: async () => (query?.userId === mockUserId ? mockProfile : null),
-      }),
+    FinancialProfile.findOne = query => ({
+      sort() { return this; },
+      lean: async () => (query?.userId === mockUserId ? mockProfile : null),
+    });
+    FinancialProfileState.findOne = query => ({
+      lean: async () => (query?.userId === mockUserId ? {
+        userId: mockUserId,
+        currentProfileId: mockProfile._id,
+        revision: 1,
+        promotionFence: 1,
+        resolutionStatus: 'CURRENT',
+      } : null),
     });
 
     Recommendation.findOne = () => ({
@@ -69,6 +86,8 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
         lean: async () => null,
       }),
     });
+    RecommendationState.findOne = () => ({ lean: async () => null });
+    RecommendationAllocationRevision.findOne = () => ({ sort() { return this; }, lean: async () => null });
 
     Goal.find = () => ({
       sort: () => ({
@@ -108,7 +127,10 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
 
   afterEach(() => {
     FinancialProfile.findOne = originalProfileFindOne;
+    FinancialProfileState.findOne = originalProfileStateFindOne;
     Recommendation.findOne = originalRecFindOne;
+    RecommendationState.findOne = originalRecommendationStateFindOne;
+    RecommendationAllocationRevision.findOne = originalAllocationRevisionFindOne;
     Goal.find = originalGoalFind;
     ConversationHistory.findOne = originalConvFindOne;
     ConversationHistory.find = originalConvFind;

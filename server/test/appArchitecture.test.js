@@ -13,12 +13,12 @@ test('app factory creates isolated Express instances with production security de
     ...process.env,
     NODE_ENV: 'production',
     CORS_ORIGINS: 'https://wealth.example',
-    TRUST_PROXY: '1',
+    TRUSTED_PROXY_CIDRS: '127.0.0.1/32',
   };
   const first = createApp({ env });
   const second = createApp({ env });
   assert.notEqual(first, second);
-  assert.equal(first.get('trust proxy'), 1);
+  assert.deepEqual(first.get('trust proxy'), ['127.0.0.1/32']);
 
   await withServer(first, async (baseUrl) => {
     const response = await fetch(`${baseUrl}/healthz`, {
@@ -54,13 +54,13 @@ test('runtime configuration bounds ports, proxy trust, and HTTP lifecycle timeou
   const config = getRuntimeConfig({
     NODE_ENV: 'production',
     PORT: '70000',
-    TRUST_PROXY: '2',
+    TRUSTED_PROXY_CIDRS: '10.0.0.0/8,192.168.0.0/16',
     HTTP_REQUEST_TIMEOUT_MS: '90000',
     HTTP_HEADERS_TIMEOUT_MS: '65000',
     HTTP_KEEP_ALIVE_TIMEOUT_MS: '60000',
   });
   assert.equal(config.port, 5000);
-  assert.equal(config.trustProxy, 2);
+  assert.deepEqual(config.trustProxy, ['10.0.0.0/8', '192.168.0.0/16']);
   assert.deepEqual(config.allowedOrigins, []);
   assert.doesNotThrow(() => assertValidHttpTimeouts(config));
 

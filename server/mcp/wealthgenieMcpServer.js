@@ -8,6 +8,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import parseJoi from 'joi-to-json';
 import FinancialProfile from '../models/FinancialProfile.js';
+import { resolveCurrentFinancialProfile } from '../services/currentFinancialProfile.js';
 import { FinancialToolRegistry } from '../services/financialToolRegistry.js';
 import { buildRecommendationProfile } from '../services/recommendationProfile.js';
 import { MCP_TOOL_POLICY, buildMcpResult, isMcpToolAllowed, mcpOutputSchema } from './toolPolicy.js';
@@ -134,11 +135,12 @@ function sha256(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
-export async function loadOwnedProfile({ profileId, userId, profileModel = FinancialProfile }) {
+export async function loadOwnedProfile({ profileId, userId, profileModel = FinancialProfile, resolveCurrent = resolveCurrentFinancialProfile }) {
   if (!profileId) throw new McpRequestError('MCP_PROFILE_CONTEXT_REQUIRED');
   if (!mongoose.isValidObjectId(profileId)) throw new McpRequestError('MCP_PROFILE_CONTEXT_NOT_FOUND');
-  const document = await profileModel.findOne({ _id: profileId, userId }).lean();
-  if (!document) throw new McpRequestError('MCP_PROFILE_CONTEXT_NOT_FOUND');
+  const current = await resolveCurrent({ userId, profileModel });
+  const document = current.profile;
+  if (!document || String(document._id) !== String(profileId)) throw new McpRequestError('MCP_PROFILE_CONTEXT_NOT_FOUND');
   try {
     if (!Number.isSafeInteger(document.version) || document.version < 1) {
       throw new McpRequestError('MCP_PROFILE_CONTEXT_INVALID');
@@ -146,8 +148,10 @@ export async function loadOwnedProfile({ profileId, userId, profileModel = Finan
     const profile = buildRecommendationProfile(document);
     return {
       profile,
+      profileId: String(document._id),
       version: document.version,
       snapshotHash: sha256(profile),
+      financialProfileStateRevision: Number(current.state.revision),
     };
   } catch {
     throw new McpRequestError('MCP_PROFILE_CONTEXT_INVALID');
@@ -170,6 +174,8 @@ function toolResult(name, result, tool, profileSnapshot) {
     profile: profileSnapshot?.profile || null,
     profileVersion: profileSnapshot?.version ?? null,
     profileSnapshotHash: profileSnapshot?.snapshotHash ?? null,
+    profileId: profileSnapshot?.profileId ?? null,
+    financialProfileStateRevision: profileSnapshot?.financialProfileStateRevision ?? null,
   });
   if (!validateOutput(wrapped)) throw new McpRequestError('MCP_RESULT_SCHEMA_INVALID');
   const bounded = boundedResult(wrapped);
@@ -181,25 +187,29 @@ function finalizeToolExecution(operation, release, startedAt, runtime) {
   const finalize = () => {
     if (finalized) return;
     finalized = true;
+    release.signal?.removeEventListener('abort', abortForLeaseLoss);
     PrometheusMetrics.recordMcpToolDuration(Date.now() - startedAt);
     PrometheusMetrics.setGauge('mcp_active_tool_executions', runtime?.snapshot().activeTools || 0);
     void release();
   };
+  const abortForLeaseLoss = () => operation.abort?.(release.signal.reason);
+  if (release.signal?.aborted) abortForLeaseLoss();
+  else release.signal?.addEventListener('abort', abortForLeaseLoss, { once: true });
   // Handle both fulfillment and rejection explicitly; a bare finally() would
   // create a second rejected promise on failure and can trigger an unhandled
   // rejection during timeout, cancellation, or shutdown.
   void operation.settled.then(finalize, finalize);
 }
 
-function createServer({ transportKind, principal = null, profileId = null, capacity = null, runtime = null, config = null, parentSignal = null }) {
+function createServer({ transportKind, principal = null, profileId = null, capacity = null, runtime = null, config = null, parentSignal = null, toolRegistry = FinancialToolRegistry }) {
   const server = new Server(
     { name: 'WealthGenie MCP Tools', version: '1.0.0' },
     { capabilities: { tools: {} } },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: FinancialToolRegistry.listMcpTools({ transport: transportKind }).map(({ name, description, version }) => {
-      const tool = FinancialToolRegistry.getTool(name);
+    tools: toolRegistry.listMcpTools({ transport: transportKind }).map(({ name, description, version }) => {
+      const tool = toolRegistry.getTool(name);
       const definition = {
         name,
         description: `${description} Results are non-authoritative calculations, not recommendations.`,
@@ -217,7 +227,7 @@ function createServer({ transportKind, principal = null, profileId = null, capac
 
   server.setRequestHandler(CallToolRequestSchema, async request => {
     const { name, arguments: args } = request.params;
-    const tool = FinancialToolRegistry.getTool(name);
+    const tool = toolRegistry.getTool(name);
     if (!tool || !isMcpToolAllowed(tool, { transport: transportKind })) {
       return resultForError(new McpRequestError('MCP_TOOL_NOT_ALLOWED'));
     }
@@ -248,7 +258,7 @@ function createServer({ transportKind, principal = null, profileId = null, capac
               profileSnapshot = await loadOwnedProfile({ profileId, userId: principal.userId });
             }
             if (signal.aborted) throw signal.reason || new McpRequestError('MCP_CLIENT_CANCELLED');
-            const execution = await FinancialToolRegistry.executeTool(name, args || {}, {
+            const execution = await toolRegistry.executeTool(name, args || {}, {
               ...(profileSnapshot ? { profile: profileSnapshot.profile } : {}),
               signal,
               mcpRequest: true,
@@ -262,6 +272,7 @@ function createServer({ transportKind, principal = null, profileId = null, capac
             result: execute(new AbortController().signal),
             settled: Promise.resolve(),
           };
+        PrometheusMetrics.setGauge('mcp_active_tool_executions', runtime?.snapshot().activeTools || 0);
         finalizeToolExecution(operation, release, executionStartedAt, runtime);
         const result = await operation.result;
         const response = toolResult(name, result, tool, profileSnapshot);
@@ -301,10 +312,6 @@ export class WealthGenieMcpServer {
     });
   }
 
-  static executeTool(name, args = {}, context = {}) {
-    return FinancialToolRegistry.executeTool(name, args, context);
-  }
-
   async connectStdio() {
     const server = createServer({ transportKind: 'stdio' });
     await server.connect(new StdioServerTransport());
@@ -318,6 +325,7 @@ export async function handleStatelessMcpRequest(req, res, {
   capacity,
   runtime,
   config,
+  toolRegistry = FinancialToolRegistry,
 } = {}) {
   const requestLease = runtime.acquireRequest();
   const abortRequest = () => requestLease.abort(new McpRequestError('MCP_CLIENT_CANCELLED'));
@@ -326,6 +334,7 @@ export async function handleStatelessMcpRequest(req, res, {
   const server = createServer({
     transportKind: 'remote', principal, profileId, capacity, runtime, config,
     parentSignal: requestLease.signal,
+    toolRegistry,
   });
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   try {

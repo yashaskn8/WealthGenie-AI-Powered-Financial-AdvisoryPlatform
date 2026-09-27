@@ -6,13 +6,14 @@
  */
 
 import { validateMongoCompatibilityConfig } from './mongoCompatibility.js';
+import proxyaddr from 'proxy-addr';
 
 export function validateEnvironmentConfig(env = process.env) {
   const isProduction = env.NODE_ENV === 'production';
   const errors = [];
   errors.push(...validateMongoCompatibilityConfig(env).errors);
 
-  for (const name of ['MCP_ENABLED', 'MCP_REMOTE_ENABLED', 'MCP_LEGACY_SSE_ENABLED']) {
+  for (const name of ['MCP_ENABLED', 'MCP_REMOTE_ENABLED', 'MCP_LEGACY_SSE_ENABLED', 'MCP_DIRECT_TLS']) {
     if (env[name] !== undefined && !['true', 'false'].includes(env[name])) {
       errors.push(`${name} must be true or false`);
     }
@@ -24,6 +25,9 @@ export function validateEnvironmentConfig(env = process.env) {
   if (mcpRemoteEnabled && !mcpEnabled) errors.push('MCP_REMOTE_ENABLED requires MCP_ENABLED=true');
   if (env.MCP_LEGACY_SSE_ENABLED === 'true') errors.push('Legacy MCP SSE has been removed; MCP_LEGACY_SSE_ENABLED must remain false');
   if (isProduction && mcpRemoteEnabled) {
+    if (!env.MCP_JWT_SECRET?.trim() || env.MCP_JWT_SECRET.trim().length < 32) errors.push('MCP_JWT_SECRET must contain at least 32 characters when production remote MCP is enabled');
+    if (env.MCP_JWT_SECRET && env.MCP_JWT_SECRET === env.JWT_SECRET) errors.push('MCP_JWT_SECRET must differ from JWT_SECRET');
+    if (!env.MCP_JWT_ISSUER?.trim()) errors.push('MCP_JWT_ISSUER is required when production remote MCP is enabled');
     if (!env.MCP_JWT_AUDIENCE?.trim()) errors.push('MCP_JWT_AUDIENCE is required when production remote MCP is enabled');
     if (!env.MCP_REQUIRED_SCOPE?.trim()) errors.push('MCP_REQUIRED_SCOPE is required when production remote MCP is enabled');
     if (env.MCP_JWT_AUDIENCE && (env.MCP_JWT_AUDIENCE.length > 255 || /\s/.test(env.MCP_JWT_AUDIENCE))) {
@@ -38,6 +42,18 @@ export function validateEnvironmentConfig(env = process.env) {
       if (host.includes('://') || /[\s/@?#]/.test(host)) errors.push(`MCP_ALLOWED_HOSTS contains an invalid host: ${host}`);
     }
     if (env.REQUIRE_REDIS === 'false') errors.push('Production remote MCP requires REQUIRE_REDIS=true');
+    const trustedProxyCidrs = String(env.TRUSTED_PROXY_CIDRS || '').split(',').map(value => value.trim()).filter(Boolean);
+    if (!trustedProxyCidrs.length && env.MCP_DIRECT_TLS !== 'true') {
+      errors.push('Production remote MCP requires explicit TRUSTED_PROXY_CIDRS');
+    } else if (trustedProxyCidrs.length) {
+      try {
+        // Validate with the same parser used by the HTTP trust boundary so
+        // invalid proxy ranges cannot pass startup validation and fail later.
+        proxyaddr.compile(trustedProxyCidrs);
+      } catch {
+        errors.push('TRUSTED_PROXY_CIDRS must contain valid proxy CIDR/range entries');
+      }
+    }
     if (!env.REDIS_URL?.trim()) {
       errors.push('REDIS_URL is required when production remote MCP is enabled');
     } else {

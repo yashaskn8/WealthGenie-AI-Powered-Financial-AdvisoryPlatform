@@ -24,13 +24,13 @@ import jwt from 'jsonwebtoken';
 import crypto from 'node:crypto';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import recommendRoutes, { recommendationPayloadFromSnapshot } from '../routes/recommend.js';
-import FinancialProfile from '../models/FinancialProfile.js';
+import profileRoutes from '../routes/profile.js';
 import Recommendation from '../models/Recommendation.js';
 import AuditRecord from '../models/AuditRecord.js';
 import { ProviderManager } from '../services/providerAbstraction.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import { assertFetchResponseMatchesOpenApi } from './helpers/openapiRuntimeContract.js';
-import { canonicalProfile } from './helpers/canonicalProfile.js';
+import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
 import { installFinancialStateTestHook } from '../services/financialStateTestHooks.js';
 
 const JWT_SECRET = 'deferred-advisory-test-secret-key-32ch';
@@ -54,6 +54,7 @@ test.before(async () => {
 
   app = express();
   app.use(express.json());
+  app.use('/api/profile', profileRoutes);
   app.use('/api/recommend', recommendRoutes);
   app.use(errorHandler);
 
@@ -77,11 +78,19 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
   const tokenA = signToken(userAId);
   const tokenB = signToken(userBId);
 
-  const profile = await FinancialProfile.create({
-    userId: userAId,
-    ...canonicalProfile({ monthlyTakeHome: 120000, monthlySavings: 35000, age: 32 }),
-    recommendationProfileVersion: 'financial-profile-1.0.0',
+  const completionResponse = await fetch(`${baseUrl}/api/profile/complete`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${tokenA}`,
+      'Idempotency-Key': crypto.randomUUID(),
+    },
+    body: JSON.stringify(canonicalProfilePayload({ monthlyTakeHome: 120000, monthlySavings: 35000, age: 32 })),
   });
+  const completionText = await completionResponse.text();
+  assert.equal(completionResponse.status, 200, completionText);
+  const completionBody = JSON.parse(completionText);
+  const profileId = completionBody.profile.profileId;
   let recData = null;
   let sourceState = null;
   let serverTimingHeader = null;
@@ -95,7 +104,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
         'Authorization': `Bearer ${tokenA}`,
         'idempotency-key': crypto.randomUUID(),
       },
-      body: JSON.stringify({ profileId: profile._id.toString() }),
+      body: JSON.stringify({ profileId }),
     });
     const elapsed = performance.now() - start;
 
@@ -125,7 +134,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     assert.ok(recData.market_adjustment, 'Must publish bounded market adjustment metadata');
     assert.match(serverTimingHeader, /market-context;dur=/);
 
-    const currentResponse = await fetch(`${baseUrl}/api/recommend/current?profileId=${profile._id}`, {
+    const currentResponse = await fetch(`${baseUrl}/api/recommend/current?profileId=${profileId}`, {
       headers: { 'Authorization': `Bearer ${tokenA}` },
     });
     assert.equal(currentResponse.status, 200);

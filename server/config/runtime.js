@@ -8,8 +8,9 @@ function positiveInteger(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEG
   return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
 }
 
-function parseTrustProxy(value, isProduction) {
-  if (value === undefined || value === '') return isProduction ? 1 : false;
+function parseTrustProxy(value, isProduction, trustedProxyCidrs = []) {
+  if (isProduction) return trustedProxyCidrs.length ? trustedProxyCidrs : false;
+  if (value === undefined || value === '') return false;
   if (value === 'false') return false;
   if (value === 'true') return 1;
   const hops = Number(value);
@@ -43,11 +44,14 @@ export function getRuntimeConfig(env = process.env) {
   const agentWorkflowBackend = enumValue(env.AGENT_WORKFLOW_BACKEND, 'mongo', ['mongo', 'temporal']);
   const agentApprovalProvider = enumValue(env.AGENT_APPROVAL_PROVIDER, isProduction ? 'webauthn' : 'development', ['development', 'webauthn']);
   const mcpEnabled = booleanValue(env.MCP_ENABLED, !isProduction);
+  const trustedProxyCidrs = (env.TRUSTED_PROXY_CIDRS || '').split(',').map(value => value.trim()).filter(Boolean);
+  const mcpSecret = env.MCP_JWT_SECRET || null;
   return Object.freeze({
     nodeEnv,
     isProduction,
     port: positiveInteger(env.PORT, 5000, { max: 65535 }),
-    trustProxy: parseTrustProxy(env.TRUST_PROXY, isProduction),
+    trustProxy: parseTrustProxy(env.TRUST_PROXY, isProduction, trustedProxyCidrs),
+    trustedProxyCidrs: Object.freeze(trustedProxyCidrs),
     allowedOrigins: configuredOrigins.length > 0
       ? configuredOrigins
       : (isProduction ? [] : LOCAL_DEVELOPMENT_ORIGINS),
@@ -62,6 +66,10 @@ export function getRuntimeConfig(env = process.env) {
       remoteEnabled: booleanValue(env.MCP_REMOTE_ENABLED, mcpEnabled && !isProduction),
       legacySseEnabled: booleanValue(env.MCP_LEGACY_SSE_ENABLED, false),
       jwtAudience: env.MCP_JWT_AUDIENCE?.trim() || null,
+      jwtIssuer: env.MCP_JWT_ISSUER?.trim() || null,
+      jwtSecret: mcpSecret,
+      jwtSecretIsolated: Boolean(mcpSecret && mcpSecret !== env.JWT_SECRET),
+      directTls: booleanValue(env.MCP_DIRECT_TLS, false),
       requiredScope: env.MCP_REQUIRED_SCOPE?.trim() || null,
       allowedHosts: (env.MCP_ALLOWED_HOSTS || (isProduction ? '' : LOCAL_MCP_HOSTS.join(',')))
         .split(',').map(value => value.trim().toLowerCase()).filter(Boolean),
@@ -221,8 +229,14 @@ export function assertValidRuntimeConfig(config) {
     throw new Error('Legacy MCP SSE has been removed; MCP_LEGACY_SSE_ENABLED must remain false');
   }
   if (config.isProduction && config.mcp.remoteEnabled) {
-    if (!config.mcp.jwtAudience || !config.mcp.requiredScope) {
-      throw new Error('Production remote MCP requires MCP_JWT_AUDIENCE and MCP_REQUIRED_SCOPE');
+    if (!config.mcp.jwtAudience || !config.mcp.jwtIssuer || !config.mcp.requiredScope) {
+      throw new Error('Production remote MCP requires MCP_JWT_ISSUER, MCP_JWT_AUDIENCE and MCP_REQUIRED_SCOPE');
+    }
+    if (!config.mcp.jwtSecret || config.mcp.jwtSecret.length < 32 || !config.mcp.jwtSecretIsolated) {
+      throw new Error('Production remote MCP requires an isolated MCP_JWT_SECRET of at least 32 characters');
+    }
+    if (!config.trustedProxyCidrs.length && !config.mcp.directTls) {
+      throw new Error('Production remote MCP requires explicit TRUSTED_PROXY_CIDRS or MCP_DIRECT_TLS=true');
     }
     if (config.mcp.allowedHosts.length === 0) {
       throw new Error('Production remote MCP requires MCP_ALLOWED_HOSTS');

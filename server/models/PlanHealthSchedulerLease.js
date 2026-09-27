@@ -8,6 +8,7 @@ const planHealthSchedulerLeaseSchema = new mongoose.Schema({
   mutationFence: { type: Number, min: 0, default: 0 },
   status: { type: String, enum: ['PENDING', 'RUNNING', 'FAILED', 'COMPLETED', 'COMPLETED_WITH_ERRORS'], default: 'PENDING', required: true },
   cursor: { type: mongoose.Schema.Types.ObjectId, default: null },
+  profileStateCursor: { type: mongoose.Schema.Types.ObjectId, default: null },
   leaseUntil: { type: Date, default: null },
   startedAt: { type: Date, default: null },
   lastHeartbeatAt: { type: Date, default: null },

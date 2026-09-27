@@ -18,6 +18,7 @@ const protectedModels = [
     field: 'session_id',
     identityPaths: [
       'userId', 'profileId', 'session_id', 'profileVersion', 'profileInputHash',
+      'financialProfileStateRevision',
       'sourceRecommendationId', 'sourceAllocationRevisionId',
       'sourceRecommendationFingerprint', 'sourcePortfolioFingerprint',
     ],
@@ -30,6 +31,7 @@ const protectedModels = [
       profileId,
       session_id: 'session-before',
       profileVersion: 1,
+      financialProfileStateRevision: 1,
       profileInputHash: 'a'.repeat(64),
       messages: [],
     }),

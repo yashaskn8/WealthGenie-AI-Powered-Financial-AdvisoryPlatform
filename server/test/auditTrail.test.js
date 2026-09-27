@@ -4,11 +4,16 @@ import mongoose from 'mongoose';
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
-import { canonicalProfile } from './helpers/canonicalProfile.js';
+import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
 
 import AuditRecord from '../models/AuditRecord.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
+import RecommendationState from '../models/RecommendationState.js';
+import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
+import IdempotencyKey from '../models/IdempotencyKey.js';
+import profileRoutes from '../routes/profile.js';
 import recommendRoutes from '../routes/recommend.js';
 import { RECOMMENDATION_POLICY_VERSION } from '../services/recommendationProfile.js';
 import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
@@ -30,6 +35,7 @@ function buildApp() {
   const app = express();
   app.use(express.json());
   app.use(correlationIdMiddleware);
+  app.use('/api/profile', profileRoutes);
   app.use('/api/recommend', recommendRoutes);
   app.use(errorHandler);
   return app;
@@ -41,14 +47,20 @@ describe('AuditRecord - Complete Advisory Audit Trail Verification', () => {
   before(async () => {
     await setupTestDatabase();
 
-    // Create a real test financial profile in DB
-    profile = await FinancialProfile.create({
-      userId: testUserId,
-      ...canonicalProfile({
+    await withServer(buildApp(), async baseUrl => {
+      const { response, body } = await jsonRequest(`${baseUrl}/api/profile/complete`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${testToken}`,
+          'Idempotency-Key': 'audit-current-profile-setup-001',
+        },
+        body: JSON.stringify(canonicalProfilePayload({
         monthlyTakeHome: 150000, monthlySavings: 50000, age: 32,
         liquidSavings: 500000, investmentHorizonYears: 15,
-      }),
-      recommendationProfileVersion: 'financial-profile-1.0.0',
+        })),
+      });
+      assert.equal(response.status, 200, JSON.stringify(body));
+      profile = { _id: body.profile.profileId, userId: testUserId };
     });
   });
 
@@ -56,10 +68,18 @@ describe('AuditRecord - Complete Advisory Audit Trail Verification', () => {
     await FinancialProfile.deleteMany({ userId: { $in: [testUserId, otherUserId] } });
     await Recommendation.deleteMany({ userId: { $in: [testUserId, otherUserId] } });
     await AuditRecord.collection.deleteMany({ userId: { $in: [testUserId, otherUserId] } });
+    await Promise.all([
+      FinancialProfileState.deleteMany({ userId: { $in: [testUserId, otherUserId] } }),
+      RecommendationState.deleteMany({ userId: { $in: [testUserId, otherUserId] } }),
+      RecommendationAllocationRevision.collection.deleteMany({ userId: { $in: [testUserId, otherUserId] } }),
+      IdempotencyKey.deleteMany({ userId: { $in: [testUserId, otherUserId] } }),
+    ]);
     await teardownTestDatabase();
   });
 
   it('1. Generates recommendation and synchronously creates tamper-evident AuditRecord', async () => {
+    const priorAudit = await AuditRecord.findOne({ userId: testUserId }).sort({ chain_sequence: -1 }).lean();
+    assert.ok(priorAudit, 'Profile completion must persist its initial audit entry');
     await withServer(buildApp(), async (baseUrl) => {
       const { response, body } = await jsonRequest(`${baseUrl}/api/recommend`, {
         method: 'POST',
@@ -92,7 +112,8 @@ describe('AuditRecord - Complete Advisory Audit Trail Verification', () => {
       assert.equal(auditDoc.recommendationId.toString(), body.recommendationId.toString());
       assert.equal(auditDoc.correlationId, 'audit-test-corr-001');
       assert.equal(auditDoc.record_hash, body.audit_hash);
-      assert.equal(auditDoc.previous_hash, 'GENESIS');
+      assert.equal(auditDoc.previous_hash, priorAudit.record_hash);
+      assert.equal(auditDoc.chain_sequence, priorAudit.chain_sequence + 1);
       assert.equal(auditDoc.hash_algorithm, 'sha256');
       assert.equal(auditDoc.schema_version, '1.0');
       assert.ok(auditDoc.version_id, 'Must have model/engine version_id');

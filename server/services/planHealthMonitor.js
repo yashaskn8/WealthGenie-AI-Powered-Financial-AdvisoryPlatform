@@ -1,12 +1,14 @@
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import PlanHealthEvent from '../models/PlanHealthEvent.js';
 import PlanHealthInspectionFence from '../models/PlanHealthInspectionFence.js';
 import PlanHealthSchedulerLease from '../models/PlanHealthSchedulerLease.js';
 import { loadPlanReviewContext } from '../agents/planReview/planReviewTools.js';
 import { PrometheusMetrics } from './metricsCollector.js';
 import logger from '../utils/logger.js';
+import { resolveCurrentFinancialProfile } from './currentFinancialProfile.js';
 
 export const PLAN_HEALTH_MONITOR_VERSION = 'plan-health-monitor-1.0.0';
 
@@ -22,6 +24,7 @@ const SEVERITY = Object.freeze({
 export function planHealthEventFingerprint({
   userId,
   profileId,
+  profileStateRevision,
   recommendationId,
   reason,
   monitorVersion = PLAN_HEALTH_MONITOR_VERSION,
@@ -30,6 +33,7 @@ export function planHealthEventFingerprint({
     .update(JSON.stringify({
       userId: String(userId),
       profileId: String(profileId),
+      profileStateRevision: Number(profileStateRevision),
       recommendationId: recommendationId ? String(recommendationId) : null,
       reason,
       monitorVersion,
@@ -64,11 +68,13 @@ async function withLeaseFence({
   publicationFence,
   leaseModel,
   publicationFenceModel,
+  profileStateFence,
+  profileStateModel,
   mongo,
   beforePublication,
   action,
 }) {
-  if (!leaseFence && !publicationFence) return action(null);
+  if (!leaseFence && !publicationFence && !profileStateFence) return action(null);
   const session = await mongo.startSession();
   let result;
   try {
@@ -88,6 +94,19 @@ async function withLeaseFence({
           leaseUntil: { $gt: nowValue },
         }, { $inc: { mutationFence: 1 } }, { session });
         if (!modifiedExactlyOne(fence)) throw leaseLostError();
+      }
+      if (profileStateFence) {
+        const stateWrite = await profileStateModel.updateOne({
+          userId: profileStateFence.userId,
+          currentProfileId: profileStateFence.profileId,
+          revision: profileStateFence.revision,
+          resolutionStatus: 'CURRENT',
+        }, { $inc: { promotionFence: 1 } }, { session });
+        if (!modifiedExactlyOne(stateWrite)) {
+          throw Object.assign(new Error('The canonical financial profile changed before Plan Health publication.'), {
+            code: 'PLAN_HEALTH_PROFILE_SUPERSEDED',
+          });
+        }
       }
       await beforePublication?.();
       if (publicationFence) {
@@ -133,6 +152,7 @@ export async function inspectPlanHealth({
   userId,
   profileId,
   profileModel = FinancialProfile,
+  profileStateModel = FinancialProfileState,
   eventModel = PlanHealthEvent,
   dependencies = {},
   signal,
@@ -142,7 +162,27 @@ export async function inspectPlanHealth({
   leaseModel = PlanHealthSchedulerLease,
   publicationFenceModel = PlanHealthInspectionFence,
   mongo = mongoose,
+  profileStateRevision: expectedProfileStateRevision = null,
 }) {
+  const canonical = await resolveCurrentFinancialProfile({
+    userId,
+    stateModel: profileStateModel,
+    profileModel,
+    requireRecommendation: false,
+  });
+  if (!canonical.profile
+      || String(canonical.profile._id) !== String(profileId)
+      || (expectedProfileStateRevision !== null
+        && Number(canonical.state.revision) !== Number(expectedProfileStateRevision))) {
+    throw Object.assign(new Error('Plan Health work was captured for a profile that is no longer current.'), {
+      code: 'PLAN_HEALTH_PROFILE_SUPERSEDED',
+    });
+  }
+  const profileStateFence = {
+    userId,
+    profileId: canonical.profile._id,
+    revision: Number(canonical.state.revision),
+  };
   const context = await loadPlanReviewContext({ userId, profileId, dependencies: { ...dependencies, profileModel } });
   if (signal?.aborted) throw signal.reason;
   const reason = context.freshness?.reasonCodes?.[0] || null;
@@ -151,7 +191,7 @@ export async function inspectPlanHealth({
     await assertLease();
     if (signal?.aborted) throw signal.reason;
     return withLeaseFence({
-      leaseFence, publicationFence, leaseModel, publicationFenceModel, mongo,
+      leaseFence, publicationFence, profileStateFence, profileStateModel, leaseModel, publicationFenceModel, mongo,
       beforePublication: () => dependencies.beforePublication?.({ publicationFence, userId, profileId }),
       action: async session => {
         await eventModel.updateMany?.(
@@ -167,12 +207,13 @@ export async function inspectPlanHealth({
   const event = {
     userId,
     profileId,
+    profileStateRevision: profileStateFence.revision,
     recommendationId,
     reason,
     severity: SEVERITY[reason] || 'ATTENTION',
     recommendation: eventCopy(reason),
     detectedAt: new Date(),
-    fingerprint: planHealthEventFingerprint({ userId, profileId, recommendationId, reason }),
+    fingerprint: planHealthEventFingerprint({ userId, profileId, profileStateRevision: profileStateFence.revision, recommendationId, reason }),
     monitorVersion: PLAN_HEALTH_MONITOR_VERSION,
   };
   const activeStatuses = ['UNREAD', 'READ', 'OPEN', 'ACKNOWLEDGED'];
@@ -182,7 +223,7 @@ export async function inspectPlanHealth({
     await assertLease();
     if (signal?.aborted) throw signal.reason;
     const persisted = await withLeaseFence({
-      leaseFence, publicationFence, leaseModel, publicationFenceModel, mongo,
+      leaseFence, publicationFence, profileStateFence, profileStateModel, leaseModel, publicationFenceModel, mongo,
       beforePublication: () => dependencies.beforePublication?.({ publicationFence, userId, profileId }),
       action: async session => {
         const options = session ? { session } : undefined;
@@ -217,7 +258,7 @@ export async function inspectPlanHealth({
     if (existing?.status === 'RESOLVED' || existing?.status === 'SUPERSEDED') {
       await assertLease();
       if (signal?.aborted) throw signal.reason;
-      const reopened = await withLeaseFence({ leaseFence, publicationFence, leaseModel, publicationFenceModel, mongo, action: async session => {
+      const reopened = await withLeaseFence({ leaseFence, publicationFence, profileStateFence, profileStateModel, leaseModel, publicationFenceModel, mongo, action: async session => {
         const query = eventModel.findOneAndUpdate(
           { _id: existing._id, fingerprint: event.fingerprint, status: { $in: ['RESOLVED', 'SUPERSEDED'] } },
           {
@@ -234,6 +275,8 @@ export async function inspectPlanHealth({
     }
     return withLeaseFence({
       leaseFence, publicationFence, leaseModel, publicationFenceModel, mongo,
+      profileStateFence,
+      profileStateModel,
       action: async () => ({ status: 'ATTENTION', event: existing }),
     });
   }
@@ -253,7 +296,11 @@ export async function acknowledgePlanHealthEvent({ userId, eventId, eventModel =
 
 export function triggerPlanHealthCheck({ userId, profileId } = {}) {
   if (!userId || !profileId) return Promise.resolve(null);
-  return inspectPlanHealth({ userId, profileId }).catch(error => {
+  return resolveCurrentFinancialProfile({ userId, requireRecommendation: false })
+    .then(current => {
+      if (!current.profile || String(current.profile._id) !== String(profileId)) return null;
+      return inspectPlanHealth({ userId, profileId, profileStateRevision: current.state.revision });
+    }).catch(error => {
     logger.warn('Event-driven plan health check failed', { code: error.code || 'PLAN_HEALTH_CHECK_FAILED' });
     return null;
   });

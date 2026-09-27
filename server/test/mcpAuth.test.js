@@ -7,15 +7,18 @@ import { correlationIdMiddleware } from '../middleware/correlation.js';
 import { withServer, rawRequest } from '../test-utils/httpTestUtils.js';
 
 const secret = 'mcp-auth-test-secret-with-more-than-thirty-two-characters';
-const config = { jwtAudience: 'wealthgenie-mcp', requiredScope: 'mcp:tools' };
+const sessionSecret = 'separate-session-test-secret-with-more-than-thirty-two-characters';
+const issuer = 'wealthgenie-mcp-test-issuer';
+const config = { jwtSecret: secret, jwtIssuer: issuer, jwtAudience: 'wealthgenie-mcp', requiredScope: 'mcp:tools' };
 const revoked = new Set();
 
 function signedToken(claims = {}, options = {}) {
   return jwt.sign({
     userId: '60d5ecb8b3b3a72d9c8e4a11',
     jti: 'phase6-auth-test-token',
+    token_use: 'mcp',
     ...claims,
-  }, secret, { expiresIn: '5m', audience: 'wealthgenie-mcp', ...options });
+  }, secret, { expiresIn: '5m', audience: 'wealthgenie-mcp', issuer, ...options });
 }
 
 function buildApp() {
@@ -23,7 +26,7 @@ function buildApp() {
   app.use(correlationIdMiddleware);
   app.get('/protected', verifyMcpBearer({
     config,
-    env: { JWT_SECRET: secret },
+    env: { JWT_SECRET: sessionSecret, MCP_JWT_SECRET: secret },
     checkRevocation: async jti => revoked.has(jti),
   }), (req, res) => res.json({ principal: req.mcpPrincipal }));
   return app;
@@ -81,6 +84,19 @@ describe('dedicated MCP Bearer authentication', () => {
       const response = await request(baseUrl, `Bearer ${signedToken({ scope: 'mcp:tools' })}`);
       assert.equal(response.status, 401);
       assert.equal((await response.json()).code, 'MCP_AUTH_TOKEN_REVOKED');
+    });
+  });
+
+  it('rejects session-key credentials and wrong issuer or missing token purpose', async () => {
+    await withServer(buildApp(), async baseUrl => {
+      const sessionToken = jwt.sign({ userId: '60d5ecb8b3b3a72d9c8e4a11', jti: 'session', token_use: 'session', scope: 'mcp:tools' }, sessionSecret, {
+        expiresIn: '5m', issuer, audience: 'wealthgenie-mcp',
+      });
+      const wrongIssuer = signedToken({ scope: 'mcp:tools' }, { issuer: 'attacker' });
+      const noPurpose = signedToken({ scope: 'mcp:tools', token_use: undefined });
+      assert.equal((await request(baseUrl, `Bearer ${sessionToken}`)).status, 401);
+      assert.equal((await request(baseUrl, `Bearer ${wrongIssuer}`)).status, 401);
+      assert.equal((await request(baseUrl, `Bearer ${noPurpose}`)).status, 401);
     });
   });
 });

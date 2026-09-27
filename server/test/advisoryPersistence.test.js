@@ -8,6 +8,7 @@ import AuditChainHead from '../models/AuditChainHead.js';
 import IdempotencyKey from '../models/IdempotencyKey.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import RecommendationState from '../models/RecommendationState.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import {
   claimAdvisoryIdempotency,
   releaseAdvisoryIdempotency,
@@ -90,6 +91,7 @@ function makeOperation(claim, suffix = '', { profileInput = testProfile, profile
     },
     response,
     idempotencyClaim: claim,
+    profileStateBinding: { revision: 1, currentProfileId: String(profileId) },
   };
 }
 
@@ -118,6 +120,7 @@ test.beforeEach(async () => {
     // harness clears its fixture rows through the raw collection instead.
     RecommendationAllocationRevision.collection.deleteMany({ userId }),
     RecommendationState.deleteMany({ userId }),
+    FinancialProfileState.deleteMany({ userId }),
     AuditRecord.collection.deleteMany({ userId }),
     AuditChainHead.deleteMany({ _id: userId }),
     IdempotencyKey.deleteMany({ userId }),
@@ -128,6 +131,9 @@ test.beforeEach(async () => {
     ...testProfile,
     recommendationProfileVersion: 'financial-profile-1.1.0',
   });
+  await FinancialProfileState.create({
+    userId, currentProfileId: profileId, revision: 1, promotionFence: 0, resolutionStatus: 'CURRENT',
+  });
 });
 
 test.after(async () => {
@@ -136,6 +142,7 @@ test.after(async () => {
     Recommendation.deleteMany({ userId }),
     RecommendationAllocationRevision.collection.deleteMany({ userId }),
     RecommendationState.deleteMany({ userId }),
+    FinancialProfileState.deleteMany({ userId }),
     AuditRecord.collection.deleteMany({ userId }),
     AuditChainHead.deleteMany({ _id: userId }),
     IdempotencyKey.deleteMany({ userId }),

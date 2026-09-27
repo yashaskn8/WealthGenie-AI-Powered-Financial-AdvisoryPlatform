@@ -20,6 +20,7 @@ const source = {
     returnAssumptionSource: 'WEALTHGENIE_MODEL_POLICY',
   },
   profileVersion: 4,
+  financialProfileState: { stateId: 'profile-state-1', currentProfileId: 'profile-1', revision: 3, promotionFence: 1 },
   recommendationFingerprint: 'c'.repeat(64),
   portfolioFingerprint: 'd'.repeat(64),
   freshness: { fresh: true, reasonCodes: [] },
@@ -38,6 +39,7 @@ function goal() {
     sourceAllocationRevisionId: 'allocation-2',
     sourceProfileInputHash: source.recommendation.profileInputHash,
     sourceProfileVersion: source.profileVersion,
+    sourceFinancialProfileStateRevision: source.financialProfileState.revision,
     sourceModelVersion: source.recommendation.modelVersion,
     sourceRecommendationPolicyVersion: source.recommendation.recommendationPolicyVersion,
     sourceRegulatoryRuleVersion: source.recommendation.regulatoryRuleVersion,
@@ -96,6 +98,30 @@ test('goal advisory metadata is accepted only for the exact current source state
   assert.equal(stale.calculation_freshness.fresh, false);
   assert.equal(stale.recommended_sip, null);
   assert.equal(stale.gemini_advice, null);
+});
+
+test('goal calculation and advisory become stale when the canonical profile pointer advances', () => {
+  const currentGoal = goal();
+  currentGoal.sourceGoalCalculationInputFingerprint = buildGoalCalculationInputFingerprint(currentGoal);
+  currentGoal.advisoryMetadata = buildGoalAdvisoryMetadata({ goal: currentGoal, state: source });
+  const response = buildCurrentGoalResponse(currentGoal, {
+    state: { ...source, financialProfileState: { ...source.financialProfileState, revision: 4, currentProfileId: 'profile-2' } },
+  });
+  assert.equal(response.calculation_freshness.fresh, false);
+  assert.ok(response.calculation_freshness.reasonCodes.includes('STALE_PROFILE'));
+  assert.equal(response.recommended_sip, null);
+  assert.equal(response.gemini_advice, null);
+});
+
+test('historical goal output reports stale profile when canonical pointer targets another profile', () => {
+  const response = buildCurrentGoalResponse(goal(), {
+    state: {
+      recommendation: null,
+      financialProfileState: { currentProfileId: 'profile-2', revision: 4 },
+    },
+  });
+  assert.deepEqual(response.calculation_freshness, { fresh: false, reasonCodes: ['STALE_PROFILE'] });
+  assert.equal(response.probability_of_success, null);
 });
 
 test('goal advisory is stale when a displayed goal input changes without a matching recalculation', () => {

@@ -52,6 +52,32 @@ function leaseModelFixture() {
   };
 }
 
+function profileStateModelFixture({ userId: stateUserId = userId, profileId, revision = 1, onWrite = () => {} } = {}) {
+  return {
+    findOne: () => lean({
+      userId: stateUserId,
+      currentProfileId: profileId,
+      revision,
+      promotionFence: 0,
+      resolutionStatus: 'CURRENT',
+    }),
+    async updateOne(filter, update, options) {
+      onWrite(filter, update, options);
+      return filter.currentProfileId === profileId && filter.revision === revision
+        ? { modifiedCount: 1 }
+        : { modifiedCount: 0 };
+    },
+  };
+}
+
+function noOpTransactionMongo() {
+  return {
+    async startSession() {
+      return { withTransaction: async callback => callback(), endSession: async () => {} };
+    },
+  };
+}
+
 function publicationFenceModelFixture() {
   const rows = new Map();
   return {
@@ -545,7 +571,9 @@ test('worker publication fences the exact profile and recommendation pointer in 
   const sourceBinding = buildPlanReviewSnapshotBinding({
     userId,
     profileId,
+    financialProfileStateRevision: 1,
     currentState: {
+      financialProfileStateRevision: 1,
       profileVersion: 5,
       recommendation: { _id: pointer.currentRecommendationId, recommendationGeneration: 3, profileInputHash: pointer.profileInputHash },
       allocationRevision: { _id: pointer.currentAllocationRevisionId, revision: 2 },
@@ -578,22 +606,29 @@ test('worker publication fences the exact profile and recommendation pointer in 
     checkpointModel: noCheckpointRetention,
     graphCheckpointModel: noCheckpointRetention,
     profileModel,
+    profileStateModel: profileStateModelFixture({
+      profileId,
+      revision: 1,
+      onWrite: (filter, update, options) => writes.push({ model: 'profileState', filter, update, options }),
+    }),
     stateModel,
     mongo: { startSession: async () => session },
     snapshotResolver: async () => ({ sourceBinding, planReviewSnapshotHash: sourceHash, currentState: { statePointer: pointer } }),
     worker: 'worker-a',
   });
   await worker.finishRun(run, { recommendedAction: 'NONE', findings: [], evidence: { entries: [] }, execution: { stepCount: 2, toolCallCount: 1, modelCallCount: 0 } });
-  assert.deepEqual(writes.map(item => item.model), ['profile', 'state', 'run']);
+  assert.deepEqual(writes.map(item => item.model), ['profile', 'profileState', 'state', 'run']);
   assert.ok(writes.every(item => item.options?.session === session));
   assert.equal(writes[0].update.$inc.planReviewPublicationFence, 1);
-  assert.equal(writes[1].filter.currentAllocationRevisionId, pointer.currentAllocationRevisionId);
-  assert.equal(writes[2].filter.planReviewSnapshotHash, sourceHash);
+  assert.equal(writes[1].filter.currentProfileId, profileId);
+  assert.equal(writes[1].filter.revision, 1);
+  assert.equal(writes[2].filter.currentAllocationRevisionId, pointer.currentAllocationRevisionId);
+  assert.equal(writes[3].filter.planReviewSnapshotHash, sourceHash);
 });
 
 test('RUN_COMPLETED and success metrics are written only with the durable terminal CAS', async () => {
   const profileId = '64b000000000000000000031';
-  const binding = buildPlanReviewSnapshotBinding({ userId, profileId, currentState: { profileVersion: 1 }, freshness: { fresh: false, reasonCodes: ['RECOMMENDATION_MISSING'] } });
+  const binding = buildPlanReviewSnapshotBinding({ userId, profileId, financialProfileStateRevision: 1, currentState: { profileVersion: 1 }, freshness: { fresh: false, reasonCodes: ['RECOMMENDATION_MISSING'] } });
   const hash = hashPlanReviewSnapshot(binding);
   const run = {
     runId: 'run-terminal-event', userId, profileId, workerId: 'worker-a', executionGeneration: 1,
@@ -625,6 +660,7 @@ test('RUN_COMPLETED and success metrics are written only with the durable termin
     checkpointModel: noCheckpointRetention,
     graphCheckpointModel: noCheckpointRetention,
     profileModel: { updateOne: async () => ({ modifiedCount: 1 }) },
+    profileStateModel: profileStateModelFixture({ profileId, revision: 1 }),
     stateModel: { updateOne: async () => ({ modifiedCount: 1 }) },
     eventModel: { async create(rows, options) { assert.equal(insideTransaction, true); assert.equal(options.session, session); events.push(...rows); } },
     mongo: { startSession: async () => session },
@@ -901,7 +937,7 @@ test('scheduler lease race allows one owner for a period', async () => {
 test('scheduled health scan uses bounded profile batches and remains read-only when empty', async () => {
   const profiles = [];
   const lease = leaseModelFixture();
-  const profileModel = {
+  const profileStateModel = {
     find() {
       const query = {
         sort() { return query; },
@@ -911,10 +947,10 @@ test('scheduled health scan uses bounded profile batches and remains read-only w
       return query;
     },
   };
-  const result = await runPlanHealthScan({ profileModel, leaseModel: lease, owner: 'scheduler', batchSize: 2 });
+  const result = await runPlanHealthScan({ profileStateModel, leaseModel: lease, owner: 'scheduler', batchSize: 2 });
   assert.deepEqual(result, { claimed: true, scanned: 0, events: 0, failures: 0, periodKey: result.periodKey });
   assert.equal(lease.row.status, 'COMPLETED');
-  assert.equal(lease.row.cursor, null);
+  assert.equal(lease.row.profileStateCursor ?? null, null);
 });
 
 test('Plan Health scheduler recurs after a run and after an error without swallowing its lifecycle state', async () => {
@@ -971,11 +1007,23 @@ test('Plan Health scheduler recurs after a run and after an error without swallo
 test('one timed-out Plan Health profile is recorded while later profiles still complete', async () => {
   const lease = leaseModelFixture();
   const ids = ['64b000000000000000000091', '64b000000000000000000092'];
-  const profiles = ids.map(_id => ({ _id, userId }));
-  const profileModel = {
+  const stateUsers = ['64b000000000000000000191', '64b000000000000000000192'];
+  const profiles = ids.map((_id, index) => ({ _id, userId: stateUsers[index] }));
+  const profileStateModel = {
     find(filter) {
-      const remaining = profiles.filter(profile => !filter._id || profile._id > filter._id.$gt);
+      const remaining = profiles.map((profile, index) => ({
+        userId: stateUsers[index],
+        currentProfileId: profile._id,
+        revision: 1,
+        resolutionStatus: 'CURRENT',
+      })).filter(state => !filter.userId || state.userId > filter.userId.$gt);
       const query = { sort() { return query; }, limit() { return query; }, lean: async () => remaining };
+      return query;
+    },
+  };
+  const profileModel = {
+    find({ _id: { $in: requestedIds } }) {
+      const query = { lean: async () => profiles.filter(profile => requestedIds.includes(profile._id)).map(profile => ({ ...profile })) };
       return query;
     },
   };
@@ -984,6 +1032,7 @@ test('one timed-out Plan Health profile is recorded while later profiles still c
   const publicationFenceModel = publicationFenceModelFixture();
   const result = await runPlanHealthScan({
     profileModel,
+    profileStateModel,
     leaseModel: lease,
     owner: 'scheduler-timeout-test',
     batchSize: 2,
@@ -1009,24 +1058,35 @@ test('one timed-out Plan Health profile is recorded while later profiles still c
   assert.equal(result.scanned, 2);
   assert.equal(result.failures, 1);
   assert.equal(lease.row.status, 'COMPLETED_WITH_ERRORS');
-  assert.equal(lease.row.cursor, ids[1]);
+  assert.equal(lease.row.profileStateCursor, stateUsers[1]);
   assert.equal(lease.row.failureCount, 1);
   assert.deepEqual([...publicationFenceModel.rows.values()].map(row => row.status).sort(), ['PUBLISHED', 'TIMED_OUT']);
 });
 
 test('a poison Plan Health profile is counted and does not prevent later profiles from completing', async () => {
   const lease = leaseModelFixture();
-  const profiles = ['profile-a', 'profile-b', 'profile-c', 'profile-d'].map(_id => ({ _id, userId }));
+  const profiles = ['64b0000000000000000000a1', '64b0000000000000000000a2', '64b0000000000000000000a3', '64b0000000000000000000a4']
+    .map((_id, index) => ({ _id, userId: `64b0000000000000000000${101 + index}` }));
   const inspected = [];
-  const profileModel = {
+  const profileStateModel = {
     find(filter = {}) {
-      const remaining = profiles.filter(profile => !filter._id || profile._id > filter._id.$gt);
+      const remaining = profiles.map((profile, index) => ({
+        userId: `64b0000000000000000000${101 + index}`,
+        currentProfileId: profile._id,
+        revision: 1,
+        resolutionStatus: 'CURRENT',
+      })).filter(state => !filter.userId || state.userId > filter.userId.$gt);
       const query = { sort() { return query; }, limit() { return query; }, lean: async () => remaining };
       return query;
     },
   };
   const result = await runPlanHealthScan({
-    profileModel,
+    profileModel: {
+      find({ _id: { $in: requestedIds } }) {
+        return { lean: async () => profiles.filter(profile => requestedIds.includes(profile._id)) };
+      },
+    },
+    profileStateModel,
     leaseModel: lease,
     publicationFenceModel: publicationFenceModelFixture(),
     periodKey: 'poison-profile-isolation',
@@ -1036,18 +1096,67 @@ test('a poison Plan Health profile is counted and does not prevent later profile
     profileTimeoutMs: 60000,
     inspect: async ({ profileId }) => {
       inspected.push(profileId);
-      if (profileId === 'profile-b') {
+      if (profileId === profiles[1]._id) {
         throw Object.assign(new Error('synthetic provider failure'), { code: 'INJECTED_PROFILE_FAILURE' });
       }
       return { status: 'HEALTHY' };
     },
   });
-  assert.deepEqual(inspected.sort(), ['profile-a', 'profile-b', 'profile-c', 'profile-d']);
+  assert.deepEqual(inspected.sort(), profiles.map(profile => profile._id).sort());
   assert.equal(result.scanned, 4);
   assert.equal(result.failures, 1);
   assert.equal(lease.row.status, 'COMPLETED_WITH_ERRORS');
   assert.equal(lease.row.failureCount, 1);
-  assert.equal(lease.row.cursor, 'profile-d');
+  assert.equal(lease.row.profileStateCursor, '64b0000000000000000000104');
+});
+
+test('malformed or foreign canonical profile pointers are isolated while valid users still scan', async () => {
+  const lease = leaseModelFixture();
+  const states = [
+    { userId: 'user-a', currentProfileId: 'profile-a', revision: 1, resolutionStatus: 'CURRENT' },
+    { userId: 'user-b', currentProfileId: 'profile-b', revision: 1, resolutionStatus: 'CURRENT' },
+    { userId: 'user-c', currentProfileId: 'profile-missing', revision: 1, resolutionStatus: 'CURRENT' },
+    { userId: 'user-d', currentProfileId: 'profile-invalid-revision', revision: 0, resolutionStatus: 'CURRENT' },
+    { userId: 'user-e', currentProfileId: null, revision: 1, resolutionStatus: 'NO_CURRENT' },
+  ];
+  const profileStateModel = {
+    find(filter = {}) {
+      const remaining = states.filter(state => !filter.userId || state.userId > filter.userId.$gt);
+      const query = { sort() { return query; }, limit() { return query; }, lean: async () => remaining };
+      return query;
+    },
+  };
+  const profileModel = {
+    find({ _id: { $in: requestedIds } }) {
+      const rows = [
+        { _id: 'profile-a', userId: 'user-a' },
+        { _id: 'profile-b', userId: 'some-other-user' },
+        { _id: 'profile-invalid-revision', userId: 'user-d' },
+      ].filter(profile => requestedIds.includes(profile._id));
+      return { lean: async () => rows };
+    },
+  };
+  const inspected = [];
+  const result = await runPlanHealthScan({
+    profileModel,
+    profileStateModel,
+    leaseModel: lease,
+    publicationFenceModel: publicationFenceModelFixture(),
+    periodKey: 'malformed-profile-pointer-isolation',
+    owner: 'malformed-profile-pointer-test',
+    batchSize: 5,
+    concurrency: 2,
+    inspect: async ({ profileId, userId: inspectedUserId }) => {
+      inspected.push([String(profileId), String(inspectedUserId)]);
+      return { status: 'HEALTHY' };
+    },
+  });
+
+  assert.deepEqual(inspected, [['profile-a', 'user-a']]);
+  assert.equal(result.scanned, 5);
+  assert.equal(result.failures, 3, 'foreign, missing, and malformed-current pointer rows fail closed');
+  assert.equal(lease.row.status, 'COMPLETED_WITH_ERRORS');
+  assert.equal(lease.row.failureCount, 3);
 });
 
 test('Plan Health shutdown aborts a hung scan and returns without awaiting the provider forever', async () => {
@@ -1095,17 +1204,23 @@ test('plan health supersedes older active events and reopens resolved fingerprin
         }
       }
     },
-    async create(event) {
+    async create(input) {
+      const batch = Array.isArray(input);
+      const event = batch ? input[0] : input;
       if (stored.has(event.fingerprint)) {
         const error = new Error('duplicate');
         error.code = 11000;
         throw error;
       }
-      stored.set(event.fingerprint, { ...event, status: 'UNREAD' });
-      return { toObject: () => stored.get(event.fingerprint) };
+      const document = { ...event, _id: event.fingerprint, status: 'UNREAD' };
+      stored.set(event.fingerprint, document);
+      return batch ? [document] : document;
     },
     findOne(filter) {
-      return { lean: async () => stored.get(filter.fingerprint) || null };
+      return { lean: async () => {
+        const existing = stored.get(filter.fingerprint) || null;
+        return existing && (!filter.status?.$in || filter.status.$in.includes(existing.status)) ? existing : null;
+      } };
     },
     findOneAndUpdate(_filter, mutation) {
       return {
@@ -1124,6 +1239,8 @@ test('plan health supersedes older active events and reopens resolved fingerprin
   let recommendationId = '64b000000000000000000012';
   const dependencies = {
     profileModel: { findOne: () => lean(profile) },
+    profileStateModel: profileStateModelFixture({ profileId: profile._id, revision: 1 }),
+    mongo: noOpTransactionMongo(),
     recommendationModel: {
       findOne: () => ({
         sort() { return this; },
@@ -1138,14 +1255,14 @@ test('plan health supersedes older active events and reopens resolved fingerprin
       }),
     },
   };
-  const first = await inspectPlanHealth({ userId, profileId: profile._id, profileModel: dependencies.profileModel, eventModel, dependencies });
+  const first = await inspectPlanHealth({ userId, profileId: profile._id, profileModel: dependencies.profileModel, profileStateModel: dependencies.profileStateModel, eventModel, dependencies, mongo: dependencies.mongo });
   assert.equal(first.status, 'ATTENTION');
   const firstEvent = [...stored.values()][0];
   stored.set(firstEvent.fingerprint, { ...firstEvent, status: 'RESOLVED' });
-  const reopened = await inspectPlanHealth({ userId, profileId: profile._id, profileModel: dependencies.profileModel, eventModel, dependencies });
+  const reopened = await inspectPlanHealth({ userId, profileId: profile._id, profileModel: dependencies.profileModel, profileStateModel: dependencies.profileStateModel, eventModel, dependencies, mongo: dependencies.mongo });
   assert.equal(reopened.event.status, 'UNREAD');
   recommendationId = '64b000000000000000000013';
-  const superseded = await inspectPlanHealth({ userId, profileId: profile._id, profileModel: dependencies.profileModel, eventModel, dependencies });
+  const superseded = await inspectPlanHealth({ userId, profileId: profile._id, profileModel: dependencies.profileModel, profileStateModel: dependencies.profileStateModel, eventModel, dependencies, mongo: dependencies.mongo });
   assert.equal(superseded.event.status, 'UNREAD');
   assert.equal(stored.get(firstEvent.fingerprint).status, 'SUPERSEDED');
 });

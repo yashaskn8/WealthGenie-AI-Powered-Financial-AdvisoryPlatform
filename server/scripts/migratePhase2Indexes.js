@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { migratePersistenceIndexes } from '../services/persistenceIndexReadiness.js';
+import { reconcileLegacyFinancialProfileStates } from '../services/financialProfileStateMigration.js';
 
 const uri = String(process.env.MONGODB_MIGRATION_URI || '').trim();
 if (!uri) {
@@ -9,9 +10,10 @@ if (!uri) {
 try {
   await mongoose.connect(uri, { autoIndex: false });
   const result = await migratePersistenceIndexes();
-  process.stdout.write(`Phase 2 indexes verified after migration at ${result.verifiedAt}.\n`);
+  const profileStateReport = await reconcileLegacyFinancialProfileStates();
+  process.stdout.write(`Phase 2 indexes verified at ${result.verifiedAt}; profile-state reconciliation ${JSON.stringify(profileStateReport)}.\n`);
 } catch (error) {
-  process.stderr.write(`Phase 2 index migration failed: ${error.code || error.name || 'MIGRATION_FAILED'}.\n`);
+  process.stderr.write(`Phase 2 migration failed: ${error.code || error.name || 'MIGRATION_FAILED'}${error.report ? ` ${JSON.stringify(error.report)}` : ''}.\n`);
   process.exitCode = 1;
 } finally {
   await mongoose.disconnect();

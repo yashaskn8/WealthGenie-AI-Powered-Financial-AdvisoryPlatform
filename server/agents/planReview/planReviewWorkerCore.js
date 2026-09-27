@@ -7,6 +7,7 @@ import AgentCheckpoint from '../../models/AgentCheckpoint.js';
 import AgentGraphCheckpoint from '../../models/AgentGraphCheckpoint.js';
 import AgentRunEvent from '../../models/AgentRunEvent.js';
 import FinancialProfile from '../../models/FinancialProfile.js';
+import FinancialProfileState from '../../models/FinancialProfileState.js';
 import RecommendationState from '../../models/RecommendationState.js';
 import { PrometheusMetrics } from '../../services/metricsCollector.js';
 import { runPlanReview } from './planReviewService.js';
@@ -294,6 +295,7 @@ class PlanReviewWorker {
     eventModel = null,
     mandateModel = UserIntentMandate,
     profileModel = FinancialProfile,
+    profileStateModel = FinancialProfileState,
     stateModel = RecommendationState,
     snapshotResolver = resolvePlanReviewSnapshot,
     mongo = mongoose,
@@ -313,6 +315,7 @@ class PlanReviewWorker {
     this.eventModel = eventModel;
     this.mandateModel = mandateModel;
     this.profileModel = profileModel;
+    this.profileStateModel = profileStateModel;
     this.stateModel = stateModel;
     this.snapshotResolver = snapshotResolver;
     this.mongo = mongo;
@@ -663,6 +666,7 @@ class PlanReviewWorker {
           profileModel: this.profileModel,
           session,
           dependencies: { stateModel: this.stateModel },
+          profileStateModel: this.profileStateModel,
         });
         if (snapshot.planReviewSnapshotHash !== run.planReviewSnapshotHash) {
           const error = new Error('Financial source state changed while the PlanReview was running.');
@@ -677,6 +681,24 @@ class PlanReviewWorker {
         }, { $inc: { planReviewPublicationFence: 1 } }, { session });
         if (!isModified(profileWrite)) {
           const error = new Error('Profile changed before PlanReview publication.');
+          error.code = 'PLAN_REVIEW_SOURCE_SUPERSEDED';
+          throw error;
+        }
+
+        const profileStateRevision = snapshot.sourceBinding.financialProfileStateRevision;
+        if (!Number.isSafeInteger(profileStateRevision)) {
+          const error = new Error('PlanReview source is missing canonical profile-state provenance.');
+          error.code = 'PLAN_REVIEW_SOURCE_SUPERSEDED';
+          throw error;
+        }
+        const profileStateWrite = await this.profileStateModel.updateOne({
+          userId: run.userId,
+          currentProfileId: run.profileId,
+          revision: profileStateRevision,
+          resolutionStatus: 'CURRENT',
+        }, { $inc: { promotionFence: 1 } }, { session });
+        if (!isModified(profileStateWrite)) {
+          const error = new Error('Canonical user profile changed before PlanReview publication.');
           error.code = 'PLAN_REVIEW_SOURCE_SUPERSEDED';
           throw error;
         }

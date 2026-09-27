@@ -45,6 +45,8 @@ export function mcpOutputSchema() {
       profileGrounded: { type: 'boolean' },
       profileVersion: { type: 'integer', minimum: 1 },
       profileSnapshotHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      profileId: { type: 'string', minLength: 24, maxLength: 24, pattern: '^[a-f0-9]{24}$' },
+      financialProfileStateRevision: { type: 'integer', minimum: 0 },
       result: { type: 'object', additionalProperties: true },
     },
     required: ['classification', 'authority', 'tool', 'toolVersion', 'calculationVersion', 'assumptionBasis', 'profileGrounded', 'result'],
@@ -52,7 +54,7 @@ export function mcpOutputSchema() {
   };
 }
 
-export function buildMcpResult({ toolName, tool, result, profile = null, profileVersion = null, profileSnapshotHash = null }) {
+export function buildMcpResult({ toolName, tool, result, profile = null, profileId = null, profileVersion = null, profileSnapshotHash = null, financialProfileStateRevision = null }) {
   const policy = tool.mcpPolicy;
   return {
     classification: String(result?.classification || 'NON_RECOMMENDATION_WHAT_IF').slice(0, 80),
@@ -62,7 +64,7 @@ export function buildMcpResult({ toolName, tool, result, profile = null, profile
     calculationVersion: tool.version,
     assumptionBasis: String(result?.returnBasis || result?.assumptionBasis || policy.assumptionBasis).slice(0, 100),
     profileGrounded: Boolean(profile),
-    ...(profile ? { profileVersion, profileSnapshotHash } : {}),
+    ...(profile ? { profileId, profileVersion, profileSnapshotHash, financialProfileStateRevision } : {}),
     result,
   };
 }

@@ -58,6 +58,7 @@ const GoalSchema = new mongoose.Schema({
   sourceAllocationRevisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'RecommendationAllocationRevision', default: null },
   sourceProfileInputHash: { type: String, match: /^[a-f0-9]{64}$/, default: null },
   sourceProfileVersion: { type: Number, min: 1, default: null },
+  sourceFinancialProfileStateRevision: { type: Number, min: 1, default: null },
   sourceModelVersion: { type: String, default: null },
   sourceRecommendationPolicyVersion: { type: String, default: null },
   sourceRegulatoryRuleVersion: { type: String, default: null },

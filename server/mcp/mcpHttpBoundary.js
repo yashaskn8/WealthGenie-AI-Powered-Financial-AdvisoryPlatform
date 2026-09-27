@@ -1,4 +1,5 @@
 import { sendError } from '../middleware/errorHandler.js';
+import proxyaddr from 'proxy-addr';
 
 function parseHost(value) {
   if (typeof value !== 'string' || value.length < 1 || value.length > 255 || /[\s/@?#]/.test(value)) return null;
@@ -17,6 +18,7 @@ function isLocalHost(hostname) {
 
 export function mcpHttpBoundary({ config }) {
   const origins = new Set(config.allowedOrigins);
+  const trustedProxy = config.trustedProxyCidrs?.length ? proxyaddr.compile(config.trustedProxyCidrs) : null;
   return function validateMcpHttpBoundary(req, res, next) {
     const requestHost = parseHost(req.headers.host);
     const allowedHost = requestHost && config.allowedHosts.some(value => {
@@ -30,8 +32,16 @@ export function mcpHttpBoundary({ config }) {
       return sendError(req, res, 403, 'The MCP host is not allowed.', 'MCP_HOST_REJECTED');
     }
 
-    if (config.isProduction && req.protocol !== 'https') {
-      return sendError(req, res, 403, 'Remote MCP requires the trusted HTTPS edge.', 'MCP_PROTOCOL_REJECTED');
+    if (config.isProduction) {
+      const directTls = config.directTls === true && req.socket?.encrypted === true;
+      const remoteAddress = req.socket?.remoteAddress || '';
+      const trustedEdge = trustedProxy && trustedProxy(remoteAddress);
+      const forwardedProtocol = req.headers['x-forwarded-proto'];
+      const trustedForwardedTls = Boolean(trustedEdge && typeof forwardedProtocol === 'string'
+        && forwardedProtocol.trim().toLowerCase() === 'https' && !forwardedProtocol.includes(','));
+      if (!directTls && !trustedForwardedTls) {
+        return sendError(req, res, 403, 'Remote MCP requires direct TLS or a configured trusted TLS proxy.', 'MCP_PROTOCOL_REJECTED');
+      }
     }
 
     const origin = req.headers.origin;

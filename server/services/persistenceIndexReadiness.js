@@ -7,11 +7,13 @@ import IdempotencyKey from '../models/IdempotencyKey.js';
 import Recommendation from '../models/Recommendation.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import RecommendationState from '../models/RecommendationState.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import { createError } from '../middleware/errorHandler.js';
 
 export const PHASE2_INDEX_MODELS = Object.freeze([
   IdempotencyKey,
   FinancialProfile,
+  FinancialProfileState,
   Recommendation,
   RecommendationState,
   RecommendationAllocationRevision,

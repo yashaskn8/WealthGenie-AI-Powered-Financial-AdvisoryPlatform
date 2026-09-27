@@ -164,8 +164,11 @@ class MetricsCollector {
     } else {
       this.inc('tool_execution_failure_total');
     }
-    const current = this.toolUsage[toolName] || 0;
-    this.toolUsage[toolName] = current + 1;
+    const boundedToolName = typeof toolName === 'string'
+      && ['sip_projection', 'lump_sum_projection', 'reverse_sip', 'tax_calculator', 'xirr_calculator', 'portfolio_optimizer', 'rebalance_calculator'].includes(toolName)
+      ? toolName : 'other';
+    const current = this.toolUsage[boundedToolName] || 0;
+    this.toolUsage[boundedToolName] = current + 1;
   }
 
   recordLatency(provider, latencyMs) {

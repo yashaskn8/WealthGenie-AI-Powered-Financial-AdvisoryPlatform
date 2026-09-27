@@ -66,7 +66,11 @@ function state() {
     allocationRevision: allocationRevision.revision,
     instruments,
   });
-  return { recommendation, allocationRevision, portfolioFingerprint, recommendationFingerprint, freshness: { fresh: true, reasonCodes: [] } };
+  return {
+    recommendation, allocationRevision, portfolioFingerprint, recommendationFingerprint,
+    financialProfileState: { stateId: '64b000000000000000000007', currentProfileId: recommendation.profileId, revision: 3, promotionFence: 0 },
+    freshness: { fresh: true, reasonCodes: [] },
+  };
 }
 
 test('portfolio fingerprints are deterministic and independent of instrument order', () => {
@@ -119,6 +123,7 @@ test('goal freshness identifies allocation and source-state changes', () => {
     sourceAllocationRevision: 2,
     sourceAllocationRevisionId: current.allocationRevision._id,
     sourceProfileInputHash: current.recommendation.profileInputHash,
+    sourceFinancialProfileStateRevision: current.financialProfileState.revision,
     sourceModelVersion: current.recommendation.modelVersion,
     sourceRecommendationPolicyVersion: current.recommendation.recommendationPolicyVersion,
     sourceRegulatoryRuleVersion: current.recommendation.regulatoryRuleVersion,
