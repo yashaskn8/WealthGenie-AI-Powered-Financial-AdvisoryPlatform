@@ -1,11 +1,146 @@
+import mongoose from 'mongoose';
 import { requireFreshRecommendationState } from './recommendationState.js';
 import { buildCurrentRecommendationResponse } from './recommendationResponse.js';
 import { formatProfileResponse } from './profileResponse.js';
 import { assessAdvisoryStateBinding } from './advisoryBinding.js';
 import { PrometheusMetrics } from './metricsCollector.js';
 import { resolveCurrentFinancialProfile } from './currentFinancialProfile.js';
+import { reachFinancialStateTestHook } from './financialStateTestHooks.js';
+import { buildRecommendationProfile, buildRecommendationProfileHash } from './recommendationProfile.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
+
+const POST_COMMIT_RECONCILIATION_ATTEMPTS = 3;
+const CURRENT_RECOMMENDATION_POINTER_FIELDS = Object.freeze([
+  'currentRecommendationId',
+  'currentAllocationRevision',
+  'currentAllocationRevisionId',
+  'generationRevision',
+  'profileInputHash',
+  'profileVersion',
+  'portfolioFingerprint',
+  'returnAssumptionVersion',
+  'returnAssumptionHash',
+  'returnAssumptionSource',
+]);
+
+function sameIdentity(left, right) {
+  return String(left ?? '') === String(right ?? '');
+}
+
+function sameCanonicalRecommendationPointer(left, right) {
+  return Boolean(left && right)
+    && CURRENT_RECOMMENDATION_POINTER_FIELDS.every(field => sameIdentity(left[field], right[field]));
+}
+
+function sameCurrentProfileState(left, right) {
+  return Boolean(left?.state && right?.state && left?.profile && right?.profile)
+    && sameIdentity(left.state.userId, right.state.userId)
+    && sameIdentity(left.state.currentProfileId, right.state.currentProfileId)
+    && Number(left.state.revision) === Number(right.state.revision)
+    && Number(left.state.promotionFence) === Number(right.state.promotionFence)
+    && left.state.resolutionStatus === right.state.resolutionStatus
+    && sameIdentity(left.profile._id, right.profile._id)
+    && Number(left.profile.version ?? 1) === Number(right.profile.version ?? 1);
+}
+
+function profileHash(profile, modelVersion) {
+  return buildRecommendationProfileHash(buildRecommendationProfile(profile), { modelVersion });
+}
+
+function isStableCurrentState({ initial, resolved, confirmed }) {
+  const recommendation = resolved?.recommendation;
+  const recommendationPointer = resolved?.statePointer;
+  const confirmedPointer = confirmed?.recommendationState;
+  if (!recommendation || !recommendationPointer || !confirmedPointer
+      || !sameCurrentProfileState(initial, confirmed)
+      || !sameCurrentProfileState(initial, { state: initial.state, profile: resolved.profile })
+      || !sameIdentity(resolved.profile?._id, initial.profile?._id)
+      || !sameCanonicalRecommendationPointer(recommendationPointer, confirmedPointer)
+      || !sameIdentity(recommendationPointer.currentRecommendationId, recommendation._id)
+      || Number(recommendationPointer.profileVersion) !== Number(resolved.profileVersion)
+      || Number(recommendation.profileVersion) !== Number(resolved.profileVersion)) {
+    return false;
+  }
+  try {
+    const confirmedProfileHash = profileHash(confirmed.profile, recommendation.modelVersion);
+    const resolvedProfileHash = profileHash(resolved.profile, recommendation.modelVersion);
+    return confirmedProfileHash === recommendation.profileInputHash
+      && resolvedProfileHash === recommendation.profileInputHash;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read the user profile pointer, resolve its authoritative recommendation state,
+ * and verify that neither pointer moved during reconstruction. This is a
+ * post-commit reconciliation fence: valid supersession is retried, while an
+ * unstable/corrupt state fails closed rather than returning historical data as
+ * current.
+ */
+export async function resolveStablePostCommitCurrentState({ userId } = {}) {
+  for (let attempt = 1; attempt <= POST_COMMIT_RECONCILIATION_ATTEMPTS; attempt += 1) {
+    const initial = await resolveCurrentFinancialProfile({ userId, requireRecommendation: false });
+    if (!initial.profile) {
+      const error = new Error('No complete current profile is available after the committed recommendation operation.');
+      error.code = 'CURRENT_FINANCIAL_PROFILE_UNAVAILABLE';
+      throw error;
+    }
+    await reachFinancialStateTestHook('post_commit.after_current_profile_read', {
+      userId: String(userId),
+      profileId: String(initial.profile._id),
+      profileStateRevision: Number(initial.state.revision),
+      attempt,
+    });
+
+    const session = await mongoose.startSession();
+    let reconciled = null;
+    let retry = false;
+    try {
+      await session.withTransaction(async () => {
+        reconciled = null;
+        retry = false;
+        const snapshotCurrent = await resolveCurrentFinancialProfile({
+          userId,
+          session,
+          requireRecommendation: false,
+        });
+        // The user-level pointer changed after the preflight read and before
+        // this snapshot. Start a new attempt from that newer state.
+        if (!sameCurrentProfileState(initial, snapshotCurrent)) {
+          retry = true;
+          return;
+        }
+        const state = await requireFreshRecommendationState({
+          userId,
+          profileId: snapshotCurrent.profile._id,
+          profile: snapshotCurrent.profile,
+          session,
+        });
+        const confirmed = await resolveCurrentFinancialProfile({ userId, session });
+        if (!isStableCurrentState({ initial, resolved: state, confirmed })) {
+          retry = true;
+          return;
+        }
+        reconciled = { current: confirmed, state };
+      }, {
+        readPreference: 'primary',
+        readConcern: { level: 'snapshot' },
+        writeConcern: { w: 'majority' },
+      });
+    } finally {
+      await session.endSession();
+    }
+    if (reconciled) return reconciled;
+    if (!retry) break;
+  }
+
+  const error = new Error('The canonical financial state changed during post-commit response reconciliation.');
+  error.code = 'POST_COMMIT_CURRENT_STATE_UNSTABLE';
+  error.status = 503;
+  throw error;
+}
 
 function explanationFromMetadata(metadata) {
   if (!metadata) return { status: 'PENDING' };
@@ -130,27 +265,51 @@ export async function buildPostCommitAdvisoryResponse({
       throw error;
     }
 
-    const state = await requireFreshRecommendationState({ userId, profileId });
+    const committedRecommendation = await Recommendation.findOne({
+      _id: committedRecommendationId,
+      userId,
+      profileId,
+    }).select('_id profileId recommendationGeneration').lean();
+    if (!committedRecommendation
+        || Number(committedRecommendation.recommendationGeneration) !== committedGeneration) {
+      const error = new Error('The committed operation does not resolve to its immutable owned recommendation generation.');
+      error.code = 'POST_COMMIT_OPERATION_BINDING_INVALID';
+      throw error;
+    }
+
+    // A committed generation may have been superseded by promotion of a
+    // different profile. Reconcile from the user's current-profile pointer,
+    // then from that profile's strict recommendation/allocation pointer.
+    const { current, state } = await resolveStablePostCommitCurrentState({ userId });
     const currentId = String(state.recommendation._id);
     const committedId = String(committedRecommendationId);
     const currentGeneration = Number(state.recommendation.recommendationGeneration);
-    const superseded = currentId !== committedId;
-    const generationIsConsistent = Number.isSafeInteger(currentGeneration)
-      && (superseded ? currentGeneration > committedGeneration : currentGeneration === committedGeneration);
+    const profileSuperseded = String(current.profile._id) !== String(profileId);
+    const superseded = profileSuperseded || currentId !== committedId;
+    const generationIsConsistent = profileSuperseded
+      || (Number.isSafeInteger(currentGeneration)
+        && (currentId !== committedId ? currentGeneration > committedGeneration : currentGeneration === committedGeneration));
     if (!generationIsConsistent) {
       const error = new Error('The verified current pointer is inconsistent with the committed recommendation generation.');
       error.code = 'POST_COMMIT_GENERATION_ORDER_INVALID';
       throw error;
     }
 
-    const body = responseFromFreshState({ state, responseTemplate, replayed });
+    const body = {
+      ...responseFromFreshState({ state, responseTemplate, replayed }),
+      current_profile_id: String(current.profile._id),
+      financial_profile_state_revision: Number(current.state.revision),
+    };
     if (!superseded) return body;
 
-    PrometheusMetrics.inc('post_commit_reconciled_to_newer_recommendation_total');
+    PrometheusMetrics.inc(profileSuperseded
+      ? 'post_commit_reconciled_to_newer_profile_total'
+      : 'post_commit_reconciled_to_newer_recommendation_total');
     return {
       ...body,
       operation_result: {
         committed: true,
+        ...(profileSuperseded ? { generated_profile_id: String(profileId) } : {}),
         generated_recommendation_id: committedId,
         superseded_before_response: true,
       },
@@ -190,17 +349,7 @@ export async function buildPostCommitProfileResponse({
       error.code = 'POST_COMMIT_OPERATION_BINDING_INVALID';
       throw error;
     }
-    const current = await resolveCurrentFinancialProfile({ userId });
-    if (!current.profile || !current.recommendationState) {
-      const error = new Error('No complete current profile is available after the committed profile operation.');
-      error.code = 'CURRENT_FINANCIAL_PROFILE_UNAVAILABLE';
-      throw error;
-    }
-    const state = await requireFreshRecommendationState({
-      userId,
-      profileId: current.profile._id,
-      profile: current.profile,
-    });
+    const { current, state } = await resolveStablePostCommitCurrentState({ userId });
     const body = responseFromFreshState({ state, responseTemplate, replayed });
     const profileSuperseded = String(current.profile._id) !== String(committedProfileId);
     const recommendationSuperseded = String(state.recommendation._id) !== String(committedRecommendationId);

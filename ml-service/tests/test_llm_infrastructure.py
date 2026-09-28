@@ -66,7 +66,10 @@ def test_api_llm_provider():
     assert "Portfolio" in res.text or "financial" in res.text.lower()
 
 
-def test_huggingface_llm_provider_fallback():
+def test_huggingface_llm_provider_fallback(monkeypatch, tmp_path):
+    import sys
+    import types
+
     # Unloaded instance should raise RuntimeError when calling generate (no fake fallback response)
     unloaded_provider = HuggingFaceLLMProvider(model_id="Qwen/Qwen2.5-0.5B-Instruct", device="cpu", load_weights=False)
     meta = unloaded_provider.get_metadata()
@@ -76,11 +79,59 @@ def test_huggingface_llm_provider_fallback():
     with pytest.raises(RuntimeError, match="is not loaded"):
         unloaded_provider.generate(req)
 
-    # Loaded instance generates real tokens
-    loaded_provider = LocalLLMLoader.load_provider(provider_type="huggingface", model_id="Qwen/Qwen2.5-0.5B-Instruct", device="cpu")
+    class FakeInputBatch(dict):
+        def __init__(self):
+            super().__init__(input_ids=[[1, 2]])
+            self.input_ids = types.SimpleNamespace(shape=(1, 2))
+
+    class FakeTokenizer:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def __call__(self, _prompt, **_kwargs):
+            return FakeInputBatch()
+
+        @staticmethod
+        def decode(_tokens, **_kwargs):
+            return "local fake response"
+
+    class FakeModel:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return cls()
+
+        def to(self, _device):
+            return self
+
+        @staticmethod
+        def generate(**_kwargs):
+            return [[1, 2, 3, 4]]
+
+    class NoGrad:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    fake_torch = types.ModuleType("torch")
+    fake_torch.float32 = "float32"
+    fake_torch.no_grad = NoGrad
+    fake_transformers = types.ModuleType("transformers")
+    fake_transformers.AutoTokenizer = FakeTokenizer
+    fake_transformers.AutoModelForCausalLM = FakeModel
+    fake_hub = types.ModuleType("huggingface_hub")
+    fake_hub.snapshot_download = lambda **_kwargs: pytest.fail("existing local fixture must not download")
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+
+    # Exercise the real loader/provider wrapper against a local model-path fixture.
+    loaded_provider = LocalLLMLoader.load_provider(provider_type="huggingface", model_id=str(tmp_path), device="cpu")
     assert loaded_provider.is_healthy()
     res = loaded_provider.generate(req)
-    assert len(res.text) > 0
+    assert res.text == "local fake response"
     assert res.provider == "huggingface"
 
 

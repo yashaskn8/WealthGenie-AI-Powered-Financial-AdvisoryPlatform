@@ -125,12 +125,31 @@ export function validateEnvironmentConfig(env = process.env) {
   if (researchFeatureEnabled && !researchA2AEnabled) errors.push('ResearchMesh feature flags require AGENT_A2A_V1_ENABLED=true');
   if (researchA2AEnabled) {
     if (!env.AGENT_A2A_RESEARCH_URL) errors.push('AGENT_A2A_RESEARCH_URL is required when A2A ResearchMesh is enabled');
-    if (isProduction && !String(env.AGENT_A2A_RESEARCH_URL || '').startsWith('https://')) errors.push('AGENT_A2A_RESEARCH_URL must use HTTPS in production');
+    let researchUrl;
+    try { researchUrl = new URL(String(env.AGENT_A2A_RESEARCH_URL || '')); } catch { researchUrl = null; }
+    if (!researchUrl) errors.push('AGENT_A2A_RESEARCH_URL must be a valid URL');
+    if (researchUrl && (researchUrl.username || researchUrl.password || researchUrl.search || researchUrl.hash
+        || (isProduction && researchUrl.protocol !== 'https:'))) {
+      errors.push('AGENT_A2A_RESEARCH_URL must be a credential-free URL and use HTTPS in production');
+    }
     const identityProvider = String(env.AGENT_IDENTITY_PROVIDER || 'development').toLowerCase();
-    if (isProduction && identityProvider === 'development') errors.push('Production ResearchMesh requires OIDC or SPIFFE agent identity');
+    if (isProduction && identityProvider !== 'oidc') errors.push('Production ResearchMesh requires OIDC; unimplemented bearer/SPIFFE verification is not accepted');
     if (!isProduction && identityProvider === 'development' && !env.AGENT_A2A_DEV_TOKEN) errors.push('AGENT_A2A_DEV_TOKEN is required for development A2A ResearchMesh');
     if (isProduction && env.AGENT_A2A_CARD_SIGNING_ENABLED !== 'true') errors.push('Production ResearchMesh requires signed Agent Cards');
     if (isProduction && env.AGENT_A2A_CARD_SIGNING_ENABLED === 'true' && !env.AGENT_A2A_CARD_SIGNING_PRIVATE_KEY) errors.push('Production signed Agent Cards require AGENT_A2A_CARD_SIGNING_PRIVATE_KEY');
+    if (isProduction) {
+      if (!env.AGENT_A2A_CLIENT_TOKEN?.trim()) errors.push('AGENT_A2A_CLIENT_TOKEN is required for production ResearchMesh calls');
+      if (!env.AGENT_A2A_CARD_SIGNING_PUBLIC_JWK?.trim()) errors.push('AGENT_A2A_CARD_SIGNING_PUBLIC_JWK is required to pin the production ResearchAgent card key');
+      if (!env.AGENT_OIDC_ISSUER?.trim() || !env.AGENT_OIDC_AUDIENCE?.trim()) errors.push('OIDC issuer and audience are required for production ResearchMesh');
+      if (!env.AGENT_OIDC_PUBLIC_KEY?.trim() && !env.AGENT_OIDC_JWKS_URL?.trim()) errors.push('OIDC public key or JWKS URL is required for production ResearchMesh');
+      if (!env.AGENT_OIDC_SUBJECT_MAP?.trim()) errors.push('AGENT_OIDC_SUBJECT_MAP is required for production ResearchMesh');
+      if (env.AGENT_OIDC_JWKS_URL) {
+        try {
+          const jwks = new URL(env.AGENT_OIDC_JWKS_URL);
+          if (jwks.protocol !== 'https:' || jwks.username || jwks.password || jwks.hash) errors.push('AGENT_OIDC_JWKS_URL must use credential-free HTTPS');
+        } catch { errors.push('AGENT_OIDC_JWKS_URL must be a valid credential-free HTTPS URL'); }
+      }
+    }
   }
   if (env.AGENT_RESEARCH_LIVE_SEARCH_ENABLED === 'true'
     && (String(env.RESEARCH_SEARCH_PROVIDER || '').toLowerCase() !== 'configured' || !env.RESEARCH_SEARCH_PROVIDER_URL)) {

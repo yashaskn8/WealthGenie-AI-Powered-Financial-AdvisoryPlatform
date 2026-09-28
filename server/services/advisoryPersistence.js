@@ -65,6 +65,53 @@ function historicalResponseSnapshot(response) {
   return historical(response);
 }
 
+function responseRecommendationFrom(response) {
+  if (response?.recommendation && typeof response.recommendation === 'object') return response.recommendation;
+  return response;
+}
+
+/** Refuse to persist a historical response that contradicts its generation row. */
+export function assertRecommendationResponseBinding(recommendation, response) {
+  if (!recommendation?._id || !recommendation?.profileId || !recommendation?.userId
+      || !Array.isArray(recommendation.instruments)) {
+    const error = new TypeError('Recommendation generation identity and instruments are required.');
+    error.code = 'RECOMMENDATION_RESPONSE_BINDING_MISMATCH';
+    throw error;
+  }
+  const responseRecommendation = responseRecommendationFrom(response);
+  if (!responseRecommendation || typeof responseRecommendation !== 'object') {
+    const error = new TypeError('A recommendation response is required for generation persistence.');
+    error.code = 'RECOMMENDATION_RESPONSE_BINDING_MISMATCH';
+    throw error;
+  }
+
+  const responseRecommendationId = responseRecommendation.recommendationId
+    ?? responseRecommendation.recommendation_id
+    ?? responseRecommendation._id;
+  const responseProfileId = responseRecommendation.profileId ?? responseRecommendation.profile_id;
+  const responseInstruments = Array.isArray(responseRecommendation.instruments)
+    ? responseRecommendation.instruments
+    : Array.isArray(responseRecommendation.generation_instruments)
+      ? responseRecommendation.generation_instruments
+      : null;
+  let mismatch = (responseRecommendationId != null
+      && String(responseRecommendationId) !== String(recommendation._id))
+    || (responseProfileId != null && String(responseProfileId) !== String(recommendation.profileId));
+  if (responseInstruments) {
+    try {
+      mismatch ||= buildPortfolioFingerprint(responseInstruments)
+        !== buildPortfolioFingerprint(recommendation.instruments);
+    } catch {
+      mismatch = true;
+    }
+  }
+  if (mismatch) {
+    const error = new Error('The generation response does not match the immutable recommendation artifact.');
+    error.code = 'RECOMMENDATION_RESPONSE_BINDING_MISMATCH';
+    throw error;
+  }
+}
+
 async function ensureAdvisoryPersistenceReady() {
   return verifyPersistenceIndexes();
 }
@@ -104,6 +151,7 @@ export async function persistAdvisoryAtomically({
   profileStateBinding,
   testHooks = {},
 }) {
+  assertRecommendationResponseBinding(recommendation, response);
   const profileUpdate = requestedProfileUpdate ? validatedProfileUpdate(requestedProfileUpdate) : null;
   if (profile && profileUpdate) throw new TypeError('Profile creation and profile update cannot be combined.');
   if (!profileStateBinding || !Number.isSafeInteger(Number(profileStateBinding.revision))

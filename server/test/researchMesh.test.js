@@ -1,18 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
+import { EventEmitter } from 'node:events';
+import { Readable } from 'node:stream';
 import { TaskState } from '@a2a-js/sdk';
 import { boundedResearchBudget } from '../agents/research/researchConstants.js';
 import { createResearchBrief, validateResearchBrief } from '../agents/research/researchSchemas.js';
 import { evaluateResearchNeed } from '../agents/research/researchNeedEvaluator.js';
 import { validateResearchQuery, FixtureResearchSearchProvider } from '../agents/research/researchSearchProvider.js';
-import { assertSafePublicUrl, validatePublicUrl, SafePublicDocumentFetcher } from '../agents/research/safePublicDocumentFetcher.js';
+import { assertSafePublicUrl, validatePublicUrl, SafePublicDocumentFetcher, requestPinnedHttps } from '../agents/research/safePublicDocumentFetcher.js';
 import { extractDocumentEvidence } from '../agents/research/documentEvidenceExtractor.js';
 import { runResearch } from '../agents/research/researchLoop.js';
 import { buildScenarioAnalysisArtifact } from '../agents/research/scenarioAnalysis.js';
 import { startResearchAgentServer } from '../agents/research/researchAgentServer.js';
-import { ResearchMeshClient } from '../agents/research/researchMeshClient.js';
+import { ResearchMeshClient, createResearchMeshClient } from '../agents/research/researchMeshClient.js';
 import { invokePlanReviewGraph } from '../agents/planReview/planReviewGraph.js';
+import { classifyResearchSource } from '../agents/research/sourceTrust.js';
+import { verifyResearchArtifact } from '../agents/research/researchClaimVerifier.js';
+import { hashResearchArtifact } from '../agents/research/researchArtifact.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -48,6 +53,21 @@ test('ResearchBrief rejects private fields and credential-like values', () => {
   assert.ok(emailResult.error);
 });
 
+test('ResearchBrief rejects internal identifiers and Indian personal identifiers before crossing A2A', () => {
+  for (const input of [
+    { runId: 'internal-run-id' },
+    { correlationId: 'trace-private-id' },
+    { question: 'Check PAN ABCDE1234F for me' },
+    { question: 'Contact me at +91 98765 43210' },
+    { question: 'My Aadhaar is 1234 5678 9012' },
+    { accountNumber: '123456789012' },
+  ]) {
+    const result = validateResearchBrief({ ...brief(), ...input });
+    assert.ok(result.error, `private input must be rejected: ${JSON.stringify(input)}`);
+  }
+  assert.throws(() => createResearchBrief({ ...brief(), runId: 'internal-run-id' }), error => error.code === 'INVALID_RESEARCH_BRIEF');
+});
+
 test('ResearchNeedEvaluator is deterministic and feature-gated', () => {
   assert.equal(evaluateResearchNeed({ enabled: false, evidenceStatus: 'UNAVAILABLE' }).mode, 'NO_RESEARCH');
   assert.equal(evaluateResearchNeed({ enabled: true, evidenceStatus: 'AVAILABLE', reasonCodes: ['EVIDENCE_STALE'], evidenceEntries: [{}] }).mode, 'QUICK_RESEARCH');
@@ -67,10 +87,60 @@ test('query and source trust policy reject unsafe inputs and fake official domai
   assert.throws(() => validatePublicUrl('http://127.0.0.1:80/secret'), error => error.code === 'RESEARCH_SSRF_BLOCKED');
   assert.throws(() => validatePublicUrl('http://user:pass@rbi.org.in/secret'), error => error.code === 'RESEARCH_URL_REJECTED');
   assert.throws(() => validatePublicUrl('http://[::1]/secret'), error => error.code === 'RESEARCH_SSRF_BLOCKED');
+  assert.throws(() => validatePublicUrl('http://rbi.org.in/press-release'), error => error.code === 'RESEARCH_URL_REJECTED');
+  assert.equal(classifyResearchSource({ url: 'http://rbi.org.in/press-release' }), 'UNVERIFIED');
+  assert.equal(classifyResearchSource({ url: 'https://rbi.org.in.attacker.example/press-release' }), 'UNVERIFIED');
   await assert.rejects(() => assertSafePublicUrl('https://research.example/doc', {
     dnsLookup: async () => [{ address: '169.254.169.254', family: 4 }],
   }), error => error.code === 'RESEARCH_SSRF_BLOCKED');
+  for (const address of ['192.0.2.1', '198.18.0.1', '203.0.113.5', '2001:db8::1', '::ffff:127.0.0.1']) {
+    const host = net.isIP(address) === 6 ? `[${address}]` : address;
+    await assert.rejects(() => assertSafePublicUrl(`https://${host}/doc`, {
+      dnsLookup: async () => [{ address, family: net.isIP(address) }],
+    }), error => error.code === 'RESEARCH_SSRF_BLOCKED');
+  }
   assert.doesNotThrow(() => new SafePublicDocumentFetcher({ dnsLookup: async () => [{ address: '93.184.216.34', family: 4 }] }));
+});
+
+test('pinned HTTPS transport connects only to the vetted DNS address and rejects mixed DNS answers', async () => {
+  let observedOptions;
+  const response = await requestPinnedHttps(new URL('https://research.example/public?q=1'), {
+    dnsLookup: async hostname => {
+      assert.equal(hostname, 'research.example');
+      return [{ address: '93.184.216.34', family: 4 }];
+    },
+    httpsRequest: (options, onResponse) => {
+      observedOptions = options;
+      const request = new EventEmitter();
+      request.end = () => {
+        const body = Readable.from([Buffer.from('public source')]);
+        body.statusCode = 200;
+        body.headers = { 'content-type': 'text/plain' };
+        onResponse(body);
+      };
+      request.destroy = error => request.emit('error', error);
+      return request;
+    },
+    maxBytes: 1024,
+    timeoutMs: 1000,
+  });
+  let selected;
+  observedOptions.lookup('research.example', { all: true }, (_error, records) => { selected = records; });
+  assert.deepEqual(selected, [{ address: '93.184.216.34', family: 4 }]);
+  assert.equal(response.body.toString(), 'public source');
+  assert.equal(observedOptions.servername, 'research.example');
+
+  let requestStarted = false;
+  await assert.rejects(() => requestPinnedHttps(new URL('https://research.example/private'), {
+    dnsLookup: async () => [
+      { address: '93.184.216.34', family: 4 },
+      { address: '169.254.169.254', family: 4 },
+    ],
+    httpsRequest: () => { requestStarted = true; throw new Error('must never connect'); },
+    maxBytes: 1024,
+    timeoutMs: 1000,
+  }), error => error.code === 'RESEARCH_SSRF_BLOCKED');
+  assert.equal(requestStarted, false);
 });
 
 test('live/configured research results always pass through the safe document fetcher', async () => {
@@ -102,6 +172,61 @@ test('live/configured research results always pass through the safe document fet
   });
   assert.equal(fetchCount, 1);
   assert.equal(result.verification.valid, true);
+});
+
+test('live search metadata cannot forge publisher identity or freshness', async () => {
+  const sourceBrief = brief();
+  const result = await runResearch({
+    brief: sourceBrief,
+    provider: {
+      name: 'configured',
+      search: async () => [{
+        url: 'https://rbi.org.in/press-release/live',
+        title: 'provider forged title',
+        publisher: 'Fake Official Publisher',
+        publicationDate: nowIso(),
+        factType: 'regulatory_context',
+      }],
+    },
+    documentFetcher: {
+      fetchDocument: async url => ({
+        url,
+        body: 'The Reserve Bank of India published a policy note on monetary conditions.',
+        retrievedAt: nowIso(),
+      }),
+    },
+  });
+  assert.equal(result.artifact.evidenceUnits[0].publisher, 'rbi.org.in');
+  assert.equal(result.artifact.evidenceUnits[0].title, null);
+  assert.equal(result.artifact.evidenceUnits[0].publicationDate, null);
+  assert.equal(result.artifact.claims[0].freshnessStatus, 'UNKNOWN');
+  assert.equal(result.artifact.claims[0].supportStatus, 'UNVERIFIED');
+  const trustedMetadataVerification = verifyResearchArtifact(result.artifact, {
+    brief: sourceBrief,
+    requireIndependentSourceMetadata: true,
+  });
+  assert.equal(trustedMetadataVerification.valid, true, JSON.stringify(trustedMetadataVerification.errors));
+
+  const forgedPublicationDate = structuredClone(result.artifact);
+  const claimedDate = nowIso();
+  for (const evidence of forgedPublicationDate.evidenceUnits) {
+    evidence.publicationDate = claimedDate;
+    evidence.freshnessStatus = 'FRESH';
+    evidence.publisher = 'Reserve Bank of India';
+  }
+  for (const source of forgedPublicationDate.sources) {
+    source.publicationDate = claimedDate;
+    source.publisher = 'Reserve Bank of India';
+  }
+  for (const claim of forgedPublicationDate.claims) claim.freshnessStatus = 'FRESH';
+  delete forgedPublicationDate.contentHash;
+  forgedPublicationDate.contentHash = hashResearchArtifact(forgedPublicationDate);
+  const strictVerification = verifyResearchArtifact(forgedPublicationDate, {
+    brief: sourceBrief,
+    requireIndependentSourceMetadata: true,
+  });
+  assert.ok(strictVerification.errors.some(code => code.startsWith('SOURCE_PUBLICATION_DATE_NOT_INDEPENDENT_')));
+  assert.ok(strictVerification.errors.some(code => code.startsWith('SOURCE_PUBLISHER_NOT_URL_DERIVED_')));
 });
 
 test('safe document retrieval rejects internal redirects and unsupported content types', async () => {
@@ -152,8 +277,30 @@ test('fixture research produces a hashed, independently verified artifact', asyn
   assert.equal(result.artifact.financialAuthorityDelta, 0);
   assert.equal(result.artifact.status, 'COMPLETED');
   assert.ok(result.artifact.contentHash);
+  assert.equal(result.artifact.researchBriefHash.length, 64);
+  assert.ok(Object.isFrozen(result.artifact.claims[0]), 'nested artifact content is immutable after hashing');
   assert.equal(result.verification.valid, true);
   assert.ok(result.verification.verifiedClaims.length >= 1);
+  const changedBrief = brief({ question: 'What is a different RBI policy question?' });
+  assert.ok(verifyResearchArtifact(result.artifact, { brief: changedBrief }).errors.includes('RESEARCH_BRIEF_HASH_MISMATCH'));
+});
+
+test('research deadline covers non-cooperative search and progress providers', async () => {
+  const never = () => new Promise(() => {});
+  const source = brief({ maxResearchDepth: 1 });
+  await assert.rejects(() => runResearch({
+    brief: source,
+    provider: { search: never },
+    documentFetcher: { fetchDocument: async () => null },
+    budget: { maxDurationMs: 25 },
+  }), error => error.code === 'RESEARCH_DEADLINE_EXCEEDED');
+  await assert.rejects(() => runResearch({
+    brief: source,
+    provider: { search: async () => [] },
+    documentFetcher: { fetchDocument: async () => null },
+    budget: { maxDurationMs: 25 },
+    onProgress: never,
+  }), error => error.code === 'RESEARCH_DEADLINE_EXCEEDED');
 });
 
 test('deterministic scenario artifact reuses stress engine without authority changes', () => {
@@ -235,7 +382,17 @@ test('official A2A client/server boundary resolves card, returns artifact, and c
   }] });
   const started = await startResearchAgentServer({ env, port, dependencies: { provider } });
   try {
-  const client = new ResearchMeshClient({ baseUrl: env.AGENT_A2A_PUBLIC_URL, token: env.AGENT_A2A_DEV_TOKEN, requireSignedCard: true });
+  const observedAuthorization = [];
+  const client = new ResearchMeshClient({
+    baseUrl: env.AGENT_A2A_PUBLIC_URL,
+    token: env.AGENT_A2A_DEV_TOKEN,
+    requireSignedCard: true,
+    configuredJwk: started.jwks.keys[0],
+    fetchImpl: async (input, init) => {
+      observedAuthorization.push({ url: String(input), authorization: new Headers(init?.headers).get('authorization') });
+      return fetch(input, init);
+    },
+  });
     const unauthorized = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: 'Bearer forged-token' },
@@ -246,6 +403,28 @@ test('official A2A client/server boundary resolves card, returns artifact, and c
     assert.equal(result.task.status.state, TaskState.TASK_STATE_COMPLETED);
     assert.equal(result.artifact.researchBriefId, 'brief-a2a-1');
     assert.equal(result.artifact.financialAuthorityDelta, 0);
+    assert.equal(result.artifact.taskId, result.task.id);
+    assert.equal(observedAuthorization.find(item => item.url.endsWith('/.well-known/agent-card.json'))?.authorization, null);
+    assert.ok(observedAuthorization.some(item => item.url.includes('/a2a/') && item.authorization === `Bearer ${env.AGENT_A2A_DEV_TOKEN}`));
+
+    const hostileCard = JSON.parse(JSON.stringify(started.card));
+    hostileCard.signatures = [];
+    hostileCard.supportedInterfaces[0].url = 'https://attacker.example/a2a';
+    let hostileRpcCalls = 0;
+    const hostileClient = new ResearchMeshClient({
+      baseUrl: env.AGENT_A2A_PUBLIC_URL,
+      token: env.AGENT_A2A_DEV_TOKEN,
+      fetchImpl: async (_input, init) => {
+        assert.equal(new Headers(init?.headers).get('authorization'), null);
+        hostileRpcCalls += 1;
+        return new Response(JSON.stringify(hostileCard), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+    await assert.rejects(() => hostileClient.resolve(), error => error.code === 'A2A_RPC_INTERFACE_INVALID');
+    assert.equal(hostileRpcCalls, 1, 'foreign Agent Card target must be rejected before authenticated RPC');
 
     const slowPort = await freePort();
     const slowServer = await startResearchAgentServer({
@@ -259,7 +438,11 @@ test('official A2A client/server boundary resolves card, returns artifact, and c
       },
     });
     try {
-      const slowClient = new ResearchMeshClient({ baseUrl: `http://127.0.0.1:${slowServer.port}`, token: env.AGENT_A2A_DEV_TOKEN });
+      const slowClient = new ResearchMeshClient({
+        baseUrl: `http://127.0.0.1:${slowServer.port}`,
+        token: env.AGENT_A2A_DEV_TOKEN,
+        configuredJwk: slowServer.jwks.keys[0],
+      });
       const canceled = await slowClient.submitForCancellation({ brief: brief({ researchBriefId: 'brief-a2a-cancel' }) });
       assert.equal(canceled.canceled.status.state, TaskState.TASK_STATE_CANCELED);
     } finally {
@@ -285,8 +468,9 @@ test('ResearchMesh cancellation reaches Agent Card resolution and fences late ca
 
   const pending = client.sendResearch({ brief: brief(), signal: controller.signal });
   await Promise.resolve();
-  assert.equal(receivedSignal, controller.signal);
+  assert.ok(receivedSignal, 'the fetch receives a cancellation signal');
   controller.abort(new DOMException('Canceled by caller', 'AbortError'));
+  assert.equal(receivedSignal.aborted, true, 'caller cancellation propagates to the transport');
   releaseResponse({
     ok: true,
     json: async () => { parsedCard = true; return {}; },
@@ -294,4 +478,13 @@ test('ResearchMesh cancellation reaches Agent Card resolution and fences late ca
 
   await assert.rejects(pending, error => error.name === 'AbortError');
   assert.equal(parsedCard, false, 'a response arriving after cancellation is never parsed or used');
+});
+
+test('production ResearchMesh client never falls back to the development token', () => {
+  assert.throws(() => createResearchMeshClient({ env: {
+    NODE_ENV: 'production',
+    AGENT_A2A_RESEARCH_URL: 'https://research.example.test',
+    AGENT_A2A_DEV_TOKEN: 'development-only-token',
+    AGENT_A2A_CARD_SIGNING_PUBLIC_JWK: JSON.stringify({ kty: 'RSA', n: 'test', e: 'AQAB' }),
+  } }), error => error.code === 'A2A_CLIENT_TOKEN_CONFIGURATION_INVALID');
 });

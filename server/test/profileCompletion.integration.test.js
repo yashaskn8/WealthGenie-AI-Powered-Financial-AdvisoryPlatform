@@ -505,6 +505,164 @@ test('profile completion persists one profile, recommendation, and audit and rep
   }
 });
 
+test('same-profile post-commit reconciliation retries v2 snapshot after v3 wins and replays the original operation', async () => {
+  let server;
+  let baseUrl;
+  let removeTestHook;
+  let releaseA = () => {};
+  const userId = new mongoose.Types.ObjectId();
+  const profilePayload = canonicalProfilePayload();
+  const headers = {
+    Authorization: `Bearer ${signToken(userId)}`,
+    'Content-Type': 'application/json',
+  };
+  let signalAAtProfileRead;
+  const aAtProfileRead = new Promise(resolve => { signalAAtProfileRead = resolve; });
+  const gateA = new Promise(resolve => { releaseA = resolve; });
+  let pausedA = false;
+
+  try {
+    await setupTestDatabase({ requireReplicaSet: true });
+    const app = express();
+    app.use(express.json());
+    app.use('/api/profile', profileRoutes);
+    app.use(errorHandler);
+    await new Promise(resolve => {
+      server = app.listen(0, '127.0.0.1', () => {
+        baseUrl = `http://127.0.0.1:${server.address().port}`;
+        resolve();
+      });
+    });
+
+    const createdResponse = await fetch(`${baseUrl}/api/profile/complete`, {
+      method: 'POST',
+      headers: { ...headers, 'Idempotency-Key': crypto.randomUUID() },
+      body: JSON.stringify(profilePayload),
+    });
+    const created = await createdResponse.json();
+    assert.equal(createdResponse.status, 200, JSON.stringify(created));
+    const profileId = created.profile.profileId;
+    const profileScope = { userId, profileId };
+    const profileDocumentScope = { userId, _id: profileId };
+
+    removeTestHook = installFinancialStateTestHook(async (boundary, context) => {
+      if (boundary === 'post_commit.after_current_profile_read'
+          && context.profileId === String(profileId)
+          && !pausedA) {
+        pausedA = true;
+        signalAAtProfileRead(context);
+        await gateA;
+      }
+    });
+
+    const firstPayload = {
+      ...profilePayload,
+      monthly_take_home: profilePayload.monthly_take_home + 5000,
+      version: 1,
+    };
+    const firstKey = crypto.randomUUID();
+    const firstPending = fetch(`${baseUrl}/api/profile/${profileId}`, {
+      method: 'PUT',
+      headers: { ...headers, 'Idempotency-Key': firstKey },
+      body: JSON.stringify(firstPayload),
+    });
+
+    const firstRead = await aAtProfileRead;
+    const profileAtBarrier = await FinancialProfile.findOne(profileDocumentScope).lean();
+    const stateAtBarrier = await RecommendationState.findOne(profileScope).lean();
+    const recommendationAtBarrier = await Recommendation.findOne({ ...profileScope, profileVersion: 2 }).lean();
+    assert.equal(profileAtBarrier.version, 2, 'A committed v2 before its outer resolver read paused');
+    assert.equal(firstRead.profileId, String(profileId));
+    assert.ok(recommendationAtBarrier, 'the v2 recommendation is durably persisted before A is paused');
+    assert.equal(String(stateAtBarrier.currentRecommendationId), String(recommendationAtBarrier._id));
+    const firstGeneratedRecommendationId = String(recommendationAtBarrier._id);
+
+    const secondPayload = {
+      ...firstPayload,
+      monthly_savings: profilePayload.monthly_savings + 1000,
+      version: 2,
+    };
+    const secondResponse = await fetch(`${baseUrl}/api/profile/${profileId}`, {
+      method: 'PUT',
+      headers: { ...headers, 'Idempotency-Key': crypto.randomUUID() },
+      body: JSON.stringify(secondPayload),
+    });
+    const second = await secondResponse.json();
+    assert.equal(secondResponse.status, 200, JSON.stringify(second));
+    assert.equal(second.profile.version, 3);
+    assert.equal(second.recommendation.profile_version, 3);
+
+    releaseA();
+    const firstResponse = await firstPending;
+    const first = await firstResponse.json();
+    assert.equal(firstResponse.status, 200, JSON.stringify(first));
+
+    const state = await RecommendationState.findOne(profileScope).lean();
+    const profile = await FinancialProfile.findOne(profileDocumentScope).lean();
+    const recommendation = await Recommendation.findById(state.currentRecommendationId).lean();
+    const allocation = await RecommendationAllocationRevision.findById(state.currentAllocationRevisionId).lean();
+    const assertCanonicalV3Bindings = body => {
+      assert.equal(body.profile.profileId, String(profileId));
+      assert.equal(body.profile.version, 3);
+      assert.equal(body.recommendation.profileId, String(profileId));
+      assert.equal(body.recommendation.recommendationId, String(state.currentRecommendationId));
+      assert.equal(body.recommendation.profile_version, profile.version);
+      assert.equal(body.recommendation.profile_input_hash, recommendation.profileInputHash);
+      assert.equal(body.recommendation.allocation_revision_id, String(state.currentAllocationRevisionId));
+      assert.equal(body.recommendation.allocation_revision_id, String(allocation._id));
+      assert.equal(body.recommendation.portfolio_fingerprint, state.portfolioFingerprint);
+      assert.equal(body.recommendation.portfolio_fingerprint, allocation.portfolioFingerprint);
+      assert.equal(body.recommendation.state_provenance.profileVersion, profile.version);
+      assert.equal(body.recommendation.state_provenance.recommendationId, String(recommendation._id));
+      assert.equal(body.recommendation.state_provenance.allocationRevisionId, String(allocation._id));
+      assert.equal(body.recommendation.calculation_freshness.fresh, true);
+      assert.equal(body.recommendation.response_state, 'CURRENT');
+    };
+    assertCanonicalV3Bindings(first);
+    assert.equal(first.operation_result.committed, true);
+    assert.equal(first.operation_result.generated_recommendation_id, firstGeneratedRecommendationId);
+    assert.equal(first.operation_result.superseded_before_response, true);
+
+    const countsBeforeReplay = await Promise.all([
+      FinancialProfile.countDocuments({ userId }),
+      Recommendation.countDocuments({ userId }),
+      RecommendationAllocationRevision.countDocuments({ userId }),
+      AuditRecord.countDocuments({ userId }),
+    ]);
+    assert.deepEqual(countsBeforeReplay, [1, 3, 3, 3]);
+    const replayResponse = await fetch(`${baseUrl}/api/profile/${profileId}`, {
+      method: 'PUT',
+      headers: { ...headers, 'Idempotency-Key': firstKey },
+      body: JSON.stringify(firstPayload),
+    });
+    const replay = await replayResponse.json();
+    assert.equal(replayResponse.status, 200, JSON.stringify(replay));
+    assertCanonicalV3Bindings(replay);
+    assert.equal(replay.operation_result.generated_recommendation_id, firstGeneratedRecommendationId);
+    assert.deepEqual(await Promise.all([
+      FinancialProfile.countDocuments({ userId }),
+      Recommendation.countDocuments({ userId }),
+      RecommendationAllocationRevision.countDocuments({ userId }),
+      AuditRecord.countDocuments({ userId }),
+    ]), countsBeforeReplay, 'same-key replay must not repeat the v2 mutation or its audit/allocation writes');
+    assert.equal((await verifyAuditChain(userId)).valid, true);
+  } finally {
+    releaseA();
+    removeTestHook?.();
+    if (server) await new Promise(resolve => server.close(resolve));
+    await Promise.all([
+      FinancialProfile.deleteMany({ userId }).catch(() => {}),
+      FinancialProfileState.deleteMany({ userId }).catch(() => {}),
+      Recommendation.deleteMany({ userId }).catch(() => {}),
+      RecommendationAllocationRevision.collection.deleteMany({ userId }).catch(() => {}),
+      RecommendationState.deleteMany({ userId }).catch(() => {}),
+      IdempotencyKey.deleteMany({ userId }).catch(() => {}),
+      AuditRecord.collection.deleteMany({ userId }).catch(() => {}),
+    ]);
+    await teardownTestDatabase();
+  }
+});
+
 test('50 concurrent profile completions from one captured state revision produce exactly one canonical promotion', { timeout: 120_000 }, async () => {
   let server;
   let baseUrl;

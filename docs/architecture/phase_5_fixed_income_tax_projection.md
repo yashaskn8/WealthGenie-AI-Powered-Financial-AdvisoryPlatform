@@ -77,7 +77,8 @@ This is an educational MVP estimate, not a complete return-filing engine. Its SI
 
 ## Projection and Monte Carlo semantics
 
-- Assumption version: `wealthgenie-projection-assumptions-1.0.0`
+- Assumption version: `wealthgenie-projection-assumptions-1.1.0`
+- The committed SHA-256 manifest binds both projection model inputs and the exact catalog expected-return values consumed by deterministic recommendation ranking; catalog source labels do not elevate those assumptions to provider facts.
 - Data class: `MODEL_ASSUMPTION`
 - Source: `WEALTHGENIE_MODEL_POLICY`
 - `observedMarketFact: false`

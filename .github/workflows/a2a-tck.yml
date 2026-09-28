@@ -50,7 +50,14 @@ jobs:
           done
 
       - name: Checkout the official A2A TCK
-        run: git clone --depth 1 https://github.com/a2aproject/a2a-tck.git .a2a-tck
+        env:
+          A2A_TCK_SHA: 263b9cfaf16a554bdfb166a7ba5b67716e946349
+        run: |
+          git init .a2a-tck
+          git -C .a2a-tck remote add origin https://github.com/a2aproject/a2a-tck.git
+          git -C .a2a-tck fetch --depth 1 origin "$A2A_TCK_SHA"
+          git -C .a2a-tck checkout --detach FETCH_HEAD
+          test "$(git -C .a2a-tck rev-parse HEAD)" = "$A2A_TCK_SHA"
 
       - name: Install TCK dependencies
         working-directory: .a2a-tck

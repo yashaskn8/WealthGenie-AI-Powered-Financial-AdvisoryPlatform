@@ -4,7 +4,10 @@ import { buildPortfolioFingerprint, buildRecommendationFingerprint } from '../se
 import { assessRecommendationFreshness } from '../services/recommendationFreshness.js';
 import { assessGoalCalculationFreshness } from '../services/recommendationState.js';
 import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
-import { PROJECTION_ASSUMPTION_POLICY_HASH } from '../services/instrumentConstants.js';
+import {
+  PROJECTION_ASSUMPTION_POLICY_HASH,
+  PROJECTION_ASSUMPTION_VERSION,
+} from '../services/instrumentConstants.js';
 import { buildGoalCalculationInputFingerprint, GOAL_CALCULATION_POLICY_VERSION } from '../services/goalCalculationProvenance.js';
 
 const profile = {
@@ -27,12 +30,12 @@ const profile = {
 const instruments = [
   {
     id: 'FD', allocationWeight: 0.6, nominalReturn: 7.5, riskScore: 1,
-    returnAssumptionVersion: 'wealthgenie-projection-assumptions-1.0.0',
+    returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
     returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH, returnSource: 'WEALTHGENIE_MODEL_POLICY',
   },
   {
     id: 'ETF', allocationWeight: 0.4, nominalReturn: 14.5, riskScore: 3,
-    returnAssumptionVersion: 'wealthgenie-projection-assumptions-1.0.0',
+    returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
     returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH, returnSource: 'WEALTHGENIE_MODEL_POLICY',
   },
 ];
@@ -50,7 +53,7 @@ function state() {
     profileId: recommendation.profileId, userId: recommendation.userId, revision: 2,
     source: 'USER_REBALANCED', instruments, profileInputHash: recommendation.profileInputHash,
     profileVersion: 1,
-    returnAssumptionVersion: 'wealthgenie-projection-assumptions-1.0.0',
+    returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
     returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
     returnAssumptionSource: 'WEALTHGENIE_MODEL_POLICY',
   };

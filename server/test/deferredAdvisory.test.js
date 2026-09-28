@@ -303,23 +303,34 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
   });
 
   await t.test('12. Deferred advisory short-circuits when status is already READY (idempotent)', async () => {
-    const start = performance.now();
-    const res = await fetch(`${baseUrl}/api/recommend/${recData.recommendationId}/advisory`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${tokenA}`,
-      },
-    });
-    const elapsed = performance.now() - start;
+    const originalPrimaryProvider = process.env.LLM_PRIMARY_PROVIDER;
+    const originalGenerate = ProviderManager.nvidia.generate;
+    let providerCalls = 0;
+    process.env.LLM_PRIMARY_PROVIDER = 'NVIDIA_NIM';
+    ProviderManager.nvidia.generate = async () => {
+      providerCalls += 1;
+      throw new Error('READY advisory must return before provider generation');
+    };
+    try {
+      const res = await fetch(`${baseUrl}/api/recommend/${recData.recommendationId}/advisory`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${tokenA}`,
+        },
+      });
 
-    assert.equal(res.status, 200);
-    await assertFetchResponseMatchesOpenApi(res, 'POST', '/api/recommend/{recommendationId}/advisory');
-    const cachedAdvisory = await res.json();
-    assert.equal(cachedAdvisory.advisory_text, advisoryData.advisory_text);
-    assertAdvisoryBinding(cachedAdvisory, sourceState);
-    // Short circuit should return in under 200ms
-    assert.ok(elapsed < 1000, `Short circuit should be fast; took ${elapsed}ms`);
+      assert.equal(res.status, 200);
+      await assertFetchResponseMatchesOpenApi(res, 'POST', '/api/recommend/{recommendationId}/advisory');
+      const cachedAdvisory = await res.json();
+      assert.equal(cachedAdvisory.advisory_text, advisoryData.advisory_text);
+      assertAdvisoryBinding(cachedAdvisory, sourceState);
+      assert.equal(providerCalls, 0, 'READY short-circuit must not invoke advisory generation');
+    } finally {
+      ProviderManager.nvidia.generate = originalGenerate;
+      if (originalPrimaryProvider === undefined) delete process.env.LLM_PRIMARY_PROVIDER;
+      else process.env.LLM_PRIMARY_PROVIDER = originalPrimaryProvider;
+    }
   });
 
   await t.test('13. Concurrent claim prevents duplicate generation (409 Conflict when GENERATING)', async () => {
@@ -415,6 +426,100 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     const concurrentReady = await res.json();
     assert.equal(concurrentReady.advisory_text, 'Concurrent advisory for the captured allocation');
     assertAdvisoryBinding(concurrentReady, sourceState);
+  });
+
+  await t.test('16. simultaneous deferred-advisory HTTP callers share one generation claim and one READY artifact', async () => {
+    await Recommendation.updateOne(
+      { _id: recData.recommendationId, userId: userAId },
+      { $set: { advisoryText: null, advisoryMetadata: { status: 'PENDING' } } },
+    );
+    const recommendationCountBefore = await Recommendation.countDocuments({ userId: userAId });
+    const auditCountBefore = await AuditRecord.countDocuments({ userId: userAId });
+    const originalPrimaryProvider = process.env.LLM_PRIMARY_PROVIDER;
+    const originalGenerate = ProviderManager.nvidia.generate;
+    let providerCalls = 0;
+    let signalBothAtClaim;
+    const bothAtClaim = new Promise(resolve => { signalBothAtClaim = resolve; });
+    let releaseClaims;
+    const claimGate = new Promise(resolve => { releaseClaims = resolve; });
+    let signalProviderEntered;
+    const providerEntered = new Promise(resolve => { signalProviderEntered = resolve; });
+    let releaseProvider;
+    const providerGate = new Promise(resolve => { releaseProvider = resolve; });
+    let claimArrivals = 0;
+    process.env.LLM_PRIMARY_PROVIDER = 'NVIDIA_NIM';
+    ProviderManager.nvidia.generate = async ({ recentHistory }) => {
+      providerCalls += 1;
+      signalProviderEntered();
+      if (providerCalls > 1) releaseProvider();
+      await providerGate;
+      const prompt = recentHistory?.[0]?.parts?.[0]?.text;
+      const evidencePacket = JSON.parse(prompt).EVIDENCE_PACKET;
+      const evidenceId = evidencePacket.entries[0].id;
+      const text = `This recommendation is grounded in the verified evidence [${evidenceId}].`;
+      return {
+        text: JSON.stringify({
+          text,
+          evidenceIdsUsed: [evidenceId],
+          claims: [{ text, evidenceIds: [evidenceId] }],
+          unavailableFacts: [],
+        }),
+        provider: 'nvidia_nim',
+        model: 'simultaneous-claim-test',
+        tokensUsed: 0,
+      };
+    };
+    const removeHook = installFinancialStateTestHook(async boundary => {
+      if (boundary !== 'recommendation.advisory.beforeClaim') return;
+      claimArrivals += 1;
+      if (claimArrivals === 2) signalBothAtClaim();
+      await claimGate;
+    });
+    const send = () => fetch(`${baseUrl}/api/recommend/${recData.recommendationId}/advisory`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${tokenA}`,
+      },
+    });
+    const pending = [send(), send()];
+
+    try {
+      await bothAtClaim;
+      releaseClaims();
+      await providerEntered;
+      const firstResult = await Promise.race(pending.map((request, index) => request.then(response => ({ index, response }))));
+      assert.equal(firstResult.response.status, 409, 'the losing caller must observe the active generation claim');
+      await assertFetchResponseMatchesOpenApi(firstResult.response, 'POST', '/api/recommend/{recommendationId}/advisory');
+      const conflict = await firstResult.response.json();
+      assert.equal(conflict.code, 'ADVISORY_GENERATION_IN_PROGRESS');
+      assert.equal(conflict.details.status, 'GENERATING');
+      assert.equal(conflict.details.recommendationId, recData.recommendationId);
+      releaseProvider();
+
+      const responses = await Promise.all(pending);
+      const winnerResponse = responses[1 - firstResult.index];
+      const winner = await winnerResponse.json();
+      await assertFetchResponseMatchesOpenApi(winnerResponse, 'POST', '/api/recommend/{recommendationId}/advisory', { body: winner });
+      assert.equal(winnerResponse.status, 200, JSON.stringify(winner));
+      assertAdvisoryBinding(winner, sourceState);
+      assert.equal(providerCalls, 1, 'only the owner of the atomic GENERATING claim may invoke the provider');
+
+      const stored = await Recommendation.findById(recData.recommendationId).lean();
+      assert.ok(['GROUNDED_EXPLANATION_AVAILABLE', 'GROUNDED_EXPLANATION_FALLBACK', 'READY'].includes(stored.advisoryMetadata.status));
+      assert.equal(stored.advisoryMetadata.recommendationId, sourceState.recommendationId);
+      assert.equal(stored.advisoryMetadata.allocationRevisionId, sourceState.allocation_revision_id);
+      assert.equal(stored.advisoryMetadata.portfolioFingerprint, sourceState.portfolio_fingerprint);
+      assert.equal(await Recommendation.countDocuments({ userId: userAId }), recommendationCountBefore);
+      assert.equal(await AuditRecord.countDocuments({ userId: userAId }), auditCountBefore);
+    } finally {
+      releaseClaims();
+      releaseProvider();
+      removeHook();
+      ProviderManager.nvidia.generate = originalGenerate;
+      if (originalPrimaryProvider === undefined) delete process.env.LLM_PRIMARY_PROVIDER;
+      else process.env.LLM_PRIMARY_PROVIDER = originalPrimaryProvider;
+    }
   });
 });
 

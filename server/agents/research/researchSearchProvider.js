@@ -1,4 +1,4 @@
-import { assertSafePublicUrl } from './safePublicDocumentFetcher.js';
+import { requestPinnedHttps, validatePublicUrl } from './safePublicDocumentFetcher.js';
 
 const QUERY_MAX_LENGTH = 240;
 const QUERY_FORBIDDEN = /(https?:\/\/|ftp:\/\/|file:\/\/|gopher:\/\/|data:|javascript:|eyJ[a-zA-Z0-9_-]+\.|\b(?:email|phone|jwt|token|password|monthlyTakeHome|rawProfile|userId)\b)/i;
@@ -54,13 +54,15 @@ export class ConfiguredResearchSearchProvider {
 
   async search({ query, brief, maxResults = 5, signal } = {}) {
     const safeQuery = validateResearchQuery(query);
-    const endpoint = await assertSafePublicUrl(this.endpoint);
+    const endpoint = validatePublicUrl(this.endpoint);
     const headers = { 'content-type': 'application/json', accept: 'application/json' };
     if (this.token) headers.authorization = `Bearer ${this.token}`;
-    const response = await this.fetchImpl(endpoint, {
+    const response = await requestPinnedHttps(endpoint, {
       method: 'POST',
       headers,
       signal,
+      maxBytes: 512_000,
+      timeoutMs: 5_000,
       body: JSON.stringify({
         query: safeQuery,
         jurisdiction: brief.jurisdiction,
@@ -70,12 +72,19 @@ export class ConfiguredResearchSearchProvider {
         limit: Math.min(5, maxResults),
       }),
     });
-    if (!response.ok) {
+    if (response.status < 200 || response.status >= 300) {
       const error = new Error('Configured research provider failed.');
       error.code = 'RESEARCH_PROVIDER_UNAVAILABLE';
       throw error;
     }
-    const body = await response.json();
+    const contentType = String(response.headers?.['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (contentType !== 'application/json') {
+      throw Object.assign(new Error('Configured research provider returned an unsupported content type.'), { code: 'RESEARCH_PROVIDER_RESPONSE_INVALID' });
+    }
+    let body;
+    try { body = JSON.parse(response.body.toString('utf8')); } catch {
+      throw Object.assign(new Error('Configured research provider returned invalid JSON.'), { code: 'RESEARCH_PROVIDER_RESPONSE_INVALID' });
+    }
     return Array.isArray(body?.results) ? body.results.map(safeResult).filter(Boolean).slice(0, 5) : [];
   }
 }

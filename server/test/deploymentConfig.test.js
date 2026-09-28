@@ -38,10 +38,10 @@ function writeYaml(root, relativePath, value) {
   fs.writeFileSync(path.join(root, relativePath), stringify(value), 'utf8');
 }
 
-test('deployment validator accepts the complete Phase 2 through Phase 5 migration sequence', () => {
+test('deployment validator accepts the complete ordered Phase 2 through Phase 7 migration sequence', () => {
   const result = validate(repositoryRoot);
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /ordered Phase 2\/3\/4\/5 migrations/);
+  assert.match(result.stdout, /ordered Phase 2\/3\/4\/5\/7 migrations/);
 });
 
 test('deployment validator rejects CD application before the Phase 3 migration', () => {

@@ -80,6 +80,29 @@ test('Config Validation: Valid production configuration passes', () => {
   assert.equal(result.errors.length, 0);
 });
 
+test('Config Validation: production ResearchMesh requires its client credential and pinned card key', () => {
+  const result = validateEnvironmentConfig({
+    JWT_SECRET: '0123456789abcdef0123456789abcdef0123456789abcdef',
+    MONGODB_URI: 'mongodb://mongodb:27017/wealthgenie?replicaSet=rs0',
+    ML_SERVICE_API_KEY: 'production-secret-api-key-value-secure',
+    METRICS_TOKEN: 'production-metrics-token-at-least-32-characters',
+    CORS_ORIGINS: 'https://wealthgenie.example',
+    NODE_ENV: 'production',
+    AGENT_A2A_V1_ENABLED: 'true',
+    AGENT_A2A_RESEARCH_URL: 'https://research.wealthgenie.example',
+    AGENT_A2A_CARD_SIGNING_ENABLED: 'true',
+    AGENT_A2A_CARD_SIGNING_PRIVATE_KEY: 'configured-private-key',
+    AGENT_IDENTITY_PROVIDER: 'oidc',
+    AGENT_OIDC_ISSUER: 'https://issuer.example',
+    AGENT_OIDC_AUDIENCE: 'wealthgenie-agents',
+    AGENT_OIDC_JWKS_URL: 'https://issuer.example/.well-known/jwks.json',
+    AGENT_OIDC_SUBJECT_MAP: '{"service":"PLAN_REVIEW"}',
+  });
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some(error => error.includes('AGENT_A2A_CLIENT_TOKEN')));
+  assert.ok(result.errors.some(error => error.includes('AGENT_A2A_CARD_SIGNING_PUBLIC_JWK')));
+});
+
 test('Config Validation: every required production value fails clearly when missing', () => {
   const complete = {
     JWT_SECRET: '0123456789abcdef0123456789abcdef0123456789abcdef',

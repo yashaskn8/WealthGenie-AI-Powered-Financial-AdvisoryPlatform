@@ -3,7 +3,6 @@ WealthGenie RAG Subsystem - Real Embedding Verification Test Suite
 Proves semantic understanding, batch efficiency, dimension mismatch guards, and factory routing.
 """
 
-import time
 import json
 import os
 import subprocess
@@ -11,6 +10,7 @@ import sys
 from pathlib import Path
 import pytest
 import numpy as np
+from lexical_embedding import stable_lexical_embedding
 
 from rag.config import RAGConfig
 from rag.embeddings.dense_embedding import (
@@ -35,11 +35,14 @@ def cosine_similarity(a, b):
 # ── 1. Semantic Similarity Proof ───────────────────────────────────────
 
 
+@pytest.mark.model_integration
 def test_semantic_similarity_same_meaning_zero_word_overlap():
     """Two sentences with the SAME meaning but ZERO shared content words
     should have HIGH cosine similarity with the real model, and near-zero
     with the old hashing provider."""
     st = SentenceTransformerEmbeddingProvider(enable_cache=False)
+    assert st.embedding_identity["provider"] == "sentence_transformers"
+    assert st.embedding_identity["model_revision"] == SentenceTransformerEmbeddingProvider.MODEL_REVISION
     hashing = DenseVectorEmbeddingProvider(dimension=128, enable_cache=False)
 
     sent_a = "portfolio value dropped significantly"
@@ -65,6 +68,7 @@ def test_semantic_similarity_same_meaning_zero_word_overlap():
     )
 
 
+@pytest.mark.model_integration
 def test_semantic_negation_distinction():
     """Two sentences that share many words but mean OPPOSITE things.
 
@@ -74,6 +78,7 @@ def test_semantic_negation_distinction():
     meaningful, differentiated embeddings and documents the known limitation.
     """
     st = SentenceTransformerEmbeddingProvider(enable_cache=False)
+    assert st.embedding_identity["provider"] == "sentence_transformers"
 
     sent_pos = "the fund gained significant value"
     sent_neg = "the fund did not gain significant value"
@@ -107,36 +112,35 @@ def test_semantic_negation_distinction():
 # ── 2. Batch vs Loop Performance Proof ──────────────────────────────────
 
 
-def test_batch_encode_is_not_n_times_single_encode():
-    """embed_batch(50 texts) should NOT take ~50x the time of a single embed_text.
-    This proves the batch calls the model's native batch encode, not a Python loop."""
-    st = SentenceTransformerEmbeddingProvider(enable_cache=False)
+def test_batch_encode_uses_one_native_model_call():
+    """Batch correctness is structural; avoid flaky wall-clock performance claims."""
+    class FakeVector:
+        def __init__(self, values):
+            self.values = values
 
-    texts = [f"Financial advisory document about tax regulation number {i}" for i in range(50)]
+        def tolist(self):
+            return self.values
 
-    # Time single embed_text
-    t0 = time.perf_counter()
-    _ = st.embed_text(texts[0])
-    single_time = time.perf_counter() - t0
+    class FakeModel:
+        def __init__(self):
+            self.calls = []
 
-    # Time batch embed_batch(50)
-    t1 = time.perf_counter()
+        def encode(self, texts, **kwargs):
+            self.calls.append((list(texts), kwargs))
+            return [FakeVector([float(index), 1.0]) for index, _ in enumerate(texts)]
+
+    st = object.__new__(SentenceTransformerEmbeddingProvider)
+    st._model = FakeModel()
+    st._batch_size = 16
+    st.enable_cache = False
+    st.cache = None
+    texts = [f"Financial advisory document {index}" for index in range(50)]
     results = st.embed_batch(texts)
-    batch_time = time.perf_counter() - t1
-
-    print(f"\n[TIMING] Single embed_text: {single_time*1000:.1f}ms")
-    print(f"[TIMING] Batch embed_batch(50): {batch_time*1000:.1f}ms")
-    print(f"[TIMING] Ratio batch/single: {batch_time/single_time:.1f}x (should be << 50x)")
-
     assert len(results) == 50
-    assert len(results[0]) == st.embedding_dimension
-
-    # Batch of 50 should be significantly less than 50x single
-    # Allow some margin — if truly looping, ratio would be ~50. With batching, typically <10x.
-    assert batch_time < single_time * 30, (
-        f"Batch appears to be looping: batch={batch_time:.3f}s vs single={single_time:.3f}s "
-        f"(ratio={batch_time/single_time:.1f}x)"
-    )
+    assert all(len(vector) == 2 for vector in results)
+    assert len(st._model.calls) == 1
+    assert st._model.calls[0][0] == texts
+    assert st._model.calls[0][1]["batch_size"] == 16
 
 
 # ── 3. Dimension Mismatch Guard ─────────────────────────────────────────
@@ -173,7 +177,17 @@ def test_dimension_mismatch_raises_clear_error(tmp_path):
 # ── 4. Factory Function Routing ──────────────────────────────────────────
 
 
-def test_factory_returns_sentence_transformer_by_default():
+def test_factory_returns_sentence_transformer_by_default(monkeypatch):
+    class FakeSentenceModel:
+        @staticmethod
+        def get_sentence_embedding_dimension():
+            return 384
+
+    monkeypatch.setattr(
+        SentenceTransformerEmbeddingProvider,
+        "_load_shared_model",
+        lambda _self: FakeSentenceModel(),
+    )
     config = RAGConfig()
     assert config.embedding_provider == "sentence_transformer"
     provider = get_embedding_provider(config)
@@ -203,8 +217,8 @@ def test_factory_raises_for_unknown_provider():
 def test_lexical_fallback_is_identical_across_python_processes():
     service_root = Path(__file__).resolve().parents[1]
     command = (
-        "import json; from rag.embeddings.dense_embedding import DenseVectorEmbeddingProvider; "
-        "print(json.dumps(DenseVectorEmbeddingProvider(dimension=64, enable_cache=False).embed_text('stable financial token vector')))"
+        "import json; from lexical_embedding import stable_lexical_embedding; "
+        "print(json.dumps(stable_lexical_embedding('stable financial token vector', 64)))"
     )
     vectors = []
     for _ in range(2):
@@ -215,9 +229,15 @@ def test_lexical_fallback_is_identical_across_python_processes():
             check=True,
             capture_output=True,
             text=True,
+            timeout=20,
         )
         vectors.append(json.loads(result.stdout))
     assert vectors[0] == vectors[1]
+    expected = DenseVectorEmbeddingProvider(dimension=64, enable_cache=False).embed_text(
+        "stable financial token vector"
+    )
+    assert vectors[0] == expected
+    assert expected == stable_lexical_embedding("stable financial token vector", 64)
 
 
 def test_embedding_cache_is_bound_to_embedding_space(tmp_path):
@@ -236,9 +256,12 @@ def test_embedding_cache_is_bound_to_embedding_space(tmp_path):
 # ── 5. Embedding Dimension Property ─────────────────────────────────────
 
 
+@pytest.mark.model_integration
 def test_sentence_transformer_dimension_from_model():
     """embedding_dimension should be read from the model, not hardcoded."""
     st = SentenceTransformerEmbeddingProvider(enable_cache=False)
+    assert st.embedding_identity["provider"] == "sentence_transformers"
+    assert st.embedding_identity["model_revision"] == SentenceTransformerEmbeddingProvider.MODEL_REVISION
     dim = st.embedding_dimension
     assert dim == 384
     # Verify actual output matches

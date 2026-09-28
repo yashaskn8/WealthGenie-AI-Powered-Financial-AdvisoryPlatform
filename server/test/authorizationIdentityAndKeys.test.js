@@ -26,6 +26,46 @@ test('OIDC agent identity requires a valid signed token and explicit subject map
   await assert.rejects(() => verifier.verify({ token: `${token}tampered`, agentType: 'PLAN_REVIEW' }), /verification failed/i);
 });
 
+test('OIDC JWKS rejects redirects and enforces a streamed response-size limit', async () => {
+  const pair = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const issuer = 'https://issuer.example.test';
+  const audience = 'wealthgenie-agents';
+  const jwk = { ...pair.publicKey.export({ format: 'jwk' }), kid: 'key-1', alg: 'RS256', use: 'sig' };
+  const token = jwt.sign({ sub: 'svc-plan-review', iss: issuer, aud: audience }, pair.privateKey, {
+    algorithm: 'RS256', keyid: 'key-1', expiresIn: 60,
+  });
+  const verifierFor = fetchImpl => new OIDCAgentIdentityVerifier({
+    issuer,
+    audience,
+    jwksUri: 'https://issuer.example.test/.well-known/jwks.json',
+    subjectMap: { 'svc-plan-review': 'PLAN_REVIEW' },
+    fetchImpl,
+  });
+
+  let requestOptions;
+  const validVerifier = verifierFor(async (_url, options) => {
+    requestOptions = options;
+    return new Response(JSON.stringify({ keys: [jwk] }), { headers: { 'content-type': 'application/json' } });
+  });
+  const identity = await validVerifier.verify({ token, agentType: 'PLAN_REVIEW' });
+  assert.equal(isVerifiedAgentIdentity(identity), true);
+  assert.equal(requestOptions.redirect, 'error');
+  assert.ok(requestOptions.signal);
+
+  const redirectVerifier = verifierFor(async () => new Response(null, { status: 302, headers: { location: 'https://attacker.example/jwks' } }));
+  await assert.rejects(() => redirectVerifier.verify({ token }), error => error.code === 'AGENT_IDENTITY_TOKEN_INVALID');
+
+  const oversizedBody = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array(40_000));
+      controller.enqueue(new Uint8Array(30_001));
+      controller.close();
+    },
+  });
+  const oversizedVerifier = verifierFor(async () => new Response(oversizedBody));
+  await assert.rejects(() => oversizedVerifier.verify({ token }), error => error.code === 'AGENT_IDENTITY_TOKEN_INVALID');
+});
+
 test('authorization key rings verify receipts signed by a historical key ID', () => {
   const first = crypto.generateKeyPairSync('ed25519');
   const active = crypto.generateKeyPairSync('ed25519');

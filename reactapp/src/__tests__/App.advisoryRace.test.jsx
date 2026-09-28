@@ -52,13 +52,14 @@ vi.mock('../components/ProfilePage', async () => {
 vi.mock('../components/ProgressHub', async () => {
   const ReactModule = await import('react');
   return {
-    default: ({ recommendationMeta, onSaveRebalance, onNavigate }) => ReactModule.createElement(
+    default: ({ recommendationMeta, isAdvisoryLoading, onSaveRebalance, onNavigate }) => ReactModule.createElement(
       'section',
       null,
       ReactModule.createElement('output', { 'data-testid': 'allocation-revision' }, String(recommendationMeta?.allocation_revision ?? 'missing')),
       ReactModule.createElement('output', { 'data-testid': 'portfolio-fingerprint' }, recommendationMeta?.portfolio_fingerprint ?? 'missing'),
       ReactModule.createElement('output', { 'data-testid': 'advisory-status' }, recommendationMeta?.advisory_explanation?.status ?? 'missing'),
       ReactModule.createElement('output', { 'data-testid': 'advisory-text' }, recommendationMeta?.advisory_text ?? ''),
+      ReactModule.createElement('output', { 'data-testid': 'advisory-loading' }, String(Boolean(isAdvisoryLoading))),
       ReactModule.createElement('button', {
         type: 'button',
         onClick: () => void onSaveRebalance([{ id: 'fixture-instrument', allocationWeight: 1 }]),
@@ -81,7 +82,7 @@ vi.mock('../components/ErrorBoundary', () => ({ default: ({ children }) => child
 vi.mock('../RecommendationDashboard', async () => {
   const ReactModule = await import('react');
   return {
-    default: ({ recommendationMeta, onNavigate, fallbackNotice, onRecalculate, userProfile }) => ReactModule.createElement(
+    default: ({ recommendationMeta, onNavigate, fallbackNotice, onRecalculate, userProfile, isAdvisoryLoading }) => ReactModule.createElement(
       'section',
       null,
       ReactModule.createElement('output', { 'data-testid': 'allocation-revision' }, String(recommendationMeta?.allocation_revision ?? 'missing')),
@@ -90,6 +91,7 @@ vi.mock('../RecommendationDashboard', async () => {
       ReactModule.createElement('output', { 'data-testid': 'recommendation-fallback' }, fallbackNotice?.message ?? ''),
       ReactModule.createElement('output', { 'data-testid': 'advisory-status' }, recommendationMeta?.advisory_explanation?.status ?? 'missing'),
       ReactModule.createElement('output', { 'data-testid': 'advisory-text' }, recommendationMeta?.advisory_text ?? ''),
+      ReactModule.createElement('output', { 'data-testid': 'advisory-loading' }, String(Boolean(isAdvisoryLoading))),
       ReactModule.createElement('button', { type: 'button', onClick: () => void onRecalculate() }, 'Retry recompute'),
       ReactModule.createElement('button', { type: 'button', onClick: () => onNavigate('progress') }, 'Open progress'),
       ReactModule.createElement('button', { type: 'button', onClick: () => onNavigate('plan') }, 'Open plan'),
@@ -343,6 +345,95 @@ describe('deferred advisory allocation binding', () => {
     expect(screen.getByTestId('advisory-text')).toBeEmptyDOMElement();
     expect(screen.getByTestId('advisory-text')).not.toHaveTextContent('revision 4');
     expect(screen.getByTestId('advisory-status')).toHaveTextContent('STALE');
+  });
+
+  it('does not merge READY(S1) from a 409 retry after the real App advances to S2 and clears obsolete loading', async () => {
+    let signalRetryStarted;
+    const retryStarted = new Promise(resolve => { signalRetryStarted = resolve; });
+    let resolveRetry;
+    let calls = 0;
+    appMocks.fetchAdvisory.mockImplementation(() => {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.reject(Object.assign(
+          new Error('Another request is generating this advisory.'),
+          { status: 409, code: 'ADVISORY_GENERATION_IN_PROGRESS' },
+        ));
+      }
+      if (calls === 2) {
+        return new Promise(resolve => {
+          resolveRetry = resolve;
+          signalRetryStarted();
+        });
+      }
+      throw new Error('Unexpected extra advisory attempt');
+    });
+
+    render(<App />);
+    await retryStarted;
+    expect(calls).toBe(2);
+    expect(screen.getByTestId('advisory-status')).toHaveTextContent('GENERATING');
+    expect(screen.getByTestId('advisory-loading')).toHaveTextContent('true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open progress' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Apply revision 5' }));
+    await waitFor(() => expect(appMocks.updateRecommendationWeights).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'View dashboard' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('allocation-revision')).toHaveTextContent('5');
+      expect(screen.getByTestId('portfolio-fingerprint')).toHaveTextContent('f'.repeat(64));
+      expect(screen.getByTestId('advisory-loading')).toHaveTextContent('false');
+    });
+
+    await act(async () => {
+      resolveRetry(advisoryBinding());
+    });
+
+    expect(calls).toBe(2);
+    expect(screen.getByTestId('allocation-revision')).toHaveTextContent('5');
+    expect(screen.getByTestId('portfolio-fingerprint')).toHaveTextContent('f'.repeat(64));
+    expect(screen.getByTestId('advisory-text')).toBeEmptyDOMElement();
+    expect(screen.getByTestId('advisory-text')).not.toHaveTextContent('revision 4');
+    expect(screen.getByTestId('advisory-status')).toHaveTextContent('STALE');
+    expect(screen.getByTestId('advisory-loading')).toHaveTextContent('false');
+    expect(screen.getByTestId('recommendation-fallback')).toBeEmptyDOMElement();
+  });
+
+  it('reloads the canonical recommendation when advisory generation reports supersession', async () => {
+    const supersededRecommendationId = '64b000000000000000000061';
+    const canonical = {
+      ...currentState(1, {
+        fingerprint: '7'.repeat(64),
+        stateId: '64b000000000000000000062',
+        allocationRevisionId: '64b000000000000000000063',
+        recommendationId: supersededRecommendationId,
+      }),
+      instruments: [],
+      advisory_text: null,
+      advisory_explanation: { status: 'PENDING' },
+    };
+    appMocks.getCurrentRecommendation.mockResolvedValueOnce(canonical);
+    appMocks.fetchAdvisory.mockRejectedValueOnce(Object.assign(
+      new Error('A newer recommendation superseded this generation.'),
+      { status: 409, code: 'RECOMMENDATION_SUPERSEDED' },
+    ));
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(appMocks.fetchAdvisory).toHaveBeenCalledTimes(1);
+      expect(appMocks.getCurrentRecommendation).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId('allocation-revision')).toHaveTextContent('1');
+      expect(screen.getByTestId('portfolio-fingerprint')).toHaveTextContent('7'.repeat(64));
+    });
+
+    expect(appMocks.getCurrentRecommendation).toHaveBeenCalledWith(
+      profileId,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(screen.getByTestId('advisory-text')).toBeEmptyDOMElement();
+    expect(screen.getByTestId('advisory-status')).toHaveTextContent('PENDING');
+    expect(screen.getByTestId('recommendation-fallback')).toBeEmptyDOMElement();
   });
 
   it('also discards a late advisory from handleAuthoritativeRecompute after state advances', async () => {

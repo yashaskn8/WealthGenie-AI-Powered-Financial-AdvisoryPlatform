@@ -15,7 +15,6 @@ import {
 import { assessSuitabilityRisk } from '../services/riskProfiler.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import { captureProfileStateForCompletion, requireCurrentFinancialProfile, resolveCurrentFinancialProfile } from '../services/currentFinancialProfile.js';
-import { buildPostCommitProfileResponse } from '../services/advisoryResponse.js';
 import { requireFreshRecommendationState } from '../services/recommendationState.js';
 import { calculateFinancialHealthScore } from '../services/financialHealthEngine.js';
 import { redisClient, redisAvailable } from '../config/redis.js';
@@ -156,15 +155,11 @@ router.post(
     const idempotencyMs = performance.now() - idempotencyStart;
     if (idempotencyClaim.state === 'REPLAY') {
       res.setHeader('X-Cache-Lookup', 'HIT - Idempotent');
-      const priorBody = idempotencyClaim.response.body;
-      const reconciled = await buildPostCommitProfileResponse({
-        userId: req.user.userId,
-        responseTemplate: priorBody,
-        committedProfileId: priorBody?.completion?.profileId,
-        committedRecommendationId: priorBody?.completion?.recommendationId,
-        replayed: true,
-      });
-      return res.status(idempotencyClaim.response.status).json(reconciled);
+      // claimAdvisoryIdempotency has already reconstructed this replay from the
+      // immutable recommendation linked to the operation ID. Its response may
+      // describe a newer current profile, so never reinterpret the current
+      // response's profileId/recommendationId as the original operation IDs.
+      return res.status(idempotencyClaim.response.status).json(idempotencyClaim.response.body);
     }
 
     const profileStateBinding = await captureProfileStateForCompletion({ userId: req.user.userId });
@@ -456,15 +451,10 @@ router.put(
     });
     if (idempotencyClaim.state === 'REPLAY') {
       res.setHeader('X-Cache-Lookup', 'HIT - Idempotent');
-      const priorBody = idempotencyClaim.response.body;
-      const reconciled = await buildPostCommitProfileResponse({
-        userId: req.user.userId,
-        responseTemplate: { ...priorBody, response_kind: 'PROFILE_UPDATE' },
-        committedProfileId: priorBody?.profile?.profileId || priorBody?.profileId,
-        committedRecommendationId: priorBody?.recommendation?.recommendationId || priorBody?.recommendationId,
-        replayed: true,
-      });
-      return res.status(idempotencyClaim.response.status).json(reconciled);
+      // The durable replay resolver is bound to the original idempotency
+      // operation. Its financial body is already canonical; rebuilding from
+      // that body would confuse current IDs with the committed operation IDs.
+      return res.status(idempotencyClaim.response.status).json(idempotencyClaim.response.body);
     }
 
     try {

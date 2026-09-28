@@ -22,6 +22,7 @@ describe('Deferred Advisory 409 / Concurrency Hardening', () => {
       if (callCount === 1) {
         const err = new Error('Advisory generation already in progress');
         err.status = 409;
+        err.code = 'ADVISORY_GENERATION_IN_PROGRESS';
         throw err;
       }
       return {
@@ -56,6 +57,7 @@ describe('Deferred Advisory 409 / Concurrency Hardening', () => {
       callCount += 1;
       const err = new Error('Advisory generation already in progress');
       err.status = 409;
+      err.code = 'ADVISORY_GENERATION_IN_PROGRESS';
       throw err;
     });
 
@@ -97,6 +99,24 @@ describe('Deferred Advisory 409 / Concurrency Hardening', () => {
     }
     expect(state.advisory_explanation.status).toBe('FAILED');
     expect(state.advisory_explanation.error).toContain('Internal Server Error');
+  });
+
+  it('does not retry a 409 that means the recommendation was superseded', async () => {
+    const fetchFn = vi.fn().mockImplementation(async () => {
+      const err = new Error('The recommendation changed after advisory generation.');
+      err.status = 409;
+      err.code = 'RECOMMENDATION_SUPERSEDED';
+      throw err;
+    });
+    const onConflict = vi.fn();
+
+    await expect(fetchDeferredAdvisoryWithBoundedRetry(fetchFn, mockRecId, {
+      retryDelays: TEST_DELAYS,
+      onConflict,
+    })).rejects.toMatchObject({ status: 409, code: 'RECOMMENDATION_SUPERSEDED' });
+
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(onConflict).not.toHaveBeenCalled();
   });
 
   // TEST 4: fetchAdvisory aborts -> no FAILED state
@@ -147,6 +167,7 @@ describe('Deferred Advisory 409 / Concurrency Hardening', () => {
       if (callCount < 2) {
         const err = new Error('Conflict');
         err.status = 409;
+        err.code = 'ADVISORY_GENERATION_IN_PROGRESS';
         throw err;
       }
       return {
@@ -191,6 +212,7 @@ describe('Deferred Advisory 409 / Concurrency Hardening', () => {
       if (callCount === 1) {
         const err = new Error('Conflict');
         err.status = 409;
+        err.code = 'ADVISORY_GENERATION_IN_PROGRESS';
         throw err;
       }
       return {

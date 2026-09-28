@@ -18,6 +18,13 @@ from rag.schema import Document, DocumentMetadata, TextChunk, ChunkMetadata
 from rag.vector_store.memory_vector_store import PersistentVectorStore
 
 
+def _assert_futures_complete(futures, timeout=30):
+    done, pending = concurrent.futures.wait(futures, timeout=timeout)
+    assert not pending, f"concurrent RAG lifecycle operation exceeded {timeout}s"
+    for future in done:
+        future.result()
+
+
 @pytest.fixture
 def client():
     api_key = os.environ.get("ML_SERVICE_API_KEY", "wealthgenie_secret_api_key_2026")
@@ -379,7 +386,7 @@ def test_concurrent_document_mutations_maintain_consistency(tmp_path):
     # Phase 1: Concurrently register 20 documents
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = [executor.submit(register_worker, i) for i in range(num_docs)]
-        concurrent.futures.wait(futures)
+        _assert_futures_complete(futures)
 
     # Phase 2: Concurrently perform mixed mutations across threads
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
@@ -389,7 +396,7 @@ def test_concurrent_document_mutations_maintain_consistency(tmp_path):
             mixed_futures.append(executor.submit(soft_delete_worker, i + 1))
             mixed_futures.append(executor.submit(hard_delete_worker, i + 2))
             mixed_futures.append(executor.submit(register_worker, i + 3))
-        concurrent.futures.wait(mixed_futures)
+        _assert_futures_complete(mixed_futures)
 
     # Assert on-disk state on a fresh instance
     fresh_store = PersistentVectorStore(index_path=tmp_path / "test_store.json")
@@ -434,7 +441,7 @@ def test_concurrent_multi_instance_mutations_across_pipeline_and_manager(tmp_pat
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
         futures = [executor.submit(worker, i) for i in range(num_instances)]
-        concurrent.futures.wait(futures)
+        _assert_futures_complete(futures)
 
     # Verify final on-disk state via a fresh manager
     final_mgr = DocumentLifecycleManager(vector_store=store, registry_path=reg_file)

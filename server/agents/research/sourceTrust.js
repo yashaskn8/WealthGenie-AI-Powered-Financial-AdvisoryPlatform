@@ -30,8 +30,12 @@ function hostMatches(hostname, domain) {
 }
 
 export function classifyResearchSource({ url } = {}) {
-  let hostname = '';
-  try { hostname = new URL(url).hostname.toLowerCase(); } catch { return 'UNVERIFIED'; }
+  let parsed;
+  try { parsed = new URL(url); } catch { return 'UNVERIFIED'; }
+  // TLS is part of source identity: an official hostname served over cleartext
+  // HTTP is not qualified evidence and must never receive a trusted tier.
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return 'UNVERIFIED';
+  const hostname = parsed.hostname.toLowerCase();
   if ([...OFFICIAL_PRIMARY_HOSTS].some(domain => hostMatches(hostname, domain))) return 'OFFICIAL_PRIMARY';
   if ([...PRIMARY_ISSUER_HOSTS].some(domain => hostMatches(hostname, domain))) return 'PRIMARY_ISSUER';
   if ([...TRUSTED_SECONDARY_HOSTS].some(domain => hostMatches(hostname, domain))) return 'TRUSTED_SECONDARY';

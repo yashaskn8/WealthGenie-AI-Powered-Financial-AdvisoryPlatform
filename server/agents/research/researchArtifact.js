@@ -11,6 +11,10 @@ export function hashResearchArtifact(value) {
   return crypto.createHash('sha256').update(canonicalStringify(value)).digest('hex');
 }
 
+export function hashResearchBrief(value) {
+  return crypto.createHash('sha256').update(canonicalStringify(value)).digest('hex');
+}
+
 export function hashResearchDocument(value) {
   return crypto.createHash('sha256').update(String(value || '')).digest('hex');
 }
@@ -34,22 +38,29 @@ export function buildResearchArtifact({
   durationMs = 0,
   parentArtifactId = null,
 } = {}) {
+  const frozenClaims = freezeTree(claims);
+  const frozenEvidence = freezeTree(evidenceUnits);
+  const frozenSources = freezeTree(sources);
+  const frozenContradictions = freezeTree(contradictions);
+  const frozenGaps = freezeTree(unresolvedGaps);
+  const frozenBudget = freezeTree(researchBudgetUsed);
   const artifact = {
     artifactId,
-    version: '1.0.0',
+    version: '1.1.0',
     researchBriefId: brief.researchBriefId,
+    researchBriefHash: hashResearchBrief(brief),
     taskId,
     agentVersion: RESEARCH_MESH_VERSION,
     researchPolicyVersion: RESEARCH_POLICY_VERSION,
     createdAt,
     asOf: brief.asOf,
     status,
-    claims,
-    evidenceUnits,
-    sources,
-    contradictions,
-    unresolvedGaps,
-    researchBudgetUsed,
+    claims: frozenClaims,
+    evidenceUnits: frozenEvidence,
+    sources: frozenSources,
+    contradictions: frozenContradictions,
+    unresolvedGaps: frozenGaps,
+    researchBudgetUsed: frozenBudget,
     queryCount,
     documentCount,
     modelCalls,
@@ -59,6 +70,14 @@ export function buildResearchArtifact({
     financialAuthorityDelta: 0,
   };
   return Object.freeze({ ...artifact, contentHash: hashResearchArtifact(artifact) });
+}
+
+function freezeTree(value) {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) freezeTree(child);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 export function verifyArtifactContentHash(artifact) {

@@ -136,8 +136,10 @@ export function getRuntimeConfig(env = process.env) {
       searchProvider: env.RESEARCH_SEARCH_PROVIDER?.trim().toLowerCase() || null,
       searchProviderUrl: env.RESEARCH_SEARCH_PROVIDER_URL?.trim() || null,
       devTokenConfigured: Boolean(env.AGENT_A2A_DEV_TOKEN),
+      clientTokenConfigured: Boolean(env.AGENT_A2A_CLIENT_TOKEN?.trim()),
       cardSigningEnabled: booleanValue(env.AGENT_A2A_CARD_SIGNING_ENABLED, false),
       cardSigningPrivateKeyConfigured: Boolean(env.AGENT_A2A_CARD_SIGNING_PRIVATE_KEY),
+      cardSigningPublicJwkConfigured: Boolean(env.AGENT_A2A_CARD_SIGNING_PUBLIC_JWK?.trim()),
       budgets: Object.freeze({
         maxResearchRounds: positiveInteger(env.RESEARCH_MAX_ROUNDS, 3, { min: 0, max: 3 }),
         maxSearchQueries: positiveInteger(env.RESEARCH_MAX_SEARCH_QUERIES, 6, { min: 0, max: 6 }),
@@ -288,11 +290,15 @@ export function assertValidRuntimeConfig(config) {
   }
   if (research.a2aV1Enabled) {
     if (!research.researchUrl) throw new Error('AGENT_A2A_RESEARCH_URL is required when A2A ResearchMesh is enabled');
-    if (config.isProduction && !research.researchUrl.startsWith('https://')) throw new Error('AGENT_A2A_RESEARCH_URL must use HTTPS in production');
-    if (config.isProduction && config.agentIdentityProvider === 'development') throw new Error('Production ResearchMesh requires OIDC or SPIFFE agent identity');
+    let researchUrl;
+    try { researchUrl = new URL(research.researchUrl); } catch { researchUrl = null; }
+    if (!researchUrl || researchUrl.username || researchUrl.password || researchUrl.search || researchUrl.hash
+        || (config.isProduction && researchUrl.protocol !== 'https:')) throw new Error('AGENT_A2A_RESEARCH_URL must be a credential-free URL and HTTPS in production');
+    if (config.isProduction && config.agentIdentityProvider !== 'oidc') throw new Error('Production ResearchMesh requires OIDC; unimplemented bearer/SPIFFE verification is not accepted');
     if (!config.isProduction && config.agentIdentityProvider === 'development' && !research.devTokenConfigured) throw new Error('AGENT_A2A_DEV_TOKEN is required for development A2A ResearchMesh');
     if (config.isProduction && !research.cardSigningEnabled) throw new Error('Production ResearchMesh requires signed Agent Cards');
     if (config.isProduction && research.cardSigningEnabled && !research.cardSigningPrivateKeyConfigured) throw new Error('Production signed Agent Cards require AGENT_A2A_CARD_SIGNING_PRIVATE_KEY');
+    if (config.isProduction && (!research.clientTokenConfigured || !research.cardSigningPublicJwkConfigured)) throw new Error('Production ResearchMesh requires a dedicated client token and pinned Agent Card public JWK');
   }
   if (research.liveSearchEnabled && (research.searchProvider !== 'configured' || !research.searchProviderUrl)) {
     throw new Error('Live ResearchMesh search requires the configured approved search provider and endpoint');

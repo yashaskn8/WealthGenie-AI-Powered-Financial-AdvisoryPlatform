@@ -89,12 +89,54 @@ function pemFromJwk(jwk) {
   }
 }
 
-async function fetchJwksKey(jwksUri, header) {
+async function fetchJwksKey(jwksUri, header, fetchImpl = globalThis.fetch) {
   if (!jwksUri || !header?.kid) throw identityError('AGENT_IDENTITY_KEY_UNAVAILABLE', 'OIDC signing key is unavailable.');
-  const response = await fetch(jwksUri, { signal: AbortSignal.timeout(3000) });
+  let uri;
+  try { uri = new URL(jwksUri); } catch { throw identityError('AGENT_IDENTITY_CONFIGURATION_INVALID', 'OIDC JWKS URL is invalid.', 503); }
+  if (uri.protocol !== 'https:' || uri.username || uri.password || uri.hash) {
+    throw identityError('AGENT_IDENTITY_CONFIGURATION_INVALID', 'OIDC JWKS URL must use credential-free HTTPS.', 503);
+  }
+  let response;
+  try {
+    response = await fetchImpl(uri, {
+      signal: AbortSignal.timeout(3000),
+      redirect: 'error',
+      headers: { accept: 'application/json' },
+    });
+  } catch { throw identityError('AGENT_IDENTITY_KEY_UNAVAILABLE', 'OIDC signing key is unavailable.'); }
+  if (response.status >= 300 && response.status < 400) throw identityError('AGENT_IDENTITY_KEY_UNAVAILABLE', 'OIDC JWKS redirects are not allowed.');
   if (!response.ok) throw identityError('AGENT_IDENTITY_KEY_UNAVAILABLE', 'OIDC JWKS endpoint did not return keys.');
-  const body = await response.json();
-  const key = body?.keys?.find(item => item.kid === header.kid && item.use !== 'enc');
+  const contentLength = Number(response.headers?.get?.('content-length'));
+  if (Number.isFinite(contentLength) && contentLength > 64_000) throw identityError('AGENT_IDENTITY_KEY_UNAVAILABLE', 'OIDC JWKS response exceeds the size limit.');
+  let bytes;
+  try {
+    if (!response.body?.getReader) throw new Error('Streaming response body is required.');
+    const reader = response.body.getReader();
+    const chunks = [];
+    let total = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > 64_000) {
+        await reader.cancel().catch(() => {});
+        throw identityError('AGENT_IDENTITY_KEY_UNAVAILABLE', 'OIDC JWKS response exceeds the size limit.');
+      }
+      chunks.push(Buffer.from(value));
+    }
+    bytes = Buffer.concat(chunks, total);
+  } catch (error) {
+    if (error?.code === 'AGENT_IDENTITY_KEY_UNAVAILABLE') throw error;
+    throw identityError('AGENT_IDENTITY_KEY_UNAVAILABLE', 'OIDC JWKS response could not be read.');
+  }
+  let body;
+  try { body = JSON.parse(bytes.toString('utf8')); } catch { throw identityError('AGENT_IDENTITY_KEY_UNAVAILABLE', 'OIDC JWKS response is invalid JSON.'); }
+  if (!Array.isArray(body?.keys) || body.keys.length > 100) throw identityError('AGENT_IDENTITY_KEY_UNAVAILABLE', 'OIDC JWKS key set is invalid.');
+  const key = body.keys.find(item => item.kid === header.kid
+    && item.use !== 'enc'
+    && (!item.alg || item.alg === header.alg)
+    && (!item.key_ops || item.key_ops.includes('verify'))
+    && !['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth'].some(name => item[name] !== undefined));
   if (!key) throw identityError('AGENT_IDENTITY_KEY_UNAVAILABLE', 'OIDC signing key ID was not found.');
   return pemFromJwk(key);
 }
@@ -118,7 +160,7 @@ export class DevelopmentAgentIdentityVerifier {
 }
 
 export class OIDCAgentIdentityVerifier {
-  constructor({ issuer, audience, algorithms = DEFAULT_ALGORITHMS, subjectMap = {}, publicKey = null, jwksUri = null, jwksResolver = null } = {}) {
+  constructor({ issuer, audience, algorithms = DEFAULT_ALGORITHMS, subjectMap = {}, publicKey = null, jwksUri = null, jwksResolver = null, fetchImpl = globalThis.fetch } = {}) {
     this.issuer = issuer;
     this.audience = audience;
     this.algorithms = algorithms;
@@ -126,12 +168,17 @@ export class OIDCAgentIdentityVerifier {
     this.publicKey = publicKey;
     this.jwksUri = jwksUri;
     this.jwksResolver = jwksResolver;
+    this.fetchImpl = fetchImpl;
   }
 
   async verify({ token, agentType } = {}) {
     if (!token || !this.issuer || !this.audience) throw identityError('AGENT_IDENTITY_CONFIGURATION_INVALID', 'OIDC verification is not fully configured.', 503);
     if (!this.publicKey && !this.jwksUri && !this.jwksResolver) throw identityError('AGENT_IDENTITY_CONFIGURATION_INVALID', 'OIDC verification requires a public key or JWKS source.', 503);
-    const result = await verifyJwt(token, header => this.publicKey || this.jwksResolver?.(header) || fetchJwksKey(this.jwksUri, header), {
+    const result = await verifyJwt(token, header => {
+      if (this.publicKey) return this.publicKey;
+      if (this.jwksResolver) return this.jwksResolver(header);
+      return fetchJwksKey(this.jwksUri, header, this.fetchImpl);
+    }, {
       algorithms: this.algorithms,
       issuer: this.issuer,
       audience: this.audience,
@@ -181,6 +228,7 @@ export function createAgentIdentityVerifier({ env = process.env, dependencies = 
     publicKey: env.AGENT_OIDC_PUBLIC_KEY || null,
     jwksUri: env.AGENT_OIDC_JWKS_URL || null,
     jwksResolver: dependencies.jwksResolver,
+    fetchImpl: dependencies.fetchImpl || globalThis.fetch,
   });
   if (provider === 'spiffe') return new SpiffeAgentIdentityVerifier({ trustDomain: env.SPIFFE_TRUST_DOMAIN, verifySvid: dependencies.verifySvid });
   throw identityError('AGENT_IDENTITY_CONFIGURATION_INVALID', 'Unsupported agent identity provider.', 500);
