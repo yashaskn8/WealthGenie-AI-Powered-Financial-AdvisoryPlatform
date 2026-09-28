@@ -5,10 +5,11 @@ import AuditRecord from '../../models/AuditRecord.js';
 import { buildRecommendationProfile } from '../../services/recommendationProfile.js';
 import { getCurrentRegulatoryRuleVersion } from '../../services/taxEngine.js';
 import { assessRecommendationFreshness } from '../../services/recommendationFreshness.js';
-import { assessGoalCalculationFreshness, resolveCurrentRecommendationState } from '../../services/recommendationState.js';
+import { assessGoalCalculationFreshness } from '../../services/recommendationState.js';
 import { buildGroundedEvidencePacket, makeEvidenceEntry } from '../../services/groundedEvidence.js';
 import { SAFE_PLAN_REVIEW_TOOLS } from './planReviewSchemas.js';
 import { buildPlanReviewSnapshotBinding, hashPlanReviewSnapshot } from './planReviewRuntime.js';
+import { resolvePlanReviewSnapshot } from './planReviewSnapshot.js';
 
 function idOf(value) {
   return value?._id ? String(value._id) : value ? String(value) : null;
@@ -212,6 +213,32 @@ export async function loadPlanReviewContext({ userId, profileId, dependencies = 
   const profileModel = dependencies.profileModel || FinancialProfile;
   const recommendationModel = dependencies.recommendationModel || Recommendation;
   const auditModel = dependencies.auditModel || AuditRecord;
+  if (!dependencies.profileModel && !dependencies.recommendationModel && !dependencies.auditModel) {
+    // Queue admission, graph execution, and publication must hash the exact
+    // same canonical source binding. In particular, the profile-state revision
+    // is part of the binding and cannot be omitted by the worker context loader.
+    const resolveSnapshot = dependencies.resolvePlanReviewSnapshot || resolvePlanReviewSnapshot;
+    const snapshot = await resolveSnapshot({
+      userId,
+      profileId,
+      profileStateModel: dependencies.profileStateModel,
+      dependencies,
+    });
+    const currentState = snapshot.currentState;
+    const recommendation = currentState?.currentRecommendationView || currentState?.recommendation || null;
+    const freshness = currentState?.freshness || null;
+    return {
+      profile: snapshot.profile,
+      profileContext: buildProfileContext(snapshot.profile, snapshot.canonicalProfile),
+      recommendation,
+      currentState,
+      sourceBinding: snapshot.sourceBinding,
+      planReviewSnapshotHash: snapshot.planReviewSnapshotHash,
+      recommendationSummary: buildRecommendationSummary(recommendation, freshness),
+      freshness,
+    };
+  }
+
   const storedProfile = await profileModel.findOne({ _id: profileId, userId }).lean();
   if (!storedProfile) {
     const freshness = assessRecommendationFreshness({ profile: null, recommendation: null });
@@ -230,18 +257,10 @@ export async function loadPlanReviewContext({ userId, profileId, dependencies = 
   }
 
   const profile = buildRecommendationProfile(storedProfile);
-  let recommendation;
-  let freshness;
-  let currentState = null;
-  if (!dependencies.profileModel && !dependencies.recommendationModel && !dependencies.auditModel) {
-    currentState = await resolveCurrentRecommendationState({ userId, profileId, profile });
-    recommendation = currentState.currentRecommendationView;
-    freshness = currentState.freshness;
-  } else {
-    // Test/adapter callers may provide isolated model doubles. Their path is
-    // still read-only; production uses the canonical resolver above.
-    recommendation = await latestOwnedRecommendationQuery(profileId, userId, recommendationModel);
-  }
+  // Test/adapter callers may provide isolated model doubles. Their path is
+  // still read-only; production returns above through the canonical snapshot
+  // resolver used at enqueue and commit time.
+  const recommendation = await latestOwnedRecommendationQuery(profileId, userId, recommendationModel);
   let recommendationRegulatoryRuleVersion = recommendation?.regulatoryRuleVersion ?? null;
   if (recommendation && !recommendationRegulatoryRuleVersion && auditModel) {
     const audit = await auditModel.findOne({ recommendationId: recommendation._id, userId })
@@ -250,13 +269,13 @@ export async function loadPlanReviewContext({ userId, profileId, dependencies = 
     recommendationRegulatoryRuleVersion = audit?.regulatory_rule_version || null;
   }
   const currentRegulatoryRuleVersion = (dependencies.getCurrentRegulatoryRuleVersion || getCurrentRegulatoryRuleVersion)();
-  freshness ||= assessRecommendationFreshness({
+  const freshness = assessRecommendationFreshness({
     profile,
     recommendation,
     currentRegulatoryRuleVersion,
     recommendationRegulatoryRuleVersion,
   });
-  currentState ||= {
+  const currentState = {
     profile: storedProfile,
     profileVersion: Number(storedProfile.version) || null,
     recommendation,

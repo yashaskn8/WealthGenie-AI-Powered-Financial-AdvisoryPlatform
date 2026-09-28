@@ -30,6 +30,14 @@ async function setupRuntimeMongo() {
   await migratePlanHealthPersistence();
 }
 
+function scopeProfileStateReads(model, userIds) {
+  return {
+    find(filter = {}) {
+      return model.find({ $and: [filter, { userId: { $in: userIds } }] });
+    },
+  };
+}
+
 function admissionSnapshot(userId, profileId, profileVersion = 1) {
   const sourceBinding = buildPlanReviewSnapshotBinding({
     userId,
@@ -676,7 +684,7 @@ test('Mongo PlanHealth scheduler resumes strictly after the last durably complet
     })));
     await assert.rejects(runPlanHealthScan({
       profileModel,
-      profileStateModel: FinancialProfileState,
+      profileStateModel: scopeProfileStateReads(FinancialProfileState, stateUserIds),
       leaseModel: PlanHealthSchedulerLease,
       publicationFenceModel: PlanHealthInspectionFence,
       periodKey: firstPeriod,
@@ -697,7 +705,7 @@ test('Mongo PlanHealth scheduler resumes strictly after the last durably complet
 
     const resumed = await runPlanHealthScan({
       profileModel,
-      profileStateModel: FinancialProfileState,
+      profileStateModel: scopeProfileStateReads(FinancialProfileState, stateUserIds),
       leaseModel: PlanHealthSchedulerLease,
       publicationFenceModel: PlanHealthInspectionFence,
       periodKey: firstPeriod,
@@ -912,6 +920,7 @@ test('Mongo timeout durably invalidates an inspection blocked before publication
   try {
     const timedOutScan = runPlanHealthScan({
       profileModel,
+      profileStateModel: scopeProfileStateReads(FinancialProfileState, [userId]),
       leaseModel: PlanHealthSchedulerLease,
       publicationFenceModel,
       inspect,
@@ -938,6 +947,7 @@ test('Mongo timeout durably invalidates an inspection blocked before publication
     blockPublication = false;
     const fresh = await runPlanHealthScan({
       profileModel,
+      profileStateModel: scopeProfileStateReads(FinancialProfileState, [userId]),
       leaseModel: PlanHealthSchedulerLease,
       publicationFenceModel,
       inspect,

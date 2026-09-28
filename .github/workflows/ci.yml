@@ -431,6 +431,23 @@ jobs:
           npm ci --prefix reactapp
           npx --prefix reactapp playwright install --with-deps chromium
 
+      - name: Start MongoDB for the explicit ML/RAG state migration
+        run: docker compose up -d mongodb
+
+      - name: Wait for transaction-capable MongoDB primary
+        run: |
+          for attempt in $(seq 1 60); do
+            if docker compose exec -T mongodb mongosh --quiet --eval 'db.hello().isWritablePrimary' 2>/dev/null | grep -qx true; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs --no-color mongodb
+          exit 1
+
+      - name: Run the explicit Phase 3 migration before starting application replicas
+        run: docker compose run --build --rm --no-deps ml-service python scripts/migrate_phase3_state.py
+
       - name: Start the real Nginx edge stack
         run: docker compose up --build -d
 

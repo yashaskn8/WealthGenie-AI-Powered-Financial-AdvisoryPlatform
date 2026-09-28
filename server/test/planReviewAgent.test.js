@@ -6,6 +6,8 @@ import { deriveRecommendedAction, policyGuardReview, safeFallbackAfterPolicyReje
 import { hashGroundedEvidence } from '../services/groundedEvidence.js';
 import { advancePlanReviewStep } from '../agents/planReview/planReviewGraph.js';
 import { createModelGateway } from '../agents/modelGateway.js';
+import { loadPlanReviewContext } from '../agents/planReview/planReviewTools.js';
+import { buildPlanReviewSnapshotBinding, hashPlanReviewSnapshot } from '../agents/planReview/planReviewRuntime.js';
 
 const profileId = '64b000000000000000000001';
 const userId = '64b000000000000000000010';
@@ -56,6 +58,59 @@ const recommendation = {
     riskLevel: 'Moderate',
   }],
 };
+
+test('production PlanReview context preserves the canonical profile-state revision from queue admission', async () => {
+  const currentAllocation = {
+    _id: '64b000000000000000000003',
+    revision: 4,
+    portfolioFingerprint: 'portfolio-fingerprint-4',
+  };
+  const freshness = { fresh: true, reasonCodes: [] };
+  const currentState = {
+    profile,
+    profileVersion: profile.version,
+    recommendation,
+    currentRecommendationView: { ...recommendation, instruments: recommendation.instruments },
+    currentAllocation,
+    allocationRevision: currentAllocation,
+    recommendationFingerprint: 'recommendation-fingerprint-4',
+    portfolioFingerprint: currentAllocation.portfolioFingerprint,
+    freshness,
+    provenance: { status: 'PERSISTED_REVISION', profileInputHash: recommendation.profileInputHash },
+  };
+  const sourceBinding = buildPlanReviewSnapshotBinding({
+    userId,
+    profileId,
+    currentState,
+    freshness,
+    financialProfileStateRevision: 7,
+  });
+  const expectedHash = hashPlanReviewSnapshot(sourceBinding);
+  const context = await loadPlanReviewContext({
+    userId,
+    profileId,
+    dependencies: {
+      resolvePlanReviewSnapshot: async () => ({
+        profile,
+        canonicalProfile: {
+          age: profile.age,
+          riskTolerance: profile.riskTolerance,
+          monthlySavings: profile.monthlySavings,
+          investmentHorizonYears: profile.investmentHorizonYears,
+          investmentGoals: profile.investmentGoals,
+        },
+        currentState,
+        sourceBinding,
+        planReviewSnapshotHash: expectedHash,
+      }),
+    },
+  });
+
+  assert.equal(context.planReviewSnapshotHash, expectedHash);
+  assert.equal(context.sourceBinding.financialProfileStateRevision, 7);
+  assert.equal(context.sourceBinding.allocationRevisionId, currentAllocation._id);
+  assert.equal(context.recommendationSummary.status, 'AVAILABLE');
+});
 
 test('unknown and missing stale-freshness evidence fails closed instead of reporting no action', () => {
   assert.equal(deriveRecommendedAction({ profile, freshness: { fresh: false, reasonCodes: ['NEW_UNRECOGNIZED_STATE'] }, goalSummary: { status: 'NONE' }, evidenceStatus: 'AVAILABLE' }), 'INSUFFICIENT_EVIDENCE');

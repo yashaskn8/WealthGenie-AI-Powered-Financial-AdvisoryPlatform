@@ -362,7 +362,15 @@ export async function createResearchAgentServer({ env = process.env, port = Numb
       req.verifiedA2AUser = await buildAuthenticatedUser(req, { env, verifier });
       next();
     } catch {
-      res.status(401).json({ error: 'A2A_AUTH_FAILED', message: 'Authenticated A2A caller required.' });
+      res.set('WWW-Authenticate', 'Bearer');
+      res.status(401).json({
+        error: {
+          code: 401,
+          message: 'Authenticated A2A caller required.',
+          status: 'UNAUTHENTICATED',
+          details: [],
+        },
+      });
     }
   });
   app.use('/a2a', restHandler({ requestHandler, userBuilder, contextBuilder }));

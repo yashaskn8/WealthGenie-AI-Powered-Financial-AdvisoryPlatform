@@ -393,12 +393,36 @@ test('official A2A client/server boundary resolves card, returns artifact, and c
       return fetch(input, init);
     },
   });
+    const missingCredentials = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
     const unauthorized = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: 'Bearer forged-token' },
       body: '{}',
     });
+    assert.equal(missingCredentials.status, 401);
+    assert.equal(missingCredentials.headers.get('www-authenticate'), 'Bearer');
+    assert.deepEqual(await missingCredentials.json(), {
+      error: {
+        code: 401,
+        message: 'Authenticated A2A caller required.',
+        status: 'UNAUTHENTICATED',
+        details: [],
+      },
+    });
     assert.equal(unauthorized.status, 401);
+    assert.equal(unauthorized.headers.get('www-authenticate'), 'Bearer');
+    assert.deepEqual(await unauthorized.json(), {
+      error: {
+        code: 401,
+        message: 'Authenticated A2A caller required.',
+        status: 'UNAUTHENTICATED',
+        details: [],
+      },
+    });
     const result = await client.sendResearch({ brief: brief({ researchBriefId: 'brief-a2a-1' }) });
     assert.equal(result.task.status.state, TaskState.TASK_STATE_COMPLETED);
     assert.equal(result.artifact.researchBriefId, 'brief-a2a-1');
