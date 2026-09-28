@@ -52,7 +52,9 @@ export function buildRecommendationSummary(recommendation, freshness = null) {
     modelVersion: recommendation.modelVersion ?? null,
     regulatoryRuleVersion: recommendation.regulatoryRuleVersion ?? null,
     profileInputHash: recommendation.profileInputHash ?? null,
-    responseSnapshotAvailable: Boolean(recommendation.responseSnapshot),
+    responseSnapshotAvailable: recommendation.responseSnapshotAvailable === undefined
+      ? Boolean(recommendation.responseSnapshot)
+      : recommendation.responseSnapshotAvailable === true,
     currentAllocationSource: recommendation.currentAllocationSource ?? null,
     instruments: Array.isArray(recommendation.instruments)
       ? recommendation.instruments.slice(0, 8).map(instrument => ({
@@ -68,6 +70,82 @@ export function buildRecommendationSummary(recommendation, freshness = null) {
         returnAssumptionVersion: instrument.returnAssumptionVersion ?? null,
       }))
       : [],
+  };
+}
+
+function planReviewEvidenceProfile(profileContext) {
+  if (!profileContext) return null;
+  return {
+    age: profileContext.age ?? null,
+    monthlySavings: profileContext.monthlySavings ?? null,
+    riskTolerance: profileContext.riskTolerance ?? null,
+    suitabilityRisk: profileContext.suitabilityRisk ?? null,
+    investmentHorizonYears: profileContext.investmentHorizonYears ?? null,
+    investmentGoals: Array.isArray(profileContext.investmentGoals) ? [...profileContext.investmentGoals] : [],
+    suitabilityReasonCodes: Array.isArray(profileContext.suitabilityReasonCodes)
+      ? [...profileContext.suitabilityReasonCodes]
+      : [],
+  };
+}
+
+function planReviewRecommendationView(recommendation) {
+  if (!recommendation) return null;
+  return {
+    _id: recommendation._id,
+    profileId: recommendation.profileId,
+    generatedAt: recommendation.generatedAt ?? null,
+    modelVersion: recommendation.modelVersion ?? null,
+    profileInputHash: recommendation.profileInputHash ?? null,
+    recommendationPolicyVersion: recommendation.recommendationPolicyVersion ?? null,
+    regulatoryRuleVersion: recommendation.regulatoryRuleVersion ?? null,
+    currentAllocationSource: recommendation.currentAllocationSource ?? null,
+    responseSnapshotAvailable: recommendation.responseSnapshotAvailable === undefined
+      ? Boolean(recommendation.responseSnapshot)
+      : recommendation.responseSnapshotAvailable === true,
+    instruments: Array.isArray(recommendation.instruments)
+      ? recommendation.instruments.slice(0, 8).map(instrument => ({
+        id: instrument.id,
+        name: instrument.name,
+        type: instrument.type,
+        assetClass: instrument.assetClass,
+        allocation_pct: instrument.allocation_pct ?? null,
+        allocationWeight: instrument.allocationWeight ?? null,
+        nominalReturn: instrument.nominalReturn ?? null,
+        riskLevel: instrument.riskLevel ?? null,
+        returnDataClass: instrument.returnDataClass ?? null,
+        returnAssumptionVersion: instrument.returnAssumptionVersion ?? null,
+      }))
+      : [],
+  };
+}
+
+function planReviewGoalFreshnessState(currentState) {
+  if (!currentState) return null;
+  const recommendation = planReviewRecommendationView(
+    currentState.currentRecommendationView || currentState.recommendation,
+  );
+  const allocation = currentState.allocationRevision || currentState.currentAllocation || null;
+  const financialProfileState = currentState.financialProfileState || null;
+  return {
+    recommendation,
+    allocationRevision: allocation ? {
+      _id: allocation._id,
+      revision: allocation.revision,
+      returnAssumptionVersion: allocation.returnAssumptionVersion ?? null,
+      returnAssumptionHash: allocation.returnAssumptionHash ?? null,
+      returnAssumptionSource: allocation.returnAssumptionSource ?? null,
+    } : null,
+    financialProfileState: financialProfileState ? {
+      revision: financialProfileState.revision,
+      currentProfileId: financialProfileState.currentProfileId,
+    } : null,
+    profileVersion: currentState.profileVersion ?? null,
+    recommendationFingerprint: currentState.recommendationFingerprint ?? null,
+    portfolioFingerprint: currentState.portfolioFingerprint ?? null,
+    freshness: currentState.freshness ? {
+      fresh: currentState.freshness.fresh === true,
+      reasonCodes: [...new Set(currentState.freshness.reasonCodes || [])],
+    } : null,
   };
 }
 
@@ -225,13 +303,16 @@ export async function loadPlanReviewContext({ userId, profileId, dependencies = 
       dependencies,
     });
     const currentState = snapshot.currentState;
-    const recommendation = currentState?.currentRecommendationView || currentState?.recommendation || null;
+    const recommendation = planReviewRecommendationView(
+      currentState?.currentRecommendationView || currentState?.recommendation || null,
+    );
     const freshness = currentState?.freshness || null;
+    const profileContext = buildProfileContext(snapshot.profile, snapshot.canonicalProfile);
     return {
-      profile: snapshot.profile,
-      profileContext: buildProfileContext(snapshot.profile, snapshot.canonicalProfile),
+      profile: planReviewEvidenceProfile(profileContext),
+      profileContext,
       recommendation,
-      currentState,
+      currentState: planReviewGoalFreshnessState(currentState),
       sourceBinding: snapshot.sourceBinding,
       planReviewSnapshotHash: snapshot.planReviewSnapshotHash,
       recommendationSummary: buildRecommendationSummary(recommendation, freshness),

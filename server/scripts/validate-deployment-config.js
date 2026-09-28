@@ -160,6 +160,44 @@ if (!(browserMongo.index < browserInstall.index
   throw new Error('Browser CI must run all ordered database migrations and artifact checks before starting application services');
 }
 
+const edgeSteps = ci.jobs?.['production-edge-e2e']?.steps || [];
+const edgeMongo = namedStep(edgeSteps, 'Start MongoDB for the explicit ML/RAG state migration');
+const edgeMongoReady = namedStep(edgeSteps, 'Wait for transaction-capable MongoDB primary');
+const edgePhase2 = namedStep(edgeSteps, 'Run the explicit Phase 2 persistence migration');
+const edgePhase3 = namedStep(edgeSteps, 'Run the explicit Phase 3 ML/RAG state migration before starting application replicas');
+const edgePhase4 = namedStep(edgeSteps, 'Run the explicit Phase 4 PlanReview persistence migration');
+const edgePhase5 = namedStep(edgeSteps, 'Run the explicit Phase 5 durable agent runtime migration');
+const edgePhase7 = namedStep(edgeSteps, 'Run the explicit Phase 7 ResearchAgent task migration');
+const edgeRagBootstrap = namedStep(edgeSteps, 'Bootstrap the production-image shared RAG corpus');
+const edgeArtifactVerification = namedStep(edgeSteps, 'Verify trusted serving artifacts in the production image');
+const edgeArtifactRegistration = namedStep(edgeSteps, 'Register verified serving bundles in MongoDB');
+const edgeStart = namedStep(edgeSteps, 'Start the real Nginx edge stack');
+const edgeReady = namedStep(edgeSteps, 'Wait for backend and published Nginx frontend');
+const edgePlaywright = namedStep(edgeSteps, 'Run production-edge Playwright test through Nginx');
+if (!(edgeMongo.index < edgeMongoReady.index
+    && edgeMongoReady.index < edgePhase2.index
+    && edgePhase2.index < edgePhase3.index
+    && edgePhase3.index < edgePhase4.index
+    && edgePhase4.index < edgePhase5.index
+    && edgePhase5.index < edgePhase7.index
+    && edgePhase7.index < edgeRagBootstrap.index
+    && edgeRagBootstrap.index < edgeArtifactVerification.index
+    && edgeArtifactVerification.index < edgeArtifactRegistration.index
+    && edgeArtifactRegistration.index < edgeStart.index
+    && edgeStart.index < edgeReady.index
+    && edgeReady.index < edgePlaywright.index)
+    || !edgePhase2.step.run?.includes('MONGODB_MIGRATION_URI=')
+    || !edgePhase2.step.run?.includes('server npm run migrate:phase2-indexes')
+    || !edgePhase3.step.run?.includes('python scripts/migrate_phase3_state.py')
+    || !edgePhase4.step.run?.includes('server npm run migrate:phase4-plan-review-indexes')
+    || !edgePhase5.step.run?.includes('server npm run migrate:phase5-agent-runtime')
+    || !edgePhase7.step.run?.includes('server npm run migrate:phase7-research-tasks')
+    || !edgeRagBootstrap.step.run?.includes('python scripts/bootstrap_rag_corpus.py')
+    || !edgeArtifactVerification.step.run?.includes('python scripts/verify_serving_artifacts.py')
+    || !edgeArtifactRegistration.step.run?.includes('python scripts/register_trusted_bundles.py')) {
+  throw new Error('Production edge E2E must run the ordered persistence migrations and production RAG/model bootstrap before application startup');
+}
+
 const cd = parse(read('.github/workflows/cd.yml'));
 const cdSteps = cd.jobs?.['deploy-and-verify-kind']?.steps || [];
 if (cdSteps.filter(step => step.name === 'Run the one-shot Phase 7 ResearchAgent task migration').length !== 1) {
@@ -205,4 +243,4 @@ if (!tckWorkflow.includes(`A2A_TCK_SHA: ${pinnedTckSha}`)
     || !tckWorkflow.includes('test "$(git -C .a2a-tck rev-parse HEAD)" = "$A2A_TCK_SHA"')) {
   throw new Error('A2A TCK workflow must fetch and verify the reviewed upstream commit SHA');
 }
-console.log(`Validated ${deploymentFiles.length} deployment YAML files, ordered Phase 2/3/4/5/7 migrations in browser CI and Kind CD, Compose API/worker separation, and worker probes.`);
+console.log(`Validated ${deploymentFiles.length} deployment YAML files, ordered Phase 2/3/4/5/7 migrations in Browser CI, production-edge E2E and Kind CD, Compose API/worker separation, and worker probes.`);

@@ -116,6 +116,22 @@ test('deployment validator rejects Browser application startup before Phase 5 ru
   });
 });
 
+test('deployment validator rejects production edge startup before persistence migration and RAG bootstrap', () => {
+  withDeploymentFixture(root => {
+    const workflowPath = '.github/workflows/ci.yml';
+    const workflow = readYaml(root, workflowPath);
+    const steps = workflow.jobs['production-edge-e2e'].steps;
+    const startIndex = steps.findIndex(step => step.name === 'Start the real Nginx edge stack');
+    const [phase2Migration] = steps.splice(steps.findIndex(step => step.name === 'Run the explicit Phase 2 persistence migration'), 1);
+    steps.splice(startIndex, 0, phase2Migration);
+    writeYaml(root, workflowPath, workflow);
+
+    const result = validate(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Production edge E2E must run the ordered persistence migrations and production RAG\/model bootstrap/);
+  });
+});
+
 test('deployment validator rejects Kind application rollout before Phase 5 runtime migration', () => {
   withDeploymentFixture(root => {
     const workflowPath = '.github/workflows/cd.yml';

@@ -14,6 +14,7 @@ import { enqueuePlanReviewRun } from '../agents/planReview/planReviewService.js'
 import { assertPlanReviewGates, gradePlanReviewTrajectory } from '../agents/evals/planReviewEvals.js';
 import { emptyCheckpoint } from '@langchain/langgraph';
 import { MongoPlanReviewCheckpointer } from '../agents/planReview/mongoPlanReviewCheckpointer.js';
+import { buildRecommendationSummary, loadPlanReviewContext } from '../agents/planReview/planReviewTools.js';
 import { completePlanReviewMandateAction, persistPlanReviewAction, reconcileTerminalPlanReviewMandates } from '../agents/planReview/planReviewApproval.js';
 import { createPlanReviewGraph } from '../agents/planReview/planReviewGraph.js';
 
@@ -404,6 +405,112 @@ test('Mongo LangGraph checkpointer enforces cumulative pending-write byte bounds
     error => error.code === 'AGENT_GRAPH_CHECKPOINT_BUDGET_EXCEEDED',
   );
   assert.equal(writes, 0, 'cumulative over-budget writes must not reach persistence');
+});
+
+test('production PlanReview graph context excludes bulky persisted snapshots before checkpoint writes', async () => {
+  const largeHistoricalSnapshot = 'historical-generation-payload-'.repeat(16_000);
+  const recommendation = {
+    _id: 'recommendation-1',
+    profileId,
+    generatedAt: new Date('2026-09-01T00:00:00.000Z'),
+    modelVersion: 'deterministic-v1',
+    profileInputHash: 'profile-hash',
+    recommendationPolicyVersion: 'policy-v1',
+    regulatoryRuleVersion: 'regulatory-v1',
+    responseSnapshot: { body: largeHistoricalSnapshot },
+    instruments: [{
+      id: 'instrument-1', name: 'Instrument', type: 'FIXED_INCOME', assetClass: 'FIXED_INCOME',
+      allocation_pct: 100, nominalReturn: 7, riskLevel: 'LOW',
+      returnDataClass: 'MODEL_ASSUMPTION', returnAssumptionVersion: 'assumption-v1',
+      internalCatalogPayload: largeHistoricalSnapshot,
+    }],
+    internalRegistryPayload: largeHistoricalSnapshot,
+  };
+  const currentState = {
+    profile: { version: 3, internalProfilePayload: largeHistoricalSnapshot },
+    profileVersion: 3,
+    currentRecommendationView: recommendation,
+    recommendation,
+    allocationRevision: {
+      _id: 'allocation-1', revision: 4, returnAssumptionVersion: 'assumption-v1',
+      returnAssumptionHash: 'assumption-hash', returnAssumptionSource: 'WEALTHGENIE_MODEL_POLICY',
+      instruments: recommendation.instruments,
+    },
+    currentAllocation: { instruments: recommendation.instruments },
+    financialProfileState: { revision: 5, currentProfileId: profileId, internalStatePayload: largeHistoricalSnapshot },
+    recommendationFingerprint: 'recommendation-fingerprint',
+    portfolioFingerprint: 'portfolio-fingerprint',
+    generationSnapshot: { response: { body: largeHistoricalSnapshot } },
+    provenance: { status: 'PERSISTED_REVISION', internalPayload: largeHistoricalSnapshot },
+    freshness: { fresh: true, reasonCodes: [] },
+  };
+  const profile = {
+    _id: profileId,
+    age: 35,
+    riskTolerance: 'MODERATE',
+    monthlySavings: 27_000,
+    investmentHorizonYears: 12,
+    investmentGoals: ['Wealth Growth'],
+    finalSuitabilityRisk: 'LOW',
+    suitabilityReasonCodes: ['CAPACITY_PULL_DOWN'],
+    email: 'private@example.invalid',
+    internalProfilePayload: largeHistoricalSnapshot,
+  };
+  const snapshot = {
+    profile,
+    canonicalProfile: {
+      age: profile.age,
+      riskTolerance: profile.riskTolerance,
+      monthlySavings: profile.monthlySavings,
+      investmentHorizonYears: profile.investmentHorizonYears,
+      investmentGoals: profile.investmentGoals,
+    },
+    currentState,
+    sourceBinding: { recommendationId: 'recommendation-1', allocationRevisionId: 'allocation-1' },
+    planReviewSnapshotHash: 'bound-snapshot-hash',
+  };
+  const context = await loadPlanReviewContext({
+    userId,
+    profileId,
+    dependencies: { resolvePlanReviewSnapshot: async () => snapshot },
+  });
+
+  assert.equal(context.planReviewSnapshotHash, snapshot.planReviewSnapshotHash);
+  assert.equal(context.sourceBinding, snapshot.sourceBinding);
+  assert.equal(context.recommendation._id, recommendation._id);
+  assert.equal(context.recommendation.responseSnapshotAvailable, true);
+  assert.equal(context.recommendation.instruments[0].assetClass, 'FIXED_INCOME');
+  assert.equal('responseSnapshot' in context.recommendation, false);
+  assert.equal('internalRegistryPayload' in context.recommendation, false);
+  assert.equal('internalProfilePayload' in context.profile, false);
+  assert.equal('generationSnapshot' in context.currentState, false);
+  assert.equal(context.currentState.allocationRevision.revision, 4);
+
+  let persistedWrites;
+  const checkpointModel = {
+    findOne() { return { lean: async () => ({ pendingWrites: [] }) }; },
+    async updateOne(_filter, update) {
+      persistedWrites = update.$push.pendingWrites.$each;
+      return { matchedCount: 1 };
+    },
+  };
+  const saver = new MongoPlanReviewCheckpointer({ model: checkpointModel, runId: 'run-compact-context', userId, executionGeneration: 1 });
+  await saver.putWrites({
+    configurable: { thread_id: 'run-compact-context:1', checkpoint_id: 'checkpoint-1' },
+  }, Object.entries(context), 'load-context-task');
+  assert.ok(persistedWrites);
+  assert.ok(persistedWrites.reduce((total, row) => total + row.reduce((sum, value) => sum + Buffer.byteLength(value), 0), 0) < 256 * 1024);
+});
+
+test('PlanReview summary preserves an explicit unavailable generation snapshot state', () => {
+  const summary = buildRecommendationSummary({
+    _id: 'recommendation-1',
+    responseSnapshotAvailable: false,
+    responseSnapshot: { historical: true },
+    instruments: [],
+  }, { fresh: true });
+
+  assert.equal(summary.responseSnapshotAvailable, false);
 });
 
 test('PlanReview identity includes financial source binding and execution generation', async () => {

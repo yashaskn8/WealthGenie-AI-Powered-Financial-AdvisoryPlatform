@@ -445,8 +445,47 @@ jobs:
           docker compose logs --no-color mongodb
           exit 1
 
-      - name: Run the explicit Phase 3 migration before starting application replicas
+      - name: Run the explicit Phase 2 persistence migration
+        run: >-
+          docker compose run --build --rm --no-deps
+          -e MONGODB_MIGRATION_URI='mongodb://mongodb:27017/wealthgenie?replicaSet=rs0'
+          server npm run migrate:phase2-indexes
+
+      - name: Run the explicit Phase 3 ML/RAG state migration before starting application replicas
         run: docker compose run --build --rm --no-deps ml-service python scripts/migrate_phase3_state.py
+
+      - name: Run the explicit Phase 4 PlanReview persistence migration
+        run: >-
+          docker compose run --build --rm --no-deps
+          -e MONGODB_MIGRATION_URI='mongodb://mongodb:27017/wealthgenie?replicaSet=rs0'
+          server npm run migrate:phase4-plan-review-indexes
+
+      - name: Run the explicit Phase 5 durable agent runtime migration
+        run: >-
+          docker compose run --build --rm --no-deps
+          -e MONGODB_MIGRATION_URI='mongodb://mongodb:27017/wealthgenie?replicaSet=rs0'
+          server npm run migrate:phase5-agent-runtime
+
+      - name: Run the explicit Phase 7 ResearchAgent task migration
+        run: >-
+          docker compose run --build --rm --no-deps
+          -e MONGODB_MIGRATION_URI='mongodb://mongodb:27017/wealthgenie?replicaSet=rs0'
+          server npm run migrate:phase7-research-tasks
+
+      - name: Bootstrap the production-image shared RAG corpus
+        run: >-
+          docker compose run --build --rm --no-deps
+          -e WEALTHGENIE_RAG_BOOTSTRAP=1
+          ml-service python scripts/bootstrap_rag_corpus.py
+
+      - name: Verify trusted serving artifacts in the production image
+        run: docker compose run --rm --no-deps ml-service python scripts/verify_serving_artifacts.py
+
+      - name: Register verified serving bundles in MongoDB
+        run: >-
+          docker compose run --rm --no-deps
+          -e WEALTHGENIE_PHASE3_BOOTSTRAP=1
+          ml-service python scripts/register_trusted_bundles.py
 
       - name: Start the real Nginx edge stack
         run: docker compose up --build -d
