@@ -33,6 +33,7 @@ jobs:
         env:
           NODE_ENV: test
           AGENT_A2A_V1_ENABLED: 'true'
+          PORT: '5089'
           AGENT_A2A_PUBLIC_URL: http://127.0.0.1:5088
           AGENT_A2A_DEV_TOKEN: ci-a2a-plan-review-token
           AGENT_IDENTITY_PROVIDER: development
@@ -44,8 +45,33 @@ jobs:
       - name: Wait for ResearchAgent liveness
         run: |
           for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:5088/health/live > /dev/null; then exit 0; fi
+            if curl --fail --silent http://127.0.0.1:5089/health/live > /dev/null; then exit 0; fi
             if [ "$attempt" -eq 30 ]; then cat research-agent.log; exit 1; fi
+            sleep 1
+          done
+
+      - name: Verify ResearchAgent rejects unauthenticated A2A calls
+        run: |
+          status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --request POST http://127.0.0.1:5089/a2a/message:send \
+            --header 'Content-Type: application/json' --data '{}')
+          test "$status" = "401"
+
+      # The pinned TCK documentation describes auth injection, but its pinned
+      # HTTP+JSON transport does not attach A2A_AUTH_* headers. Keep the app's
+      # bearer check enabled and inject the CI-only caller token at a loopback
+      # adapter instead of weakening the application boundary.
+      - name: Start loopback authentication adapter for the pinned TCK
+        env:
+          A2A_TCK_PROXY_TOKEN: ci-a2a-plan-review-token
+          A2A_TCK_PROXY_LISTEN_PORT: '5088'
+          A2A_TCK_PROXY_UPSTREAM_PORT: '5089'
+        run: |
+          node server/scripts/a2aTckAuthProxy.js > a2a-tck-proxy.log 2>&1 &
+          echo $! > a2a-tck-proxy.pid
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:5088/__ci-health > /dev/null; then exit 0; fi
+            if [ "$attempt" -eq 30 ]; then cat a2a-tck-proxy.log; exit 1; fi
             sleep 1
           done
 
@@ -67,9 +93,6 @@ jobs:
 
       - name: Run official HTTP+JSON MUST checks
         working-directory: .a2a-tck
-        env:
-          A2A_AUTH_TYPE: bearer
-          A2A_AUTH_TOKEN: ci-a2a-plan-review-token
         run: |
           python run_tck.py --sut-host http://127.0.0.1:5088 --transport http_json --level must
 
@@ -82,7 +105,10 @@ jobs:
           path: |
             .a2a-tck/reports/
             research-agent.log
+            a2a-tck-proxy.log
 
       - name: Stop ResearchAgent
         if: always()
-        run: if [ -f research-agent.pid ]; then kill "$(cat research-agent.pid)" || true; fi
+        run: |
+          if [ -f a2a-tck-proxy.pid ]; then kill "$(cat a2a-tck-proxy.pid)" || true; fi
+          if [ -f research-agent.pid ]; then kill "$(cat research-agent.pid)" || true; fi
