@@ -370,6 +370,77 @@ test('Mongo LangGraph checkpointer persists and reloads a run-scoped checkpoint'
   assert.throws(() => saver.scope('run-1:2'), { code: 'CHECKPOINT_SCOPE_MISMATCH' });
 });
 
+test('Mongo LangGraph checkpointer orders pending writes after an in-flight checkpoint save', async () => {
+  let signalCheckpointSaveStarted;
+  let releaseCheckpointSave;
+  const checkpointSaveStarted = new Promise(resolve => { signalCheckpointSaveStarted = resolve; });
+  const checkpointSaveGate = new Promise(resolve => { releaseCheckpointSave = resolve; });
+  const documents = [];
+  let pendingWriteReads = 0;
+  const model = {
+    async findOneAndUpdate(filter, update) {
+      signalCheckpointSaveStarted();
+      await checkpointSaveGate;
+      let document = documents.find(item => Object.entries(filter).every(([key, value]) => String(item[key]) === String(value)));
+      if (!document) {
+        document = { ...update.$setOnInsert, pendingWrites: [] };
+        documents.push(document);
+      }
+      Object.assign(document, update.$set);
+      return document;
+    },
+    findOne(filter) {
+      pendingWriteReads += 1;
+      const query = {
+        select() { return query; },
+        lean: async () => documents.find(item => Object.entries(filter).every(([key, value]) => String(item[key]) === String(value))),
+      };
+      return query;
+    },
+    async updateOne(filter, update) {
+      const document = documents.find(item => Object.entries(filter).every(([key, value]) => (
+        key === 'pendingWrites' ? JSON.stringify(item[key] || []) === JSON.stringify(value) : String(item[key]) === String(value)
+      )));
+      if (!document) return { matchedCount: 0 };
+      document.pendingWrites.push(...update.$push.pendingWrites.$each);
+      return { matchedCount: 1 };
+    },
+  };
+  const saver = new MongoPlanReviewCheckpointer({ model, runId: 'run-ordered-writes', userId, executionGeneration: 1 });
+  const checkpoint = { ...emptyCheckpoint(), id: 'checkpoint-ordered', channel_values: { status: 'RUNNING' } };
+  const savePromise = saver.put(
+    { configurable: { thread_id: 'run-ordered-writes:1' } },
+    checkpoint,
+    { runId: 'run-ordered-writes' },
+    checkpoint.channel_versions,
+  );
+  await checkpointSaveStarted;
+
+  const writesResult = saver.putWrites(
+    { configurable: { thread_id: 'run-ordered-writes:1', checkpoint_id: 'checkpoint-ordered' } },
+    [['status', 'RUNNING']],
+    'task-ordered',
+  ).then(() => null, error => error);
+  await new Promise(resolve => setImmediate(resolve));
+  const readsBeforeCheckpointCommit = pendingWriteReads;
+  releaseCheckpointSave();
+
+  const savedConfig = await savePromise;
+  const writeError = await writesResult;
+  assert.equal(readsBeforeCheckpointCommit, 0, 'pending writes must wait until the checkpoint record is durable');
+  assert.equal(writeError, null);
+  await Promise.all([
+    saver.putWrites(savedConfig, [['step', 1]], 'task-concurrent-a'),
+    saver.putWrites(savedConfig, [['toolCallCount', 1]], 'task-concurrent-b'),
+  ]);
+  const tuple = await saver.getTuple(savedConfig);
+  assert.deepEqual(tuple.pendingWrites, [
+    ['task-ordered', 'status', 'RUNNING'],
+    ['task-concurrent-a', 'step', 1],
+    ['task-concurrent-b', 'toolCallCount', 1],
+  ]);
+});
+
 test('Mongo LangGraph checkpointer rejects a pending-write batch above its recovery count bound', async () => {
   let reads = 0;
   const model = {

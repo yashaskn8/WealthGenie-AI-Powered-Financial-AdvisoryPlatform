@@ -389,8 +389,13 @@ test('official A2A client/server boundary resolves card, returns artifact, and c
     requireSignedCard: true,
     configuredJwk: started.jwks.keys[0],
     fetchImpl: async (input, init) => {
-      observedAuthorization.push({ url: String(input), authorization: new Headers(init?.headers).get('authorization') });
-      return fetch(input, init);
+      const response = await fetch(input, init);
+      observedAuthorization.push({
+        url: String(input),
+        authorization: new Headers(init?.headers).get('authorization'),
+        contentType: response.headers.get('content-type'),
+      });
+      return response;
     },
   });
     const missingCredentials = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
@@ -423,11 +428,41 @@ test('official A2A client/server boundary resolves card, returns artifact, and c
         details: [],
       },
     });
+    const unsupportedContentType = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain', authorization: `Bearer ${env.AGENT_A2A_DEV_TOKEN}` },
+      body: '{}',
+    });
+    assert.equal(unsupportedContentType.status, 415);
+    assert.match(unsupportedContentType.headers.get('content-type') || '', /^application\/json\b/i);
+    assert.deepEqual(await unsupportedContentType.json(), {
+      error: {
+        code: 415,
+        status: 'INVALID_ARGUMENT',
+        message: 'Unsupported Content-Type "text/plain"; expected application/json or application/a2a+json.',
+        details: [{
+          '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+          reason: 'CONTENT_TYPE_NOT_SUPPORTED',
+          domain: 'a2a-protocol.org',
+        }],
+      },
+    });
+    const missingTask = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/tasks/nonexistent-a2a-task`, {
+      headers: { authorization: `Bearer ${env.AGENT_A2A_DEV_TOKEN}`, 'A2A-Version': '1.0' },
+    });
+    const missingTaskBody = await missingTask.json();
+    assert.equal(missingTask.status, 404, JSON.stringify(missingTaskBody));
+    assert.match(missingTask.headers.get('content-type') || '', /^application\/json\b/i);
+    assert.equal(missingTaskBody.error.code, 404);
+    assert.equal(missingTaskBody.error.details[0]['@type'], 'type.googleapis.com/google.rpc.ErrorInfo');
+    assert.equal(missingTaskBody.error.details[0].reason, 'TASK_NOT_FOUND');
+    assert.equal(missingTaskBody.error.details[0].domain, 'a2a-protocol.org');
     const result = await client.sendResearch({ brief: brief({ researchBriefId: 'brief-a2a-1' }) });
     assert.equal(result.task.status.state, TaskState.TASK_STATE_COMPLETED);
     assert.equal(result.artifact.researchBriefId, 'brief-a2a-1');
     assert.equal(result.artifact.financialAuthorityDelta, 0);
     assert.equal(result.artifact.taskId, result.task.id);
+    assert.ok(observedAuthorization.some(item => item.url.includes('/a2a/message:send') && /^application\/json\b/i.test(item.contentType || '')));
     assert.equal(observedAuthorization.find(item => item.url.endsWith('/.well-known/agent-card.json'))?.authorization, null);
     assert.ok(observedAuthorization.some(item => item.url.includes('/a2a/') && item.authorization === `Bearer ${env.AGENT_A2A_DEV_TOKEN}`));
 

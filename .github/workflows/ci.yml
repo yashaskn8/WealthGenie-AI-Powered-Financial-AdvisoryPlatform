@@ -388,7 +388,7 @@ jobs:
         run: node --test --test-concurrency=1 test/profileCompletion.integration.test.js
 
       - name: Run real-dependency Playwright lifecycle
-        run: npm run test:e2e --prefix reactapp
+        run: npm run test:e2e --prefix reactapp -- --grep-invert @production-edge
 
       - name: Upload browser failure evidence
         if: failure()

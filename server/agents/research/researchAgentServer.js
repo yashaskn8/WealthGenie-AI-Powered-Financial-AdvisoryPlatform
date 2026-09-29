@@ -211,6 +211,36 @@ function initialTask(requestContext) {
   };
 }
 
+function enforceHttpJsonContract(req, res, next) {
+  const sendJson = res.json.bind(res);
+  res.json = body => {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    return sendJson(body);
+  };
+
+  const contentType = req.get('content-type');
+  const hasRequestBody = ['POST', 'PUT', 'PATCH'].includes(req.method);
+  if (hasRequestBody && contentType) {
+    const mediaType = contentType.split(';', 1)[0].trim().toLowerCase();
+    if (mediaType !== 'application/json' && mediaType !== 'application/a2a+json') {
+      const message = `Unsupported Content-Type "${contentType}"; expected application/json or application/a2a+json.`;
+      return res.status(415).json({
+        error: {
+          code: 415,
+          status: 'INVALID_ARGUMENT',
+          message,
+          details: [{
+            '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+            reason: 'CONTENT_TYPE_NOT_SUPPORTED',
+            domain: 'a2a-protocol.org',
+          }],
+        },
+      });
+    }
+  }
+  return next();
+}
+
 class ResearchAgentExecutor {
   constructor({ run, provider, documentFetcher, taskStore, budget, activeTasks = new Map(), taskContexts = new Map() } = {}) {
     this.run = run;
@@ -373,6 +403,7 @@ export async function createResearchAgentServer({ env = process.env, port = Numb
       });
     }
   });
+  app.use('/a2a', enforceHttpJsonContract);
   app.use('/a2a', restHandler({ requestHandler, userBuilder, contextBuilder }));
   return { app, card: signedCard, jwks, signing, executor, taskStore };
 }
