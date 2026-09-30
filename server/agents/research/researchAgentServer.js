@@ -5,6 +5,7 @@ import express from 'express';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { AgentCard, Role, TaskState } from '@a2a-js/sdk';
+import { RestContentTypeNotSupportedError } from '@a2a-js/sdk/errors';
 import { agentCardHandler, restHandler } from '@a2a-js/sdk/server/express';
 import {
   DefaultRequestHandler,
@@ -30,6 +31,7 @@ import { researchAgentMaxActiveTasks } from '../../services/researchTaskCapacity
 
 const RESEARCH_AGENT_TYPE = 'FINANCIAL_RESEARCH';
 const REQUIRED_CALLER_TYPE = 'PLAN_REVIEW';
+const RESEARCH_INPUT_MEDIA_TYPES = new Set(['application/json', 'text/plain']);
 
 function configError(message) {
   const error = new Error(message);
@@ -139,7 +141,7 @@ function createAgentCard({ baseUrl }) {
       },
     },
     securityRequirements: [{ schemes: { bearerAuth: { list: [] } } }],
-    defaultInputModes: ['application/json'],
+    defaultInputModes: [...RESEARCH_INPUT_MEDIA_TYPES],
     defaultOutputModes: ['application/json'],
     skills: [{
       id: 'research_public_financial_evidence',
@@ -294,6 +296,23 @@ function enforceHttpJsonContract(req, res, next) {
   return next();
 }
 
+function validateResearchInputMediaTypes(message) {
+  for (const part of message?.parts || []) {
+    const mediaType = String(part?.mediaType || '').split(';', 1)[0].trim().toLowerCase();
+    if (!mediaType || RESEARCH_INPUT_MEDIA_TYPES.has(mediaType)) continue;
+    throw new RestContentTypeNotSupportedError({
+      message: `Unsupported input media type "${mediaType}"; supported input media types are application/json and text/plain.`,
+    });
+  }
+}
+
+class ResearchAgentRequestHandler extends DefaultRequestHandler {
+  async sendMessage(params, context) {
+    validateResearchInputMediaTypes(params?.message);
+    return super.sendMessage(params, context);
+  }
+}
+
 export class ResearchAgentExecutor {
   constructor({ run, provider, documentFetcher, taskStore, budget, activeTasks = new Map(), taskContexts = new Map() } = {}) {
     this.run = run;
@@ -424,6 +443,11 @@ export class ResearchAgentExecutor {
     const leaseMs = this.taskStore?.leaseMs || 30_000;
     const heartbeatIntervalMs = Math.max(250, Math.floor(leaseMs / 3));
     try {
+      // The A2A request handler needs the Task event to establish task context
+      // even when the domain input is rejected. Publish the submitted Task
+      // before validation so fail-closed input errors become a terminal FAILED
+      // Task response instead of an unassociated transport error.
+      if (!recovery) eventBus.publish(AgentEvent.task(task));
       if (!userMessage || !dataFromMessage(userMessage)) {
         throw Object.assign(new Error('Research task has no valid persisted input.'), { code: 'A2A_TASK_RECOVERY_INPUT_UNAVAILABLE' });
       }
@@ -433,7 +457,6 @@ export class ResearchAgentExecutor {
         task.status = workingStatus;
         await this.taskStore.saveClaimed(task, lease);
       } else {
-        eventBus.publish(AgentEvent.task(task));
         eventBus.publish(AgentEvent.statusUpdate({ taskId, contextId, status: workingStatus, metadata: undefined }));
       }
       if (durableLease) {
@@ -624,7 +647,7 @@ export async function createResearchAgentServer({ env = process.env, port = Numb
     taskStore ||= new InMemoryTaskStore();
   }
   const executor = new ResearchAgentExecutor({ run: dependencies.run || runResearch, provider, documentFetcher, taskStore, budget: dependencies.budget, activeTasks, taskContexts });
-  const requestHandler = new DefaultRequestHandler(signedCard, taskStore, executor);
+  const requestHandler = new ResearchAgentRequestHandler(signedCard, taskStore, executor);
   const app = express();
   app.disable('x-powered-by');
   app.get('/health/live', (_req, res) => res.json({ status: 'ok', agent: RESEARCH_AGENT_TYPE, protocol: 'A2A v1.0' }));

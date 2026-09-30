@@ -512,6 +512,66 @@ test('official A2A client/server boundary resolves card, returns artifact, and c
   }
 });
 
+test('A2A rejects unsupported part media and returns failed Tasks for unstructured research input', async () => {
+  const port = await freePort();
+  const env = {
+    NODE_ENV: 'test',
+    AGENT_A2A_V1_ENABLED: 'true',
+    AGENT_A2A_PUBLIC_URL: `http://127.0.0.1:${port}`,
+    AGENT_A2A_DEV_TOKEN: 'research-input-test-token',
+    AGENT_IDENTITY_PROVIDER: 'development',
+    RESEARCH_SEARCH_PROVIDER: 'fixture',
+  };
+  let researchRuns = 0;
+  const started = await startResearchAgentServer({ env, port, dependencies: {
+    run: async () => { researchRuns += 1; throw new Error('invalid input must never reach research'); },
+  } });
+  const headers = { 'content-type': 'application/json', 'A2A-Version': '1.0', authorization: `Bearer ${env.AGENT_A2A_DEV_TOKEN}` };
+  try {
+    assert.deepEqual(started.card.defaultInputModes, ['application/json', 'text/plain']);
+    assert.deepEqual(started.card.skills[0].inputModes, ['application/json'], 'successful research still requires a structured brief');
+    for (const [index, part] of [
+      { raw: Buffer.from('unsupported file').toString('base64'), mediaType: 'image/png' },
+      { data: { question: 'public research' }, mediaType: 'video/mp4' },
+    ].entries()) {
+      const response = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ message: { messageId: `unsupported-media-${index}`, role: 'ROLE_USER', parts: [part] } }),
+      });
+      const body = await response.json();
+      assert.equal(response.status, 400, JSON.stringify(body));
+      assert.match(response.headers.get('content-type') || '', /^application\/json\b/i);
+      assert.equal(body.error.status, 'INVALID_ARGUMENT', JSON.stringify(body));
+      assert.equal(body.error.details[0].reason, 'CONTENT_TYPE_NOT_SUPPORTED');
+    }
+    for (const returnImmediately of [false, true]) {
+      const response = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
+        method: 'POST', headers,
+        body: JSON.stringify({
+          message: {
+            messageId: `unstructured-${returnImmediately}`, role: 'ROLE_USER',
+            parts: [{ text: 'Please research this without a structured brief.', mediaType: 'text/plain' }],
+          },
+          configuration: { returnImmediately },
+        }),
+      });
+      const body = await response.json();
+      assert.equal(response.status, 200, JSON.stringify(body));
+      assert.ok(body.task?.id, 'every accepted execution establishes a Task identity');
+      assert.ok(body.task.contextId, 'the Task retains its generated context binding');
+      assert.deepEqual(body.task.artifacts || [], [], 'invalid briefs never fabricate evidence');
+      if (!returnImmediately) {
+        assert.equal(body.task.status.state, 'TASK_STATE_FAILED');
+        assert.match(body.task.status.message.parts[0].text, /A2A_TASK_RECOVERY_INPUT_UNAVAILABLE/);
+        const restored = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/tasks/${body.task.id}`, { headers });
+        assert.equal(restored.status, 200);
+        assert.equal((await restored.json()).status.state, 'TASK_STATE_FAILED');
+      }
+    }
+    assert.equal(researchRuns, 0);
+  } finally { await started.close(); }
+});
+
 test('ResearchMesh cancellation reaches Agent Card resolution and fences late card responses', async () => {
   const controller = new AbortController();
   let receivedSignal;

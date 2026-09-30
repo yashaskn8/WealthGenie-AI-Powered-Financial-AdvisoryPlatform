@@ -67,7 +67,7 @@
   },
   "overrides": {
     "hono": "4.13.9",
-    "ip-address": "10.5.1"
+    "ip-address": "10.7.2"
   },
   "devDependencies": {
     "ajv-formats": "^3.0.1",

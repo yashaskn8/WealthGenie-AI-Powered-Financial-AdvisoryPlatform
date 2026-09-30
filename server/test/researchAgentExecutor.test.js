@@ -53,6 +53,35 @@ test('duplicate execution for one task joins the in-flight run and does not dupl
   assert.equal(executor.activeTasks.size, 0);
 });
 
+test('invalid research input returns a terminal failed Task instead of an unassociated execution error', async () => {
+  let runCount = 0;
+  const events = [];
+  const executor = new ResearchAgentExecutor({
+    run: async () => { runCount += 1; throw new Error('invalid input must not reach research'); },
+    taskStore: { isCanceled: async () => false },
+  });
+
+  await executor.execute({
+    taskId: 'task-invalid-input',
+    contextId: 'context-invalid-input',
+    context: { user: { identity: { agentType: 'PLAN_REVIEW' } } },
+    userMessage: {
+      messageId: 'message-invalid-input',
+      role: Role.ROLE_USER,
+      contextId: 'context-invalid-input',
+      taskId: 'task-invalid-input',
+      parts: [{ content: { $case: 'text', value: 'A generic message without a structured research brief.' } }],
+    },
+  }, { publish: event => events.push(event) });
+
+  assert.equal(runCount, 0, 'unstructured text must not be converted into fabricated research evidence');
+  assert.equal(events.length, 2);
+  assert.equal(events[0].data.id, 'task-invalid-input');
+  assert.equal(events[0].data.status.state, TaskState.TASK_STATE_SUBMITTED);
+  assert.equal(events[1].data.status.state, TaskState.TASK_STATE_FAILED);
+  assert.match(events[1].data.status.message.parts[0].content.value, /A2A_TASK_RECOVERY_INPUT_UNAVAILABLE/);
+});
+
 test('recovery execution persists one deterministic artifact and completes the durable task', async () => {
   const task = {
     id: 'task-recovery',
