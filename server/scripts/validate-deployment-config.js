@@ -238,9 +238,21 @@ if (!(dbApply.index < secrets.index
 
 const tckWorkflow = read('.github/workflows/a2a-tck.yml');
 const pinnedTckSha = '263b9cfaf16a554bdfb166a7ba5b67716e946349';
+const tckPolicy = JSON.parse(read('.github/a2a-tck-known-blockers.json'));
 if (!tckWorkflow.includes(`A2A_TCK_SHA: ${pinnedTckSha}`)
     || !tckWorkflow.includes('git -C .a2a-tck fetch --depth 1 origin "$A2A_TCK_SHA"')
-    || !tckWorkflow.includes('test "$(git -C .a2a-tck rev-parse HEAD)" = "$A2A_TCK_SHA"')) {
-  throw new Error('A2A TCK workflow must fetch and verify the reviewed upstream commit SHA');
+    || !tckWorkflow.includes('test "$(git -C .a2a-tck rev-parse HEAD)" = "$A2A_TCK_SHA"')
+    || !tckWorkflow.includes('git -C .a2a-tck status --porcelain=v1 --untracked-files=all')
+    || !tckWorkflow.includes('python run_tck.py --sut-host http://127.0.0.1:5088 --transport http_json --level must')
+    || !tckWorkflow.includes('python ../scripts/validate_a2a_tck_policy.py')
+    || !tckWorkflow.includes('RAW_TCK_EXIT_CODE=$raw_tck_exit_code')
+    || !tckWorkflow.includes('$GITHUB_STEP_SUMMARY')
+    || tckWorkflow.includes('continue-on-error: true')
+    || tckPolicy.tck_sha !== pinnedTckSha
+    || tckPolicy.tck_repository !== 'a2aproject/a2a-tck'
+    || tckPolicy.known_failures?.length !== 5
+    || tckPolicy.acceptance?.allow_unknown_failures !== false
+    || tckPolicy.acceptance?.allow_skipped_known_tests !== false) {
+  throw new Error('A2A TCK workflow must run the pinned upstream suite through the explicit fail-closed applicability policy');
 }
 console.log(`Validated ${deploymentFiles.length} deployment YAML files, ordered Phase 2/3/4/5/7 migrations in Browser CI, production-edge E2E and Kind CD, Compose API/worker separation, and worker probes.`);

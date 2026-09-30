@@ -91,10 +91,42 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .
 
+      - name: Verify pinned TCK checkout is pristine before test execution
+        run: |
+          test -z "$(git -C .a2a-tck status --porcelain=v1 --untracked-files=all)"
+          test "$(git -C .a2a-tck rev-parse HEAD)" = "263b9cfaf16a554bdfb166a7ba5b67716e946349"
+
+      - name: Test A2A TCK applicability policy validator
+        run: python scripts/test_validate_a2a_tck_policy.py
+
+      - name: Run targeted ResearchAgent and A2A tests
+        env:
+          NODE_ENV: test
+          AGENT_A2A_V1_ENABLED: 'true'
+          AGENT_A2A_DEV_TOKEN: ci-a2a-plan-review-token
+          AGENT_IDENTITY_PROVIDER: development
+          RESEARCH_SEARCH_PROVIDER: fixture
+        run: node --test --test-concurrency=1 server/test/researchMesh.test.js server/test/researchTaskStore.test.js server/test/a2aTckAuthProxy.test.js
+
       - name: Run official HTTP+JSON MUST checks
         working-directory: .a2a-tck
+        env:
+          A2A_TCK_SHA: 263b9cfaf16a554bdfb166a7ba5b67716e946349
         run: |
+          tck_started_at=$(date +%s.%N)
+          set +e
           python run_tck.py --sut-host http://127.0.0.1:5088 --transport http_json --level must
+          raw_tck_exit_code=$?
+          set -e
+          echo "RAW_TCK_EXIT_CODE=$raw_tck_exit_code"
+          python ../scripts/validate_a2a_tck_policy.py \
+            --junit reports/junitreport.xml \
+            --policy ../.github/a2a-tck-known-blockers.json \
+            --tck-dir . \
+            --tck-sha "$A2A_TCK_SHA" \
+            --raw-exit-code "$raw_tck_exit_code" \
+            --started-at "$tck_started_at" \
+            --summary-path "$GITHUB_STEP_SUMMARY"
 
       - name: Upload TCK report
         if: always()
@@ -110,5 +142,5 @@ jobs:
       - name: Stop ResearchAgent
         if: always()
         run: |
-          if [ -f a2a-tck-proxy.pid ]; then kill "$(cat a2a-tck-proxy.pid)" || true; fi
-          if [ -f research-agent.pid ]; then kill "$(cat research-agent.pid)" || true; fi
+          if [ -f a2a-tck-proxy.pid ]; then proxy_pid=$(cat a2a-tck-proxy.pid); if kill -0 "$proxy_pid" 2>/dev/null; then kill "$proxy_pid"; fi; fi
+          if [ -f research-agent.pid ]; then agent_pid=$(cat research-agent.pid); if kill -0 "$agent_pid" 2>/dev/null; then kill "$agent_pid"; fi; fi

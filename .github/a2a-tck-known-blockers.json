@@ -1,0 +1,53 @@
+{
+  "policy_schema_version": 1,
+  "tck_repository": "a2aproject/a2a-tck",
+  "tck_sha": "263b9cfaf16a554bdfb166a7ba5b67716e946349",
+  "upstream_issue": "https://github.com/a2aproject/a2a-tck/issues/229",
+  "classification": "KNOWN_UPSTREAM_APPLICABILITY_EXCEPTION",
+  "test_case_count": 235,
+  "rationale": "The pinned TCK sends the same generic prompt to a domain-bounded research agent and expects different canned artifact or direct-message scenarios. The prompt does not select those scenario semantics. This policy accepts only the exact pinned fixture failures and does not change product behavior or protocol validation.",
+  "known_failures": [
+    {
+      "node_id": "tests/compatibility/core_operations/test_artifacts.py::TestTextArtifact::test_task_has_text_artifact[http_json]",
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestTextArtifact",
+      "junit_name": "test_task_has_text_artifact[http_json]",
+      "requirement_id": "DM-ART-001",
+      "failure_fragment": "Response contains no artifacts"
+    },
+    {
+      "node_id": "tests/compatibility/core_operations/test_artifacts.py::TestFileArtifact::test_task_has_file_artifact[http_json]",
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestFileArtifact",
+      "junit_name": "test_task_has_file_artifact[http_json]",
+      "requirement_id": "DM-ART-001",
+      "failure_fragment": "Response contains no artifacts"
+    },
+    {
+      "node_id": "tests/compatibility/core_operations/test_artifacts.py::TestFileUrlArtifact::test_task_has_file_url_artifact[http_json]",
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestFileUrlArtifact",
+      "junit_name": "test_task_has_file_url_artifact[http_json]",
+      "requirement_id": "DM-ART-001",
+      "failure_fragment": "Response contains no artifacts"
+    },
+    {
+      "node_id": "tests/compatibility/core_operations/test_artifacts.py::TestDataArtifact::test_task_has_data_artifact[http_json]",
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestDataArtifact",
+      "junit_name": "test_task_has_data_artifact[http_json]",
+      "requirement_id": "DM-ART-001",
+      "failure_fragment": "Response contains no artifacts"
+    },
+    {
+      "node_id": "tests/compatibility/core_operations/test_artifacts.py::TestMessageResponse::test_returns_message_with_text_part[http_json]",
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestMessageResponse",
+      "junit_name": "test_returns_message_with_text_part[http_json]",
+      "requirement_id": "DM-MSG-001",
+      "failure_fragment": "Expected a Message response, but got a Task or no payload"
+    }
+  ],
+  "acceptance": {
+    "allow_skipped_known_tests": false,
+    "allow_unknown_failures": false,
+    "allow_test_errors": false,
+    "allow_tracked_tck_changes": false,
+    "allow_untracked_tck_paths": ["reports/"]
+  }
+}

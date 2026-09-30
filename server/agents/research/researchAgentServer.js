@@ -18,11 +18,15 @@ import { createAgentIdentityVerifier } from '../identity/agentIdentityVerifier.j
 import { createResearchSearchProvider } from './researchSearchProvider.js';
 import { SafePublicDocumentFetcher } from './safePublicDocumentFetcher.js';
 import { runResearch } from './researchLoop.js';
+import { buildResearchArtifact } from './researchArtifact.js';
+import { verifyResearchArtifact } from './researchClaimVerifier.js';
+import { validateResearchBrief } from './researchSchemas.js';
 import { PrometheusMetrics } from '../../services/metricsCollector.js';
-import { RESEARCH_CAPABILITIES, RESEARCH_FORBIDDEN_CAPABILITIES } from './researchConstants.js';
+import { RESEARCH_CAPABILITIES, RESEARCH_FORBIDDEN_CAPABILITIES, stableResearchId } from './researchConstants.js';
 import connectDB from '../../config/db.js';
 import { MongoResearchTaskStore } from '../../services/researchTaskStore.js';
 import { verifyResearchTaskIndexes } from '../../services/researchTaskPersistence.js';
+import { researchAgentMaxActiveTasks } from '../../services/researchTaskCapacity.js';
 
 const RESEARCH_AGENT_TYPE = 'FINANCIAL_RESEARCH';
 const REQUIRED_CALLER_TYPE = 'PLAN_REVIEW';
@@ -211,6 +215,55 @@ function initialTask(requestContext) {
   };
 }
 
+function mergeArtifactsById(existing = [], incoming = []) {
+  const merged = new Map();
+  for (const artifact of existing) if (artifact?.artifactId) merged.set(artifact.artifactId, structuredClone(artifact));
+  for (const artifact of incoming) if (artifact?.artifactId) merged.set(artifact.artifactId, structuredClone(artifact));
+  return [...merged.values()];
+}
+
+function messageResearchBrief(message) {
+  const part = message?.parts?.find(item => ['data', 'json'].includes(item?.content?.$case));
+  return part?.content?.value || null;
+}
+
+function researchArtifactFromTask(task) {
+  return task?.artifacts?.flatMap(artifact => artifact.parts || [])
+    .find(part => part?.content?.$case === 'data')?.content?.value || null;
+}
+
+function buildSemanticReplayArtifact({ sourceTask, targetTask }) {
+  const sourceMessage = sourceTask.history?.find(message => message?.role === Role.ROLE_USER);
+  const sourceBriefResult = validateResearchBrief(messageResearchBrief(sourceMessage));
+  const targetMessage = targetTask.history?.find(message => message?.role === Role.ROLE_USER);
+  const targetBriefResult = validateResearchBrief(messageResearchBrief(targetMessage));
+  const sourceArtifact = researchArtifactFromTask(sourceTask);
+  if (sourceBriefResult.error || targetBriefResult.error || !sourceArtifact
+      || sourceArtifact.taskId !== sourceTask.id
+      || !verifyResearchArtifact(sourceArtifact, { brief: sourceBriefResult.value }).valid) return null;
+
+  const source = sourceArtifact;
+  const artifact = buildResearchArtifact({
+    brief: targetBriefResult.value,
+    taskId: targetTask.id,
+    artifactId: stableResearchId('A', targetTask.id),
+    status: source.status,
+    claims: structuredClone(source.claims),
+    evidenceUnits: structuredClone(source.evidenceUnits),
+    sources: structuredClone(source.sources),
+    contradictions: structuredClone(source.contradictions),
+    unresolvedGaps: structuredClone(source.unresolvedGaps),
+    researchBudgetUsed: structuredClone(source.researchBudgetUsed),
+    queryCount: source.queryCount,
+    documentCount: source.documentCount,
+    modelCalls: source.modelCalls,
+    tokenUsage: source.tokenUsage,
+    durationMs: source.durationMs,
+    parentArtifactId: source.artifactId,
+  });
+  return verifyResearchArtifact(artifact, { brief: targetBriefResult.value }).valid ? artifact : null;
+}
+
 function enforceHttpJsonContract(req, res, next) {
   const sendJson = res.json.bind(res);
   res.json = body => {
@@ -241,7 +294,7 @@ function enforceHttpJsonContract(req, res, next) {
   return next();
 }
 
-class ResearchAgentExecutor {
+export class ResearchAgentExecutor {
   constructor({ run, provider, documentFetcher, taskStore, budget, activeTasks = new Map(), taskContexts = new Map() } = {}) {
     this.run = run;
     this.provider = provider;
@@ -252,73 +305,278 @@ class ResearchAgentExecutor {
     this.taskContexts = taskContexts;
     this.canceledTasks = new Set();
     this.inFlight = new Map();
+    this.recoveryTimer = null;
+    this.recoveryTickRunning = false;
   }
 
   async execute(requestContext, eventBus) {
     const taskId = requestContext.taskId;
-    const contextId = requestContext.contextId;
+    const existingExecution = this.inFlight.get(taskId);
+    if (existingExecution) {
+      await existingExecution;
+      return;
+    }
+    const execution = this.executeRequest(requestContext, eventBus);
+    this.inFlight.set(taskId, execution);
+    try { await execution; } finally {
+      if (this.inFlight.get(taskId) === execution) this.inFlight.delete(taskId);
+    }
+  }
+
+  async executeRequest(requestContext, eventBus) {
+    const identity = requestContext.context.user?.identity;
+    if (identity?.agentType !== REQUIRED_CALLER_TYPE) throw Object.assign(new Error('A2A caller identity is not allowed.'), { code: 'A2A_CALLER_IDENTITY_DENIED' });
+    const taskId = requestContext.taskId;
+    let task = requestContext.task || initialTask(requestContext);
+    let lease = null;
+    if (this.taskStore?.durable) {
+      let claim;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        claim = await this.taskStore.prepareAndClaim(task, requestContext.context, {
+          messageId: requestContext.userMessage?.messageId,
+          allowSemanticDeduplication: !requestContext.task,
+        });
+        if (!claim?.semanticDuplicateTaskId) break;
+        const replayTask = await this.replaySemanticDuplicate({
+          task,
+          context: requestContext.context,
+          sourceTaskId: claim.semanticDuplicateTaskId,
+          requestFingerprint: claim.requestFingerprint,
+        });
+        if (replayTask) {
+          eventBus.publish(AgentEvent.task(replayTask));
+          eventBus.publish(AgentEvent.statusUpdate({ taskId: replayTask.id, contextId: replayTask.contextId, status: replayTask.status, metadata: undefined }));
+          return;
+        }
+      }
+      if (claim?.semanticDuplicateTaskId) {
+        throw Object.assign(new Error('Research task semantic deduplication is contended; retry the request.'), { code: 'A2A_TASK_DEDUPLICATION_CONTENTION', status: 409 });
+      }
+      if (!claim) {
+        task = await this.waitForTerminalTask(taskId, requestContext.context);
+        eventBus.publish(AgentEvent.task(task));
+        eventBus.publish(AgentEvent.statusUpdate({ taskId, contextId: task.contextId, status: task.status, metadata: undefined }));
+        return;
+      }
+      if (claim.capacityUnavailable) {
+        task = claim.task;
+        eventBus.publish(AgentEvent.task(task));
+        eventBus.publish(AgentEvent.statusUpdate({ taskId, contextId: task.contextId, status: task.status, metadata: undefined }));
+        return;
+      }
+      task = claim.task;
+      lease = claim.lease;
+    }
+    const userMessage = task.history?.find(message => message.messageId === lease?.messageId)
+      || requestContext.userMessage;
+    await this.runClaimedTask({ task, userMessage, lease, requestContext, eventBus, recovery: false });
+  }
+
+  async replaySemanticDuplicate({ task, context, sourceTaskId, requestFingerprint }) {
+    const sourceTask = await this.waitForTerminalTask(sourceTaskId, context);
+    if (sourceTask.status?.state === TaskState.TASK_STATE_COMPLETED) {
+      const artifact = buildSemanticReplayArtifact({ sourceTask, targetTask: task });
+      if (artifact) {
+        const replayTask = structuredClone(task);
+        replayTask.artifacts = mergeArtifactsById(replayTask.artifacts, [{
+          artifactId: artifact.artifactId,
+          name: 'ResearchArtifact',
+          description: 'Verified public research artifact reused for a semantically identical brief.',
+          parts: [{ content: { $case: 'data', value: artifact }, metadata: undefined, filename: '', mediaType: 'application/json' }],
+          metadata: { financialAuthorityDelta: 0, deduplicatedFromTaskId: sourceTaskId },
+          extensions: [],
+        }]);
+        replayTask.status = statusEvent(task.id, task.contextId, TaskState.TASK_STATE_COMPLETED, 'Verified research evidence reused for an identical brief.').data.status;
+        const persisted = await this.taskStore.createSemanticReplay({
+          task: replayTask,
+          context,
+          sourceTaskId,
+          requestFingerprint,
+        });
+        if (persisted) return persisted;
+      }
+    }
+    await this.taskStore.retireSemanticDeduplication(sourceTaskId, context, requestFingerprint);
+    return null;
+  }
+
+  async waitForTerminalTask(taskId, context) {
+    let delayMs = 100;
+    for (;;) {
+      const task = await this.taskStore.load(taskId, context);
+      if (!task) throw Object.assign(new Error('Research task disappeared while waiting for its owner.'), { code: 'A2A_TASK_STATE_UNAVAILABLE', status: 503 });
+      if ([TaskState.TASK_STATE_CANCELED, TaskState.TASK_STATE_FAILED, TaskState.TASK_STATE_COMPLETED].includes(task.status?.state)) return task;
+      await new Promise(resolveDelay => setTimeout(resolveDelay, delayMs));
+      delayMs = Math.min(delayMs * 2, 1_000);
+    }
+  }
+
+  async runClaimedTask({ task, userMessage, lease, requestContext = null, eventBus = null, recovery = false }) {
+    const taskId = task.id;
+    const contextId = task.contextId;
+    const context = requestContext?.context;
     const controller = new AbortController();
     this.activeTasks.set(taskId, controller);
     this.taskContexts.set(taskId, contextId);
-    PrometheusMetrics.inc('research_a2a_tasks_total');
-    eventBus.publish(AgentEvent.task(initialTask(requestContext)));
-    eventBus.publish(statusEvent(taskId, contextId, TaskState.TASK_STATE_WORKING, 'Research is running within the configured safety budget.'));
-    let cancellationMonitor = null;
+    let heartbeat = null;
+    let heartbeatRunning = false;
+    const durableLease = Boolean(lease && this.taskStore?.durable);
+    const leaseMs = this.taskStore?.leaseMs || 30_000;
+    const heartbeatIntervalMs = Math.max(250, Math.floor(leaseMs / 3));
     try {
-      const identity = requestContext.context.user?.identity;
-      if (identity?.agentType !== REQUIRED_CALLER_TYPE) throw Object.assign(new Error('A2A caller identity is not allowed.'), { code: 'A2A_CALLER_IDENTITY_DENIED' });
-      const brief = dataFromMessage(requestContext.userMessage);
-      let checkingCancellation = false;
-      cancellationMonitor = typeof this.taskStore?.isCanceled === 'function'
-        ? setInterval(async () => {
-          if (checkingCancellation || controller.signal.aborted) return;
-          checkingCancellation = true;
+      if (!userMessage || !dataFromMessage(userMessage)) {
+        throw Object.assign(new Error('Research task has no valid persisted input.'), { code: 'A2A_TASK_RECOVERY_INPUT_UNAVAILABLE' });
+      }
+      PrometheusMetrics.inc('research_a2a_tasks_total');
+      const workingStatus = statusEvent(taskId, contextId, TaskState.TASK_STATE_WORKING, 'Research is running within the configured safety budget.').data.status;
+      if (recovery) {
+        task.status = workingStatus;
+        await this.taskStore.saveClaimed(task, lease);
+      } else {
+        eventBus.publish(AgentEvent.task(task));
+        eventBus.publish(AgentEvent.statusUpdate({ taskId, contextId, status: workingStatus, metadata: undefined }));
+      }
+      if (durableLease) {
+        heartbeat = setInterval(async () => {
+          if (heartbeatRunning || controller.signal.aborted) return;
+          heartbeatRunning = true;
           try {
-            if (await this.taskStore.isCanceled(taskId, requestContext.context)) controller.abort();
+            const renewed = recovery
+              ? await this.taskStore.renewClaimedExecutionLease(taskId, lease)
+              : await this.taskStore.renewExecutionLease(taskId, context, lease);
+            if (!renewed) {
+              this.taskStore.forgetExecutionLease?.(taskId, lease);
+              controller.abort(Object.assign(new Error('Research task execution lease was superseded.'), { code: 'A2A_TASK_EXECUTION_LEASE_LOST' }));
+            }
           } catch {
-            controller.abort(Object.assign(new Error('Durable task state became unavailable.'), { code: 'A2A_TASK_STORE_UNAVAILABLE' }));
-          } finally { checkingCancellation = false; }
-        }, 500)
-        : null;
-      cancellationMonitor?.unref?.();
-      const execution = Promise.resolve().then(() => this.run({
-        brief,
+            this.taskStore.forgetExecutionLease?.(taskId, lease);
+            controller.abort(Object.assign(new Error('Research task execution lease is unavailable.'), { code: 'A2A_TASK_STORE_UNAVAILABLE' }));
+          } finally { heartbeatRunning = false; }
+        }, heartbeatIntervalMs);
+        heartbeat.unref?.();
+      }
+      const result = await this.run({
+        brief: dataFromMessage(userMessage),
         taskId,
+        artifactId: stableResearchId('A', taskId),
         provider: this.provider,
         documentFetcher: this.documentFetcher,
         budget: this.budget,
         signal: controller.signal,
-      }));
-      this.inFlight.set(taskId, execution);
-      const result = await execution;
+      });
       if (controller.signal.aborted || this.canceledTasks.has(taskId)) return;
-      eventBus.publish(AgentEvent.artifactUpdate({
-        taskId,
-        contextId,
-        artifact: {
-          artifactId: result.artifact.artifactId,
-          name: 'ResearchArtifact',
-          description: 'Verified public research artifact with claim-level provenance.',
-          parts: [{ content: { $case: 'data', value: result.artifact }, metadata: undefined, filename: '', mediaType: 'application/json' }],
-          metadata: { financialAuthorityDelta: 0 },
-          extensions: [],
-        },
-        append: false,
-        lastChunk: true,
-        metadata: undefined,
-      }));
-      eventBus.publish(statusEvent(taskId, contextId, TaskState.TASK_STATE_COMPLETED, 'Research artifact verified.'));
+      const artifact = {
+        artifactId: result.artifact.artifactId,
+        name: 'ResearchArtifact',
+        description: 'Verified public research artifact with claim-level provenance.',
+        parts: [{ content: { $case: 'data', value: result.artifact }, metadata: undefined, filename: '', mediaType: 'application/json' }],
+        metadata: { financialAuthorityDelta: 0 },
+        extensions: [],
+      };
+      const completedStatus = statusEvent(taskId, contextId, TaskState.TASK_STATE_COMPLETED, 'Research artifact verified.').data.status;
+      task.artifacts = mergeArtifactsById(task.artifacts, [artifact]);
+      task.status = completedStatus;
+      if (durableLease) {
+        // Persist the lease-fenced terminal state before sending success to the
+        // A2A caller. A worker whose lease expired must not publish a completion
+        // that the canonical task store rejected.
+        await this.taskStore.saveClaimed(task, lease);
+      }
+      if (recovery) {
+        return;
+      } else {
+        eventBus.publish(AgentEvent.artifactUpdate({ taskId, contextId, artifact, append: false, lastChunk: true, metadata: undefined }));
+        eventBus.publish(AgentEvent.statusUpdate({ taskId, contextId, status: completedStatus, metadata: undefined }));
+      }
     } catch (error) {
       if (controller.signal.aborted || this.canceledTasks.has(taskId) || error?.code === 'RESEARCH_CANCELED') return;
       PrometheusMetrics.inc('research_a2a_task_failures_total');
-      eventBus.publish(statusEvent(taskId, contextId, TaskState.TASK_STATE_FAILED, `Research failed closed: ${error?.code || 'RESEARCH_FAILED'}.`));
+      const failedStatus = statusEvent(taskId, contextId, TaskState.TASK_STATE_FAILED, `Research failed closed: ${error?.code || 'RESEARCH_FAILED'}.`).data.status;
+      if (recovery) {
+        task.status = failedStatus;
+        try { await this.taskStore.saveClaimed(task, lease); } catch {
+          this.taskStore.forgetExecutionLease?.(taskId, lease);
+        }
+      } else if (durableLease) {
+        task.status = failedStatus;
+        try {
+          await this.taskStore.saveClaimed(task, lease);
+          eventBus.publish(AgentEvent.statusUpdate({ taskId, contextId, status: failedStatus, metadata: undefined }));
+        } catch {
+          // A failure is user-visible only after the canonical store accepts it.
+          // Otherwise recovery owns the durable task and will publish its state
+          // on the next request rather than exposing a stale worker result.
+          this.taskStore.forgetExecutionLease?.(taskId, lease);
+        }
+      } else {
+        eventBus.publish(AgentEvent.statusUpdate({ taskId, contextId, status: failedStatus, metadata: undefined }));
+      }
     } finally {
+      if (heartbeat) clearInterval(heartbeat);
       this.activeTasks.delete(taskId);
       this.taskContexts.delete(taskId);
       this.canceledTasks.delete(taskId);
-      this.inFlight.delete(taskId);
-      if (cancellationMonitor) clearInterval(cancellationMonitor);
     }
+  }
+
+  async recoverOne() {
+    if (!this.taskStore?.durable || typeof this.taskStore.claimNextRecoverable !== 'function') return false;
+    const claim = await this.taskStore.claimNextRecoverable();
+    if (!claim) return false;
+    const { task, taskId, lease } = claim;
+    const message = task.history?.find(item => item.messageId === lease.messageId);
+    const execution = this.runClaimedTask({ task, userMessage: message, lease, recovery: true });
+    this.inFlight.set(taskId, execution);
+    try { await execution; } finally {
+      if (this.inFlight.get(taskId) === execution) this.inFlight.delete(taskId);
+    }
+    return true;
+  }
+
+  async recoverBatch(maxBatchSize = 10) {
+    const boundedLimit = Math.max(1, Math.min(25, Math.floor(Number(maxBatchSize) || 10)));
+    let recovered = 0;
+    while (recovered < boundedLimit && await this.recoverOne()) recovered += 1;
+    return recovered;
+  }
+
+  startRecoveryLoop({ intervalMs = 1_000, maxBatchSize = 10, maxBackoffMs = 30_000 } = {}) {
+    if (!this.taskStore?.durable || this.recoveryTimer) return;
+    intervalMs = Math.max(250, Math.min(30_000, Math.floor(Number(intervalMs) || 1_000)));
+    maxBatchSize = Math.max(1, Math.min(25, Math.floor(Number(maxBatchSize) || 10)));
+    maxBackoffMs = Math.max(intervalMs, Math.min(120_000, Math.floor(Number(maxBackoffMs) || 30_000)));
+    this.recoveryStopping = false;
+    this.recoveryBackoffMs = intervalMs;
+    const tick = async () => {
+      if (this.recoveryStopping || this.recoveryTickRunning) return;
+      this.recoveryTickRunning = true;
+      let recovered = 0;
+      try {
+        recovered = await this.recoverBatch(maxBatchSize);
+      } catch (error) {
+        console.error('Research task recovery pass failed:', error?.code || 'A2A_TASK_RECOVERY_FAILED');
+      } finally {
+        this.recoveryTickRunning = false;
+        if (!this.recoveryStopping) {
+          const nextDelay = recovered === maxBatchSize
+            ? Math.min(intervalMs, 100)
+            : recovered > 0 ? intervalMs : this.recoveryBackoffMs;
+          this.recoveryBackoffMs = recovered > 0
+            ? intervalMs
+            : Math.min(Math.max(intervalMs, this.recoveryBackoffMs * 2), maxBackoffMs);
+          this.recoveryTimer = setTimeout(tick, nextDelay);
+          this.recoveryTimer.unref?.();
+        }
+      }
+    };
+    this.recoveryTimer = setTimeout(tick, 0);
+    this.recoveryTimer.unref?.();
+  }
+
+  stopRecoveryLoop() {
+    this.recoveryStopping = true;
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = null;
   }
 
   async cancelTask(taskId, eventBus) {
@@ -329,6 +587,7 @@ class ResearchAgentExecutor {
   }
 
   async drain({ graceMs = 5000 } = {}) {
+    this.stopRecoveryLoop();
     for (const controller of this.activeTasks.values()) controller.abort();
     const pending = Promise.allSettled([...this.inFlight.values()]);
     let timer;
@@ -360,7 +619,7 @@ export async function createResearchAgentServer({ env = process.env, port = Numb
       throw configError('Production ResearchAgent requires a connected Mongo task store.');
     }
     await verifyResearchTaskIndexes();
-    taskStore = new MongoResearchTaskStore({ env });
+    taskStore = new MongoResearchTaskStore({ env, maxActiveTasks: researchAgentMaxActiveTasks(env) });
   } else {
     taskStore ||= new InMemoryTaskStore();
   }
@@ -373,8 +632,8 @@ export async function createResearchAgentServer({ env = process.env, port = Numb
     const databaseReady = !production || mongoose.connection.readyState === 1;
     if (!databaseReady) return res.status(503).json({ status: 'NOT_READY', reason: 'RESEARCH_TASK_STORE_UNAVAILABLE' });
     if (production) {
-      try { await verifyResearchTaskIndexes(); } catch {
-        return res.status(503).json({ status: 'NOT_READY', reason: 'RESEARCH_TASK_INDEXES_UNAVAILABLE' });
+      try { await verifyResearchTaskIndexes({ maxActiveTasks: researchAgentMaxActiveTasks(env) }); } catch (error) {
+        return res.status(503).json({ status: 'NOT_READY', reason: error.code || 'RESEARCH_TASK_PERSISTENCE_UNAVAILABLE' });
       }
     }
     return res.json({ status: 'READY', agent: RESEARCH_AGENT_TYPE, taskStore: taskStore.durable ? 'DURABLE' : 'EPHEMERAL' });
@@ -425,6 +684,7 @@ export async function startResearchAgentServer({ env = process.env, port = Numbe
       server.listen(port, host, resolveListen);
     });
     const address = server.address();
+    instance.executor.startRecoveryLoop();
     return {
       ...instance,
       server,

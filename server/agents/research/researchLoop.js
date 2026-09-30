@@ -96,10 +96,11 @@ function checkTimeAndUsageBudget(usage, budget, startedAt) {
   return true;
 }
 
-function buildFailureArtifact({ brief, taskId, usage, status, unresolvedGaps, claims, evidenceUnits, sources, contradictions, startedAt }) {
+function buildFailureArtifact({ brief, taskId, artifactId, usage, status, unresolvedGaps, claims, evidenceUnits, sources, contradictions, startedAt }) {
   return buildResearchArtifact({
     brief,
     taskId,
+    artifactId,
     status,
     claims,
     evidenceUnits,
@@ -118,6 +119,7 @@ function buildFailureArtifact({ brief, taskId, usage, status, unresolvedGaps, cl
 export async function runResearch({
   brief,
   taskId = null,
+  artifactId,
   provider,
   documentFetcher,
   budget: budgetOverrides = {},
@@ -264,6 +266,7 @@ export async function runResearch({
   const artifact = buildFailureArtifact({
     brief: safeBrief,
     taskId,
+    artifactId,
     usage,
     status,
     unresolvedGaps,

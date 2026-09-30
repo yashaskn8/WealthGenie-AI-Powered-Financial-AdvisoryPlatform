@@ -72,6 +72,7 @@ export function validateEnvironmentConfig(env = process.env) {
     ['MCP_PERMIT_TTL_MS', 1000, 300000], ['MCP_TOOL_TIMEOUT_MS', 100, 120000],
     ['MCP_SHUTDOWN_GRACE_MS', 0, 60000], ['MCP_XIRR_MAX_CASHFLOWS', 2, 600],
     ['MCP_XIRR_MAX_ABS_AMOUNT', 1, 1000000000000],
+    ['RESEARCH_AGENT_MAX_ACTIVE_TASKS', 1, 100],
   ];
   for (const [name, min, max] of boundedIntegers) {
     if (env[name] === undefined || env[name] === '') continue;
