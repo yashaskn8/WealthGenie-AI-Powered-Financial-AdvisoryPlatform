@@ -15,10 +15,16 @@ function caller() {
   return { user: { identity: { provider: 'development', authenticated: true, subject: 'phase7-lease-integration', agentType: 'PLAN_REVIEW' } } };
 }
 
+function privacySafeBriefId(id) {
+  // UUID digits can accidentally form phone/Aadhaar-shaped substrings. Encode
+  // them as distinct letters in fixture-only brief IDs; keep transport IDs intact.
+  return `brief-${id.replace(/\d/g, digit => 'ghijklmnop'[Number(digit)])}`;
+}
+
 function submittedTask(id, question = 'Verify the current official public financial rule') {
   const contextId = `context-${id}`;
   const brief = createResearchBrief({
-    researchBriefId: `brief-${id}`,
+    researchBriefId: privacySafeBriefId(id),
     topic: 'Official financial rule',
     question,
     requestedFactTypes: ['statutory_rule'],
@@ -38,6 +44,20 @@ function submittedTask(id, question = 'Verify the current official public financ
     metadata: { agentType: 'FINANCIAL_RESEARCH' },
   };
 }
+
+test('ResearchTask brief fixtures remain valid for UUIDs with private-identifier-like numeric tails', () => {
+  const taskId = 'phase7-dedupe-00000000-0000-4000-8000-612345678901';
+  const task = submittedTask(taskId);
+  const brief = task.history[0].parts[0].content.value;
+  assert.equal(task.id, taskId, 'transport identity remains unchanged');
+  assert.doesNotMatch(brief.researchBriefId, /\d/, 'brief fixture IDs cannot randomly resemble private numbers');
+  assert.throws(
+    () => createResearchBrief({ ...brief, researchBriefId: `brief-${taskId}` }),
+    error => error.code === 'INVALID_RESEARCH_BRIEF'
+      && error.details.some(detail => detail.type === 'RESEARCH_BRIEF_PRIVACY_VIOLATION'),
+    'production privacy validation must still reject the unsafe identifier',
+  );
+});
 
 test('Mongo task execution claims fence stale workers and persist recovery idempotently', { skip: !hasMongoUri, timeout: 30_000 }, async () => {
   await setupTestDatabase();
@@ -167,7 +187,7 @@ test('Mongo semantic ResearchBrief deduplication is owner-scoped and ignores tra
     duplicate.history[0].taskId = duplicate.id;
     duplicate.history[0].parts[0].content.value = {
       ...originalBrief,
-      researchBriefId: `new-brief-${crypto.randomUUID()}`,
+      researchBriefId: privacySafeBriefId(`new-brief-${crypto.randomUUID()}`),
     };
     const replay = await store.prepareAndClaim(duplicate, sameOwner);
     assert.equal(replay.semanticDuplicateTaskId, taskId);

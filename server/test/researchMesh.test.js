@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import net from 'node:net';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
@@ -43,6 +44,17 @@ async function freePort() {
   await new Promise(resolve => server.close(resolve));
   return port;
 }
+
+test('generated ResearchBrief IDs cannot accidentally resemble private numbers', t => {
+  let uuid = '00000000-0000-4000-8000-612345678901';
+  t.mock.method(crypto, 'randomUUID', () => uuid);
+  const input = { topic: 'Public financial rule', question: 'Verify the current official public rule', requestedFactTypes: ['statutory_rule'] };
+  const first = createResearchBrief(input);
+  assert.doesNotMatch(first.researchBriefId, /\d/);
+  uuid = '00000000-0000-4000-8000-612345678902';
+  const second = createResearchBrief(input);
+  assert.notEqual(first.researchBriefId, second.researchBriefId, 'encoding preserves distinct generated identities');
+});
 
 test('ResearchBrief rejects private fields and credential-like values', () => {
   for (const field of ['email', 'phone', 'monthlyTakeHome', 'jwt', 'userId', 'rawProfile']) {

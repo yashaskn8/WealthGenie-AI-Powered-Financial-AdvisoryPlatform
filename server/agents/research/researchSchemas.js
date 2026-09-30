@@ -183,7 +183,10 @@ export function validateResearchArtifact(value) {
 
 export function createResearchBrief(options = {}) {
   const result = validateResearchBrief({
-    researchBriefId: crypto.randomUUID(),
+    // Generated opaque IDs must not accidentally match the private-number
+    // filters. The disjoint digit-to-letter mapping preserves UUID uniqueness;
+    // explicitly supplied IDs still pass through unchanged and are validated.
+    researchBriefId: crypto.randomUUID().replace(/\d/g, digit => 'ghijklmnop'[Number(digit)]),
     jurisdiction: 'IN',
     asOf: new Date().toISOString(),
     instrumentCategories: [],
