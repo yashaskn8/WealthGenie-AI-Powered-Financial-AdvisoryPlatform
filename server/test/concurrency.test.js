@@ -92,9 +92,10 @@ test('OCC: PUT /api/profile/:id with stale version returns 409 Conflict', async 
   });
 
   await withServer(async (baseUrl) => {
-    // 1. Create a profile via POST /build
+    // /profile/build creates a draft. Promote it through the explicit
+    // completion boundary before testing current-profile OCC behavior.
     const { response: createRes, body: createBody } = await jsonFetch(
-      `${baseUrl}/api/profile/build`,
+      `${baseUrl}/api/profile/complete`,
       {
         method: 'POST',
         body: JSON.stringify(VALID_PROFILE_BODY),
@@ -102,12 +103,13 @@ test('OCC: PUT /api/profile/:id with stale version returns 409 Conflict', async 
       }
     );
 
-    assert.equal(createRes.status, 201, `Profile create failed: ${JSON.stringify(createBody)}`);
+    assert.equal(createRes.status, 200, `Profile completion failed: ${JSON.stringify(createBody)}`);
     assertRuntimeResponseMatchesContract({
-      method: 'POST', path: '/api/profile/build', status: createRes.status,
+      method: 'POST', path: '/api/profile/complete', status: createRes.status,
       contentType: createRes.headers.get('content-type'), body: createBody,
     });
-    const profileId = createBody.profileId;
+    const profileId = createBody.profile.profileId;
+    const initialVersion = createBody.profile.version;
     assert.ok(profileId, 'profileId must be returned');
 
     const currentProfile = await jsonFetch(`${baseUrl}/api/profile/current`, {
@@ -132,7 +134,7 @@ test('OCC: PUT /api/profile/:id with stale version returns 409 Conflict', async 
       `${baseUrl}/api/profile/${profileId}`,
       {
         method: 'PUT',
-        body: JSON.stringify({ ...VALID_PROFILE_BODY, monthly_take_home: 90000, monthly_savings: 25000, version: createBody.version }),
+        body: JSON.stringify({ ...VALID_PROFILE_BODY, monthly_take_home: 90000, monthly_savings: 25000, version: initialVersion }),
         headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
       }
     );
@@ -143,9 +145,9 @@ test('OCC: PUT /api/profile/:id with stale version returns 409 Conflict', async 
       contentType: update1Res.headers.get('content-type'), body: update1Body,
     });
     const updatedProfile = await FinancialProfile.findById(profileId).lean();
-    assert.equal(updatedProfile.version, createBody.version + 1);
+    assert.equal(updatedProfile.version, initialVersion + 1);
     assert.equal(updatedProfile.financialStateFence, 1, 'profile update must advance its fence in the recommendation transaction');
-    assert.equal(update1Body.profile.version, createBody.version + 1);
+    assert.equal(update1Body.profile.version, initialVersion + 1);
     assert.equal(update1Body.recommendation.profile_version, update1Body.profile.version);
     assert.equal(update1Body.recommendation.response_state, 'CURRENT');
 
@@ -154,7 +156,7 @@ test('OCC: PUT /api/profile/:id with stale version returns 409 Conflict', async 
       `${baseUrl}/api/profile/${profileId}`,
       {
         method: 'PUT',
-        body: JSON.stringify({ ...VALID_PROFILE_BODY, monthly_take_home: 100000, monthly_savings: 30000, version: createBody.version }),
+        body: JSON.stringify({ ...VALID_PROFILE_BODY, monthly_take_home: 100000, monthly_savings: 30000, version: initialVersion }),
         headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
       }
     );

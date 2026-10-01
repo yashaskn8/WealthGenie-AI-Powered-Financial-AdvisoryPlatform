@@ -4,6 +4,9 @@
 
 /* ─── Root Container ─────────────────────────────────────────────── */
 .pta-root {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
   max-width: 1440px;
   margin: 0 auto;
   padding: 28px 24px 80px;
@@ -26,7 +29,7 @@
   width: 500px;
   height: 500px;
   top: -180px;
-  right: -120px;
+  right: 50px;
   background: radial-gradient(circle, rgba(139, 92, 246, 0.10) 0%, transparent 70%);
   animation: ptaGlow 12s ease-in-out infinite;
 }
@@ -177,6 +180,10 @@
   .pta-main-grid {
     grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr);
   }
+  /* Keep the six financial columns readable instead of hiding asset names. */
+  .pta-main-grid > .pta-col:first-child { display: contents; }
+  .pta-main-grid > .pta-col:last-child { grid-column: 2; grid-row: 1; }
+  .pta-main-grid .pta-card--flush { grid-column: 1 / -1; }
 }
 .pta-col {
   display: flex;
@@ -289,6 +296,12 @@
   overflow-x: auto;
   border-top: 1px solid var(--border-subtle);
 }
+
+.pta-calculation-details { font-size: 0.75rem; color: #cbd5e1; margin-top: 8px; white-space: normal; }
+.pta-calculation-details summary { cursor: pointer; color: #38bdf8; }
+.pta-calculation-details dd { margin: 2px 0 8px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pta-calculation-details dt { font-weight: 500; }
+.pta-calculation-details dd:last-child { white-space: normal; overflow-wrap: anywhere; }
 .pta-table {
   width: 100%;
   border-collapse: collapse;
@@ -305,7 +318,7 @@
   text-transform: uppercase;
   letter-spacing: 0.6px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  white-space: nowrap;
+  white-space: normal;
 }
 .pta-th--left   { text-align: left; }
 .pta-th--center { text-align: center; }
@@ -353,7 +366,7 @@
   font-weight: 500;
 }
 
-.pta-td--mono   { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.84rem; font-weight: 600; }
+.pta-td--mono   { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.84rem; font-weight: 600; white-space: nowrap; }
 .pta-td--center { text-align: center; }
 .pta-td--right  { text-align: right; }
 .pta-td--left   { text-align: left; }
@@ -380,8 +393,9 @@
   font-weight: 700;
   border: 1px solid transparent;
   letter-spacing: 0.2px;
-  white-space: nowrap;
-  max-width: 180px;
+  white-space: normal;
+  max-width: 220px;
+  overflow-wrap: anywhere;
   overflow: hidden;
   text-overflow: ellipsis;
 }

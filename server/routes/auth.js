@@ -1,6 +1,8 @@
 import { Router } from 'express';
+import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import User from '../models/User.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import { validate, registerSchema, loginSchema } from '../validation/schemas.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
 import { verifyJWT, verifyJWTWithRevocationAvailability } from '../middleware/authMiddleware.js';
@@ -43,14 +45,26 @@ router.post('/register', validate(registerSchema), asyncHandler(async (req, res)
   // Wrap create in try/catch to handle the race condition where two concurrent
   // requests both pass the findOne check but only one can insert (unique index).
   let user;
+  const session = await mongoose.startSession();
   try {
-    user = await User.create({ name: name.trim(), email, mobile, passwordHash });
+    await session.withTransaction(async () => {
+      [user] = await User.create([{ name: name.trim(), email, mobile, passwordHash }], { session });
+      await FinancialProfileState.create([{
+        userId: user._id,
+        currentProfileId: null,
+        revision: 0,
+        promotionFence: 0,
+        resolutionStatus: 'NO_CURRENT',
+      }], { session });
+    }, { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } });
   } catch (err) {
     if (err.code === 11000) {
       // MongoDB duplicate key error — concurrent registration with same email
       throw createError(409, `Concurrent registration race for: ${email}`, 'Email already registered.');
     }
     throw err; // Re-throw non-duplicate errors
+  } finally {
+    await session.endSession();
   }
 
   const token = createSessionToken(user);

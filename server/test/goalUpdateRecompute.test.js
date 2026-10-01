@@ -23,6 +23,7 @@ import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import RecommendationState from '../models/RecommendationState.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
 import { buildRecommendationProfileHash, RECOMMENDATION_POLICY_VERSION } from '../services/recommendationProfile.js';
 import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
@@ -144,6 +145,11 @@ async function ensureDb() {
     } },
     { upsert: true, new: true },
   );
+  await FinancialProfileState.findOneAndUpdate(
+    { userId: TEST_USER_ID },
+    { $set: { currentProfileId: profile._id, resolutionStatus: 'CURRENT' }, $setOnInsert: { revision: 1, promotionFence: 0 } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
   return profile;
 }
 
@@ -152,6 +158,7 @@ test.after(async () => {
     await Goal.deleteMany({ userId: TEST_USER_ID });
     await IdempotencyKey.deleteMany({ userId: TEST_USER_ID });
     await RecommendationState.deleteMany({ userId: TEST_USER_ID });
+    await FinancialProfileState.deleteMany({ userId: TEST_USER_ID });
     await Recommendation.deleteMany({ userId: TEST_USER_ID });
     await FinancialProfile.deleteMany({ userId: TEST_USER_ID });
   } catch (_) {}

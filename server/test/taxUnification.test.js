@@ -143,6 +143,47 @@ test('ordinary-interest projection applies annual tax events after gross cash fl
   assert.ok(projection.assumptions.includes('TAX_POLICY_HELD_CONSTANT_FOR_PROJECTION'));
 });
 
+for (const { name, nominalRate, inflationRate, expectedSign } of [
+  { name: 'zero return and zero inflation', nominalRate: 0, inflationRate: 0, expectedSign: 0 },
+  { name: 'zero return and positive inflation', nominalRate: 0, inflationRate: 0.06, expectedSign: -1 },
+  { name: 'positive return and zero inflation', nominalRate: 0.07, inflationRate: 0, expectedSign: 1 },
+  { name: 'inflation above the post-tax return', nominalRate: 0.07, inflationRate: 0.1, expectedSign: -1 },
+]) {
+  test(`real-return projection uses growth factors: ${name}`, () => {
+    const context = {
+      annualGrossIncome: 3_000_000, regime: 'new', incomeSource: 'salary',
+      fiscalYear: FY, userAge: 35, deductions: {},
+    };
+    const result = calculatePostTaxReturn('FD', nominalRate, context.annualGrossIncome,
+      2, 'new', 10_000, 35, 'salary', undefined, FY);
+    const projection = calculatePostTaxProjection(result,
+      { nominalRate, monthlySIP: 10_000, holdingYears: 2 }, inflationRate, context);
+    assert.equal(projection.status, 'CALCULATED');
+    const postTaxRate = projection.postTaxCAGR;
+    assert.ok(Number.isFinite(postTaxRate));
+    const expected = Number((((1 + postTaxRate) / (1 + inflationRate) - 1) * 100).toFixed(4));
+    assert.equal(projection.realReturnPercent, expected);
+    assert.equal(Math.sign(projection.realReturnPercent), expectedSign);
+    if (inflationRate === 0) assert.equal(projection.realReturnPercent, projection.postTaxReturnPercent);
+  });
+}
+
+test('inflation matching post-tax CAGR gives zero real return without changing tax cash flows', () => {
+  const context = {
+    annualGrossIncome: 3_000_000, regime: 'new', incomeSource: 'salary',
+    fiscalYear: FY, userAge: 35, deductions: {},
+  };
+  const result = calculatePostTaxReturn('FD', 0.07, context.annualGrossIncome,
+    2, 'new', 10_000, 35, 'salary', undefined, FY);
+  const instrument = { nominalRate: 0.07, monthlySIP: 10_000, holdingYears: 2 };
+  const withoutInflation = calculatePostTaxProjection(result, instrument, 0, context);
+  const withInflation = calculatePostTaxProjection(result, instrument, withoutInflation.postTaxCAGR, context);
+  assert.equal(withInflation.realReturnPercent, 0);
+  assert.equal(withInflation.postTaxFutureValue, withoutInflation.postTaxFutureValue);
+  assert.equal(withInflation.postTaxReturnPercent, withoutInflation.postTaxReturnPercent);
+  assert.deepEqual(withInflation.taxEvents, withoutInflation.taxEvents);
+});
+
 test('SGB requires an explicit redemption channel and separates coupon from capital gain', () => {
   const missingChannel = calculatePostTaxReturn('SGB', 0.13, 1_500_000, 8, 'new', 10_000, 35, 'salary', undefined, FY, { couponRate: 0.025 });
   assert.equal(missingChannel.status, 'REQUIRES_TAX_INPUTS');

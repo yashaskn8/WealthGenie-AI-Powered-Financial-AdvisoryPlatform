@@ -5,7 +5,6 @@
  */
 import { redisClient, redisAvailable } from '../config/redis.js';
 import { createError } from '../middleware/errorHandler.js';
-import FinancialProfile from '../models/FinancialProfile.js';
 import { ImmutableSecurityPipeline } from './immutableSecurityPipeline.js';
 import { PrometheusMetrics } from './metricsCollector.js';
 import {
@@ -21,6 +20,7 @@ import {
   isGroundingBoundaryAttack,
 } from './groundedExplanationService.js';
 import { resolveCurrentRecommendationState } from './recommendationState.js';
+import { resolveCurrentFinancialProfile } from './currentFinancialProfile.js';
 import {
   CHAT_SESSION_TOKEN_CAP,
   defaultChatSessionStore,
@@ -106,7 +106,8 @@ export async function processChat({ userId, user: _user, message, sessionId }, {
     });
   }
 
-  const storedProfile = await FinancialProfile.findOne({ userId }).sort({ createdAt: -1 }).lean();
+  const canonicalProfile = await resolveCurrentFinancialProfile({ userId, requireRecommendation: false });
+  const storedProfile = canonicalProfile.profile;
   if (!storedProfile) return noProfileResponse(sessionId, rateCheck);
   const profile = buildRecommendationProfile(storedProfile);
   const suitability = assessSuitabilityRisk(profile);
@@ -131,6 +132,7 @@ export async function processChat({ userId, user: _user, message, sessionId }, {
   const binding = {
     profileId: storedProfile._id,
     profileVersion: Number(storedProfile.version || 1),
+    financialProfileStateRevision: Number(canonicalProfile.state.revision),
     profileInputHash: buildRecommendationProfileHash(storedProfile, { modelVersion }),
     sourceRecommendationId: recommendation?._id || null,
     sourceAllocationRevisionId: recommendationState?.allocationRevision?._id || null,

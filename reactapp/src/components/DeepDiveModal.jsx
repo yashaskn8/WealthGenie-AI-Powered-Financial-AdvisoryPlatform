@@ -43,9 +43,6 @@ const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRec
   const [projectionLoading, setProjectionLoading] = useState(false);
   const [stressTestAmount, setStressTestAmount] = useState(100000);
 
-  const [prevInvestmentId, setPrevInvestmentId] = useState(investment?.id);
-  const [prevHorizon, setPrevHorizon] = useState(horizon);
-
   const modalRef = React.useRef(null);
   const previouslyFocusedElementRef = React.useRef(null);
 
@@ -90,73 +87,77 @@ const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRec
 
   // ─── Instrument-Aware Calculator Bounds ───
   const calcBounds = useMemo(() => {
-    if (!investment) return { returnMin: 1, returnMax: 30, yearMin: 1, yearMax: 40 };
-    const exactReturn = Number(investment.nominalReturn);
-    const retMin = Number(investment.expected_return_min ?? investment.returnRange?.min ?? exactReturn);
-    const retMax = Number(investment.expected_return_max ?? investment.returnRange?.max ?? exactReturn);
-    if (!Number.isFinite(retMin) || !Number.isFinite(retMax)) throw new TypeError('Instrument return assumptions are unavailable.');
-    const cat = (investment.category || investment.cat || '').toLowerCase();
-    const name = (investment.name || investment.abbr || '').toLowerCase();
+    const numberOrNull = (value) => value === null || value === undefined || value === ''
+      ? null
+      : Number.isFinite(Number(value)) ? Number(value) : null;
+    const exactReturn = numberOrNull(investment?.nominalReturn);
+    const retMin = numberOrNull(investment?.expected_return_min ?? investment?.returnRange?.min) ?? exactReturn;
+    const retMax = numberOrNull(investment?.expected_return_max ?? investment?.returnRange?.max) ?? exactReturn;
+    const clampReturn = value => Math.max(1, Math.min(30, value));
+    const modelMin = retMin === null ? 1 : clampReturn(Math.floor(retMin - 2));
+    const modelMax = retMax === null ? 30 : clampReturn(Math.ceil(retMax + 2));
+    const declaredMin = Number(investment?.calculatorConstraints?.minYears);
+    const declaredMax = Number(investment?.calculatorConstraints?.maxYears);
+    const hasDeclaredYearBounds = Number.isSafeInteger(declaredMin) && declaredMin > 0
+      && Number.isSafeInteger(declaredMax) && declaredMax >= declaredMin;
+    return {
+      returnMin: modelMin,
+      returnMax: Math.max(modelMin, modelMax),
+      returnBoundsBasis: retMin === null || retMax === null ? 'GENERIC_WHAT_IF' : 'MODEL_ASSUMPTION_RANGE',
+      yearMin: hasDeclaredYearBounds ? declaredMin : 1,
+      yearMax: hasDeclaredYearBounds ? declaredMax : 40,
+      yearBoundsBasis: hasDeclaredYearBounds
+        ? investment?.calculatorConstraints?.basis || 'SERVER_DECLARED'
+        : 'GENERIC_WHAT_IF',
+    };
+  }, [
+    investment?.nominalReturn,
+    investment?.expected_return_min,
+    investment?.expected_return_max,
+    investment?.returnRange?.min,
+    investment?.returnRange?.max,
+    investment?.calculatorConstraints?.minYears,
+    investment?.calculatorConstraints?.maxYears,
+    investment?.calculatorConstraints?.basis,
+  ]);
 
-    let yearMin = 1, yearMax = 30;
-    if (name.includes('ppf')) { yearMin = 15; yearMax = 30; }
-    else if (name.includes('scss')) { yearMin = 5; yearMax = 8; }
-    else if (name.includes('sukanya') || name.includes('ssy')) { yearMin = 15; yearMax = 21; }
-    else if (name.includes('nps')) { yearMin = 10; yearMax = 40; }
-    else if (name.includes('rbi') && name.includes('bond')) { yearMin = 7; yearMax = 7; }
-    else if (name.includes('pmvvy')) { yearMin = 10; yearMax = 10; }
-    else if (name.includes('fd') || name.includes('fixed deposit')) { yearMin = 1; yearMax = 10; }
-    else if (name.includes('liquid')) { yearMin = 1; yearMax = 3; }
-    else if (name.includes('sgb') || name.includes('gold bond')) { yearMin = 5; yearMax = 8; }
-    else if (name.includes('elss')) { yearMin = 3; yearMax = 25; }
-    else if (cat.includes('equity')) { yearMin = 3; yearMax = 30; }
-    else if (cat.includes('hybrid')) { yearMin = 3; yearMax = 25; }
-    else if (cat.includes('debt') || cat.includes('deposit') || cat.includes('bond')) { yearMin = 1; yearMax = 10; }
+  const calculatorStateKey = JSON.stringify({
+    investmentId: investment?.id || null,
+    returnMin: investment?.expected_return_min ?? investment?.returnRange?.min ?? investment?.nominalReturn ?? null,
+    returnMax: investment?.expected_return_max ?? investment?.returnRange?.max ?? investment?.nominalReturn ?? null,
+    constraints: investment?.calculatorConstraints || null,
+    horizon: horizon ?? null,
+    profileId: recommendationMeta?.profileId || recommendationMeta?.profile_id || null,
+    profileVersion: recommendationMeta?.profile_version ?? null,
+    recommendationId: recommendationMeta?.recommendationId || recommendationMeta?.recommendation_id || null,
+    allocationRevision: recommendationMeta?.allocation_revision ?? null,
+    allocationRevisionId: recommendationMeta?.allocation_revision_id || null,
+    portfolioFingerprint: recommendationMeta?.portfolio_fingerprint || null,
+    recommendationFingerprint: recommendationMeta?.recommendation_fingerprint || null,
+    profileInputHash: recommendationMeta?.profile_input_hash || null,
+    isOpen,
+    initialTab: initialTab || null,
+  });
+  const hasInvestment = Boolean(investment);
 
-    const sliderRetMin = Math.max(1, Math.floor(retMin - 2));
-    const sliderRetMax = Math.min(30, Math.ceil(retMax + 2));
-
-    return { returnMin: sliderRetMin, returnMax: sliderRetMax, yearMin, yearMax };
-  }, [investment]);
-
-  // Reset calculator state when instrument changes
-  if (investment?.id !== prevInvestmentId || horizon !== prevHorizon) {
-    setPrevInvestmentId(investment?.id);
-    setPrevHorizon(horizon);
-
-    const exactReturn = Number(investment?.nominalReturn);
-    const retMin = Number(investment?.expected_return_min ?? investment?.returnRange?.min ?? exactReturn);
-    const retMax = Number(investment?.expected_return_max ?? investment?.returnRange?.max ?? exactReturn);
-    if (!Number.isFinite(retMin) || !Number.isFinite(retMax)) throw new TypeError('Instrument return assumptions are unavailable.');
-    const cat = investment ? (investment.category || investment.cat || '').toLowerCase() : '';
-    const name = investment ? (investment.name || investment.abbr || '').toLowerCase() : '';
-
-    let _yearMin = 1, yearMax = 30;
-    if (name.includes('ppf')) { _yearMin = 15; yearMax = 30; }
-    else if (name.includes('scss')) { _yearMin = 5; yearMax = 8; }
-    else if (name.includes('sukanya') || name.includes('ssy')) { _yearMin = 15; yearMax = 21; }
-    else if (name.includes('nps')) { _yearMin = 10; yearMax = 40; }
-    else if (name.includes('rbi') && name.includes('bond')) { _yearMin = 7; yearMax = 7; }
-    else if (name.includes('pmvvy')) { _yearMin = 10; yearMax = 10; }
-    else if (name.includes('fd') || name.includes('fixed deposit')) { _yearMin = 1; yearMax = 10; }
-    else if (name.includes('liquid')) { _yearMin = 1; yearMax = 3; }
-    else if (name.includes('sgb') || name.includes('gold bond')) { _yearMin = 5; yearMax = 8; }
-    else if (name.includes('elss')) { _yearMin = 3; yearMax = 25; }
-    else if (cat.includes('equity')) { _yearMin = 3; yearMax = 30; }
-    else if (cat.includes('hybrid')) { _yearMin = 3; yearMax = 25; }
-    else if (cat.includes('debt') || cat.includes('deposit') || cat.includes('bond')) { _yearMin = 1; yearMax = 10; }
-
-    const sliderRetMin = Math.max(1, Math.floor(retMin - 2));
-    const sliderRetMax = Math.min(30, Math.ceil(retMax + 2));
-    const midReturn = ((sliderRetMin + sliderRetMax) / 2).toFixed(1);
-
-    setCalcReturn(Number(midReturn));
-    const declaredHorizon = Number(horizon);
-    if (!Number.isFinite(declaredHorizon)) throw new TypeError('Investment horizon is unavailable.');
-    setCalcYears(Math.max(_yearMin, Math.min(declaredHorizon, yearMax)));
+  React.useEffect(() => {
+    if (!hasInvestment) {
+      setProjection(null);
+      setProjectionError(null);
+      setProjectionLoading(false);
+      return;
+    }
+    const defaultYears = horizon === null || horizon === undefined || horizon === '' ? null : Number(horizon);
+    const boundedYears = defaultYears !== null && Number.isFinite(defaultYears)
+      ? Math.max(calcBounds.yearMin, Math.min(defaultYears, calcBounds.yearMax))
+      : calcBounds.yearMin;
+    setCalcReturn(Number(((calcBounds.returnMin + calcBounds.returnMax) / 2).toFixed(1)));
+    setCalcYears(boundedYears);
     setCalcAmount(5000);
-    setActiveTab('Overview');
-  }
+    setProjection(null);
+    setProjectionError(null);
+    setActiveTab(initialTab || 'Overview');
+  }, [calculatorStateKey, calcBounds, horizon, hasInvestment, initialTab]);
 
   // Normalize fields
   const inv = useMemo(() => {
@@ -182,7 +183,7 @@ const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRec
   const riskLevel = typeof inv.risk_level === 'string' ? inv.risk_level : '';
 
   React.useEffect(() => {
-    if (!isOpen || !investment) return undefined;
+    if (!isOpen || !hasInvestment) return undefined;
     let cancelled = false;
     const controller = new AbortController();
     const timer = setTimeout(() => {
@@ -211,7 +212,7 @@ const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRec
       clearTimeout(timer);
       controller.abort();
     };
-  }, [isOpen, investment, calcAmount, calcReturn, benchmarkRate, inflationRate, calcYears]);
+  }, [isOpen, hasInvestment, calculatorStateKey, calcAmount, calcReturn, benchmarkRate, inflationRate, calcYears]);
 
   const historicalData = useMemo(() => (projection?.normalizedChart || []).map(point => ({
     ...point,
@@ -366,7 +367,9 @@ const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRec
               <span className="metric-label"><JargonTooltip term="Return Potential">Model Return Assumption</JargonTooltip></span>
               <span className="metric-value" style={{ color: '#22c55e' }}>
                 {hasReturnRange
-                  ? `${returnMin.toFixed(1).replace(/\.0$/, '')}% – ${returnMax.toFixed(1).replace(/\.0$/, '')}%`
+                  ? returnMin === returnMax
+                    ? `${returnMin.toFixed(1).replace(/\.0$/, '')}% p.a.`
+                    : `${returnMin.toFixed(1).replace(/\.0$/, '')}% – ${returnMax.toFixed(1).replace(/\.0$/, '')}%`
                   : 'Unavailable'}
               </span>
             </div>

@@ -28,6 +28,7 @@ function sameNullableId(left, right) {
 function isBindingMatch(conversation, binding) {
   return String(conversation.profileId) === String(binding.profileId)
     && Number(conversation.profileVersion) === Number(binding.profileVersion)
+    && Number(conversation.financialProfileStateRevision) === Number(binding.financialProfileStateRevision)
     && conversation.profileInputHash === binding.profileInputHash
     && sameNullableId(conversation.sourceRecommendationId, binding.sourceRecommendationId)
     && sameNullableId(conversation.sourceAllocationRevisionId, binding.sourceAllocationRevisionId)
@@ -36,7 +37,9 @@ function isBindingMatch(conversation, binding) {
 }
 
 function requireSessionBinding(conversation, binding) {
-  if (!conversation.profileInputHash || !Number.isInteger(Number(conversation.profileVersion))) {
+  if (!conversation.profileInputHash || !Number.isInteger(Number(conversation.profileVersion))
+      || !Number.isSafeInteger(Number(conversation.financialProfileStateRevision))
+      || Number(conversation.financialProfileStateRevision) < 0) {
     throw createError(409, 'This chat session has no verifiable profile provenance; start a new session.', 'Start a new chat to continue with the current profile.', {
       code: 'CHAT_SESSION_PROVENANCE_MISSING',
     });
@@ -86,6 +89,7 @@ export async function acquireChatSession({ userId, sessionId, binding, now = new
         ...identity,
         profileId: binding.profileId,
         profileVersion: binding.profileVersion,
+        financialProfileStateRevision: binding.financialProfileStateRevision,
         profileInputHash: binding.profileInputHash,
         sourceRecommendationId: binding.sourceRecommendationId,
         sourceAllocationRevisionId: binding.sourceAllocationRevisionId,
@@ -218,6 +222,7 @@ export async function completeChatTurn({ claim, userMessage, modelMessage, actua
       message_sequence: Number(claim.conversation.message_sequence || 0) + index + 1,
       profileId: claim.conversation.profileId,
       profileVersion: claim.conversation.profileVersion,
+      financialProfileStateRevision: claim.conversation.financialProfileStateRevision,
       profileInputHash: claim.conversation.profileInputHash,
       recommendationId: claim.conversation.sourceRecommendationId || undefined,
       allocationRevisionId: claim.conversation.sourceAllocationRevisionId || undefined,

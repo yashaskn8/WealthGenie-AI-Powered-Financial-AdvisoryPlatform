@@ -37,6 +37,11 @@ const LandingPage = lazy(() => import('./LandingPage'));
 // ── Bounded retry helper for deferred advisory generation ──
 // eslint-disable-next-line react-refresh/only-export-components
 export const ADVISORY_RETRY_DELAYS_MS = [1000, 1500];
+const ADVISORY_GENERATION_CONFLICT_CODE = 'ADVISORY_GENERATION_IN_PROGRESS';
+
+function isAdvisoryGenerationConflict(error) {
+  return error?.status === 409 && error?.code === ADVISORY_GENERATION_CONFLICT_CODE;
+}
 
 function profileOperationIdentity({ profileId, profileVersion, profileKey }) {
   return JSON.stringify([profileId || null, Number(profileVersion ?? 1), profileKey || '']);
@@ -78,7 +83,7 @@ export async function fetchDeferredAdvisoryWithBoundedRetry(
       if (err?.code === 'REQUEST_ABORTED' || err?.name === 'AbortError' || signal?.aborted) {
         throw err;
       }
-      if (err?.status === 409) {
+      if (isAdvisoryGenerationConflict(err)) {
         if (typeof onConflict === 'function') {
           onConflict();
         }
@@ -217,6 +222,34 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
     && activeProfileRef.current.profileVersion === token.profileVersion
     && activeProfileRef.current.profileKey === token.profileKey);
 
+  const refreshCanonicalRecommendationAfterSupersession = async (token) => {
+    if (!operationIsCurrent(token)) return;
+    writeBackendRecs(null);
+    setBackendFallback(null);
+    setIsRecommendationLoading(true);
+    setIsAdvisoryLoading(false);
+    try {
+      const canonical = await api.getCurrentRecommendation(token.profileId, { signal: token.controller.signal });
+      if (!operationIsCurrent(token)) return;
+      if (!matchesProfileState(canonical, userProfile)
+          || !isFinancialCalculationFresh(canonical?.calculation_freshness)) {
+        throw new Error('The canonical recommendation changed with the financial profile.');
+      }
+      writeBackendRecs(canonical);
+    } catch (error) {
+      if (!operationIsCurrent(token)
+          || error?.code === 'REQUEST_ABORTED'
+          || error?.name === 'AbortError') return;
+      writeBackendRecs(null);
+      setBackendFallback({
+        message: 'Your financial recommendation changed. Refresh it before using personalized results.',
+        detail: error?.message || null,
+      });
+    } finally {
+      if (operationIsCurrent(token)) setIsRecommendationLoading(false);
+    }
+  };
+
   useEffect(() => {
     const effectIdentity = profileOperationIdentity(activeProfileRef.current);
     if (skipProfileRestoreRef.current === effectIdentity) {
@@ -286,7 +319,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
             }
           } catch (advErr) {
             if (operationIsCurrent(token) && advErr?.code !== 'REQUEST_ABORTED' && advErr?.name !== 'AbortError') {
-              if (advErr?.status === 409) {
+              if (isAdvisoryGenerationConflict(advErr)) {
                 // 409 Conflict: Another request is generating the advisory.
                 // Keep advisory state as GENERATING, never mark FAILED on 409.
                 writeBackendRecs(prev => {
@@ -299,6 +332,8 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
                     },
                   };
                 });
+              } else if (advErr?.code === 'RECOMMENDATION_SUPERSEDED') {
+                await refreshCanonicalRecommendationAfterSupersession(token);
               } else {
                 console.warn('Deferred advisory generation failed:', advErr);
                 writeBackendRecs(prev => {
@@ -390,9 +425,9 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
         abbr: dbMatch?.abbr || bi.type,
         color: dbMatch?.color || '#38bdf8',
         desc: dbMatch?.desc || '',
-        category: dbMatch?.category || dbMatch?.cat || 'Other',
-        cat: dbMatch?.cat || dbMatch?.category || 'Other',
-        assetClass: dbMatch?.assetClass || 'Other',
+        category: bi.assetClass,
+        cat: bi.assetClass,
+        assetClass: bi.assetClass,
         riskLabel: bi.riskLevel,
         risk: bi.riskScore,
         lockIn: bi.lockIn,
@@ -407,10 +442,16 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
         nominalReturn: bi.nominalReturn,
         rate: bi.nominalReturn,
         expectedReturn: bi.nominalReturn,
+        // A reference-catalog range must not replace the current server assumption.
+        returnRange: undefined,
+        expected_return_min: undefined,
+        expected_return_max: undefined,
+        returnAssumptionVersion: currentRecommendationState.return_assumption_version,
         allocationWeight: backendWeight,
         allocation_pct: Number(bi.allocation_pct),
         score: Number(bi.score),
         scoreFactors: { ...bi.scoreFactors },
+        taxClassification: bi.taxClassification ?? null,
         ml_confidence: currentRecommendationState.confidence_scores?.[bi.type] ?? null,
         advisory_text: currentRecommendationState.advisory_text,
         _source: 'backend',
@@ -431,6 +472,10 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
   const handleRebalanceSave = async (updated) => {
     const predecessor = backendRecsRef.current;
     const token = beginOperation();
+    // The prior advisory request is bound to the predecessor state and has
+    // just been aborted by beginOperation; its guarded finally cannot clear
+    // this flag after the new operation owns the UI state.
+    setIsAdvisoryLoading(false);
     try {
       if (!currentRecommendationState
           || !sameFinancialState(predecessor, currentRecommendationState)
@@ -549,14 +594,18 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
         } catch (advisoryError) {
           if (operationIsCurrent(token)
               && advisoryError?.code !== 'REQUEST_ABORTED' && advisoryError?.name !== 'AbortError') {
+            if (advisoryError?.code === 'RECOMMENDATION_SUPERSEDED') {
+              await refreshCanonicalRecommendationAfterSupersession(token);
+              return;
+            }
             writeBackendRecs(prev => {
               if (!advisoryMatchesCurrentFinancialState(prev, recResponse)) return prev;
               return {
                 ...prev,
                 advisory_explanation: {
                   ...(prev.advisory_explanation || {}),
-                  status: advisoryError?.status === 409 ? 'GENERATING' : 'FAILED',
-                  ...(advisoryError?.status === 409 ? {} : { error: advisoryError.message }),
+                  status: isAdvisoryGenerationConflict(advisoryError) ? 'GENERATING' : 'FAILED',
+                  ...(isAdvisoryGenerationConflict(advisoryError) ? {} : { error: advisoryError.message }),
                 },
               };
             });
@@ -679,6 +728,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
               onTabChange={(newTab) => navigateTo({ page: NAV_PAGES.TAXES, tab: newTab })}
               profile={userProfile}
               recommendations={recommendations}
+              recommendationMeta={currentRecommendationState}
               onLearnMore={handleLearnMore}
             />
           </ErrorBoundary>

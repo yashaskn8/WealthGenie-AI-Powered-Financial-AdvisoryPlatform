@@ -3,7 +3,7 @@
  */
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor, cleanup } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, cleanup } from '@testing-library/react';
 import * as api from '../services/api';
 import { resetMarketContextStoreForTest, useMarketContext } from './useMarketContext';
 
@@ -41,6 +41,7 @@ function Probe() {
 describe('shared market context store', () => {
   beforeEach(() => {
     resetMarketContextStoreForTest();
+    vi.useRealTimers();
     vi.clearAllMocks();
     api.getCurrentMarketContext.mockResolvedValue(snapshot);
   });
@@ -87,5 +88,41 @@ describe('shared market context store', () => {
 
     await waitFor(() => expect(screen.getByTestId('transport-status').textContent).toBe('FAILED'));
     expect(screen.getByTestId('context').textContent).toBe('NORMAL');
+  });
+
+  it.each([
+    ['CURRENT', 'MARKET_OPEN', 90_000],
+    ['MARKET_CLOSED', 'MARKET_CLOSED', 600_000],
+  ])('uses one shared %s cadence and stops polling when unmounted', async (status, session, cadence) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-30T05:00:00Z'));
+    api.getCurrentMarketContext.mockResolvedValue({ ...snapshot, marketSnapshot: { ...snapshot.marketSnapshot, status, marketSession: { status: session } } });
+    const view = render(<><Probe /><Probe /></>);
+    await act(async () => {});
+    expect(api.getCurrentMarketContext).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(cadence - 1); });
+    expect(api.getCurrentMarketContext).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(api.getCurrentMarketContext).toHaveBeenCalledTimes(2);
+    view.unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(cadence); fireEvent.focus(window); });
+    expect(api.getCurrentMarketContext).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it('coalesces focus and visibility revalidation only after the current threshold', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-30T05:00:00Z'));
+    render(<Probe />);
+    await act(async () => {});
+    fireEvent.focus(window);
+    expect(api.getCurrentMarketContext).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    await act(async () => {
+      fireEvent.focus(window);
+      fireEvent(document, new Event('visibilitychange'));
+    });
+    expect(api.getCurrentMarketContext).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
   });
 });

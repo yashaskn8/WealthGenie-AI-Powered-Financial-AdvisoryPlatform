@@ -487,7 +487,7 @@ export async function getInstruments(type, sort = 'rate', order = 'desc', limit 
   return request('GET', `/instruments?${params.toString()}`);
 }
 
-export async function rankInvestmentCandidates(profileId, parentInstrumentId, taxCalculationContext = null, requestOptions = {}) {
+export async function rankInvestmentCandidates(profileId, parentInstrumentId, taxCalculationContext = null, requestOptions = {}, financialStateBinding = null) {
   let actualTaxContext = null;
   let actualOptions = requestOptions;
   if (taxCalculationContext && !taxCalculationContext.signal && !taxCalculationContext.timeoutMs && !taxCalculationContext.headers) {
@@ -497,10 +497,26 @@ export async function rankInvestmentCandidates(profileId, parentInstrumentId, ta
     actualTaxContext = null;
   }
 
+  const binding = financialStateBinding || {};
+  if (binding.profileId && binding.profileId !== profileId) {
+    throw new Error('Product ranking profile does not match the bound financial state.');
+  }
   const payload = {
     profileId,
     parentInstrumentId,
   };
+  const expectedBindingFields = [
+    ['profileVersion', 'profileVersion'],
+    ['recommendationId', 'recommendationId'],
+    ['expectedAllocationRevision', 'allocationRevision'],
+    ['expectedAllocationRevisionId', 'allocationRevisionId'],
+    ['expectedPortfolioFingerprint', 'portfolioFingerprint'],
+    ['expectedRecommendationFingerprint', 'recommendationFingerprint'],
+  ];
+  for (const [requestField, stateField] of expectedBindingFields) {
+    const value = binding[requestField] ?? binding[stateField];
+    if (value !== undefined) payload[requestField] = value;
+  }
   if (actualTaxContext) {
     payload.taxCalculationContext = actualTaxContext;
   }
@@ -716,10 +732,11 @@ export async function computePostTaxReturn(instrumentType, nominalRate, annualIn
 }
 
 export async function computePostTaxReturnBatch(instruments, annualIncome, regime, userAge, incomeSource, inflationRate, fiscalYear, options = {}) {
+  const { body = {}, ...requestOptions } = options;
   return request('POST', '/tax/post-tax-return/batch', {
     instruments, annualIncome, regime, userAge, incomeSource, inflationRate, fiscalYear,
-    ...(options.body || options),
-  });
+    ...body,
+  }, requestOptions);
 }
 
 // Default export for convenience

@@ -70,11 +70,20 @@ test('recommendation-sensitive modules cannot directly consume forbidden profile
 
 test('every profile-loading personalized route invokes the canonical boundary', () => {
   const routeModules = [
-    '../routes/recommend.js', '../routes/instruments.js', '../routes/portfolio.js',
+    '../routes/recommend.js', '../routes/portfolio.js',
     '../routes/projection.js', '../routes/montecarlo.js', '../routes/goals.js',
   ];
   for (const relativePath of routeModules) {
     const source = readFileSync(new URL(relativePath, import.meta.url), 'utf8');
     assert.match(source, /buildRecommendationProfile\(/, relativePath);
   }
+
+  // The WTI route is intentionally a thin transport adapter. Its dedicated
+  // service owns both the canonical profile boundary and full freshness gate.
+  const wtiRoute = readFileSync(new URL('../routes/instruments.js', import.meta.url), 'utf8');
+  const wtiService = readFileSync(new URL('../services/currentWtiRanking.js', import.meta.url), 'utf8');
+  assert.match(wtiRoute, /rankWtiAgainstCurrentState\(/);
+  assert.match(wtiService, /dependencies\.buildRecommendationProfile\s*\|\|\s*buildRecommendationProfile/);
+  assert.match(wtiService, /profileBuilder\(state\.profile\)/);
+  assert.match(wtiService, /requireFreshRecommendationState/);
 });

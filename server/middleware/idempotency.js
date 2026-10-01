@@ -305,6 +305,8 @@ async function completedResponseFromRecommendation(recommendation) {
     headers: { 'content-type': 'application/json; charset=utf-8' },
     body: await buildPostCommitAdvisoryResponse({
       userId: recommendation.userId,
+      // The committed profile binds operation history only. The post-commit
+      // resolver independently follows the user's canonical current pointer.
       profileId: recommendation.profileId,
       responseTemplate: recommendation.responseSnapshot,
       committedRecommendationId: recommendation._id,

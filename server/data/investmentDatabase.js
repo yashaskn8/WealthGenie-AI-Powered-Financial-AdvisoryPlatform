@@ -10,6 +10,12 @@
 import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import {
+  PROJECTION_ASSUMPTION_DATA_CLASS,
+  PROJECTION_ASSUMPTION_POLICY_HASH,
+  PROJECTION_ASSUMPTION_SOURCE,
+  PROJECTION_ASSUMPTION_VERSION,
+} from '../services/instrumentConstants.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const masterCatalog = JSON.parse(
@@ -211,9 +217,10 @@ export const investmentDatabase = masterCatalog.instruments.map(inst => {
     
     // Dynamic fields flattened
     expectedReturn: inst.dynamicData.expectedReturn.avg,
-    returnDataClass: 'MODEL_ASSUMPTION',
-    returnAssumptionVersion: 'wealthgenie-projection-assumptions-1.0.0',
-    returnSource: 'WEALTHGENIE_MODEL_POLICY',
+    returnDataClass: PROJECTION_ASSUMPTION_DATA_CLASS,
+    returnAssumptionVersion: PROJECTION_ASSUMPTION_VERSION,
+    returnAssumptionHash: PROJECTION_ASSUMPTION_POLICY_HASH,
+    returnSource: PROJECTION_ASSUMPTION_SOURCE,
     observedMarketFact: false,
     providerForecast: false,
     rate: inst.dynamicData.interestRates,

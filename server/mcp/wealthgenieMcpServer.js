@@ -1,205 +1,359 @@
+import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+import mongoose from 'mongoose';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import Ajv from 'ajv';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import parseJoi from 'joi-to-json';
+import FinancialProfile from '../models/FinancialProfile.js';
+import { resolveCurrentFinancialProfile } from '../services/currentFinancialProfile.js';
 import { FinancialToolRegistry } from '../services/financialToolRegistry.js';
+import { buildRecommendationProfile } from '../services/recommendationProfile.js';
+import { MCP_TOOL_POLICY, buildMcpResult, isMcpToolAllowed, mcpOutputSchema } from './toolPolicy.js';
+import { McpCapacityError } from './mcpCapacity.js';
+import { PrometheusMetrics } from '../services/metricsCollector.js';
 
-/**
- * WealthGenie MCP Server
- * Wraps canonical FinancialToolRegistry as a standardized Model Context Protocol (MCP) server.
- * Single source of truth for all tools derived dynamically from Joi schemas.
- */
-export class WealthGenieMcpServer {
-  constructor({ maxGlobalSessions = process.env.MAX_GLOBAL_SESSIONS, maxSessionsPerUser = process.env.MAX_SESSIONS_PER_USER } = {}) {
-    this.server = new Server(
-      {
-        name: 'WealthGenie Financial Tools Server',
-        version: '1.0.0',
-      },
-      {
-        capabilities: {
-          tools: {},
-        },
-      }
-    );
-    this.sseTransports = new Map();
-    this.maxGlobalSessions = WealthGenieMcpServer.positiveLimit(maxGlobalSessions, 100);
-    this.maxSessionsPerUser = WealthGenieMcpServer.positiveLimit(maxSessionsPerUser, 5);
-    this.setupHandlers();
-  }
+const DANGEROUS_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+const MAX_RESULT_BYTES = 32768;
+const MAX_RESULT_DEPTH = 12;
+const MAX_RESULT_NODES = 4000;
+const GENERIC_EXECUTION_ERROR = 'The requested calculation could not be completed.';
+const SAFE_MCP_ERROR_CODES = new Set([
+  'MCP_TOOL_NOT_ALLOWED', 'MCP_INVALID_ARGUMENTS', 'MCP_PROFILE_CONTEXT_REQUIRED',
+  'MCP_PROFILE_CONTEXT_NOT_FOUND', 'MCP_PROFILE_CONTEXT_INVALID', 'MCP_TOOL_TIMEOUT',
+  'MCP_CLIENT_CANCELLED', 'MCP_SHUTDOWN', 'MCP_DRAINING', 'MCP_CAPACITY_EXCEEDED',
+  'MCP_CAPACITY_UNAVAILABLE', 'MCP_UNSAFE_PROPERTY', 'MCP_PAYLOAD_COMPLEXITY_LIMIT',
+  'MCP_NON_FINITE_NUMBER', 'MCP_STRING_LIMIT', 'MCP_RESULT_TOO_LARGE',
+]);
+const validateOutput = new Ajv({ allErrors: false, strict: false }).compile(mcpOutputSchema());
 
-  static positiveLimit(value, fallback) {
-    const parsed = Number(value);
-    return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-  }
-
-  #sessionCountForUser(userId) {
-    const normalizedUserId = String(userId);
-    let count = 0;
-    for (const session of this.sseTransports.values()) {
-      if (session.userId === normalizedUserId) count += 1;
-    }
-    return count;
-  }
-
-  checkSseCapacity(userId) {
-    if (this.sseTransports.size >= this.maxGlobalSessions) {
-      return { allowed: false, status: 429, code: 'MCP_GLOBAL_SESSION_LIMIT' };
-    }
-    if (this.#sessionCountForUser(userId) >= this.maxSessionsPerUser) {
-      return { allowed: false, status: 429, code: 'MCP_USER_SESSION_LIMIT' };
-    }
-    return { allowed: true };
-  }
-
-  /**
-   * Converts a tool's Joi schema into a standard JSON Schema object.
-   */
-  static convertJoiToJsonSchema(joiSchema) {
-    const jsonSchema = parseJoi(joiSchema) || {};
-    if (!jsonSchema.type) {
-      jsonSchema.type = 'object';
-    }
-    if (!jsonSchema.properties) {
-      jsonSchema.properties = {};
-    }
-    delete jsonSchema.$schema;
-    return jsonSchema;
-  }
-
-  /**
-   * Returns standard MCP/OpenAI-compatible tool definitions for LLM provider function declaration.
-   */
-  static getToolDefinitions() {
-    const tools = FinancialToolRegistry.listTools();
-    return tools.map(toolMeta => {
-      const tool = FinancialToolRegistry.getTool(toolMeta.name);
-      const jsonSchema = WealthGenieMcpServer.convertJoiToJsonSchema(tool.schema);
-      return {
-        name: tool.name,
-        description: tool.description,
-        parameters: jsonSchema,
-      };
-    });
-  }
-
-  /**
-   * Sets up ListTools and CallTool MCP protocol handlers.
-   */
-  setupHandlers() {
-    // List tools request handler
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-      const definitions = WealthGenieMcpServer.getToolDefinitions();
-      const mcpTools = definitions.map(def => ({
-        name: def.name,
-        description: def.description,
-        inputSchema: def.parameters,
-      }));
-      return { tools: mcpTools };
-    });
-
-    // Call tool request handler
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const { name, arguments: args } = request.params;
-      const result = await FinancialToolRegistry.executeTool(name, args || {});
-      if (!result.success) {
-        return {
-          isError: true,
-          content: [{ type: 'text', text: result.error || `Execution failed for '${name}'` }],
-        };
-      }
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result.result) }],
-      };
-    });
-  }
-
-  /**
-   * Directly executes a tool through FinancialToolRegistry.
-   */
-  static async executeTool(name, args = {}, context = {}) {
-    return FinancialToolRegistry.executeTool(name, args, context);
-  }
-
-  /**
-   * Connects the server to Stdio transport for local CLI / Claude Desktop connections.
-   */
-  async connectStdio() {
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    console.error('[WealthGenieMcpServer] MCP Server connected via stdio transport.');
-  }
-
-  /**
-   * Returns current count of active SSE sessions.
-   */
-  getActiveSessionCount() {
-    return this.sseTransports.size;
-  }
-
-  /**
-   * Handles incoming SSE connection for HTTP transport.
-   * Enforces max concurrent sessions and reaps disconnected clients on close.
-   */
-  async handleSseConnection(req, res) {
-    const userId = req.user?.userId;
-    if (!userId) {
-      return res.status(401).json({ error: 'Authenticated MCP session required.' });
-    }
-    const capacity = this.checkSseCapacity(userId);
-    if (!capacity.allowed) {
-      return res.status(capacity.status).json({
-        error: 'MCP session capacity reached.',
-        code: capacity.code,
-      });
-    }
-
-    const transport = new SSEServerTransport('/api/mcp/messages', res);
-    const sessionId = transport.sessionId;
-    this.sseTransports.set(sessionId, {
-      transport,
-      userId: String(userId),
-      createdAt: new Date(),
-    });
-
-    const cleanup = () => {
-      if (this.sseTransports.get(sessionId)?.transport === transport) {
-        this.sseTransports.delete(sessionId);
-      }
-    };
-
-    transport.onclose = cleanup;
-    res.on('close', cleanup);
-    res.on('finish', cleanup);
-    req.on('close', cleanup);
-    req.on('aborted', cleanup);
-    if (req.socket) {
-      req.socket.on('close', cleanup);
-    }
-
-    await this.server.connect(transport);
-  }
-
-  /**
-   * Handles incoming SSE messages endpoint for HTTP transport.
-   */
-  async handleSseMessage(req, res) {
-    const sessionId = req.query.sessionId;
-    const session = this.sseTransports.get(sessionId);
-    if (!session || session.userId !== String(req.user?.userId || '')) {
-      // Do not reveal whether a different user's session ID exists.
-      return res.status(404).json({ error: 'MCP session not found.' });
-    }
-    await session.transport.handlePostMessage(req, res);
+export class McpRequestError extends Error {
+  constructor(code, message = code) {
+    super(message);
+    this.name = 'McpRequestError';
+    this.code = code;
   }
 }
 
-export const mcpServerInstance = new WealthGenieMcpServer();
+function removeJoiPatternPlaceholders(schema) {
+  if (!schema || typeof schema !== 'object') return;
+  if (schema.patternProperties && schema.properties) {
+    for (const property of Object.keys(schema.properties)) {
+      const unwrapped = property.startsWith('/') && property.endsWith('/') ? property.slice(1, -1) : property;
+      if (Object.hasOwn(schema.patternProperties, property) || Object.hasOwn(schema.patternProperties, unwrapped)) {
+        delete schema.properties[property];
+      }
+    }
+    const patterns = Object.keys(schema.patternProperties);
+    if (patterns.length === 1) schema.propertyNames = { pattern: patterns[0] };
+  }
+  for (const child of Object.values(schema)) {
+    if (Array.isArray(child)) child.forEach(removeJoiPatternPlaceholders);
+    else if (child && typeof child === 'object') removeJoiPatternPlaceholders(child);
+  }
+}
 
-if (process.argv[1] && process.argv[1].replace(/\\/g, '/').endsWith('wealthgenieMcpServer.js')) {
-  mcpServerInstance.connectStdio().catch(err => {
-    console.error('[WealthGenieMcpServer] Failed to connect stdio transport:', err);
-    process.exit(1);
+export function convertJoiToJsonSchema(joiSchema, { maxXirrCashflows = 600, maxXirrAbsAmount = 1000000000000 } = {}) {
+  const jsonSchema = parseJoi(joiSchema) || {};
+  if (!jsonSchema.type) jsonSchema.type = 'object';
+  if (!jsonSchema.properties) jsonSchema.properties = {};
+  delete jsonSchema.$schema;
+  // joi-to-json expresses Joi's object default with additionalProperties:false
+  // in current releases; preserve that strictness as an explicit contract.
+  if (joiSchema?.type === 'object' && jsonSchema.additionalProperties === undefined) {
+    jsonSchema.additionalProperties = false;
+  }
+  removeJoiPatternPlaceholders(jsonSchema);
+  if (jsonSchema.properties?.cashflows?.items?.properties?.amount) {
+    jsonSchema.properties.cashflows.maxItems = maxXirrCashflows;
+    jsonSchema.properties.cashflows.items.properties.amount.minimum = -maxXirrAbsAmount;
+    jsonSchema.properties.cashflows.items.properties.amount.maximum = maxXirrAbsAmount;
+    jsonSchema.properties.cashflows.items.properties.date = {
+      type: 'string',
+        format: 'date',
+        maxLength: 10,
+        pattern: '^\\d{4}-\\d{2}-\\d{2}$',
+    };
+  }
+  return jsonSchema;
+}
+
+function inspectJson(value, { maxDepth = MAX_RESULT_DEPTH, maxNodes = MAX_RESULT_NODES } = {}) {
+  let nodes = 0;
+  const visit = (item, depth) => {
+    nodes += 1;
+    if (nodes > maxNodes || depth > maxDepth) throw new McpRequestError('MCP_PAYLOAD_COMPLEXITY_LIMIT');
+    if (typeof item === 'number' && !Number.isFinite(item)) throw new McpRequestError('MCP_NON_FINITE_NUMBER');
+    if (typeof item === 'string' && (item.includes('\0') || item.length > 8192)) throw new McpRequestError('MCP_STRING_LIMIT');
+    if (Array.isArray(item)) {
+      for (const child of item) visit(child, depth + 1);
+    } else if (item && typeof item === 'object') {
+      for (const [key, child] of Object.entries(item)) {
+        if (DANGEROUS_KEYS.has(key) || key.startsWith('__')) throw new McpRequestError('MCP_UNSAFE_PROPERTY');
+        visit(child, depth + 1);
+      }
+    }
+  };
+  visit(value, 0);
+}
+
+export function validateMcpPayload(value) {
+  inspectJson(value, { maxDepth: 16, maxNodes: 5000 });
+  return true;
+}
+
+function safeMcpError(error) {
+  const code = SAFE_MCP_ERROR_CODES.has(error?.code) ? error.code : 'MCP_TOOL_EXECUTION_FAILED';
+  const messages = {
+    MCP_CAPACITY_EXCEEDED: 'MCP calculation capacity is temporarily exhausted.',
+    MCP_CAPACITY_UNAVAILABLE: 'MCP capacity control is temporarily unavailable.',
+    MCP_PROFILE_CONTEXT_REQUIRED: 'Select an owned financial profile for this simulation.',
+    MCP_PROFILE_CONTEXT_NOT_FOUND: 'The selected financial profile is unavailable.',
+    MCP_PROFILE_CONTEXT_INVALID: 'The selected profile cannot be used for this simulation.',
+    MCP_TOOL_TIMEOUT: 'The MCP calculation exceeded its time budget.',
+    MCP_CLIENT_CANCELLED: 'The MCP request was cancelled.',
+    MCP_SHUTDOWN: 'MCP is shutting down.',
+    MCP_INVALID_ARGUMENTS: 'The tool arguments do not match the published input schema.',
+    MCP_UNSAFE_PROPERTY: 'The request contains a prohibited property.',
+    MCP_PAYLOAD_COMPLEXITY_LIMIT: 'The request exceeds the supported structural limits.',
+    MCP_NON_FINITE_NUMBER: 'The request contains an invalid numeric value.',
+    MCP_STRING_LIMIT: 'The request contains an oversized or invalid string.',
+  };
+  return { code, message: messages[code] || GENERIC_EXECUTION_ERROR };
+}
+
+function boundedResult(value) {
+  inspectJson(value);
+  const text = JSON.stringify(value);
+  if (Buffer.byteLength(text, 'utf8') > MAX_RESULT_BYTES) throw new McpRequestError('MCP_RESULT_TOO_LARGE');
+  return { text, value };
+}
+
+function sha256(value) {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+export async function loadOwnedProfile({ profileId, userId, profileModel = FinancialProfile, resolveCurrent = resolveCurrentFinancialProfile }) {
+  if (!profileId) throw new McpRequestError('MCP_PROFILE_CONTEXT_REQUIRED');
+  if (!mongoose.isValidObjectId(profileId)) throw new McpRequestError('MCP_PROFILE_CONTEXT_NOT_FOUND');
+  const current = await resolveCurrent({ userId, profileModel });
+  const document = current.profile;
+  if (!document || String(document._id) !== String(profileId)) throw new McpRequestError('MCP_PROFILE_CONTEXT_NOT_FOUND');
+  try {
+    if (!Number.isSafeInteger(document.version) || document.version < 1) {
+      throw new McpRequestError('MCP_PROFILE_CONTEXT_INVALID');
+    }
+    const profile = buildRecommendationProfile(document);
+    return {
+      profile,
+      profileId: String(document._id),
+      version: document.version,
+      snapshotHash: sha256(profile),
+      financialProfileStateRevision: Number(current.state.revision),
+    };
+  } catch {
+    throw new McpRequestError('MCP_PROFILE_CONTEXT_INVALID');
+  }
+}
+
+function resultForError(error) {
+  const safe = safeMcpError(error);
+  return {
+    isError: true,
+    content: [{ type: 'text', text: JSON.stringify(safe) }],
+  };
+}
+
+function toolResult(name, result, tool, profileSnapshot) {
+  const wrapped = buildMcpResult({
+    toolName: name,
+    tool,
+    result,
+    profile: profileSnapshot?.profile || null,
+    profileVersion: profileSnapshot?.version ?? null,
+    profileSnapshotHash: profileSnapshot?.snapshotHash ?? null,
+    profileId: profileSnapshot?.profileId ?? null,
+    financialProfileStateRevision: profileSnapshot?.financialProfileStateRevision ?? null,
+  });
+  if (!validateOutput(wrapped)) throw new McpRequestError('MCP_RESULT_SCHEMA_INVALID');
+  const bounded = boundedResult(wrapped);
+  return { content: [{ type: 'text', text: bounded.text }], structuredContent: bounded.value };
+}
+
+function finalizeToolExecution(operation, release, startedAt, runtime) {
+  let finalized = false;
+  const finalize = () => {
+    if (finalized) return;
+    finalized = true;
+    release.signal?.removeEventListener('abort', abortForLeaseLoss);
+    PrometheusMetrics.recordMcpToolDuration(Date.now() - startedAt);
+    PrometheusMetrics.setGauge('mcp_active_tool_executions', runtime?.snapshot().activeTools || 0);
+    void release();
+  };
+  const abortForLeaseLoss = () => operation.abort?.(release.signal.reason);
+  if (release.signal?.aborted) abortForLeaseLoss();
+  else release.signal?.addEventListener('abort', abortForLeaseLoss, { once: true });
+  // Handle both fulfillment and rejection explicitly; a bare finally() would
+  // create a second rejected promise on failure and can trigger an unhandled
+  // rejection during timeout, cancellation, or shutdown.
+  void operation.settled.then(finalize, finalize);
+}
+
+function createServer({ transportKind, principal = null, profileId = null, capacity = null, runtime = null, config = null, parentSignal = null, toolRegistry = FinancialToolRegistry }) {
+  const server = new Server(
+    { name: 'WealthGenie MCP Tools', version: '1.0.0' },
+    { capabilities: { tools: {} } },
+  );
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: toolRegistry.listMcpTools({ transport: transportKind }).map(({ name, description, version }) => {
+      const tool = toolRegistry.getTool(name);
+      const definition = {
+        name,
+        description: `${description} Results are non-authoritative calculations, not recommendations.`,
+        inputSchema: convertJoiToJsonSchema(tool.schema, {
+          maxXirrCashflows: config?.maxXirrCashflows || 600,
+          maxXirrAbsAmount: config?.maxXirrAbsAmount || 1000000000000,
+        }),
+        outputSchema: mcpOutputSchema(),
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+        _meta: { wealthgenie: { toolVersion: version, authority: 'NON_AUTHORITATIVE', profileContext: tool.mcpPolicy.profileContext, costClass: tool.mcpPolicy.costClass } },
+      };
+      return definition;
+    }),
+  }));
+
+  server.setRequestHandler(CallToolRequestSchema, async request => {
+    const { name, arguments: args } = request.params;
+    const tool = toolRegistry.getTool(name);
+    if (!tool || !isMcpToolAllowed(tool, { transport: transportKind })) {
+      return resultForError(new McpRequestError('MCP_TOOL_NOT_ALLOWED'));
+    }
+    try {
+      inspectJson(args || {});
+      if (name === 'xirr_calculator') {
+        const cashflows = args?.cashflows;
+        if (!Array.isArray(cashflows)
+            || cashflows.length > (config?.maxXirrCashflows || 600)
+            || cashflows.some(flow => Math.abs(flow.amount) > (config?.maxXirrAbsAmount || 1000000000000))) {
+          throw new McpRequestError('MCP_INVALID_ARGUMENTS');
+        }
+      }
+      if (transportKind === 'stdio' && tool.mcpPolicy.profileContext === 'required') {
+        throw new McpRequestError('MCP_PROFILE_CONTEXT_REQUIRED');
+      }
+      const release = transportKind === 'remote'
+        ? await capacity.acquireToolPermit(principal.userId, name, tool.mcpPolicy.costClass)
+        : () => {};
+      PrometheusMetrics.inc('mcp_tool_calls_total');
+      const executionStartedAt = Date.now();
+      let profileSnapshot = null;
+      let operation;
+      try {
+        const execute = async signal => {
+            if (signal.aborted) throw signal.reason || new McpRequestError('MCP_CLIENT_CANCELLED');
+            if (tool.mcpPolicy.profileContext === 'required' || (tool.mcpPolicy.profileContext === 'optional' && profileId)) {
+              profileSnapshot = await loadOwnedProfile({ profileId, userId: principal.userId });
+            }
+            if (signal.aborted) throw signal.reason || new McpRequestError('MCP_CLIENT_CANCELLED');
+            const execution = await toolRegistry.executeTool(name, args || {}, {
+              ...(profileSnapshot ? { profile: profileSnapshot.profile } : {}),
+              signal,
+              mcpRequest: true,
+            });
+            if (!execution.success) throw new McpRequestError('MCP_INVALID_ARGUMENTS');
+            return execution.result;
+          };
+        operation = runtime
+          ? runtime.startTool(execute, parentSignal)
+          : {
+            result: execute(new AbortController().signal),
+            settled: Promise.resolve(),
+          };
+        PrometheusMetrics.setGauge('mcp_active_tool_executions', runtime?.snapshot().activeTools || 0);
+        finalizeToolExecution(operation, release, executionStartedAt, runtime);
+        const result = await operation.result;
+        const response = toolResult(name, result, tool, profileSnapshot);
+        PrometheusMetrics.inc('mcp_tool_successes_total');
+        return response;
+      } catch (error) {
+        PrometheusMetrics.inc('mcp_tool_failures_total');
+        if (error instanceof McpCapacityError) PrometheusMetrics.inc('mcp_capacity_rejections_total');
+        if (error?.code === 'MCP_TOOL_TIMEOUT') PrometheusMetrics.inc('mcp_tool_timeouts_total');
+        if (operation?.settled) finalizeToolExecution(operation, release, executionStartedAt, runtime);
+        else await release();
+        return resultForError(error);
+      }
+    } catch (error) {
+      PrometheusMetrics.inc('mcp_tool_failures_total');
+      if (error instanceof McpCapacityError) PrometheusMetrics.inc('mcp_capacity_rejections_total');
+      return resultForError(error);
+    }
+  });
+  return server;
+}
+
+export class WealthGenieMcpServer {
+  static convertJoiToJsonSchema = convertJoiToJsonSchema;
+
+  static getToolDefinitions({ transport = 'remote', config = null } = {}) {
+    return FinancialToolRegistry.listMcpTools({ transport }).map(({ name, description, version }) => {
+      const tool = FinancialToolRegistry.getTool(name);
+      return {
+        name, description, version,
+        parameters: convertJoiToJsonSchema(tool.schema, {
+          maxXirrCashflows: config?.maxXirrCashflows || 600,
+          maxXirrAbsAmount: config?.maxXirrAbsAmount || 1000000000000,
+        }),
+        outputSchema: mcpOutputSchema(),
+      };
+    });
+  }
+
+  async connectStdio() {
+    const server = createServer({ transportKind: 'stdio' });
+    await server.connect(new StdioServerTransport());
+    console.error('[WealthGenieMcpServer] Connected using explicitly allowlisted stdio tools.');
+  }
+}
+
+export async function handleStatelessMcpRequest(req, res, {
+  principal,
+  profileId = null,
+  capacity,
+  runtime,
+  config,
+  toolRegistry = FinancialToolRegistry,
+} = {}) {
+  const requestLease = runtime.acquireRequest();
+  const abortRequest = () => requestLease.abort(new McpRequestError('MCP_CLIENT_CANCELLED'));
+  req.once('aborted', abortRequest);
+  res.once('close', () => { if (!res.writableEnded) abortRequest(); });
+  const server = createServer({
+    transportKind: 'remote', principal, profileId, capacity, runtime, config,
+    parentSignal: requestLease.signal,
+    toolRegistry,
+  });
+  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+  try {
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } finally {
+    req.off('aborted', abortRequest);
+    requestLease.release();
+    await server.close().catch(() => {});
+  }
+}
+
+export function isMcpToolKnown(name) {
+  return Object.hasOwn(MCP_TOOL_POLICY, name);
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  new WealthGenieMcpServer().connectStdio().catch(error => {
+    console.error('[WealthGenieMcpServer] stdio startup failed:', error?.code || 'MCP_START_FAILED');
+    process.exitCode = 1;
   });
 }

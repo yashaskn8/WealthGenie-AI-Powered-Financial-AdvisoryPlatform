@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Building2,
   Shield,
@@ -23,10 +23,14 @@ import * as api from '../../services/api';
 import SebiDisclaimer from '../SebiDisclaimer';
 import {
   formatMarketTimestamp,
+  getMarketAttemptedProvider,
   getMarketDisplayState,
   getMarketEvidenceSource,
   nullableMarketNumber,
+  readableSource,
+  safeSourceUrl,
 } from '../../utils/marketDataDisplay';
+import { formatINR } from '../../utils/recommendationPresentation';
 import { toOptionalNumber } from '../../utils/financialValues';
 import { useMarketContext } from '../../state/useMarketContext';
 
@@ -147,10 +151,59 @@ function getRiskTierColor(tier) {
   }
 }
 
+const WTI_SUPPORTED_TAX_CONTROLS = new Set([
+  'annualGrossIncome', 'incomeSource', 'regime', 'fiscalYear', 'userAge',
+  'holdingPeriodMonths', 'section112AExemptionUsed', 'acquisitionDate', 'redemptionDate',
+]);
+
+function hasCompleteWtiStateBinding(binding) {
+  return Boolean(binding?.profileId)
+    && Number.isSafeInteger(binding?.profileVersion) && binding.profileVersion > 0
+    && Boolean(binding?.recommendationId)
+    && Number.isSafeInteger(binding?.allocationRevision) && binding.allocationRevision > 0
+    && Boolean(binding?.allocationRevisionId)
+    && /^[a-f0-9]{64}$/i.test(binding?.portfolioFingerprint || '')
+    && /^[a-f0-9]{64}$/i.test(binding?.recommendationFingerprint || '');
+}
+
+function sameWtiStateBinding(left, right) {
+  return hasCompleteWtiStateBinding(left) && hasCompleteWtiStateBinding(right)
+    && left.profileId === right.profileId
+    && left.profileVersion === right.profileVersion
+    && left.recommendationId === right.recommendationId
+    && left.allocationRevision === right.allocationRevision
+    && left.allocationRevisionId === right.allocationRevisionId
+    && left.portfolioFingerprint === right.portfolioFingerprint
+    && left.recommendationFingerprint === right.recommendationFingerprint;
+}
+
 const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const profileId = userProfile?.profileId;
   const parentInstrumentId = inv?.id;
-  const requestKey = `${profileId || 'missing-profile'}:${parentInstrumentId || 'missing-instrument'}`;
+  const financialStateBinding = useMemo(() => ({
+    profileId,
+    profileVersion: Number(userProfile?.version ?? recommendationMeta?.profile_version),
+    recommendationId: recommendationMeta?.recommendationId || recommendationMeta?.recommendation_id,
+    allocationRevision: Number(recommendationMeta?.allocation_revision),
+    allocationRevisionId: recommendationMeta?.allocation_revision_id,
+    portfolioFingerprint: recommendationMeta?.portfolio_fingerprint,
+    recommendationFingerprint: recommendationMeta?.recommendation_fingerprint,
+  }), [
+    profileId,
+    userProfile?.version,
+    recommendationMeta?.profile_version,
+    recommendationMeta?.recommendationId,
+    recommendationMeta?.recommendation_id,
+    recommendationMeta?.allocation_revision,
+    recommendationMeta?.allocation_revision_id,
+    recommendationMeta?.portfolio_fingerprint,
+    recommendationMeta?.recommendation_fingerprint,
+  ]);
+  const financialKey = JSON.stringify({
+    ...financialStateBinding,
+    parentInstrumentId,
+    revisionId: recommendationMeta?.allocation_revision_id,
+  });
 
   const [rankingResult, setRankingResult] = useState({
     requestKey: null,
@@ -162,11 +215,11 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
     error: null,
   });
 
-  const wtiData = useMemo(() => rankingResult.catalog || ({
+  const wtiData = useMemo(() => (rankingResult.financialKey === financialKey && rankingResult.catalog) || ({
     riskLevel: inv?.riskScore ?? inv?.risk ?? null,
     note: null,
     howToStart: null,
-  }), [inv, rankingResult.catalog]);
+  }), [inv, rankingResult, financialKey]);
 
   const subCategoryMap = wtiData?.sectors || wtiData?.subCategories || null;
   const subKeys = subCategoryMap ? Object.keys(subCategoryMap) : [];
@@ -174,6 +227,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const [contextPreview, setContextPreview] = useState(null);
   const [contextPreviewError, setContextPreviewError] = useState(null);
   const [contextPreviewLoading, setContextPreviewLoading] = useState(false);
+  const previewController = useRef(null);
   const {
     marketContext,
     marketContextError,
@@ -188,9 +242,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   // Illustrative principal & tax context state
   const [illustrativePrincipal, setIllustrativePrincipal] = useState(10000);
   const [showTaxDrawer, setShowTaxDrawer] = useState(false);
-  const [taxAnnualIncome, setTaxAnnualIncome] = useState(
-    userProfile?.annualGrossIncome ?? userProfile?.annual_gross_income ?? ''
-  );
+  const [taxAnnualIncome, setTaxAnnualIncome] = useState('');
   const [taxIncomeSource, setTaxIncomeSource] = useState('');
   const [taxRegime, setTaxRegime] = useState('');
   const [taxFiscalYear, setTaxFiscalYear] = useState('');
@@ -207,6 +259,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const [taxPolicyMetadata, setTaxPolicyMetadata] = useState(null);
   const [taxPolicyError, setTaxPolicyError] = useState(null);
   const [activeTaxContext, setActiveTaxContext] = useState(null);
+  const requestKey = JSON.stringify({ financialKey, activeTaxContext, illustrativePrincipal });
 
   useEffect(() => {
     if (typeof api.getTaxPolicyMetadata !== 'function') return undefined;
@@ -215,20 +268,36 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
       .then((metadata) => {
         if (cancelled) return;
         setTaxPolicyMetadata(metadata);
-        if (!taxFiscalYear && metadata?.currentFiscalYearVerified && metadata.currentFiscalYear) {
-          setTaxFiscalYear(metadata.currentFiscalYear);
+        if (metadata?.currentFiscalYearVerified && metadata.currentFiscalYear) {
+          setTaxFiscalYear(current => current || metadata.currentFiscalYear);
         }
       })
       .catch((error) => {
         if (!cancelled) setTaxPolicyError(error?.message || 'Verified tax policy metadata is unavailable.');
       });
     return () => { cancelled = true; };
-  }, [taxFiscalYear]);
+  }, []);
 
   useEffect(() => {
     setContextPreview(null);
     setContextPreviewError(null);
-  }, [parentInstrumentId]);
+    setActiveTaxContext(null);
+    setShowTaxDrawer(false);
+    setTaxAnnualIncome('');
+    setTaxIncomeSource('');
+    setTaxRegime('');
+    setTaxFiscalYear('');
+    setTaxUserAge(userProfile?.age ?? '');
+    setHoldingPeriodMonths('');
+    setUseExactTransactionDates(false);
+    setAcquisitionDate('');
+    setRedemptionDate('');
+    setSection112AExemptionUsed('');
+    setTaxSection80C('');
+    setTaxNps80CCD1B('');
+    setTaxAdvancedDeductions({});
+    setTaxFormError('');
+  }, [financialKey, userProfile?.age]);
 
   useEffect(() => {
     if (userProfile?.age !== undefined && userProfile?.age !== null) {
@@ -238,6 +307,11 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
 
   const currentMarketSnapshot = marketContext?.marketSnapshot || null;
   const currentSnapshotFingerprint = marketSnapshotFingerprint(currentMarketSnapshot);
+  useEffect(() => {
+    previewController.current?.abort();
+    setContextPreviewLoading(false);
+    return () => previewController.current?.abort();
+  }, [financialKey, currentSnapshotFingerprint]);
   useEffect(() => {
     if (contextPreview && contextPreview.__marketSnapshotFingerprint !== currentSnapshotFingerprint) {
       setContextPreview(null);
@@ -254,26 +328,30 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
       setContextPreviewError('A live market context and saved Financial Profile are required.');
       return;
     }
+    const controller = new AbortController();
+    previewController.current = controller;
     try {
       setContextPreviewLoading(true);
       setContextPreviewError(null);
-      const result = await api.previewMarketContextAdjustment(profileId);
+      const result = await api.previewMarketContextAdjustment(profileId, { signal: controller.signal });
+      if (controller.signal.aborted) return;
       setContextPreview({
         ...result,
         __marketSnapshotFingerprint: marketSnapshotFingerprint(result?.marketContext?.marketSnapshot),
       });
     } catch (error) {
+      if (controller.signal.aborted) return;
       setContextPreview(null);
       setContextPreviewError(error.message || 'Market-context adjustment preview is unavailable.');
     } finally {
-      setContextPreviewLoading(false);
+      if (!controller.signal.aborted) setContextPreviewLoading(false);
     }
   };
 
   // Fetch products whenever instrument, profile, or activeTaxContext changes
   useEffect(() => {
     const controller = new AbortController();
-    if (!profileId || !parentInstrumentId) {
+    if (!profileId || !parentInstrumentId || !hasCompleteWtiStateBinding(financialStateBinding)) {
       return () => controller.abort();
     }
 
@@ -284,11 +362,18 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
       illustrativePrincipal,
     };
 
-    api.rankInvestmentCandidates(profileId, parentInstrumentId, currentTaxContext, { signal: controller.signal })
+    api.rankInvestmentCandidates(profileId, parentInstrumentId, currentTaxContext, { signal: controller.signal }, financialStateBinding)
       .then((result) => {
+        if (controller.signal.aborted) return;
+        if (!sameWtiStateBinding(result?.financialStateBinding, financialStateBinding)) {
+          const stateError = new Error('The financial state changed while products were being ranked. Refresh the current plan and try again.');
+          stateError.code = 'FINANCIAL_STATE_CHANGED';
+          throw stateError;
+        }
         const ranked = Array.isArray(result?.products) ? result.products : [];
         setRankingResult({
           requestKey,
+          financialKey,
           products: ranked.map((product) => {
             const historicalReturn = nullableMarketNumber(product.historicalReturn?.valuePct);
             const nav = nullableMarketNumber(product.nav?.value);
@@ -320,23 +405,36 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
         });
       })
       .catch((error) => {
-        if (error?.code === 'REQUEST_ABORTED') return;
+        if (controller.signal.aborted || error?.code === 'REQUEST_ABORTED') return;
         setRankingResult({
           requestKey,
+          financialKey,
           products: [],
           catalog: null,
           suitability: null,
           ranking: null,
           comparisonUniverse: null,
-          error: 'Authoritative product ranking is temporarily unavailable. No personalized ranking has been generated.',
+          error: error?.code === 'FINANCIAL_STATE_CHANGED'
+            ? error.message
+            : 'Authoritative product ranking is temporarily unavailable. No personalized ranking has been generated.',
         });
       });
 
     return () => controller.abort();
-  }, [parentInstrumentId, profileId, requestKey, activeTaxContext, illustrativePrincipal]);
+  }, [parentInstrumentId, profileId, financialKey, requestKey, activeTaxContext, illustrativePrincipal, financialStateBinding]);
 
   const requiredTaxInputs = useMemo(() => (
-    [...new Set((rankingResult.products || []).flatMap(product => product.postTaxAnalysis?.requiredTaxInputs || []))]
+    [...new Set((rankingResult.products || [])
+      .filter(product => ['CALCULATED', 'REQUIRES_TAX_INPUTS'].includes(product.postTaxAnalysis?.status))
+      .flatMap(product => product.postTaxAnalysis?.requiredTaxInputs || [])
+      .filter(key => WTI_SUPPORTED_TAX_CONTROLS.has(key)))]
+  ), [rankingResult.products]);
+
+  const unsupportedTaxFactRequirements = useMemo(() => (
+    [...new Set((rankingResult.products || [])
+      .filter(product => !['CALCULATED', 'REQUIRES_TAX_INPUTS'].includes(product.postTaxAnalysis?.status)
+        || (product.postTaxAnalysis?.requiredTaxInputs || []).some(key => !WTI_SUPPORTED_TAX_CONTROLS.has(key)))
+      .flatMap(product => product.postTaxAnalysis?.requiredTaxInputs || []))]
   ), [rankingResult.products]);
 
   const handleApplyTaxInputs = (e) => {
@@ -344,16 +442,28 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
     setTaxFormError('');
     const incomeNum = Number(taxAnnualIncome);
     const ageNum = Number(taxUserAge);
-    if (!Number.isFinite(incomeNum) || incomeNum < 0 || !Number.isInteger(ageNum) || ageNum < 18 || ageNum > 120
-      || !taxIncomeSource || !taxRegime || !taxFiscalYear) {
-      setTaxFormError('Enter the required income, age, regime, income source, and fiscal year facts.');
+    const requiredFieldMissing = (
+      (requiredTaxInputs.includes('annualGrossIncome') && (taxAnnualIncome === '' || !Number.isFinite(incomeNum) || incomeNum < 0))
+      || (requiredTaxInputs.includes('userAge') && (!Number.isInteger(ageNum) || ageNum < 18 || ageNum > 120))
+      || (requiredTaxInputs.includes('incomeSource') && !taxIncomeSource)
+      || (requiredTaxInputs.includes('regime') && !taxRegime)
+      || (requiredTaxInputs.includes('fiscalYear') && !taxFiscalYear)
+      || (requiredTaxInputs.includes('section112AExemptionUsed') && section112AExemptionUsed === '')
+      || (requiredTaxInputs.includes('acquisitionDate') && !acquisitionDate)
+      || (requiredTaxInputs.includes('redemptionDate') && !redemptionDate)
+    );
+    if (requiredFieldMissing) {
+      setTaxFormError('Complete each required tax input shown for this calculation.');
       return;
     }
-    if (useExactTransactionDates && (!acquisitionDate || !redemptionDate || redemptionDate < acquisitionDate)) {
+    const exactDatesRequired = requiredTaxInputs.includes('acquisitionDate') || requiredTaxInputs.includes('redemptionDate');
+    if ((useExactTransactionDates || exactDatesRequired)
+      && (!acquisitionDate || !redemptionDate || redemptionDate < acquisitionDate)) {
       setTaxFormError('Enter both exact transaction dates, with redemption on or after acquisition.');
       return;
     }
-    if (!useExactTransactionDates && requiredTaxInputs.includes('holdingPeriodMonths') && holdingPeriodMonths === '') {
+    if (!useExactTransactionDates && !exactDatesRequired
+      && requiredTaxInputs.includes('holdingPeriodMonths') && holdingPeriodMonths === '') {
       setTaxFormError('Enter a holding period in months, or switch on exact transaction dates.');
       return;
     }
@@ -373,16 +483,13 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
       section80TTA: toOptionalNumber(taxAdvancedDeductions.section80TTA),
       section80TTB: toOptionalNumber(taxAdvancedDeductions.section80TTB),
     }).filter(([, value]) => value !== undefined));
-    const nextContext = {
-      annualGrossIncome: incomeNum,
-      regime: taxRegime,
-      fiscalYear: taxFiscalYear,
-      incomeSource: taxIncomeSource,
-      userAge: ageNum,
-      illustrativePrincipal,
-      deductions,
-    };
-    if (useExactTransactionDates) {
+    const nextContext = { illustrativePrincipal, deductions };
+    if (taxAnnualIncome !== '') nextContext.annualGrossIncome = incomeNum;
+    if (taxRegime) nextContext.regime = taxRegime;
+    if (taxFiscalYear) nextContext.fiscalYear = taxFiscalYear;
+    if (taxIncomeSource) nextContext.incomeSource = taxIncomeSource;
+    if (taxUserAge !== '' && Number.isFinite(ageNum)) nextContext.userAge = ageNum;
+    if (useExactTransactionDates || exactDatesRequired) {
       nextContext.acquisitionDate = acquisitionDate;
       nextContext.redemptionDate = redemptionDate;
     } else if (holdingPeriodMonths !== '') {
@@ -403,7 +510,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
     );
   }
 
-  const riskLevel = Number(wtiData.riskLevel);
+  const riskLevel = nullableMarketNumber(wtiData.riskLevel);
   const level = Number.isFinite(riskLevel) ? Math.max(0, Math.min(5, riskLevel - 1)) : null;
   const risk = level === null
     ? { label: 'Not available', color: '#64748b', desc: 'The backend did not provide a parent-category suitability risk classification.' }
@@ -413,7 +520,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const totalAngle = Math.PI;
   const segGap = 0.025;
 
-  const missingRankingInput = !profileId || !parentInstrumentId;
+  const missingRankingInput = !profileId || !parentInstrumentId || !hasCompleteWtiStateBinding(financialStateBinding);
   const rankingStatus = missingRankingInput
     ? 'error'
     : rankingResult.requestKey === requestKey
@@ -422,10 +529,9 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const products = rankingStatus === 'ready' ? rankingResult.products : [];
   const isEvidenceRanked = rankingResult.ranking?.status === 'EVIDENCE_RANKED';
   const isComparableSet = rankingResult.ranking?.status === 'VERIFIED_COMPARABLE_OPTIONS';
-  const isUnavailable = rankingStatus === 'ready' && rankingResult.ranking?.status === 'UNAVAILABLE';
 
   const rankingError = missingRankingInput
-    ? 'A saved Financial Profile and authoritative parent instrument are required. No provider ranking is shown.'
+    ? 'A saved Financial Profile and complete current recommendation binding are required. Refresh the current plan before comparing products.'
     : rankingStatus === 'error' ? rankingResult.error : null;
 
   const headerLabel = rankingStatus === 'loading'
@@ -441,10 +547,13 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const beginnerMarketState = contextAvailable ? marketContext.context : 'UNAVAILABLE';
   const contextCopy = MARKET_CONTEXT_COPY[beginnerMarketState] || MARKET_CONTEXT_COPY.UNAVAILABLE;
   const marketSnapshot = marketContext?.marketSnapshot || null;
+  const providerSelection = marketContext?.liveProviderSelection || marketSnapshot?.providerSelection || null;
   const marketDisplay = getMarketDisplayState(marketContext, {
     loading: marketContextLoading && marketContext === null && !marketContextError,
+    refreshFailed: marketContextTransport?.revalidationStatus === 'FAILED',
   });
   const marketEvidenceSource = getMarketEvidenceSource(marketContext);
+  const marketAttemptedProvider = getMarketAttemptedProvider(marketContext);
   const marketObservedAt = formatMarketTimestamp(marketSnapshot?.observedAt || marketContext?.observedAt);
   const currentAllocationSource = recommendationMeta?.current_allocation_source
     || recommendationMeta?.currentAllocationSource
@@ -520,7 +629,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
               borderColor: marketBadgeBorder,
             }}
           >
-            {contextAvailable ? contextRawState : marketDisplay.key}
+            {contextAvailable ? contextRawState.replaceAll('_', ' ') : marketDisplay.label}
           </span>
         </div>
 
@@ -536,7 +645,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
               <span role="status">Refresh failed; showing the last verified snapshot.</span>
             )}
             <span className="wti-market-data-asof">
-              As of: {marketObservedAt || 'Unavailable'} · Source: {marketEvidenceSource || 'Unavailable'}
+              As of: {marketObservedAt || 'Unavailable'} · Verified source: {marketEvidenceSource || 'Unavailable'} · Attempted provider: {marketAttemptedProvider || 'Unavailable'}
             </span>
             <button
               type="button"
@@ -586,7 +695,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
 
         {contextPreview && (
           <p className="wti-preview-feedback">
-            Server preview {contextPreview.applied ? 'applied' : 'did not apply'} a bounded {contextPreview.actualTotalTiltPct ?? 0}% total tilt across {contextPreview.explanations?.length ?? 0} allocation change{contextPreview.explanations?.length === 1 ? '' : 's'}. It is not persisted and does not execute trades.
+            Server preview {contextPreview.applied ? 'applied' : 'did not apply'} a bounded {contextPreview.actualTotalTiltPct ?? 'unavailable'}% total tilt across {contextPreview.explanations?.length ?? 'unavailable'} allocation change{contextPreview.explanations?.length === 1 ? '' : 's'}. It is not persisted and does not execute trades.
           </p>
         )}
         {contextPreviewError && (
@@ -709,6 +818,10 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
                     ? marketContext.sources.map(source => `${source.provider || 'UNAVAILABLE'} (${source.instrumentId || 'benchmark history'} · ${source.dataClass || 'UNAVAILABLE'})`).join(', ')
                     : 'UNAVAILABLE'}
                 </div>
+                {providerSelection && <div>
+                  Provider attempts: {(providerSelection.attemptedProviders || []).join(', ') || 'UNAVAILABLE'} · Selected: {providerSelection.selectedProvider || 'none'} · Fallback used: {providerSelection.fallbackUsed ? 'yes' : 'no'}
+                  {providerSelection.providerFailures?.length > 0 && ` · Failed attempts: ${providerSelection.providerFailures.map(failure => `${failure.provider} [${failure.reasonCodes.join(', ')}]`).join('; ')}`}
+                </div>}
                 <div>Reason codes: {contextReasonCodes.length ? contextReasonCodes.join(', ') : 'UNAVAILABLE'}</div>
               </div>
 
@@ -721,37 +834,52 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
       </section>
 
       {/* ─── Illustrative Investment & Tax Controls Bar ─── */}
-      <div className="wti-controls-bar">
-        <div className="wti-illustrative-group">
-          <span className="wti-illustrative-label">Illustrative example:</span>
-          {ILLUSTRATIVE_PRINCIPALS.map((amount) => (
-            <button
-              key={amount}
-              type="button"
-              className={`wti-amount-btn ${illustrativePrincipal === amount ? 'wti-amount-btn--active' : ''}`}
-              onClick={() => setIllustrativePrincipal(amount)}
-              title={`View illustrative ₹${amount.toLocaleString('en-IN')} investment outcome`}
-            >
-              ₹{amount.toLocaleString('en-IN')}
-            </button>
-          ))}
-        </div>
+      {rankingStatus === 'ready' && products.length > 0 && (
+        <div className="wti-controls-bar">
+          <div className="wti-illustrative-group">
+            <span className="wti-illustrative-label">Illustrative principal:</span>
+            {ILLUSTRATIVE_PRINCIPALS.map((amount) => (
+              <button
+                key={amount}
+                type="button"
+                className={`wti-amount-btn ${illustrativePrincipal === amount ? 'wti-amount-btn--active' : ''}`}
+                onClick={() => setIllustrativePrincipal(amount)}
+                title={`Use ₹${amount.toLocaleString('en-IN')} as the server calculation principal`}
+              >
+                ₹{amount.toLocaleString('en-IN')}
+              </button>
+            ))}
+          </div>
 
-        <button
-          type="button"
-          className="wti-tax-toggle-btn"
-          onClick={() => setShowTaxDrawer(!showTaxDrawer)}
-          title="Add or update income and tax regime details for personalized after-tax returns"
-        >
-          <Calculator size={14} />
-          <span>{activeTaxContext ? 'Update Tax Details' : 'Calculate after tax'}</span>
-          {showTaxDrawer ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-        </button>
-      </div>
+          {requiredTaxInputs.length > 0 && (
+            <button
+              type="button"
+              className="wti-tax-toggle-btn"
+              onClick={() => setShowTaxDrawer(!showTaxDrawer)}
+              title="Enter tax facts required by the backend calculation contract"
+            >
+              <Calculator size={14} />
+              <span>{activeTaxContext ? 'Update tax inputs' : 'Exact-product tax illustration'}</span>
+              {showTaxDrawer ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            </button>
+          )}
+        </div>
+      )}
+
+      {rankingStatus === 'ready' && products.length === 0 && (
+        <div role="status" className="wti-status-banner wti-status-banner--unavailable">
+          <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+          <div>No current source-qualified products are available for this category. No static fallback values were inserted.</div>
+        </div>
+      )}
 
       {/* ─── Expandable Tax Inputs Drawer ─── */}
-      {showTaxDrawer && (
+      {showTaxDrawer && rankingStatus === 'ready' && products.length > 0 && requiredTaxInputs.length > 0 && (
         <form className="wti-tax-drawer" onSubmit={handleApplyTaxInputs}>
+          <h4>Exact-product tax illustration</h4>
+          {unsupportedTaxFactRequirements.length > 0 && <p role="note">
+            Some listed products need product or account facts that are not available as user-entered tax controls. Their exact-product tax result remains unavailable; no tax treatment is inferred.
+          </p>}
           {requiredTaxInputs.includes('annualGrossIncome') && <div className="wti-tax-input-group">
             <label htmlFor="wti-annual-income">Annual Gross Income (₹)</label>
             <input
@@ -834,9 +962,9 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
             </div>
           )}
 
-          {requiredTaxInputs.includes('holdingPeriodMonths') && (
+          {(requiredTaxInputs.includes('holdingPeriodMonths') || requiredTaxInputs.includes('acquisitionDate') || requiredTaxInputs.includes('redemptionDate')) && (
             <>
-            <div className="wti-tax-input-group">
+            {requiredTaxInputs.includes('holdingPeriodMonths') && !requiredTaxInputs.includes('acquisitionDate') && !requiredTaxInputs.includes('redemptionDate') && <div className="wti-tax-input-group">
               <label htmlFor="wti-exact-dates">
                 <input
                   id="wti-exact-dates"
@@ -847,8 +975,8 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
                 Use exact transaction dates
               </label>
               <small>Use this when the tax result depends on the actual acquisition and redemption dates.</small>
-            </div>
-            {useExactTransactionDates ? (
+            </div>}
+            {useExactTransactionDates || requiredTaxInputs.includes('acquisitionDate') || requiredTaxInputs.includes('redemptionDate') ? (
               <>
                 <div className="wti-tax-input-group">
                   <label htmlFor="wti-acquisition-date">Acquisition date</label>
@@ -1036,13 +1164,9 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
         </div>
 
         {/* Sorting Controls */}
-        <div className="wti-sort-controls">
-          <span className="wti-sort-label">Sort:</span>
-          {[
-            { id: 'score', label: isEvidenceRanked ? 'Historical Evidence' : 'Comparable Set' },
-            { id: 'postTaxYield', label: activeTaxContext ? 'Post-Tax Calculated' : 'Post-Tax Needs Inputs' },
-            { id: 'expense', label: 'Expense Ratio Unavailable' },
-          ].map(mode => (
+        {products.length > 0 && <div className="wti-sort-controls">
+          <span className="wti-sort-label">Display order:</span>
+          {[{ id: 'score', label: isEvidenceRanked ? 'Historical evidence' : 'Comparable set' }].map(mode => (
             <button
               key={mode.id}
               type="button"
@@ -1056,7 +1180,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
               {mode.label}
             </button>
           ))}
-        </div>
+        </div>}
       </div>
 
       {wtiData.note && (
@@ -1083,13 +1207,6 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
         <div className="wti-note-banner">
           <Info size={14} style={{ flexShrink: 0, marginTop: 2 }} />
           <p>{rankingResult.ranking.warning}</p>
-        </div>
-      )}
-
-      {isUnavailable && !rankingError && (
-        <div role="status" className="wti-status-banner wti-status-banner--unavailable">
-          <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 2 }} />
-          <div><strong>UNAVAILABLE:</strong> No current source-qualified product comparison is available for this parent category. No fallback products or financial values were inserted.</div>
         </div>
       )}
 
@@ -1251,6 +1368,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
           return (
             <div
               key={product.id}
+              data-testid={`wti-product-${product.id}`}
               className={`wti-item ${isEvidenceRanked && product.rank === 1 && rankingResult.ranking?.hasUniqueLeader ? 'wti-item--featured' : ''}`}
             >
               <div
@@ -1274,16 +1392,16 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
                           borderColor: isEvidenceRanked ? 'rgba(34, 197, 94, 0.3)' : 'rgba(56, 189, 248, 0.25)',
                         }}
                       >
-                        {product.presentationStatus?.replaceAll('_', ' ') || 'UNAVAILABLE'}
+                        {readableSource(product.presentationStatus)}
                       </span>
                       {product.tiedRank && <span className="wti-badge">TIED RANK</span>}
                     </div>
 
                     <span className="wti-provider">
-                      {product.provider || 'Provider unavailable'} · {product.source?.provider || 'Source unavailable'}
+                      {readableSource(product.provider)} · {readableSource(product.source?.provider)}
                     </span>
                     <div className="wti-card-evidence-row">
-                      <span>Source: {product.source?.provider || 'Unavailable'}</span>
+                      <span>Source: {readableSource(product.source?.provider)}</span>
                       <span>As of: {productObservedAt || 'Unavailable'}</span>
                     </div>
 
@@ -1334,31 +1452,37 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
                         <strong>{Number.isFinite(postTax.postTaxRatePct) ? `${postTax.postTaxRatePct}%` : 'Unavailable'}</strong>
                       </span>
                       <span className="wti-badge" style={{ background: 'rgba(52, 211, 153, 0.1)', color: '#34d399', borderColor: 'rgba(52, 211, 153, 0.2)' }}>
-                        Defensible Post-Tax
+                        Exact-product tax illustration
                       </span>
                     </div>
 
                     <div className="wti-illustrative-grid">
                       <div>
                         <span>You invest</span>
-                        <strong>₹{postTax.illustrativePrincipal.toLocaleString('en-IN')}</strong>
+                        <strong>{formatINR(postTax.illustrativePrincipal)}</strong>
                       </div>
                       <div>
                         <span>Gross return</span>
-                        <strong>₹{Number.isFinite(postTax.grossGain) ? postTax.grossGain.toLocaleString('en-IN') : 'Unavailable'}</strong>
+                        <strong>{formatINR(postTax.grossGain)}</strong>
                       </div>
                       <div>
                         <span>Tax on gain</span>
-                        <strong>₹{Number.isFinite(postTax.incrementalTax) ? postTax.incrementalTax.toLocaleString('en-IN') : 'Unavailable'}</strong>
+                        <strong>{formatINR(postTax.incrementalTax)}</strong>
                       </div>
                       <div className="wti-keep-highlight">
                         <span>You keep</span>
-                        <strong>₹{Number.isFinite(postTax.netGain) ? postTax.netGain.toLocaleString('en-IN') : 'Unavailable'}</strong>
+                        <strong>{formatINR(postTax.netGain)}</strong>
                       </div>
                     </div>
 
                     <div className="wti-post-tax-disclosure">
                       {postTax.disclosure}
+                      {postTax.calculationClass === 'HISTORICAL_RETURN_POST_TAX_ILLUSTRATION' && (
+                        <p>
+                          Historical performance window: {Number.isFinite(postTax.historicalObservationWindowMonths) ? `${postTax.historicalObservationWindowMonths} months` : 'Unavailable'}.
+                          {' '}Tax holding-period basis: {postTax.holdingPeriodBasis || 'Unavailable'}. This is an illustration; those periods may differ.
+                        </p>
+                      )}
                     </div>
                   </div>
                 )}
@@ -1366,20 +1490,24 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
                 {/* If Post-Tax Requires Inputs */}
                 {postTax && postTax.status === 'REQUIRES_TAX_INPUTS' && (
                   <div className="wti-post-tax-cta-box">
-                    <span>After tax: Add tax details to calculate your return</span>
-                    <button
-                      type="button"
-                      onClick={() => setShowTaxDrawer(true)}
-                      className="wti-calc-tax-btn"
-                    >
-                      Calculate after tax
-                    </button>
+                    {(postTax.requiredTaxInputs || []).some(key => !WTI_SUPPORTED_TAX_CONTROLS.has(key))
+                      ? <span>Exact-product tax illustration is unavailable because one or more required product or account facts cannot be established here.</span>
+                      : <>
+                        <span>Exact-product tax illustration: required tax facts were not supplied.</span>
+                        <button
+                          type="button"
+                          onClick={() => setShowTaxDrawer(true)}
+                          className="wti-calc-tax-btn"
+                        >
+                          Enter required facts
+                        </button>
+                      </>}
                   </div>
                 )}
 
-                {postTax && ['TAX_CLASSIFICATION_UNAVAILABLE', 'FISCAL_YEAR_UNSUPPORTED', 'PRODUCT_FACTS_UNAVAILABLE', 'UNAVAILABLE'].includes(postTax.status) && (
+                {postTax && ['TAX_CLASSIFICATION_UNAVAILABLE', 'TAX_CLASSIFICATION_REQUIRES_ACQUISITION_FACTS', 'FISCAL_YEAR_UNSUPPORTED', 'PRODUCT_FACTS_UNAVAILABLE', 'UNAVAILABLE'].includes(postTax.status) && (
                   <div className="wti-post-tax-cta-box">
-                    <span>After-tax result: {postTax.status.replaceAll('_', ' ').toLowerCase()}.</span>
+                    <span>Exact-product tax illustration: {postTax.status.replaceAll('_', ' ').toLowerCase()}.</span>
                     {postTax.disclosure && <small>{postTax.disclosure}</small>}
                   </div>
                 )}
@@ -1395,6 +1523,9 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
                     : isEvidenceRanked
                     ? 'Ranked only among explicitly sourced Direct Growth options in the exact AMFI category by verified one-year historical NAV return. Historical performance is not an expected return.'
                     : 'Verified AMFI category and fresh NAV. No defensible merit order is claimed for this comparable option.'}
+                  {!isEvidenceRanked && Number.isFinite(nullableMarketNumber(product.historicalReturn?.valuePct))
+                    ? ' A verified historical return is shown for context only. Historical performance is not an expected return.'
+                    : ''}
                 </p>
 
                 {product.taxSavingsNote && (
@@ -1419,15 +1550,32 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
                   </summary>
 
                   <div className="wti-meta-footer">
-                    <div className="meta-box"><Building2 size={12} /> Source: {product.source?.provider || 'UNAVAILABLE'}</div>
+                    <div className="meta-box"><Building2 size={12} /> Source: {readableSource(product.source?.provider)}</div>
+                    <div className="meta-box">Product type: {readableSource(product.productType)}</div>
+                    {safeSourceUrl(product.source?.url) && <a href={safeSourceUrl(product.source.url)} target="_blank" rel="noreferrer">Official source</a>}
                     {product.nav && <div className="meta-box"><Wallet size={12} /> NAV: {Number.isFinite(nullableMarketNumber(product.nav?.value)) ? `₹${nullableMarketNumber(product.nav.value).toLocaleString('en-IN')}` : 'UNAVAILABLE'}</div>}
                     {product.nav && <div className="meta-box"><HistoryIcon size={12} /> Valuation: {product.valuationDate || 'UNAVAILABLE'}</div>}
-                    {product.officialRate && <div className="meta-box"><Wallet size={12} /> Rate class: {product.officialRate.dataClass?.replaceAll('_', ' ') || 'UNAVAILABLE'}</div>}
+                    {product.officialRate && <div className="meta-box"><Wallet size={12} /> Rate class: {readableSource(product.officialRate.dataClass)}</div>}
                     {product.officialRate && <div className="meta-box"><HistoryIcon size={12} /> Effective: {product.officialRate.effectiveFrom || 'UNAVAILABLE'} → {product.officialRate.effectiveTo || 'until revised'}</div>}
                     <div className="meta-box"><Activity size={12} /> Freshness: {product.freshness?.status || 'UNAVAILABLE'}</div>
                     <div className="meta-box">Eligibility: {product.productEligibility?.status?.replaceAll('_', ' ') || 'UNAVAILABLE'}</div>
                     {product.productType === 'MUTUAL_FUND' && <div className="meta-box">Plan: {product.plan || 'UNAVAILABLE'}</div>}
                     {product.productType === 'MUTUAL_FUND' && <div className="meta-box">Option: {product.option || 'UNAVAILABLE'}</div>}
+                    {product.productType === 'ETF' && <>
+                      <div className="meta-box">Benchmark: {product.benchmark?.name || 'UNAVAILABLE'}{product.benchmark?.returnVariant ? ` (${product.benchmark.returnVariant})` : ''}</div>
+                      <div className="meta-box">Exchange / ticker: {product.exchange || 'UNAVAILABLE'} / {product.ticker || 'UNAVAILABLE'}</div>
+                      <div className="meta-box">ISIN: {product.isin || 'UNAVAILABLE'}</div>
+                      <div className="meta-box">Exchange market price: {Number.isFinite(nullableMarketNumber(product.marketPrice?.value)) ? `₹${nullableMarketNumber(product.marketPrice.value).toLocaleString('en-IN')}` : 'Unavailable'}</div>
+                      <div className="meta-box">Fund NAV: {Number.isFinite(nullableMarketNumber(product.nav?.value)) ? `₹${nullableMarketNumber(product.nav.value).toLocaleString('en-IN')}` : 'Unavailable'}</div>
+                      {(product.identityEvidence || []).map(evidence => safeSourceUrl(evidence?.url) && (
+                        <a key={`${evidence.authority}-${evidence.url}`} href={safeSourceUrl(evidence.url)} target="_blank" rel="noreferrer">
+                          {evidence.authority || 'Official product identity'} evidence
+                        </a>
+                      ))}
+                      {safeSourceUrl(product.benchmark?.source?.url) && (
+                        <a href={safeSourceUrl(product.benchmark.source.url)} target="_blank" rel="noreferrer">Benchmark evidence</a>
+                      )}
+                    </>}
                     {product.historicalReturn && <div className="meta-box"><HistoryIcon size={12} /> History: {product.historicalReturn.startDate} → {product.historicalReturn.endDate}</div>}
                     {isEvidenceRanked && product.rank === 1 && rankingResult.ranking?.hasUniqueLeader && (
                       <div className="meta-box meta-box--pick"><Star size={12} /> Rank #1 by 1Y Historical NAV Return</div>

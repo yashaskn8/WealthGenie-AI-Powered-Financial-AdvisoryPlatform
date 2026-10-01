@@ -13,6 +13,7 @@ import {
   validateStrict,
 } from '../validation/financialSchemas.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import { requireCurrentFinancialProfile, resolveCurrentFinancialProfile } from '../services/currentFinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import RecommendationState from '../models/RecommendationState.js';
 import AuditRecord from '../models/AuditRecord.js';
@@ -30,6 +31,7 @@ import {
 import { assessSuitabilityRisk } from '../services/riskProfiler.js';
 import { claimAdvisoryIdempotency, releaseAdvisoryIdempotency } from '../middleware/idempotency.js';
 import { persistAdvisoryAtomically } from '../services/advisoryPersistence.js';
+import { resolveStablePostCommitCurrentState } from '../services/advisoryResponse.js';
 import { setCache, delCache } from '../config/redis.js';
 import { verifyAuditChain } from '../services/auditChain.js';
 import { triggerPlanHealthCheck } from '../services/planHealthMonitor.js';
@@ -194,18 +196,16 @@ export async function persistAdvisoryIfCurrent({ recommendationId, userId, state
 router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHandler(async (req, res) => {
   const tTotalStart = performance.now();
   const { profileId } = req.body;
-  const tProfileStart = performance.now();
-  const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
-  const tProfile = performance.now() - tProfileStart;
-  if (!stored) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
-
-  const profile = buildRecommendationProfile(stored);
+  const ownedProfile = await FinancialProfile.exists({ _id: profileId, userId: req.user.userId });
+  if (!ownedProfile) {
+    throw createError(404, 'Profile not found or access denied', 'Profile not found.', { code: 'PROFILE_NOT_FOUND' });
+  }
   const tIdempotencyStart = performance.now();
   const idempotencyClaim = await claimAdvisoryIdempotency({
     key: req.headers['idempotency-key'],
     userId: req.user.userId,
-    profileId: stored._id,
-    payload: { profileId },
+    profileId,
+    payload: { profileId: String(profileId) },
     operation: 'recommendation.generate',
   });
   const tIdempotency = performance.now() - tIdempotencyStart;
@@ -215,6 +215,22 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
   }
 
   try {
+    // A durable completed operation must be replayed before checking whether
+    // its originally requested profile is still current. New operations still
+    // fail closed on stale profile state and release their uncommitted claim.
+    const tProfileStart = performance.now();
+    const currentProfileState = await resolveCurrentFinancialProfile({ userId: req.user.userId });
+    const stored = currentProfileState.profile;
+    if (stored && String(stored._id) !== String(profileId)) {
+      throw createError(409, 'The requested profile is no longer current.', 'Refresh the current profile before generating a recommendation.', {
+        code: 'PROFILE_STATE_VERSION_CONFLICT',
+        details: { profileStateRevision: currentProfileState.state.revision },
+      });
+    }
+    const tProfile = performance.now() - tProfileStart;
+    if (!stored) throw createError(404, 'Profile not found or access denied', 'Profile not found.', { code: 'PROFILE_NOT_FOUND' });
+
+    const profile = buildRecommendationProfile(stored);
     const core = await computeCoreRecommendation({
       canonicalProfile: profile,
       profileVersion: stored.version ?? 1,
@@ -230,6 +246,10 @@ router.post('/', verifyJWT, validateStrict(recommendationRequestSchema), asyncHa
       auditRecord: core.auditRecordData,
       response: core.response,
       idempotencyClaim,
+      profileStateBinding: {
+        revision: Number(currentProfileState.state.revision),
+        currentProfileId: String(stored._id),
+      },
     });
     const tPersist = performance.now() - tPersistStart;
     const tCacheStart = performance.now();
@@ -269,10 +289,8 @@ router.get('/current', verifyJWT, validateQuery(recommendationCurrentQuerySchema
     throw createError(400, 'Invalid profile ID format', 'Invalid profile ID.');
   }
 
-  const profile = await FinancialProfile.findOne({
-    _id: profileId,
-    userId: req.user.userId,
-  }).lean();
+  const profileState = await requireCurrentFinancialProfile({ userId: req.user.userId, profileId });
+  const profile = profileState.profile;
   if (!profile) {
     throw createError(404, 'Profile not found or access denied', 'Recommendation not found.');
   }
@@ -343,6 +361,8 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
     throw createError(403, 'Access denied to recommendation', 'Access denied.');
   }
 
+  await requireCurrentFinancialProfile({ userId: recommendation.userId, profileId: recommendation.profileId });
+
   let recommendationState;
   try {
     recommendationState = await requireFreshRecommendationState({
@@ -405,17 +425,17 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
         {
           'advisoryMetadata.status': { $in: ['READY', 'GROUNDED_EXPLANATION_AVAILABLE', 'GROUNDED_EXPLANATION_FALLBACK'] },
           $or: [
-            { 'advisoryMetadata.recommendationId': { $exists: false } },
-            { 'advisoryMetadata.profileId': { $exists: false } },
-            { 'advisoryMetadata.allocationRevision': { $exists: false } },
-            { 'advisoryMetadata.allocationRevisionId': { $exists: false } },
-            { 'advisoryMetadata.portfolioFingerprint': { $exists: false } },
-            { 'advisoryMetadata.profileInputHash': { $exists: false } },
-            { 'advisoryMetadata.recommendationPolicyVersion': { $exists: false } },
-            { 'advisoryMetadata.regulatoryRuleVersion': { $exists: false } },
-            { 'advisoryMetadata.returnAssumptionHash': { $exists: false } },
-            { 'advisoryMetadata.recommendationFingerprint': { $exists: false } },
-            { 'advisoryMetadata.profileVersion': { $exists: false } },
+            { 'advisoryMetadata.recommendationId': { $ne: String(recommendation._id) } },
+            { 'advisoryMetadata.profileId': { $ne: String(recommendation.profileId) } },
+            { 'advisoryMetadata.allocationRevision': { $ne: currentAllocationRevision } },
+            { 'advisoryMetadata.allocationRevisionId': { $ne: String(recommendationState.allocationRevision._id) } },
+            { 'advisoryMetadata.portfolioFingerprint': { $ne: currentPortfolioFingerprint } },
+            { 'advisoryMetadata.profileInputHash': { $ne: recommendation.profileInputHash } },
+            { 'advisoryMetadata.recommendationPolicyVersion': { $ne: recommendation.recommendationPolicyVersion || RECOMMENDATION_POLICY_VERSION } },
+            { 'advisoryMetadata.regulatoryRuleVersion': { $ne: recommendation.regulatoryRuleVersion } },
+            { 'advisoryMetadata.returnAssumptionHash': { $ne: recommendationState.allocationRevision.returnAssumptionHash } },
+            { 'advisoryMetadata.recommendationFingerprint': { $ne: recommendationState.recommendationFingerprint } },
+            { 'advisoryMetadata.profileVersion': { $ne: recommendationState.profileVersion } },
           ],
         },
       ],
@@ -552,22 +572,28 @@ router.post('/:recommendationId/advisory', verifyJWT, asyncHandler(async (req, r
       advisoryMetadata,
     });
 
-    return res.json(buildAdvisoryResponse({
-      recommendationId: recommendation._id,
+    await reachFinancialStateTestHook('recommendation.advisory.afterPersistenceBeforeResponse', {
+      recommendationId,
+      userId: req.user.userId,
       state: currentState,
-      advisoryText: advisory.text,
-      advisoryExplanation: {
-        status: advisory.status,
-        provider: advisory.provider,
-        model: advisory.model,
-        prompt_version: advisory.promptVersion,
-        grounding_version: advisory.groundingVersion,
-        evidence_ids_used: advisory.evidenceIdsUsed,
-        unavailable_facts: advisory.unavailableFacts,
-        citations: advisory.citations,
-        validation_status: advisory.validation?.status,
-        generated_at: advisory.generatedAt,
-      },
+    });
+    const reconciled = await resolveStablePostCommitCurrentState({ userId: req.user.userId });
+    if (String(reconciled.current.profile._id) !== String(recommendation.profileId)
+        || String(reconciled.state.recommendation._id) !== String(recommendation._id)) {
+      throw createError(409, 'The recommendation changed after advisory generation.', 'Refresh the current recommendation before loading its advisory.', {
+        code: 'RECOMMENDATION_SUPERSEDED',
+      });
+    }
+    const persistedRecommendation = reconciled.state.recommendation;
+    const persistedBinding = assessAdvisoryStateBinding(persistedRecommendation.advisoryMetadata, reconciled.state);
+    const persistedMetadata = persistedRecommendation.advisoryMetadata || {};
+    return res.json(buildAdvisoryResponse({
+      recommendationId: persistedRecommendation._id,
+      state: reconciled.state,
+      advisoryText: persistedBinding.fresh ? persistedRecommendation.advisoryText : null,
+      advisoryExplanation: persistedBinding.fresh
+        ? advisoryExplanationFromMetadata(persistedMetadata)
+        : { status: 'STALE', unavailable_facts: [persistedBinding.reason || 'ADVISORY_SOURCE_STATE_CHANGED'] },
     }));
   } catch (error) {
     await Recommendation.updateOne(
@@ -618,7 +644,8 @@ router.get('/audit/:id', verifyJWT, asyncHandler(async (req, res) => {
 
 router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), asyncHandler(async (req, res) => {
   const { profileId, recommendationId, weights, expectedAllocationRevision, expectedPortfolioFingerprint } = req.body;
-  const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
+  const currentProfile = await requireCurrentFinancialProfile({ userId: req.user.userId, profileId });
+  const stored = currentProfile.profile;
   if (!stored) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
   const profile = buildRecommendationProfile(stored);
   let state;
@@ -688,6 +715,9 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
     if (error.code === 'PROFILE_STATE_CHANGED') {
       throw createError(409, error.message, 'The Financial Profile changed before the rebalance completed. Refresh and retry.', { code: error.code });
     }
+    if (error.code === 'PROFILE_STATE_VERSION_CONFLICT') {
+      throw createError(409, error.message, 'The current Financial Profile changed before the rebalance completed. Refresh and retry.', { code: error.code });
+    }
     throw error;
   }
   await delCache(buildRecommendationCacheKey(req.user.userId, stored._id, profile, recommendation.modelVersion)).catch(error => {
@@ -710,10 +740,8 @@ router.post('/weights', verifyJWT, validateStrict(recommendationWeightsSchema), 
   try {
     // The write and audit chain have committed. Reconcile against the current
     // canonical pointer; do not treat a valid later revision as a failed write.
-    committedState = await requireFreshRecommendationState({
-      userId: req.user.userId,
-      profileId: stored._id,
-    });
+    const reconciled = await resolveStablePostCommitCurrentState({ userId: req.user.userId });
+    committedState = reconciled.state;
   } catch (error) {
     logger.error('Committed allocation revision could not be reconciled to verified current state', {
       userId: String(req.user.userId),

@@ -31,7 +31,7 @@ async function register(page: Page, unique: string) {
   await expect(page).toHaveURL(/\/profile$/);
 }
 
-test('production Nginx edge preserves browser auth and API lifecycle', async ({ page, context }) => {
+test('production Nginx edge preserves browser auth and API lifecycle @production-edge', async ({ page, context }) => {
   test.setTimeout(180_000);
   const unique = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
   await register(page, unique);

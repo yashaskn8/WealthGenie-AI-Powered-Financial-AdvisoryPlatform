@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import chatRouter from '../routes/chatRoutes.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import Recommendation from '../models/Recommendation.js';
 import ConversationHistory from '../models/ConversationHistory.js';
 import { ProviderManager } from '../services/providerAbstraction.js';
@@ -51,10 +52,12 @@ describe('grounded chat DTO and persistence isolation', () => {
   let env;
   let conversation;
   let restoreChatStore;
+  let profileStateStatus;
 
   beforeEach(() => {
     originals = {
       profileFindOne: FinancialProfile.findOne,
+      profileStateFindOne: FinancialProfileState.findOne,
       recommendationFindOne: Recommendation.findOne,
       conversationFindOne: ConversationHistory.findOne,
       geminiGenerate: ProviderManager.gemini.generate,
@@ -69,12 +72,26 @@ describe('grounded chat DTO and persistence isolation', () => {
     process.env.GEMINI_API_KEY = 'unit-test-only';
     process.env.GROQ_API_KEY = '';
     process.env.LLM_PRIMARY_PROVIDER = 'GEMINI';
+    profileStateStatus = 'CURRENT';
     ProviderManager.gemini.recordSuccess();
-    FinancialProfile.findOne = () => ({ sort: () => ({ lean: async () => profile }) });
+    FinancialProfile.findOne = () => {
+      const query = { sort: () => query, lean: async () => profile };
+      return query;
+    };
+    FinancialProfileState.findOne = query => ({
+      lean: async () => (String(query?.userId) === userId ? {
+        userId,
+        currentProfileId: profileStateStatus === 'CURRENT' ? profile._id : null,
+        revision: profileStateStatus === 'CURRENT' ? 1 : 0,
+        promotionFence: 0,
+        resolutionStatus: profileStateStatus,
+      } : null),
+    });
     Recommendation.findOne = () => ({ sort: () => ({ lean: async () => null }) });
     conversation = {
       userId,
       profileId: profile._id,
+      financialProfileStateRevision: 1,
       session_id: 'session-grounded',
       messages: [],
       cumulative_tokens: 0,
@@ -88,6 +105,7 @@ describe('grounded chat DTO and persistence isolation', () => {
   afterEach(() => {
     restoreChatStore?.();
     FinancialProfile.findOne = originals.profileFindOne;
+    FinancialProfileState.findOne = originals.profileStateFindOne;
     Recommendation.findOne = originals.recommendationFindOne;
     ConversationHistory.findOne = originals.conversationFindOne;
     ProviderManager.gemini.generate = originals.geminiGenerate;
@@ -164,6 +182,7 @@ describe('grounded chat DTO and persistence isolation', () => {
   });
 
   it('returns a minimal system response when no Financial Profile exists', async () => {
+    profileStateStatus = 'NO_CURRENT';
     FinancialProfile.findOne = () => ({ sort: () => ({ lean: async () => null }) });
     const result = await processChat({
       userId, user: {}, message: 'Hello', sessionId: 'session-grounded',

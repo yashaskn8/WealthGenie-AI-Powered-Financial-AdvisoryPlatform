@@ -9,8 +9,29 @@ import WhereToInvestTab from '../deepdive/WhereToInvestTab';
 import * as api from '../../services/api';
 import { resetMarketContextStoreForTest } from '../../state/useMarketContext';
 
+const { CURRENT_STATE_BINDING, CURRENT_RECOMMENDATION_META } = vi.hoisted(() => {
+  const binding = {
+    profileId: '64b000000000000000000001', profileVersion: 4,
+    recommendationId: '64b000000000000000000002', allocationRevision: 3,
+    allocationRevisionId: '64b000000000000000000003',
+    portfolioFingerprint: 'a'.repeat(64), recommendationFingerprint: 'b'.repeat(64),
+  };
+  return {
+    CURRENT_STATE_BINDING: binding,
+    CURRENT_RECOMMENDATION_META: {
+      recommendationId: binding.recommendationId,
+      profile_version: binding.profileVersion,
+      allocation_revision: binding.allocationRevision,
+      allocation_revision_id: binding.allocationRevisionId,
+      portfolio_fingerprint: binding.portfolioFingerprint,
+      recommendation_fingerprint: binding.recommendationFingerprint,
+    },
+  };
+});
+
 vi.mock('../../services/api', () => ({
-  rankInvestmentCandidates: vi.fn(async () => ({
+  rankInvestmentCandidates: vi.fn(async (_profileId, _parentId, _taxContext, _options, financialStateBinding) => ({
+    financialStateBinding,
     products: Array.from({ length: 2 }, (_, index) => ({
       id: `mf:amfi:${index + 1}`,
       name: `Verified Fund ${index + 1}`,
@@ -54,6 +75,13 @@ vi.mock('../../services/api', () => ({
   })),
 }));
 
+function renderWti(element) {
+  return render(React.cloneElement(element, {
+    recommendationMeta: CURRENT_RECOMMENDATION_META,
+    ...element.props,
+  }));
+}
+
 describe('SebiDisclaimer Component', () => {
   afterEach(() => {
     cleanup();
@@ -69,16 +97,16 @@ describe('SebiDisclaimer Component', () => {
 
   it('renders verified comparable options without presenting their display order as a ranking', async () => {
     const mockInv = { id: 'mid_cap_stocks', name: 'Mid Cap Growth Stocks', riskLevel: 5 };
-    render(<WhereToInvestTab inv={mockInv} userProfile={{ profileId: '64b000000000000000000001' }} />);
+    renderWti(<WhereToInvestTab inv={mockInv} userProfile={{ profileId: '64b000000000000000000001' }} />);
     const matches = screen.getAllByText(/Not SEBI-registered investment advice/i);
     expect(matches.length).toBeGreaterThan(0);
     expect(await screen.findByText(/Verified Products \(2 Comparable Options\)/i)).toBeTruthy();
     expect(await screen.findByText('Verified Fund 2')).toBeTruthy();
-    expect((await screen.findAllByText('VERIFIED COMPARABLE OPTION')).length).toBe(2);
+    expect((await screen.findAllByText('Verified comparable option')).length).toBe(2);
     expect(screen.getByText('Plan: UNAVAILABLE')).toBeTruthy();
     expect(screen.getByTestId('wti-comparison-universe')).toBeTruthy();
     expect(screen.queryByText('Top Pick')).toBeNull();
-    expect(await screen.findByText('UNAVAILABLE')).toBeTruthy();
+    expect(await screen.findByText('Market data unavailable', { selector: '.wti-beginner-market-badge' })).toBeTruthy();
     expect(screen.getByTestId('market-data-status')).toHaveTextContent(/Market data unavailable/i);
     expect(screen.getByText(/PROVIDER_NOT_CONFIGURED/)).toBeTruthy();
   });
@@ -104,7 +132,7 @@ describe('SebiDisclaimer Component', () => {
         freshness: { status: 'FRESH' },
       }],
     });
-    render(<WhereToInvestTab inv={{ id: 'mid_cap_stocks', name: 'Mid Cap Growth Stocks', riskLevel: 5 }} userProfile={{ profileId: '64b000000000000000000001' }} />);
+    renderWti(<WhereToInvestTab inv={{ id: 'mid_cap_stocks', name: 'Mid Cap Growth Stocks', riskLevel: 5 }} userProfile={{ profileId: '64b000000000000000000001' }} />);
     expect(await screen.findByText('NORMAL')).toBeTruthy();
     const sourceEvidence = screen.getByText(/NSE \(NIFTY 50 · LIVE\)/);
     expect(sourceEvidence).toBeTruthy();
@@ -116,6 +144,7 @@ describe('SebiDisclaimer Component', () => {
 
   it('labels the unique historical-return leader precisely without calling it a Top Pick', async () => {
     api.rankInvestmentCandidates.mockResolvedValueOnce({
+      financialStateBinding: CURRENT_STATE_BINDING,
       products: [
         {
           id: 'mf:amfi:101', name: 'Evidence Leader', provider: 'Verified AMC',
@@ -143,7 +172,7 @@ describe('SebiDisclaimer Component', () => {
         historicalEvidenceProductCount: 2,
       },
     });
-    render(<WhereToInvestTab inv={{ id: 'large_cap_mf', riskLevel: 3 }} userProfile={{ profileId: '64b000000000000000000001' }} />);
+    renderWti(<WhereToInvestTab inv={{ id: 'large_cap_mf', riskLevel: 3 }} userProfile={{ profileId: '64b000000000000000000001' }} />);
     expect(await screen.findByText(/Verified Products \(2 Ranked Options\)/i)).toBeTruthy();
     expect((await screen.findAllByText('VERIFIED RANKED PRODUCT')).length).toBe(2);
     expect(screen.getByText('18.25% historical')).toBeTruthy();

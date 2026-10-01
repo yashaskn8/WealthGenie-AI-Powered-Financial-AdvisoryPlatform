@@ -1,8 +1,10 @@
 import 'dotenv/config';
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import mongoose from 'mongoose';
 import axios from 'axios';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import { generateAdvisory, getGoalAdvisory } from '../services/geminiService.js';
 import { processChat } from '../services/geminiChatService.js';
 import { buildGroundedEvidencePacket } from '../services/groundedEvidence.js';
@@ -83,11 +85,21 @@ test('geminiService uses the shared grounded provider contract', async (t) => {
 
 test('geminiChatService returns profile setup guidance when no profile exists', async (t) => {
   const originalFindOne = FinancialProfile.findOne;
+  const originalStateFindOne = FinancialProfileState.findOne;
   FinancialProfile.findOne = () => ({ sort: () => ({ lean: async () => null }) });
-  t.after(() => { FinancialProfile.findOne = originalFindOne; });
+  FinancialProfileState.findOne = () => ({ lean: async () => ({
+    currentProfileId: null,
+    revision: 0,
+    promotionFence: 0,
+    resolutionStatus: 'NO_CURRENT',
+  }) });
+  t.after(() => {
+    FinancialProfile.findOne = originalFindOne;
+    FinancialProfileState.findOne = originalStateFindOne;
+  });
 
   const result = await processChat({
-    userId: 'chat-service-user-no-profile',
+    userId: new mongoose.Types.ObjectId().toString(),
     user: { email: 'user@example.com' },
     message: 'What should I invest in?',
     sessionId: 'session-1',

@@ -1,7 +1,7 @@
 import express from 'express';
 import { verifyJWT } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
-import FinancialProfile from '../models/FinancialProfile.js';
+import { requireCurrentFinancialProfile } from '../services/currentFinancialProfile.js';
 import {
   buildRecommendationProfile,
 } from '../services/recommendationProfile.js';
@@ -25,10 +25,7 @@ router.get('/current', validateQuery(marketContextQuerySchema), asyncHandler(asy
 // recommendation. Client-supplied weights and context overrides are forbidden.
 router.post('/adjust', verifyJWT, validate(regimeAdjustSchema), asyncHandler(async (req, res) => {
   const { profileId } = req.body;
-  const profileDocument = await FinancialProfile.findOne({
-    _id: profileId,
-    userId: req.user.userId,
-  }).lean();
+  const { profile: profileDocument } = await requireCurrentFinancialProfile({ userId: req.user.userId, profileId });
   if (!profileDocument) {
     throw createError(404, 'Profile not found or access denied', 'Financial profile not found.');
   }

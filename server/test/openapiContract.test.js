@@ -27,6 +27,7 @@ import FinancialProfile from '../models/FinancialProfile.js';
 import Recommendation from '../models/Recommendation.js';
 import RecommendationState from '../models/RecommendationState.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import { withServer, rawRequest } from '../test-utils/httpTestUtils.js';
 import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
 import { buildRecommendationProfile, toProfilePersistence } from '../services/recommendationProfile.js';
@@ -434,6 +435,8 @@ test('OpenAPI runtime contracts exercise real HTTP success and canonical error r
   const oldFind = Instrument.find;
   const oldCountDocuments = Instrument.countDocuments;
   const oldProfileFindOne = FinancialProfile.findOne;
+  const oldProfileExists = FinancialProfile.exists;
+  const oldProfileStateFindOne = FinancialProfileState.findOne;
   const oldRecommendationFindOne = Recommendation.findOne;
   const oldStateFindOne = RecommendationState.findOne;
   const oldRevisionFindOne = RecommendationAllocationRevision.findOne;
@@ -447,6 +450,7 @@ test('OpenAPI runtime contracts exercise real HTTP success and canonical error r
     ...toProfilePersistence(recommendationProfile, assessSuitabilityRisk(recommendationProfile)),
   };
   const emptyQuery = value => ({
+    select() { return this; },
     sort() { return this; },
     lean: async () => value,
   });
@@ -463,6 +467,14 @@ test('OpenAPI runtime contracts exercise real HTTP success and canonical error r
   });
   Instrument.countDocuments = async () => 1;
   FinancialProfile.findOne = () => emptyQuery(profileFixture);
+  FinancialProfile.exists = async filter => (String(filter?._id) === profileId && String(filter?.userId) === userId ? { _id: profileId } : null);
+  FinancialProfileState.findOne = () => emptyQuery({
+    userId,
+    currentProfileId: profileId,
+    revision: 1,
+    promotionFence: 0,
+    resolutionStatus: 'CURRENT',
+  });
   Recommendation.findOne = () => emptyQuery(null);
   RecommendationState.findOne = () => emptyQuery(null);
   RecommendationAllocationRevision.findOne = () => emptyQuery(null);
@@ -513,6 +525,8 @@ test('OpenAPI runtime contracts exercise real HTTP success and canonical error r
     Instrument.find = oldFind;
     Instrument.countDocuments = oldCountDocuments;
     FinancialProfile.findOne = oldProfileFindOne;
+    FinancialProfile.exists = oldProfileExists;
+    FinancialProfileState.findOne = oldProfileStateFindOne;
     Recommendation.findOne = oldRecommendationFindOne;
     RecommendationState.findOne = oldStateFindOne;
     RecommendationAllocationRevision.findOne = oldRevisionFindOne;

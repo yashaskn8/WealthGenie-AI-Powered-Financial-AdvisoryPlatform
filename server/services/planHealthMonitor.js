@@ -1,9 +1,14 @@
 import crypto from 'node:crypto';
+import mongoose from 'mongoose';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import PlanHealthEvent from '../models/PlanHealthEvent.js';
+import PlanHealthInspectionFence from '../models/PlanHealthInspectionFence.js';
+import PlanHealthSchedulerLease from '../models/PlanHealthSchedulerLease.js';
 import { loadPlanReviewContext } from '../agents/planReview/planReviewTools.js';
 import { PrometheusMetrics } from './metricsCollector.js';
 import logger from '../utils/logger.js';
+import { resolveCurrentFinancialProfile } from './currentFinancialProfile.js';
 
 export const PLAN_HEALTH_MONITOR_VERSION = 'plan-health-monitor-1.0.0';
 
@@ -16,9 +21,23 @@ const SEVERITY = Object.freeze({
   REGULATORY_VERSION_UNAVAILABLE: 'BLOCKED',
 });
 
-function fingerprint({ userId, recommendationId, reason }) {
+export function planHealthEventFingerprint({
+  userId,
+  profileId,
+  profileStateRevision,
+  recommendationId,
+  reason,
+  monitorVersion = PLAN_HEALTH_MONITOR_VERSION,
+}) {
   return crypto.createHash('sha256')
-    .update(JSON.stringify({ userId: String(userId), recommendationId: recommendationId ? String(recommendationId) : null, reason, version: PLAN_HEALTH_MONITOR_VERSION }))
+    .update(JSON.stringify({
+      userId: String(userId),
+      profileId: String(profileId),
+      profileStateRevision: Number(profileStateRevision),
+      recommendationId: recommendationId ? String(recommendationId) : null,
+      reason,
+      monitorVersion,
+    }))
     .digest('hex');
 }
 
@@ -30,58 +49,236 @@ function eventCopy(reason) {
   return 'The saved plan needs a review before it can be treated as current.';
 }
 
-export async function inspectPlanHealth({ userId, profileId, profileModel = FinancialProfile, eventModel = PlanHealthEvent, dependencies = {} }) {
+function leaseLostError() {
+  return Object.assign(new Error('Plan Health scan lease was lost before its event write.'), { code: 'PLAN_HEALTH_LEASE_LOST' });
+}
+
+function publicationFenceLostError() {
+  return Object.assign(new Error('Plan Health inspection is no longer authorized to publish its result.'), {
+    code: 'PLAN_HEALTH_PUBLICATION_FENCE_LOST',
+  });
+}
+
+function modifiedExactlyOne(result) {
+  return Number(result?.modifiedCount ?? result?.nModified ?? 0) === 1;
+}
+
+async function withLeaseFence({
+  leaseFence,
+  publicationFence,
+  leaseModel,
+  publicationFenceModel,
+  profileStateFence,
+  profileStateModel,
+  mongo,
+  beforePublication,
+  action,
+}) {
+  if (!leaseFence && !publicationFence && !profileStateFence) return action(null);
+  const session = await mongo.startSession();
+  let result;
+  try {
+    if (typeof session?.withTransaction !== 'function') {
+      throw Object.assign(new Error('Plan Health event writes require transaction-capable MongoDB.'), {
+        code: 'TRANSACTION_REQUIRED',
+      });
+    }
+    await session.withTransaction(async () => {
+      if (leaseFence) {
+        const nowValue = new Date();
+        const fence = await leaseModel.updateOne({
+          _id: leaseFence.periodKey,
+          owner: leaseFence.owner,
+          executionGeneration: leaseFence.executionGeneration,
+          status: 'RUNNING',
+          leaseUntil: { $gt: nowValue },
+        }, { $inc: { mutationFence: 1 } }, { session });
+        if (!modifiedExactlyOne(fence)) throw leaseLostError();
+      }
+      if (profileStateFence) {
+        const stateWrite = await profileStateModel.updateOne({
+          userId: profileStateFence.userId,
+          currentProfileId: profileStateFence.profileId,
+          revision: profileStateFence.revision,
+          resolutionStatus: 'CURRENT',
+        }, { $inc: { promotionFence: 1 } }, { session });
+        if (!modifiedExactlyOne(stateWrite)) {
+          throw Object.assign(new Error('The canonical financial profile changed before Plan Health publication.'), {
+            code: 'PLAN_HEALTH_PROFILE_SUPERSEDED',
+          });
+        }
+      }
+      await beforePublication?.();
+      if (publicationFence) {
+        const publicationStartedAt = new Date();
+        const claimed = await publicationFenceModel.updateOne({
+          _id: publicationFence.tokenId,
+          periodKey: publicationFence.periodKey,
+          profileId: publicationFence.profileId,
+          owner: publicationFence.owner,
+          executionGeneration: publicationFence.executionGeneration,
+          status: 'RUNNING',
+          deadlineAt: { $gt: publicationStartedAt },
+        }, { $set: { status: 'PUBLISHING', publicationStartedAt } }, { session });
+        if (!modifiedExactlyOne(claimed)) throw publicationFenceLostError();
+      }
+      result = await action(session);
+      if (publicationFence) {
+        const publishedAt = new Date();
+        const published = await publicationFenceModel.updateOne({
+          _id: publicationFence.tokenId,
+          owner: publicationFence.owner,
+          executionGeneration: publicationFence.executionGeneration,
+          status: 'PUBLISHING',
+          deadlineAt: { $gt: publishedAt },
+        }, {
+          $set: {
+            status: 'PUBLISHED',
+            publishedAt,
+            resultStatus: result?.status || null,
+            eventId: result?.event?._id || null,
+          },
+        }, { session });
+        if (!modifiedExactlyOne(published)) throw publicationFenceLostError();
+      }
+    });
+    return result;
+  } finally {
+    await session.endSession();
+  }
+}
+
+export async function inspectPlanHealth({
+  userId,
+  profileId,
+  profileModel = FinancialProfile,
+  profileStateModel = FinancialProfileState,
+  eventModel = PlanHealthEvent,
+  dependencies = {},
+  signal,
+  assertLease = async () => undefined,
+  leaseFence = null,
+  publicationFence = null,
+  leaseModel = PlanHealthSchedulerLease,
+  publicationFenceModel = PlanHealthInspectionFence,
+  mongo = mongoose,
+  profileStateRevision: expectedProfileStateRevision = null,
+}) {
+  const canonical = await resolveCurrentFinancialProfile({
+    userId,
+    stateModel: profileStateModel,
+    profileModel,
+    requireRecommendation: false,
+  });
+  if (!canonical.profile
+      || String(canonical.profile._id) !== String(profileId)
+      || (expectedProfileStateRevision !== null
+        && Number(canonical.state.revision) !== Number(expectedProfileStateRevision))) {
+    throw Object.assign(new Error('Plan Health work was captured for a profile that is no longer current.'), {
+      code: 'PLAN_HEALTH_PROFILE_SUPERSEDED',
+    });
+  }
+  const profileStateFence = {
+    userId,
+    profileId: canonical.profile._id,
+    revision: Number(canonical.state.revision),
+  };
   const context = await loadPlanReviewContext({ userId, profileId, dependencies: { ...dependencies, profileModel } });
+  if (signal?.aborted) throw signal.reason;
   const reason = context.freshness?.reasonCodes?.[0] || null;
   if (!context.profile) return { status: 'HEALTHY', event: null };
   if (!reason) {
-    await eventModel.updateMany?.(
-      { userId, profileId, status: { $in: ['UNREAD', 'READ', 'OPEN', 'ACKNOWLEDGED'] } },
-      { $set: { status: 'RESOLVED', resolvedAt: new Date() } },
-    );
-    return { status: 'HEALTHY', event: null };
+    await assertLease();
+    if (signal?.aborted) throw signal.reason;
+    return withLeaseFence({
+      leaseFence, publicationFence, profileStateFence, profileStateModel, leaseModel, publicationFenceModel, mongo,
+      beforePublication: () => dependencies.beforePublication?.({ publicationFence, userId, profileId }),
+      action: async session => {
+        await eventModel.updateMany?.(
+          { userId, profileId, status: { $in: ['UNREAD', 'READ', 'OPEN', 'ACKNOWLEDGED'] } },
+          { $set: { status: 'RESOLVED', resolvedAt: new Date() } },
+          session ? { session } : undefined,
+        );
+        return { status: 'HEALTHY', event: null };
+      },
+    });
   }
   const recommendationId = context.recommendation?._id || null;
   const event = {
     userId,
     profileId,
+    profileStateRevision: profileStateFence.revision,
     recommendationId,
     reason,
     severity: SEVERITY[reason] || 'ATTENTION',
     recommendation: eventCopy(reason),
     detectedAt: new Date(),
-    fingerprint: fingerprint({ userId, recommendationId, reason }),
+    fingerprint: planHealthEventFingerprint({ userId, profileId, profileStateRevision: profileStateFence.revision, recommendationId, reason }),
     monitorVersion: PLAN_HEALTH_MONITOR_VERSION,
   };
   const activeStatuses = ['UNREAD', 'READ', 'OPEN', 'ACKNOWLEDGED'];
-  await eventModel.updateMany?.(
-    { userId, profileId, fingerprint: { $ne: event.fingerprint }, status: { $in: activeStatuses } },
-    { $set: { status: 'SUPERSEDED', supersededAt: event.detectedAt } },
-  );
+  await assertLease();
+  if (signal?.aborted) throw signal.reason;
   try {
-    const persisted = await eventModel.create(event);
+    await assertLease();
+    if (signal?.aborted) throw signal.reason;
+    const persisted = await withLeaseFence({
+      leaseFence, publicationFence, profileStateFence, profileStateModel, leaseModel, publicationFenceModel, mongo,
+      beforePublication: () => dependencies.beforePublication?.({ publicationFence, userId, profileId }),
+      action: async session => {
+        const options = session ? { session } : undefined;
+        await eventModel.updateMany(
+          { userId, profileId, fingerprint: { $ne: event.fingerprint }, status: { $in: activeStatuses } },
+          { $set: { status: 'SUPERSEDED', supersededAt: event.detectedAt } },
+          options,
+        );
+        const created = session
+          ? await eventModel.create([event], options)
+          : await eventModel.create(event);
+        const stored = Array.isArray(created) ? created[0] : created;
+        return { status: 'ATTENTION', event: stored };
+      },
+    });
     PrometheusMetrics.inc('plan_health_events_created_total');
     PrometheusMetrics.inc('plan_health_events_total');
-    return { status: 'ATTENTION', event: persisted.toObject ? persisted.toObject() : persisted };
+    return { ...persisted, event: persisted.event?.toObject ? persisted.event.toObject() : persisted.event };
   } catch (error) {
+    if (signal?.aborted) throw signal.reason;
     if (error?.code !== 11000) throw error;
     PrometheusMetrics.inc('plan_health_events_deduplicated_total');
-    const existing = await eventModel.findOne({ fingerprint: event.fingerprint }).lean();
-    if (existing?.status === 'RESOLVED' || existing?.status === 'SUPERSEDED') {
-      const reopened = await eventModel.findOneAndUpdate(
-        { fingerprint: event.fingerprint },
-        {
-          $set: {
-            status: 'UNREAD',
-            detectedAt: event.detectedAt,
-          },
-          $unset: { acknowledgedAt: 1, resolvedAt: 1, supersededAt: 1 },
-        },
-        { new: true },
-      ).lean();
-      return { status: 'ATTENTION', event: reopened || existing };
+    let existingQuery = eventModel.findOne({ fingerprint: event.fingerprint, status: { $in: activeStatuses } });
+    if (existingQuery?.sort) existingQuery = existingQuery.sort({ detectedAt: -1, _id: 1 });
+    let existing = await existingQuery.lean();
+    if (!existing) {
+      let historyQuery = eventModel.findOne({ fingerprint: event.fingerprint });
+      if (historyQuery?.sort) historyQuery = historyQuery.sort({ detectedAt: -1, _id: 1 });
+      existing = await historyQuery.lean();
     }
-    return { status: 'ATTENTION', event: existing };
+    if (!existing) throw error;
+    if (existing?.status === 'RESOLVED' || existing?.status === 'SUPERSEDED') {
+      await assertLease();
+      if (signal?.aborted) throw signal.reason;
+      const reopened = await withLeaseFence({ leaseFence, publicationFence, profileStateFence, profileStateModel, leaseModel, publicationFenceModel, mongo, action: async session => {
+        const query = eventModel.findOneAndUpdate(
+          { _id: existing._id, fingerprint: event.fingerprint, status: { $in: ['RESOLVED', 'SUPERSEDED'] } },
+          {
+            $set: { status: 'UNREAD', detectedAt: event.detectedAt },
+            $unset: { acknowledgedAt: 1, resolvedAt: 1, supersededAt: 1 },
+          },
+          { new: true, ...(session ? { session } : {}) },
+        );
+        const changed = query.lean ? await query.lean() : await query;
+        if (!changed) throw publicationFenceLostError();
+        return { status: 'ATTENTION', event: changed };
+      } });
+      return { ...reopened, event: reopened.event || existing };
+    }
+    return withLeaseFence({
+      leaseFence, publicationFence, leaseModel, publicationFenceModel, mongo,
+      profileStateFence,
+      profileStateModel,
+      action: async () => ({ status: 'ATTENTION', event: existing }),
+    });
   }
 }
 
@@ -99,7 +296,11 @@ export async function acknowledgePlanHealthEvent({ userId, eventId, eventModel =
 
 export function triggerPlanHealthCheck({ userId, profileId } = {}) {
   if (!userId || !profileId) return Promise.resolve(null);
-  return inspectPlanHealth({ userId, profileId }).catch(error => {
+  return resolveCurrentFinancialProfile({ userId, requireRecommendation: false })
+    .then(current => {
+      if (!current.profile || String(current.profile._id) !== String(profileId)) return null;
+      return inspectPlanHealth({ userId, profileId, profileStateRevision: current.state.revision });
+    }).catch(error => {
     logger.warn('Event-driven plan health check failed', { code: error.code || 'PLAN_HEALTH_CHECK_FAILED' });
     return null;
   });

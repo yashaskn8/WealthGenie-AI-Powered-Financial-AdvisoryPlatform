@@ -1,14 +1,16 @@
 import { getMongoFlavor } from './mongoCompatibility.js';
 
 const LOCAL_DEVELOPMENT_ORIGINS = ['http://localhost:5173', 'http://localhost:3000'];
+const LOCAL_MCP_HOSTS = ['localhost', '127.0.0.1', '[::1]'];
 
 function positiveInteger(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
 }
 
-function parseTrustProxy(value, isProduction) {
-  if (value === undefined || value === '') return isProduction ? 1 : false;
+function parseTrustProxy(value, isProduction, trustedProxyCidrs = []) {
+  if (isProduction) return trustedProxyCidrs.length ? trustedProxyCidrs : false;
+  if (value === undefined || value === '') return false;
   if (value === 'false') return false;
   if (value === 'true') return 1;
   const hops = Number(value);
@@ -41,11 +43,15 @@ export function getRuntimeConfig(env = process.env) {
   const agentIdentityProvider = enumValue(env.AGENT_IDENTITY_PROVIDER, 'development', ['development', 'oidc', 'spiffe']);
   const agentWorkflowBackend = enumValue(env.AGENT_WORKFLOW_BACKEND, 'mongo', ['mongo', 'temporal']);
   const agentApprovalProvider = enumValue(env.AGENT_APPROVAL_PROVIDER, isProduction ? 'webauthn' : 'development', ['development', 'webauthn']);
+  const mcpEnabled = booleanValue(env.MCP_ENABLED, !isProduction);
+  const trustedProxyCidrs = (env.TRUSTED_PROXY_CIDRS || '').split(',').map(value => value.trim()).filter(Boolean);
+  const mcpSecret = env.MCP_JWT_SECRET || null;
   return Object.freeze({
     nodeEnv,
     isProduction,
     port: positiveInteger(env.PORT, 5000, { max: 65535 }),
-    trustProxy: parseTrustProxy(env.TRUST_PROXY, isProduction),
+    trustProxy: parseTrustProxy(env.TRUST_PROXY, isProduction, trustedProxyCidrs),
+    trustedProxyCidrs: Object.freeze(trustedProxyCidrs),
     allowedOrigins: configuredOrigins.length > 0
       ? configuredOrigins
       : (isProduction ? [] : LOCAL_DEVELOPMENT_ORIGINS),
@@ -53,6 +59,38 @@ export function getRuntimeConfig(env = process.env) {
     slowRequestMs: positiveInteger(env.SLOW_REQUEST_MS, 3000, { min: 100 }),
     maxInFlightRequests: positiveInteger(env.MAX_IN_FLIGHT_REQUESTS, 250, { min: 1, max: 10000 }),
     requireRedis: booleanValue(env.REQUIRE_REDIS, isProduction),
+    mcp: Object.freeze({
+      enabled: mcpEnabled,
+      // Remote execution is opt-in in production, even if MCP's local or
+      // stdio tooling is enabled. In development it follows MCP_ENABLED.
+      remoteEnabled: booleanValue(env.MCP_REMOTE_ENABLED, mcpEnabled && !isProduction),
+      legacySseEnabled: booleanValue(env.MCP_LEGACY_SSE_ENABLED, false),
+      jwtAudience: env.MCP_JWT_AUDIENCE?.trim() || null,
+      jwtIssuer: env.MCP_JWT_ISSUER?.trim() || null,
+      jwtSecret: mcpSecret,
+      jwtSecretIsolated: Boolean(mcpSecret && mcpSecret !== env.JWT_SECRET),
+      directTls: booleanValue(env.MCP_DIRECT_TLS, false),
+      requiredScope: env.MCP_REQUIRED_SCOPE?.trim() || null,
+      allowedHosts: (env.MCP_ALLOWED_HOSTS || (isProduction ? '' : LOCAL_MCP_HOSTS.join(',')))
+        .split(',').map(value => value.trim().toLowerCase()).filter(Boolean),
+      allowedOrigins: (env.MCP_ALLOWED_ORIGINS || (isProduction ? '' : LOCAL_DEVELOPMENT_ORIGINS.join(',')))
+        .split(',').map(value => value.trim().replace(/\/+$/, '')).filter(Boolean),
+      maxRequestBytes: positiveInteger(env.MCP_MAX_REQUEST_BYTES, 32768, { min: 1024, max: 131072 }),
+      rateWindowMs: positiveInteger(env.MCP_RATE_WINDOW_MS, 60000, { min: 1000, max: 3600000 }),
+      maxRequestsPerWindow: positiveInteger(env.MCP_MAX_REQUESTS_PER_WINDOW, 120, { min: 1, max: 10000 }),
+      maxToolCallsPerWindow: Object.freeze({
+        LOW: positiveInteger(env.MCP_MAX_LOW_COST_CALLS_PER_WINDOW, 60, { min: 1, max: 10000 }),
+        MEDIUM: positiveInteger(env.MCP_MAX_MEDIUM_COST_CALLS_PER_WINDOW, 30, { min: 1, max: 10000 }),
+        HIGH: positiveInteger(env.MCP_MAX_HIGH_COST_CALLS_PER_WINDOW, 10, { min: 1, max: 10000 }),
+      }),
+      maxConcurrentPerUser: positiveInteger(env.MCP_MAX_CONCURRENT_PER_USER, 3, { min: 1, max: 100 }),
+      maxConcurrentGlobal: positiveInteger(env.MCP_MAX_CONCURRENT_GLOBAL, 100, { min: 1, max: 10000 }),
+      permitTtlMs: positiveInteger(env.MCP_PERMIT_TTL_MS, 90000, { min: 1000, max: 300000 }),
+      toolTimeoutMs: positiveInteger(env.MCP_TOOL_TIMEOUT_MS, 30000, { min: 100, max: 120000 }),
+      shutdownGraceMs: positiveInteger(env.MCP_SHUTDOWN_GRACE_MS, 10000, { min: 0, max: 60000 }),
+      maxXirrCashflows: positiveInteger(env.MCP_XIRR_MAX_CASHFLOWS, 600, { min: 2, max: 600 }),
+      maxXirrAbsAmount: positiveInteger(env.MCP_XIRR_MAX_ABS_AMOUNT, 1000000000000, { min: 1, max: 1000000000000 }),
+    }),
     // Plan Review is read-only and opt-in in production. Local development can
     // exercise the feature without requiring an extra .env entry.
     agenticPlanReviewEnabled: booleanValue(env.AGENTIC_PLAN_REVIEW_ENABLED, !isProduction),
@@ -98,8 +136,10 @@ export function getRuntimeConfig(env = process.env) {
       searchProvider: env.RESEARCH_SEARCH_PROVIDER?.trim().toLowerCase() || null,
       searchProviderUrl: env.RESEARCH_SEARCH_PROVIDER_URL?.trim() || null,
       devTokenConfigured: Boolean(env.AGENT_A2A_DEV_TOKEN),
+      clientTokenConfigured: Boolean(env.AGENT_A2A_CLIENT_TOKEN?.trim()),
       cardSigningEnabled: booleanValue(env.AGENT_A2A_CARD_SIGNING_ENABLED, false),
       cardSigningPrivateKeyConfigured: Boolean(env.AGENT_A2A_CARD_SIGNING_PRIVATE_KEY),
+      cardSigningPublicJwkConfigured: Boolean(env.AGENT_A2A_CARD_SIGNING_PUBLIC_JWK?.trim()),
       budgets: Object.freeze({
         maxResearchRounds: positiveInteger(env.RESEARCH_MAX_ROUNDS, 3, { min: 0, max: 3 }),
         maxSearchQueries: positiveInteger(env.RESEARCH_MAX_SEARCH_QUERIES, 6, { min: 0, max: 6 }),
@@ -145,6 +185,8 @@ export function getRuntimeConfig(env = process.env) {
       batchSize: positiveInteger(env.PLAN_HEALTH_BATCH_SIZE, 100, { min: 1, max: 1000 }),
       intervalMs: positiveInteger(env.PLAN_HEALTH_INTERVAL_MS, 86400000, { min: 3600000, max: 604800000 }),
       leaseMs: positiveInteger(env.PLAN_HEALTH_LEASE_MS, 300000, { min: 30000, max: 3600000 }),
+      heartbeatMs: positiveInteger(env.PLAN_HEALTH_HEARTBEAT_MS, 60000, { min: 1000, max: 1800000 }),
+      profileTimeoutMs: positiveInteger(env.PLAN_HEALTH_PROFILE_TIMEOUT_MS, 30000, { min: 1000, max: 120000 }),
       jitterMs: positiveInteger(env.PLAN_HEALTH_JITTER_MS, 900000, { min: 0, max: 3600000 }),
       concurrency: positiveInteger(env.PLAN_HEALTH_CONCURRENCY, 4, { min: 1, max: 20 }),
     }),
@@ -181,6 +223,35 @@ export function assertValidRuntimeConfig(config) {
   assertValidHttpTimeouts(config);
   if (config.mongo.minPoolSize > config.mongo.maxPoolSize) {
     throw new Error('MONGODB_MIN_POOL_SIZE must be less than or equal to MONGODB_MAX_POOL_SIZE');
+  }
+  if (config.mcp.remoteEnabled && !config.mcp.enabled) {
+    throw new Error('MCP_REMOTE_ENABLED requires MCP_ENABLED=true');
+  }
+  if (config.mcp.legacySseEnabled) {
+    throw new Error('Legacy MCP SSE has been removed; MCP_LEGACY_SSE_ENABLED must remain false');
+  }
+  if (config.isProduction && config.mcp.remoteEnabled) {
+    if (!config.mcp.jwtAudience || !config.mcp.jwtIssuer || !config.mcp.requiredScope) {
+      throw new Error('Production remote MCP requires MCP_JWT_ISSUER, MCP_JWT_AUDIENCE and MCP_REQUIRED_SCOPE');
+    }
+    if (!config.mcp.jwtSecret || config.mcp.jwtSecret.length < 32 || !config.mcp.jwtSecretIsolated) {
+      throw new Error('Production remote MCP requires an isolated MCP_JWT_SECRET of at least 32 characters');
+    }
+    if (!config.trustedProxyCidrs.length && !config.mcp.directTls) {
+      throw new Error('Production remote MCP requires explicit TRUSTED_PROXY_CIDRS or MCP_DIRECT_TLS=true');
+    }
+    if (config.mcp.allowedHosts.length === 0) {
+      throw new Error('Production remote MCP requires MCP_ALLOWED_HOSTS');
+    }
+    if (!config.requireRedis) {
+      throw new Error('Production remote MCP requires REQUIRE_REDIS=true for distributed capacity control');
+    }
+    if (config.mcp.allowedOrigins.some(origin => !config.allowedOrigins.includes(origin))) {
+      throw new Error('MCP_ALLOWED_ORIGINS must be a subset of CORS_ORIGINS');
+    }
+  }
+  if (config.mcp.permitTtlMs <= config.mcp.toolTimeoutMs + 5000) {
+    throw new Error('MCP_PERMIT_TTL_MS must exceed MCP_TOOL_TIMEOUT_MS by at least 5 seconds');
   }
   if (config.isProduction && config.agentWorkerMode !== 'external') {
     throw new Error('AGENT_WORKER_MODE must be external in production');
@@ -219,11 +290,15 @@ export function assertValidRuntimeConfig(config) {
   }
   if (research.a2aV1Enabled) {
     if (!research.researchUrl) throw new Error('AGENT_A2A_RESEARCH_URL is required when A2A ResearchMesh is enabled');
-    if (config.isProduction && !research.researchUrl.startsWith('https://')) throw new Error('AGENT_A2A_RESEARCH_URL must use HTTPS in production');
-    if (config.isProduction && config.agentIdentityProvider === 'development') throw new Error('Production ResearchMesh requires OIDC or SPIFFE agent identity');
+    let researchUrl;
+    try { researchUrl = new URL(research.researchUrl); } catch { researchUrl = null; }
+    if (!researchUrl || researchUrl.username || researchUrl.password || researchUrl.search || researchUrl.hash
+        || (config.isProduction && researchUrl.protocol !== 'https:')) throw new Error('AGENT_A2A_RESEARCH_URL must be a credential-free URL and HTTPS in production');
+    if (config.isProduction && config.agentIdentityProvider !== 'oidc') throw new Error('Production ResearchMesh requires OIDC; unimplemented bearer/SPIFFE verification is not accepted');
     if (!config.isProduction && config.agentIdentityProvider === 'development' && !research.devTokenConfigured) throw new Error('AGENT_A2A_DEV_TOKEN is required for development A2A ResearchMesh');
     if (config.isProduction && !research.cardSigningEnabled) throw new Error('Production ResearchMesh requires signed Agent Cards');
     if (config.isProduction && research.cardSigningEnabled && !research.cardSigningPrivateKeyConfigured) throw new Error('Production signed Agent Cards require AGENT_A2A_CARD_SIGNING_PRIVATE_KEY');
+    if (config.isProduction && (!research.clientTokenConfigured || !research.cardSigningPublicJwkConfigured)) throw new Error('Production ResearchMesh requires a dedicated client token and pinned Agent Card public JWK');
   }
   if (research.liveSearchEnabled && (research.searchProvider !== 'configured' || !research.searchProviderUrl)) {
     throw new Error('Live ResearchMesh search requires the configured approved search provider and endpoint');
@@ -233,5 +308,8 @@ export function assertValidRuntimeConfig(config) {
   }
   if (config.agentPlanReview.heartbeatMs >= config.agentPlanReview.leaseMs) {
     throw new Error('AGENT_HEARTBEAT_MS must be less than AGENT_LEASE_MS');
+  }
+  if (config.planHealth.heartbeatMs >= config.planHealth.leaseMs) {
+    throw new Error('PLAN_HEALTH_HEARTBEAT_MS must be less than PLAN_HEALTH_LEASE_MS');
   }
 }

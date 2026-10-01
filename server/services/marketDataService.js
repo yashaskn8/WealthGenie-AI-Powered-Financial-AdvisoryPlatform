@@ -25,6 +25,7 @@ import NseHistoricalDataProvider from './marketData/NseHistoricalDataProvider.js
 import GovernmentSmallSavingsProvider from './marketData/GovernmentSmallSavingsProvider.js';
 import SbiTermDepositProvider from './marketData/SbiTermDepositProvider.js';
 import RbiFloatingRateSavingsBondProvider from './marketData/RbiFloatingRateSavingsBondProvider.js';
+import { fetchQualifiedMarketPair } from './qualifiedMarketFailover.js';
 import {
   DEFAULT_BENCHMARK_IDS,
   MARKET_BENCHMARKS,
@@ -206,6 +207,54 @@ export async function fetchNiftyHistoricalCandles({
   });
   const persistence = persist ? await persistFreshSnapshot(snapshot) : { status: 'NOT_REQUESTED' };
   return { ...snapshot, persistence };
+}
+
+/**
+ * Resolve market-context inputs as one provider-coherent pair. This is the
+ * bounded NSE/Upstox failover boundary; standalone quote endpoints retain their
+ * existing single-provider semantics and source labels.
+ */
+export async function fetchQualifiedMarketContextSnapshots({
+  forceRefresh = false,
+  forceQuoteRefresh = forceRefresh,
+  forceHistoryRefresh = forceRefresh,
+  now = new Date(),
+  persist = true,
+} = {}) {
+  const window = buildNiftyHistoryWindow(now);
+  const providerPairs = [
+    {
+      name: 'NSE',
+      fetchQuotes: () => nseProvider.getQuotes(DEFAULT_BENCHMARK_IDS, { forceRefresh: forceQuoteRefresh }),
+      fetchHistory: () => nseHistoryProvider.getDailyCandles(MARKET_BENCHMARKS.NIFTY_50.canonicalProductId, {
+        ...window,
+        forceRefresh: forceHistoryRefresh,
+      }),
+    },
+    {
+      name: 'UPSTOX',
+      fetchQuotes: () => upstoxProvider.getQuotes(DEFAULT_BENCHMARK_INSTRUMENT_KEYS, { forceRefresh: forceQuoteRefresh }),
+      fetchHistory: () => upstoxHistoryProvider.getDailyCandles(NIFTY_50_INSTRUMENT_KEY, {
+        ...window,
+        forceRefresh: forceHistoryRefresh,
+      }),
+    },
+  ];
+  const result = await fetchQualifiedMarketPair({
+    providers: providerPairs,
+    preferredProvider: PRIMARY_MARKET_PROVIDER,
+  });
+  const persistence = persist
+    ? await Promise.all([
+      persistFreshSnapshot(result.quoteSnapshot),
+      persistFreshSnapshot(result.historicalSnapshot),
+    ])
+    : [{ status: 'NOT_REQUESTED' }, { status: 'NOT_REQUESTED' }];
+  return {
+    ...result,
+    quoteSnapshot: { ...result.quoteSnapshot, persistence: persistence[0] },
+    historicalSnapshot: { ...result.historicalSnapshot, persistence: persistence[1] },
+  };
 }
 
 /**

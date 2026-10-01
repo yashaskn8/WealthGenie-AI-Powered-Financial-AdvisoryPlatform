@@ -24,13 +24,13 @@ import jwt from 'jsonwebtoken';
 import crypto from 'node:crypto';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import recommendRoutes, { recommendationPayloadFromSnapshot } from '../routes/recommend.js';
-import FinancialProfile from '../models/FinancialProfile.js';
+import profileRoutes from '../routes/profile.js';
 import Recommendation from '../models/Recommendation.js';
 import AuditRecord from '../models/AuditRecord.js';
 import { ProviderManager } from '../services/providerAbstraction.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import { assertFetchResponseMatchesOpenApi } from './helpers/openapiRuntimeContract.js';
-import { canonicalProfile } from './helpers/canonicalProfile.js';
+import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
 import { installFinancialStateTestHook } from '../services/financialStateTestHooks.js';
 
 const JWT_SECRET = 'deferred-advisory-test-secret-key-32ch';
@@ -54,6 +54,7 @@ test.before(async () => {
 
   app = express();
   app.use(express.json());
+  app.use('/api/profile', profileRoutes);
   app.use('/api/recommend', recommendRoutes);
   app.use(errorHandler);
 
@@ -77,11 +78,19 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
   const tokenA = signToken(userAId);
   const tokenB = signToken(userBId);
 
-  const profile = await FinancialProfile.create({
-    userId: userAId,
-    ...canonicalProfile({ monthlyTakeHome: 120000, monthlySavings: 35000, age: 32 }),
-    recommendationProfileVersion: 'financial-profile-1.0.0',
+  const completionResponse = await fetch(`${baseUrl}/api/profile/complete`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${tokenA}`,
+      'Idempotency-Key': crypto.randomUUID(),
+    },
+    body: JSON.stringify(canonicalProfilePayload({ monthlyTakeHome: 120000, monthlySavings: 35000, age: 32 })),
   });
+  const completionText = await completionResponse.text();
+  assert.equal(completionResponse.status, 200, completionText);
+  const completionBody = JSON.parse(completionText);
+  const profileId = completionBody.profile.profileId;
   let recData = null;
   let sourceState = null;
   let serverTimingHeader = null;
@@ -95,7 +104,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
         'Authorization': `Bearer ${tokenA}`,
         'idempotency-key': crypto.randomUUID(),
       },
-      body: JSON.stringify({ profileId: profile._id.toString() }),
+      body: JSON.stringify({ profileId }),
     });
     const elapsed = performance.now() - start;
 
@@ -125,7 +134,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     assert.ok(recData.market_adjustment, 'Must publish bounded market adjustment metadata');
     assert.match(serverTimingHeader, /market-context;dur=/);
 
-    const currentResponse = await fetch(`${baseUrl}/api/recommend/current?profileId=${profile._id}`, {
+    const currentResponse = await fetch(`${baseUrl}/api/recommend/current?profileId=${profileId}`, {
       headers: { 'Authorization': `Bearer ${tokenA}` },
     });
     assert.equal(currentResponse.status, 200);
@@ -294,23 +303,34 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
   });
 
   await t.test('12. Deferred advisory short-circuits when status is already READY (idempotent)', async () => {
-    const start = performance.now();
-    const res = await fetch(`${baseUrl}/api/recommend/${recData.recommendationId}/advisory`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${tokenA}`,
-      },
-    });
-    const elapsed = performance.now() - start;
+    const originalPrimaryProvider = process.env.LLM_PRIMARY_PROVIDER;
+    const originalGenerate = ProviderManager.nvidia.generate;
+    let providerCalls = 0;
+    process.env.LLM_PRIMARY_PROVIDER = 'NVIDIA_NIM';
+    ProviderManager.nvidia.generate = async () => {
+      providerCalls += 1;
+      throw new Error('READY advisory must return before provider generation');
+    };
+    try {
+      const res = await fetch(`${baseUrl}/api/recommend/${recData.recommendationId}/advisory`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${tokenA}`,
+        },
+      });
 
-    assert.equal(res.status, 200);
-    await assertFetchResponseMatchesOpenApi(res, 'POST', '/api/recommend/{recommendationId}/advisory');
-    const cachedAdvisory = await res.json();
-    assert.equal(cachedAdvisory.advisory_text, advisoryData.advisory_text);
-    assertAdvisoryBinding(cachedAdvisory, sourceState);
-    // Short circuit should return in under 200ms
-    assert.ok(elapsed < 1000, `Short circuit should be fast; took ${elapsed}ms`);
+      assert.equal(res.status, 200);
+      await assertFetchResponseMatchesOpenApi(res, 'POST', '/api/recommend/{recommendationId}/advisory');
+      const cachedAdvisory = await res.json();
+      assert.equal(cachedAdvisory.advisory_text, advisoryData.advisory_text);
+      assertAdvisoryBinding(cachedAdvisory, sourceState);
+      assert.equal(providerCalls, 0, 'READY short-circuit must not invoke advisory generation');
+    } finally {
+      ProviderManager.nvidia.generate = originalGenerate;
+      if (originalPrimaryProvider === undefined) delete process.env.LLM_PRIMARY_PROVIDER;
+      else process.env.LLM_PRIMARY_PROVIDER = originalPrimaryProvider;
+    }
   });
 
   await t.test('13. Concurrent claim prevents duplicate generation (409 Conflict when GENERATING)', async () => {
@@ -406,6 +426,100 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     const concurrentReady = await res.json();
     assert.equal(concurrentReady.advisory_text, 'Concurrent advisory for the captured allocation');
     assertAdvisoryBinding(concurrentReady, sourceState);
+  });
+
+  await t.test('16. simultaneous deferred-advisory HTTP callers share one generation claim and one READY artifact', async () => {
+    await Recommendation.updateOne(
+      { _id: recData.recommendationId, userId: userAId },
+      { $set: { advisoryText: null, advisoryMetadata: { status: 'PENDING' } } },
+    );
+    const recommendationCountBefore = await Recommendation.countDocuments({ userId: userAId });
+    const auditCountBefore = await AuditRecord.countDocuments({ userId: userAId });
+    const originalPrimaryProvider = process.env.LLM_PRIMARY_PROVIDER;
+    const originalGenerate = ProviderManager.nvidia.generate;
+    let providerCalls = 0;
+    let signalBothAtClaim;
+    const bothAtClaim = new Promise(resolve => { signalBothAtClaim = resolve; });
+    let releaseClaims;
+    const claimGate = new Promise(resolve => { releaseClaims = resolve; });
+    let signalProviderEntered;
+    const providerEntered = new Promise(resolve => { signalProviderEntered = resolve; });
+    let releaseProvider;
+    const providerGate = new Promise(resolve => { releaseProvider = resolve; });
+    let claimArrivals = 0;
+    process.env.LLM_PRIMARY_PROVIDER = 'NVIDIA_NIM';
+    ProviderManager.nvidia.generate = async ({ recentHistory }) => {
+      providerCalls += 1;
+      signalProviderEntered();
+      if (providerCalls > 1) releaseProvider();
+      await providerGate;
+      const prompt = recentHistory?.[0]?.parts?.[0]?.text;
+      const evidencePacket = JSON.parse(prompt).EVIDENCE_PACKET;
+      const evidenceId = evidencePacket.entries[0].id;
+      const text = `This recommendation is grounded in the verified evidence [${evidenceId}].`;
+      return {
+        text: JSON.stringify({
+          text,
+          evidenceIdsUsed: [evidenceId],
+          claims: [{ text, evidenceIds: [evidenceId] }],
+          unavailableFacts: [],
+        }),
+        provider: 'nvidia_nim',
+        model: 'simultaneous-claim-test',
+        tokensUsed: 0,
+      };
+    };
+    const removeHook = installFinancialStateTestHook(async boundary => {
+      if (boundary !== 'recommendation.advisory.beforeClaim') return;
+      claimArrivals += 1;
+      if (claimArrivals === 2) signalBothAtClaim();
+      await claimGate;
+    });
+    const send = () => fetch(`${baseUrl}/api/recommend/${recData.recommendationId}/advisory`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${tokenA}`,
+      },
+    });
+    const pending = [send(), send()];
+
+    try {
+      await bothAtClaim;
+      releaseClaims();
+      await providerEntered;
+      const firstResult = await Promise.race(pending.map((request, index) => request.then(response => ({ index, response }))));
+      assert.equal(firstResult.response.status, 409, 'the losing caller must observe the active generation claim');
+      await assertFetchResponseMatchesOpenApi(firstResult.response, 'POST', '/api/recommend/{recommendationId}/advisory');
+      const conflict = await firstResult.response.json();
+      assert.equal(conflict.code, 'ADVISORY_GENERATION_IN_PROGRESS');
+      assert.equal(conflict.details.status, 'GENERATING');
+      assert.equal(conflict.details.recommendationId, recData.recommendationId);
+      releaseProvider();
+
+      const responses = await Promise.all(pending);
+      const winnerResponse = responses[1 - firstResult.index];
+      const winner = await winnerResponse.json();
+      await assertFetchResponseMatchesOpenApi(winnerResponse, 'POST', '/api/recommend/{recommendationId}/advisory', { body: winner });
+      assert.equal(winnerResponse.status, 200, JSON.stringify(winner));
+      assertAdvisoryBinding(winner, sourceState);
+      assert.equal(providerCalls, 1, 'only the owner of the atomic GENERATING claim may invoke the provider');
+
+      const stored = await Recommendation.findById(recData.recommendationId).lean();
+      assert.ok(['GROUNDED_EXPLANATION_AVAILABLE', 'GROUNDED_EXPLANATION_FALLBACK', 'READY'].includes(stored.advisoryMetadata.status));
+      assert.equal(stored.advisoryMetadata.recommendationId, sourceState.recommendationId);
+      assert.equal(stored.advisoryMetadata.allocationRevisionId, sourceState.allocation_revision_id);
+      assert.equal(stored.advisoryMetadata.portfolioFingerprint, sourceState.portfolio_fingerprint);
+      assert.equal(await Recommendation.countDocuments({ userId: userAId }), recommendationCountBefore);
+      assert.equal(await AuditRecord.countDocuments({ userId: userAId }), auditCountBefore);
+    } finally {
+      releaseClaims();
+      releaseProvider();
+      removeHook();
+      ProviderManager.nvidia.generate = originalGenerate;
+      if (originalPrimaryProvider === undefined) delete process.env.LLM_PRIMARY_PROVIDER;
+      else process.env.LLM_PRIMARY_PROVIDER = originalPrimaryProvider;
+    }
   });
 });
 

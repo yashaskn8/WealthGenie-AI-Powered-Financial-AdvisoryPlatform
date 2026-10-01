@@ -110,7 +110,7 @@ async function requestMarketContext({ force = false } = {}) {
 function bindLifecycle() {
   if (lifecycleBound || typeof window === 'undefined') return;
   lifecycleRevalidate = () => {
-    if (document.visibilityState === 'hidden' || !shouldRevalidate()) return;
+    if (consumerCount === 0 || document.visibilityState === 'hidden' || !shouldRevalidate()) return;
     requestMarketContext();
   };
   window.addEventListener('focus', lifecycleRevalidate);
@@ -137,6 +137,7 @@ function subscribe(listener) {
     listeners.delete(listener);
     consumerCount = Math.max(0, consumerCount - 1);
     if (consumerCount === 0) {
+      unbindLifecycle();
       if (pollTimer) clearTimeout(pollTimer);
       pollTimer = null;
     }

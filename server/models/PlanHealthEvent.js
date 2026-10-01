@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 const planHealthEventSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   profileId: { type: mongoose.Schema.Types.ObjectId, ref: 'FinancialProfile', required: true, index: true },
+  profileStateRevision: { type: Number, min: 1, required: true, validate: Number.isSafeInteger },
   recommendationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Recommendation', default: null },
   reason: { type: String, required: true, maxlength: 120 },
   severity: { type: String, enum: ['INFO', 'ATTENTION', 'BLOCKED'], required: true },
@@ -18,6 +19,13 @@ const planHealthEventSchema = new mongoose.Schema({
 }, { strict: 'throw', timestamps: true });
 
 planHealthEventSchema.index({ userId: 1, detectedAt: -1 });
-planHealthEventSchema.index({ fingerprint: 1 }, { unique: true });
+planHealthEventSchema.index(
+  { fingerprint: 1 },
+  {
+    unique: true,
+    name: 'uniq_active_plan_health_fingerprint',
+    partialFilterExpression: { status: { $in: ['UNREAD', 'READ', 'OPEN', 'ACKNOWLEDGED'] } },
+  },
+);
 
 export default mongoose.model('PlanHealthEvent', planHealthEventSchema);

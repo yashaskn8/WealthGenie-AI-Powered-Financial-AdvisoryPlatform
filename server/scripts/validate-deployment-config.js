@@ -61,6 +61,40 @@ if (phase4Spec.template.spec.restartPolicy !== 'Never'
   throw new Error('Phase 4 migration Job must run its explicit script with the configured database URI');
 }
 
+const phase5MigrationJobs = docs.filter(item => item.value?.kind === 'Job'
+  && item.value?.metadata?.labels?.app === 'wealthgenie-phase5-agent-runtime-migration');
+if (phase5MigrationJobs.length !== 1) throw new Error('Exactly one Phase 5 durable agent runtime migration Job must be defined');
+const phase5Spec = phase5MigrationJobs[0].value.spec;
+const phase5Container = phase5Spec.template.spec.containers.find(item => item.name === 'phase5-agent-runtime-migration');
+if (phase5Spec.parallelism !== 1 || phase5Spec.completions !== 1 || phase5Spec.backoffLimit !== 0) {
+  throw new Error('Phase 5 durable agent runtime migration must be a single, non-parallel, fail-closed Job');
+}
+if (phase5Spec.template.spec.restartPolicy !== 'Never'
+    || phase5Container?.image !== 'wealthgenie-server:latest'
+    || phase5Container?.command?.join(' ') !== 'node scripts/migratePhase5AgentRuntimeIndexes.js'
+    || !phase5Container.env?.some(item => item.name === 'MONGODB_MIGRATION_URI'
+      && item.valueFrom?.secretKeyRef?.name === 'wealthgenie-secrets'
+      && item.valueFrom?.secretKeyRef?.key === 'MONGODB_URI')) {
+  throw new Error('Phase 5 migration Job must run the explicit migration with the configured database URI');
+}
+
+const phase7MigrationJobs = docs.filter(item => item.value?.kind === 'Job'
+  && item.value?.metadata?.labels?.app === 'wealthgenie-phase7-research-task-migration');
+if (phase7MigrationJobs.length !== 1) throw new Error('Exactly one Phase 7 ResearchAgent task migration Job must be defined');
+const phase7Spec = phase7MigrationJobs[0].value.spec;
+const phase7Container = phase7Spec.template.spec.containers.find(item => item.name === 'phase7-research-task-migration');
+if (phase7Spec.parallelism !== 1 || phase7Spec.completions !== 1 || phase7Spec.backoffLimit !== 0) {
+  throw new Error('Phase 7 ResearchAgent task migration must be a single, non-parallel, fail-closed Job');
+}
+if (phase7Spec.template.spec.restartPolicy !== 'Never'
+    || phase7Container?.image !== 'wealthgenie-server:latest'
+    || phase7Container?.command?.join(' ') !== 'node scripts/migrateResearchTaskIndexes.js'
+    || !phase7Container.env?.some(item => item.name === 'MONGODB_MIGRATION_URI'
+      && item.valueFrom?.secretKeyRef?.name === 'wealthgenie-secrets'
+      && item.valueFrom?.secretKeyRef?.key === 'MONGODB_URI')) {
+  throw new Error('Phase 7 task migration Job must run its explicit migration with the configured database URI');
+}
+
 const phase3MigrationJobs = docs.filter(item => item.value?.kind === 'Job'
   && item.value?.metadata?.labels?.app === 'wealthgenie-phase3-state-migration');
 if (phase3MigrationJobs.length !== 1) throw new Error('Exactly one Phase 3 ML/RAG state migration Job must be defined');
@@ -81,7 +115,9 @@ if (phase3Spec.template.spec.restartPolicy !== 'Never'
 const kustomization = parse(read('k8s/kustomization.yaml'));
 if (kustomization.resources?.some(resource => resource.includes('phase2-index-migration')
     || resource.includes('phase3-state-migration')
-    || resource.includes('phase4-plan-review-migration'))) {
+    || resource.includes('phase4-plan-review-migration')
+    || resource.includes('phase5-agent-runtime-migration')
+    || resource.includes('phase7-research-task-migration'))) {
   throw new Error('One-shot database migration Jobs must only be created by ordered deployment steps');
 }
 
@@ -93,11 +129,16 @@ function namedStep(steps, name) {
 
 const ci = parse(read('.github/workflows/ci.yml'));
 const browserSteps = ci.jobs?.['browser-real-dependencies']?.steps || [];
+if (browserSteps.filter(step => step.name === 'Migrate Phase 7 ResearchAgent task persistence').length !== 1) {
+  throw new Error('Browser CI must run exactly one Phase 7 ResearchAgent task migration');
+}
 const browserMongo = namedStep(browserSteps, 'Start transaction-capable MongoDB');
 const browserInstall = namedStep(browserSteps, 'Install application and browser dependencies');
 const browserPhase2Migration = namedStep(browserSteps, 'Migrate Phase 2 persistence indexes');
 const browserPhase3Migration = namedStep(browserSteps, 'Migrate Phase 3 ML/RAG shared-state indexes');
 const browserPhase4Migration = namedStep(browserSteps, 'Migrate Phase 4 PlanReview persistence indexes');
+const browserPhase5Migration = namedStep(browserSteps, 'Migrate Phase 5 durable agent runtime persistence');
+const browserPhase7Migration = namedStep(browserSteps, 'Migrate Phase 7 ResearchAgent task persistence');
 const browserModelActivation = namedStep(browserSteps, 'Verify transactional ML model activation');
 const browserArtifactVerification = namedStep(browserSteps, 'Verify trusted serving artifact bundles');
 const browserStart = namedStep(browserSteps, 'Start real application services');
@@ -105,24 +146,71 @@ if (!(browserMongo.index < browserInstall.index
     && browserInstall.index < browserPhase2Migration.index
     && browserPhase2Migration.index < browserPhase3Migration.index
     && browserPhase3Migration.index < browserPhase4Migration.index
-    && browserPhase4Migration.index < browserModelActivation.index
+    && browserPhase4Migration.index < browserPhase5Migration.index
+    && browserPhase5Migration.index < browserPhase7Migration.index
+    && browserPhase7Migration.index < browserModelActivation.index
     && browserModelActivation.index < browserArtifactVerification.index
     && browserArtifactVerification.index < browserStart.index)
     || !browserPhase2Migration.step.run?.includes('MONGODB_MIGRATION_URI="$MONGODB_URI" npm run migrate:phase2-indexes --prefix server')
     || browserPhase3Migration.step['working-directory'] !== 'ml-service'
     || !browserPhase3Migration.step.run?.includes('python scripts/migrate_phase3_state.py')
-    || !browserPhase4Migration.step.run?.includes('MONGODB_MIGRATION_URI="$MONGODB_URI" npm run migrate:phase4-plan-review-indexes --prefix server')) {
-  throw new Error('Browser CI must run both database migrations and artifact checks before starting application services');
+    || !browserPhase4Migration.step.run?.includes('MONGODB_MIGRATION_URI="$MONGODB_URI" npm run migrate:phase4-plan-review-indexes --prefix server')
+    || !browserPhase5Migration.step.run?.includes('MONGODB_MIGRATION_URI="$MONGODB_URI" npm run migrate:phase5-agent-runtime --prefix server')
+    || !browserPhase7Migration.step.run?.includes('MONGODB_MIGRATION_URI="$MONGODB_URI" npm run migrate:phase7-research-tasks --prefix server')) {
+  throw new Error('Browser CI must run all ordered database migrations and artifact checks before starting application services');
+}
+
+const edgeSteps = ci.jobs?.['production-edge-e2e']?.steps || [];
+const edgeMongo = namedStep(edgeSteps, 'Start MongoDB for the explicit ML/RAG state migration');
+const edgeMongoReady = namedStep(edgeSteps, 'Wait for transaction-capable MongoDB primary');
+const edgePhase2 = namedStep(edgeSteps, 'Run the explicit Phase 2 persistence migration');
+const edgePhase3 = namedStep(edgeSteps, 'Run the explicit Phase 3 ML/RAG state migration before starting application replicas');
+const edgePhase4 = namedStep(edgeSteps, 'Run the explicit Phase 4 PlanReview persistence migration');
+const edgePhase5 = namedStep(edgeSteps, 'Run the explicit Phase 5 durable agent runtime migration');
+const edgePhase7 = namedStep(edgeSteps, 'Run the explicit Phase 7 ResearchAgent task migration');
+const edgeRagBootstrap = namedStep(edgeSteps, 'Bootstrap the production-image shared RAG corpus');
+const edgeArtifactVerification = namedStep(edgeSteps, 'Verify trusted serving artifacts in the production image');
+const edgeArtifactRegistration = namedStep(edgeSteps, 'Register verified serving bundles in MongoDB');
+const edgeStart = namedStep(edgeSteps, 'Start the real Nginx edge stack');
+const edgeReady = namedStep(edgeSteps, 'Wait for backend and published Nginx frontend');
+const edgePlaywright = namedStep(edgeSteps, 'Run production-edge Playwright test through Nginx');
+if (!(edgeMongo.index < edgeMongoReady.index
+    && edgeMongoReady.index < edgePhase2.index
+    && edgePhase2.index < edgePhase3.index
+    && edgePhase3.index < edgePhase4.index
+    && edgePhase4.index < edgePhase5.index
+    && edgePhase5.index < edgePhase7.index
+    && edgePhase7.index < edgeRagBootstrap.index
+    && edgeRagBootstrap.index < edgeArtifactVerification.index
+    && edgeArtifactVerification.index < edgeArtifactRegistration.index
+    && edgeArtifactRegistration.index < edgeStart.index
+    && edgeStart.index < edgeReady.index
+    && edgeReady.index < edgePlaywright.index)
+    || !edgePhase2.step.run?.includes('MONGODB_MIGRATION_URI=')
+    || !edgePhase2.step.run?.includes('server npm run migrate:phase2-indexes')
+    || !edgePhase3.step.run?.includes('python scripts/migrate_phase3_state.py')
+    || !edgePhase4.step.run?.includes('server npm run migrate:phase4-plan-review-indexes')
+    || !edgePhase5.step.run?.includes('server npm run migrate:phase5-agent-runtime')
+    || !edgePhase7.step.run?.includes('server npm run migrate:phase7-research-tasks')
+    || !edgeRagBootstrap.step.run?.includes('python scripts/bootstrap_rag_corpus.py')
+    || !edgeArtifactVerification.step.run?.includes('python scripts/verify_serving_artifacts.py')
+    || !edgeArtifactRegistration.step.run?.includes('python scripts/register_trusted_bundles.py')) {
+  throw new Error('Production edge E2E must run the ordered persistence migrations and production RAG/model bootstrap before application startup');
 }
 
 const cd = parse(read('.github/workflows/cd.yml'));
 const cdSteps = cd.jobs?.['deploy-and-verify-kind']?.steps || [];
+if (cdSteps.filter(step => step.name === 'Run the one-shot Phase 7 ResearchAgent task migration').length !== 1) {
+  throw new Error('Kind CD must run exactly one Phase 7 ResearchAgent task migration');
+}
 const dbApply = namedStep(cdSteps, 'Apply database prerequisites');
 const secrets = namedStep(cdSteps, 'Inject ephemeral secrets for Kind validation cluster');
 const dbReady = namedStep(cdSteps, 'Wait for Database and Redis to be Ready');
 const cdPhase2Migration = namedStep(cdSteps, 'Run the one-shot Phase 2 index migration');
 const cdPhase3Migration = namedStep(cdSteps, 'Run the one-shot Phase 3 ML/RAG state migration');
 const cdPhase4Migration = namedStep(cdSteps, 'Run the one-shot Phase 4 PlanReview persistence migration');
+const cdPhase5Migration = namedStep(cdSteps, 'Run the one-shot Phase 5 durable agent runtime migration');
+const cdPhase7Migration = namedStep(cdSteps, 'Run the one-shot Phase 7 ResearchAgent task migration');
 const appApply = namedStep(cdSteps, 'Apply application manifests after database migrations');
 const appReady = namedStep(cdSteps, 'Wait for Microservices to be Ready');
 if (!(dbApply.index < secrets.index
@@ -130,7 +218,9 @@ if (!(dbApply.index < secrets.index
     && dbReady.index < cdPhase2Migration.index
     && cdPhase2Migration.index < cdPhase3Migration.index
     && cdPhase3Migration.index < cdPhase4Migration.index
-    && cdPhase4Migration.index < appApply.index
+    && cdPhase4Migration.index < cdPhase5Migration.index
+    && cdPhase5Migration.index < cdPhase7Migration.index
+    && cdPhase7Migration.index < appApply.index
     && appApply.index < appReady.index)
     || !cdPhase2Migration.step.run?.includes('kubectl create -f k8s/phase2-index-migration/job.yaml')
     || !cdPhase2Migration.step.run?.includes('kubectl wait --for=condition=complete')
@@ -138,7 +228,51 @@ if (!(dbApply.index < secrets.index
     || !cdPhase3Migration.step.run?.includes('kubectl wait --for=condition=complete')
     || !cdPhase4Migration.step.run?.includes('kubectl create -f k8s/phase4-plan-review-migration/job.yaml')
     || !cdPhase4Migration.step.run?.includes('kubectl wait --for=condition=complete')
+    || !cdPhase5Migration.step.run?.includes('kubectl create -f k8s/phase5-agent-runtime-migration/job.yaml')
+    || !cdPhase5Migration.step.run?.includes('kubectl wait --for=condition=complete')
+    || !cdPhase7Migration.step.run?.includes('kubectl create -f k8s/phase7-research-task-migration.yaml')
+    || !cdPhase7Migration.step.run?.includes('kubectl wait --for=condition=complete')
     || !appApply.step.run?.includes('kubectl apply -k k8s/')) {
-  throw new Error('Kind CD must wait for both one-shot database migrations before applying application workloads');
+  throw new Error('Kind CD must wait for all ordered one-shot database migrations before applying application workloads');
 }
-console.log(`Validated ${deploymentFiles.length} deployment YAML files, ordered Phase 2/3/4 migrations in browser CI and Kind CD, Compose API/worker separation, and worker probes.`);
+
+const tckWorkflow = read('.github/workflows/a2a-tck.yml');
+const pinnedTckSha = '263b9cfaf16a554bdfb166a7ba5b67716e946349';
+const tckPolicy = JSON.parse(read('.github/a2a-tck-known-blockers.json'));
+const expectedTckIssueClasses = {
+  'https://github.com/a2aproject/a2a-tck/issues/202': 'MISSING_EXPECTED_ERROR_ASSERTION',
+  'https://github.com/a2aproject/a2a-tck/issues/229': 'FIXTURE_APPLICABILITY',
+};
+const tckIssueClasses = Object.fromEntries(
+  (Array.isArray(tckPolicy.upstream_issues) ? tckPolicy.upstream_issues : [])
+    .map(issue => [issue?.url, issue?.classification]),
+);
+const tckCoreSendException = Array.isArray(tckPolicy.known_failures)
+  ? tckPolicy.known_failures.find(testCase => testCase?.requirement_id === 'CORE-SEND-003')
+  : null;
+if (!tckWorkflow.includes(`A2A_TCK_SHA: ${pinnedTckSha}`)
+    || !tckWorkflow.includes('git -C .a2a-tck fetch --depth 1 origin "$A2A_TCK_SHA"')
+    || !tckWorkflow.includes('test "$(git -C .a2a-tck rev-parse HEAD)" = "$A2A_TCK_SHA"')
+    || !tckWorkflow.includes('git -C .a2a-tck status --porcelain=v1 --untracked-files=all')
+    || !tckWorkflow.includes('python run_tck.py --sut-host http://127.0.0.1:5088 --transport http_json --level must')
+    || !tckWorkflow.includes('python ../scripts/validate_a2a_tck_policy.py')
+    || !tckWorkflow.includes('RAW_TCK_EXIT_CODE=$raw_tck_exit_code')
+    || !tckWorkflow.includes('$GITHUB_STEP_SUMMARY')
+    || tckWorkflow.includes('continue-on-error: true')
+    || tckPolicy.tck_sha !== pinnedTckSha
+    || tckPolicy.tck_repository !== 'a2aproject/a2a-tck'
+    || tckPolicy.policy_schema_version !== 2
+    || tckPolicy.classification !== 'KNOWN_UPSTREAM_TCK_EXCEPTIONS'
+    || Object.keys(tckIssueClasses).length !== 2
+    || Object.entries(expectedTckIssueClasses).some(([url, classification]) => tckIssueClasses[url] !== classification)
+    || !Array.isArray(tckPolicy.known_failures)
+    || tckPolicy.known_failures.length !== 6
+    || tckPolicy.known_failures.filter(testCase => testCase?.upstream_issue === 'https://github.com/a2aproject/a2a-tck/issues/229').length !== 5
+    || tckCoreSendException?.node_id !== 'tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-SEND-003-http_json]'
+    || tckCoreSendException?.upstream_issue !== 'https://github.com/a2aproject/a2a-tck/issues/202'
+    || !tckCoreSendException?.failure_fragment?.includes('Operation failed: [415] Unsupported input media type "application/x-unsupported-tck-type"')
+    || tckPolicy.acceptance?.allow_unknown_failures !== false
+    || tckPolicy.acceptance?.allow_skipped_known_tests !== false) {
+  throw new Error('A2A TCK workflow must run the pinned upstream suite through the exact fail-closed exception policy');
+}
+console.log(`Validated ${deploymentFiles.length} deployment YAML files, ordered Phase 2/3/4/5/7 migrations in Browser CI, production-edge E2E and Kind CD, Compose API/worker separation, and worker probes.`);

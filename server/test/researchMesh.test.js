@@ -1,18 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import net from 'node:net';
+import { EventEmitter } from 'node:events';
+import { Readable } from 'node:stream';
 import { TaskState } from '@a2a-js/sdk';
 import { boundedResearchBudget } from '../agents/research/researchConstants.js';
 import { createResearchBrief, validateResearchBrief } from '../agents/research/researchSchemas.js';
 import { evaluateResearchNeed } from '../agents/research/researchNeedEvaluator.js';
 import { validateResearchQuery, FixtureResearchSearchProvider } from '../agents/research/researchSearchProvider.js';
-import { assertSafePublicUrl, validatePublicUrl, SafePublicDocumentFetcher } from '../agents/research/safePublicDocumentFetcher.js';
+import { assertSafePublicUrl, validatePublicUrl, SafePublicDocumentFetcher, requestPinnedHttps } from '../agents/research/safePublicDocumentFetcher.js';
 import { extractDocumentEvidence } from '../agents/research/documentEvidenceExtractor.js';
 import { runResearch } from '../agents/research/researchLoop.js';
 import { buildScenarioAnalysisArtifact } from '../agents/research/scenarioAnalysis.js';
-import { startResearchAgentServer } from '../agents/research/researchAgentServer.js';
-import { ResearchMeshClient } from '../agents/research/researchMeshClient.js';
+import { mapA2AHttpErrorResponse, startResearchAgentServer } from '../agents/research/researchAgentServer.js';
+import { ResearchMeshClient, createResearchMeshClient } from '../agents/research/researchMeshClient.js';
 import { invokePlanReviewGraph } from '../agents/planReview/planReviewGraph.js';
+import { classifyResearchSource } from '../agents/research/sourceTrust.js';
+import { verifyResearchArtifact } from '../agents/research/researchClaimVerifier.js';
+import { hashResearchArtifact } from '../agents/research/researchArtifact.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -39,6 +45,34 @@ async function freePort() {
   return port;
 }
 
+test('A2A REST maps unsupported-media semantics to HTTP 415 without mutating the SDK payload', () => {
+  const sdkBody = {
+    error: {
+      code: 400,
+      status: 'INVALID_ARGUMENT',
+      message: 'Unsupported input media type.',
+      details: [{ reason: 'CONTENT_TYPE_NOT_SUPPORTED' }],
+    },
+  };
+  const mapped = mapA2AHttpErrorResponse(sdkBody);
+
+  assert.equal(mapped.status, 415);
+  assert.equal(mapped.body.error.code, 415);
+  assert.equal(sdkBody.error.code, 400, 'the SDK-owned response object is not mutated');
+  assert.equal(mapA2AHttpErrorResponse({ error: { code: 400, details: [{ reason: 'INVALID_PARAMS' }] } }), null);
+});
+
+test('generated ResearchBrief IDs cannot accidentally resemble private numbers', t => {
+  let uuid = '00000000-0000-4000-8000-612345678901';
+  t.mock.method(crypto, 'randomUUID', () => uuid);
+  const input = { topic: 'Public financial rule', question: 'Verify the current official public rule', requestedFactTypes: ['statutory_rule'] };
+  const first = createResearchBrief(input);
+  assert.doesNotMatch(first.researchBriefId, /\d/);
+  uuid = '00000000-0000-4000-8000-612345678902';
+  const second = createResearchBrief(input);
+  assert.notEqual(first.researchBriefId, second.researchBriefId, 'encoding preserves distinct generated identities');
+});
+
 test('ResearchBrief rejects private fields and credential-like values', () => {
   for (const field of ['email', 'phone', 'monthlyTakeHome', 'jwt', 'userId', 'rawProfile']) {
     const result = validateResearchBrief({ ...brief(), [field]: 'private-value' });
@@ -46,6 +80,21 @@ test('ResearchBrief rejects private fields and credential-like values', () => {
   }
   const emailResult = validateResearchBrief({ ...brief(), question: 'alice@example.com current RBI rate' });
   assert.ok(emailResult.error);
+});
+
+test('ResearchBrief rejects internal identifiers and Indian personal identifiers before crossing A2A', () => {
+  for (const input of [
+    { runId: 'internal-run-id' },
+    { correlationId: 'trace-private-id' },
+    { question: 'Check PAN ABCDE1234F for me' },
+    { question: 'Contact me at +91 98765 43210' },
+    { question: 'My Aadhaar is 1234 5678 9012' },
+    { accountNumber: '123456789012' },
+  ]) {
+    const result = validateResearchBrief({ ...brief(), ...input });
+    assert.ok(result.error, `private input must be rejected: ${JSON.stringify(input)}`);
+  }
+  assert.throws(() => createResearchBrief({ ...brief(), runId: 'internal-run-id' }), error => error.code === 'INVALID_RESEARCH_BRIEF');
 });
 
 test('ResearchNeedEvaluator is deterministic and feature-gated', () => {
@@ -67,10 +116,60 @@ test('query and source trust policy reject unsafe inputs and fake official domai
   assert.throws(() => validatePublicUrl('http://127.0.0.1:80/secret'), error => error.code === 'RESEARCH_SSRF_BLOCKED');
   assert.throws(() => validatePublicUrl('http://user:pass@rbi.org.in/secret'), error => error.code === 'RESEARCH_URL_REJECTED');
   assert.throws(() => validatePublicUrl('http://[::1]/secret'), error => error.code === 'RESEARCH_SSRF_BLOCKED');
+  assert.throws(() => validatePublicUrl('http://rbi.org.in/press-release'), error => error.code === 'RESEARCH_URL_REJECTED');
+  assert.equal(classifyResearchSource({ url: 'http://rbi.org.in/press-release' }), 'UNVERIFIED');
+  assert.equal(classifyResearchSource({ url: 'https://rbi.org.in.attacker.example/press-release' }), 'UNVERIFIED');
   await assert.rejects(() => assertSafePublicUrl('https://research.example/doc', {
     dnsLookup: async () => [{ address: '169.254.169.254', family: 4 }],
   }), error => error.code === 'RESEARCH_SSRF_BLOCKED');
+  for (const address of ['192.0.2.1', '198.18.0.1', '203.0.113.5', '2001:db8::1', '::ffff:127.0.0.1']) {
+    const host = net.isIP(address) === 6 ? `[${address}]` : address;
+    await assert.rejects(() => assertSafePublicUrl(`https://${host}/doc`, {
+      dnsLookup: async () => [{ address, family: net.isIP(address) }],
+    }), error => error.code === 'RESEARCH_SSRF_BLOCKED');
+  }
   assert.doesNotThrow(() => new SafePublicDocumentFetcher({ dnsLookup: async () => [{ address: '93.184.216.34', family: 4 }] }));
+});
+
+test('pinned HTTPS transport connects only to the vetted DNS address and rejects mixed DNS answers', async () => {
+  let observedOptions;
+  const response = await requestPinnedHttps(new URL('https://research.example/public?q=1'), {
+    dnsLookup: async hostname => {
+      assert.equal(hostname, 'research.example');
+      return [{ address: '93.184.216.34', family: 4 }];
+    },
+    httpsRequest: (options, onResponse) => {
+      observedOptions = options;
+      const request = new EventEmitter();
+      request.end = () => {
+        const body = Readable.from([Buffer.from('public source')]);
+        body.statusCode = 200;
+        body.headers = { 'content-type': 'text/plain' };
+        onResponse(body);
+      };
+      request.destroy = error => request.emit('error', error);
+      return request;
+    },
+    maxBytes: 1024,
+    timeoutMs: 1000,
+  });
+  let selected;
+  observedOptions.lookup('research.example', { all: true }, (_error, records) => { selected = records; });
+  assert.deepEqual(selected, [{ address: '93.184.216.34', family: 4 }]);
+  assert.equal(response.body.toString(), 'public source');
+  assert.equal(observedOptions.servername, 'research.example');
+
+  let requestStarted = false;
+  await assert.rejects(() => requestPinnedHttps(new URL('https://research.example/private'), {
+    dnsLookup: async () => [
+      { address: '93.184.216.34', family: 4 },
+      { address: '169.254.169.254', family: 4 },
+    ],
+    httpsRequest: () => { requestStarted = true; throw new Error('must never connect'); },
+    maxBytes: 1024,
+    timeoutMs: 1000,
+  }), error => error.code === 'RESEARCH_SSRF_BLOCKED');
+  assert.equal(requestStarted, false);
 });
 
 test('live/configured research results always pass through the safe document fetcher', async () => {
@@ -102,6 +201,61 @@ test('live/configured research results always pass through the safe document fet
   });
   assert.equal(fetchCount, 1);
   assert.equal(result.verification.valid, true);
+});
+
+test('live search metadata cannot forge publisher identity or freshness', async () => {
+  const sourceBrief = brief();
+  const result = await runResearch({
+    brief: sourceBrief,
+    provider: {
+      name: 'configured',
+      search: async () => [{
+        url: 'https://rbi.org.in/press-release/live',
+        title: 'provider forged title',
+        publisher: 'Fake Official Publisher',
+        publicationDate: nowIso(),
+        factType: 'regulatory_context',
+      }],
+    },
+    documentFetcher: {
+      fetchDocument: async url => ({
+        url,
+        body: 'The Reserve Bank of India published a policy note on monetary conditions.',
+        retrievedAt: nowIso(),
+      }),
+    },
+  });
+  assert.equal(result.artifact.evidenceUnits[0].publisher, 'rbi.org.in');
+  assert.equal(result.artifact.evidenceUnits[0].title, null);
+  assert.equal(result.artifact.evidenceUnits[0].publicationDate, null);
+  assert.equal(result.artifact.claims[0].freshnessStatus, 'UNKNOWN');
+  assert.equal(result.artifact.claims[0].supportStatus, 'UNVERIFIED');
+  const trustedMetadataVerification = verifyResearchArtifact(result.artifact, {
+    brief: sourceBrief,
+    requireIndependentSourceMetadata: true,
+  });
+  assert.equal(trustedMetadataVerification.valid, true, JSON.stringify(trustedMetadataVerification.errors));
+
+  const forgedPublicationDate = structuredClone(result.artifact);
+  const claimedDate = nowIso();
+  for (const evidence of forgedPublicationDate.evidenceUnits) {
+    evidence.publicationDate = claimedDate;
+    evidence.freshnessStatus = 'FRESH';
+    evidence.publisher = 'Reserve Bank of India';
+  }
+  for (const source of forgedPublicationDate.sources) {
+    source.publicationDate = claimedDate;
+    source.publisher = 'Reserve Bank of India';
+  }
+  for (const claim of forgedPublicationDate.claims) claim.freshnessStatus = 'FRESH';
+  delete forgedPublicationDate.contentHash;
+  forgedPublicationDate.contentHash = hashResearchArtifact(forgedPublicationDate);
+  const strictVerification = verifyResearchArtifact(forgedPublicationDate, {
+    brief: sourceBrief,
+    requireIndependentSourceMetadata: true,
+  });
+  assert.ok(strictVerification.errors.some(code => code.startsWith('SOURCE_PUBLICATION_DATE_NOT_INDEPENDENT_')));
+  assert.ok(strictVerification.errors.some(code => code.startsWith('SOURCE_PUBLISHER_NOT_URL_DERIVED_')));
 });
 
 test('safe document retrieval rejects internal redirects and unsupported content types', async () => {
@@ -152,8 +306,30 @@ test('fixture research produces a hashed, independently verified artifact', asyn
   assert.equal(result.artifact.financialAuthorityDelta, 0);
   assert.equal(result.artifact.status, 'COMPLETED');
   assert.ok(result.artifact.contentHash);
+  assert.equal(result.artifact.researchBriefHash.length, 64);
+  assert.ok(Object.isFrozen(result.artifact.claims[0]), 'nested artifact content is immutable after hashing');
   assert.equal(result.verification.valid, true);
   assert.ok(result.verification.verifiedClaims.length >= 1);
+  const changedBrief = brief({ question: 'What is a different RBI policy question?' });
+  assert.ok(verifyResearchArtifact(result.artifact, { brief: changedBrief }).errors.includes('RESEARCH_BRIEF_HASH_MISMATCH'));
+});
+
+test('research deadline covers non-cooperative search and progress providers', async () => {
+  const never = () => new Promise(() => {});
+  const source = brief({ maxResearchDepth: 1 });
+  await assert.rejects(() => runResearch({
+    brief: source,
+    provider: { search: never },
+    documentFetcher: { fetchDocument: async () => null },
+    budget: { maxDurationMs: 25 },
+  }), error => error.code === 'RESEARCH_DEADLINE_EXCEEDED');
+  await assert.rejects(() => runResearch({
+    brief: source,
+    provider: { search: async () => [] },
+    documentFetcher: { fetchDocument: async () => null },
+    budget: { maxDurationMs: 25 },
+    onProgress: never,
+  }), error => error.code === 'RESEARCH_DEADLINE_EXCEEDED');
 });
 
 test('deterministic scenario artifact reuses stress engine without authority changes', () => {
@@ -235,17 +411,134 @@ test('official A2A client/server boundary resolves card, returns artifact, and c
   }] });
   const started = await startResearchAgentServer({ env, port, dependencies: { provider } });
   try {
-  const client = new ResearchMeshClient({ baseUrl: env.AGENT_A2A_PUBLIC_URL, token: env.AGENT_A2A_DEV_TOKEN, requireSignedCard: true });
+  const observedAuthorization = [];
+  const client = new ResearchMeshClient({
+    baseUrl: env.AGENT_A2A_PUBLIC_URL,
+    token: env.AGENT_A2A_DEV_TOKEN,
+    requireSignedCard: true,
+    configuredJwk: started.jwks.keys[0],
+    fetchImpl: async (input, init) => {
+      const response = await fetch(input, init);
+      observedAuthorization.push({
+        url: String(input),
+        authorization: new Headers(init?.headers).get('authorization'),
+        contentType: response.headers.get('content-type'),
+      });
+      return response;
+    },
+  });
+    const missingCredentials = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
     const unauthorized = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: 'Bearer forged-token' },
       body: '{}',
     });
+    assert.equal(missingCredentials.status, 401);
+    assert.equal(missingCredentials.headers.get('www-authenticate'), 'Bearer');
+    assert.deepEqual(await missingCredentials.json(), {
+      error: {
+        code: 401,
+        message: 'Authenticated A2A caller required.',
+        status: 'UNAUTHENTICATED',
+        details: [],
+      },
+    });
     assert.equal(unauthorized.status, 401);
+    assert.equal(unauthorized.headers.get('www-authenticate'), 'Bearer');
+    assert.deepEqual(await unauthorized.json(), {
+      error: {
+        code: 401,
+        message: 'Authenticated A2A caller required.',
+        status: 'UNAUTHENTICATED',
+        details: [],
+      },
+    });
+    for (const contentType of ['text/plain', 'application/xml', 'text/html', 'application/octet-stream', 'multipart/form-data', 'not a media type']) {
+      const unsupportedContentType = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
+        method: 'POST',
+        headers: { 'content-type': contentType, authorization: `Bearer ${env.AGENT_A2A_DEV_TOKEN}` },
+        body: '{}',
+      });
+      assert.equal(unsupportedContentType.status, 415, contentType);
+      assert.match(unsupportedContentType.headers.get('content-type') || '', /^application\/json\b/i);
+      assert.deepEqual(await unsupportedContentType.json(), {
+        error: {
+          code: 415,
+          status: 'INVALID_ARGUMENT',
+          message: `Unsupported Content-Type "${contentType}"; expected application/json or application/a2a+json.`,
+          details: [{
+            '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+            reason: 'CONTENT_TYPE_NOT_SUPPORTED',
+            domain: 'a2a-protocol.org',
+          }],
+        },
+      });
+    }
+    const unsupportedInputMediaType = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${env.AGENT_A2A_DEV_TOKEN}`,
+        'A2A-Version': '1.0',
+      },
+      body: JSON.stringify({
+        message: {
+          role: 'ROLE_USER',
+          parts: [{ raw: 'dGNr', mediaType: 'application/x-unsupported-tck-type' }],
+          messageId: 'unsupported-media-regression',
+        },
+      }),
+    });
+    assert.equal(unsupportedInputMediaType.status, 415);
+    assert.match(unsupportedInputMediaType.headers.get('content-type') || '', /^application\/json\b/i);
+    const unsupportedInputBody = await unsupportedInputMediaType.json();
+    assert.equal(unsupportedInputBody.error.code, 415);
+    assert.equal(unsupportedInputBody.error.status, 'INVALID_ARGUMENT');
+    assert.match(unsupportedInputBody.error.message, /Unsupported input media type/);
+    assert.equal(unsupportedInputBody.error.details[0]['@type'], 'type.googleapis.com/google.rpc.ErrorInfo');
+    assert.equal(unsupportedInputBody.error.details[0].reason, 'CONTENT_TYPE_NOT_SUPPORTED');
+    assert.equal(unsupportedInputBody.error.details[0].domain, 'a2a-protocol.org');
+    const missingTask = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/tasks/nonexistent-a2a-task`, {
+      headers: { authorization: `Bearer ${env.AGENT_A2A_DEV_TOKEN}`, 'A2A-Version': '1.0' },
+    });
+    const missingTaskBody = await missingTask.json();
+    assert.equal(missingTask.status, 404, JSON.stringify(missingTaskBody));
+    assert.match(missingTask.headers.get('content-type') || '', /^application\/json\b/i);
+    assert.equal(missingTaskBody.error.code, 404);
+    assert.equal(missingTaskBody.error.details[0]['@type'], 'type.googleapis.com/google.rpc.ErrorInfo');
+    assert.equal(missingTaskBody.error.details[0].reason, 'TASK_NOT_FOUND');
+    assert.equal(missingTaskBody.error.details[0].domain, 'a2a-protocol.org');
     const result = await client.sendResearch({ brief: brief({ researchBriefId: 'brief-a2a-1' }) });
     assert.equal(result.task.status.state, TaskState.TASK_STATE_COMPLETED);
     assert.equal(result.artifact.researchBriefId, 'brief-a2a-1');
     assert.equal(result.artifact.financialAuthorityDelta, 0);
+    assert.equal(result.artifact.taskId, result.task.id);
+    assert.ok(observedAuthorization.some(item => item.url.includes('/a2a/message:send') && /^application\/json\b/i.test(item.contentType || '')));
+    assert.equal(observedAuthorization.find(item => item.url.endsWith('/.well-known/agent-card.json'))?.authorization, null);
+    assert.ok(observedAuthorization.some(item => item.url.includes('/a2a/') && item.authorization === `Bearer ${env.AGENT_A2A_DEV_TOKEN}`));
+
+    const hostileCard = JSON.parse(JSON.stringify(started.card));
+    hostileCard.signatures = [];
+    hostileCard.supportedInterfaces[0].url = 'https://attacker.example/a2a';
+    let hostileRpcCalls = 0;
+    const hostileClient = new ResearchMeshClient({
+      baseUrl: env.AGENT_A2A_PUBLIC_URL,
+      token: env.AGENT_A2A_DEV_TOKEN,
+      fetchImpl: async (_input, init) => {
+        assert.equal(new Headers(init?.headers).get('authorization'), null);
+        hostileRpcCalls += 1;
+        return new Response(JSON.stringify(hostileCard), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    });
+    await assert.rejects(() => hostileClient.resolve(), error => error.code === 'A2A_RPC_INTERFACE_INVALID');
+    assert.equal(hostileRpcCalls, 1, 'foreign Agent Card target must be rejected before authenticated RPC');
 
     const slowPort = await freePort();
     const slowServer = await startResearchAgentServer({
@@ -259,7 +552,11 @@ test('official A2A client/server boundary resolves card, returns artifact, and c
       },
     });
     try {
-      const slowClient = new ResearchMeshClient({ baseUrl: `http://127.0.0.1:${slowServer.port}`, token: env.AGENT_A2A_DEV_TOKEN });
+      const slowClient = new ResearchMeshClient({
+        baseUrl: `http://127.0.0.1:${slowServer.port}`,
+        token: env.AGENT_A2A_DEV_TOKEN,
+        configuredJwk: slowServer.jwks.keys[0],
+      });
       const canceled = await slowClient.submitForCancellation({ brief: brief({ researchBriefId: 'brief-a2a-cancel' }) });
       assert.equal(canceled.canceled.status.state, TaskState.TASK_STATE_CANCELED);
     } finally {
@@ -268,6 +565,74 @@ test('official A2A client/server boundary resolves card, returns artifact, and c
   } finally {
     await started.close();
   }
+});
+
+test('A2A rejects unsupported part media and returns failed Tasks for unstructured research input', async () => {
+  const port = await freePort();
+  const env = {
+    NODE_ENV: 'test',
+    AGENT_A2A_V1_ENABLED: 'true',
+    AGENT_A2A_PUBLIC_URL: `http://127.0.0.1:${port}`,
+    AGENT_A2A_DEV_TOKEN: 'research-input-test-token',
+    AGENT_IDENTITY_PROVIDER: 'development',
+    RESEARCH_SEARCH_PROVIDER: 'fixture',
+  };
+  let researchRuns = 0;
+  const started = await startResearchAgentServer({ env, port, dependencies: {
+    run: async () => { researchRuns += 1; throw new Error('invalid input must never reach research'); },
+  } });
+  const headers = { 'content-type': 'application/json', 'A2A-Version': '1.0', authorization: `Bearer ${env.AGENT_A2A_DEV_TOKEN}` };
+  try {
+    assert.deepEqual(started.card.defaultInputModes, ['application/json', 'text/plain']);
+    assert.deepEqual(started.card.skills[0].inputModes, ['application/json'], 'successful research still requires a structured brief');
+    for (const [index, part] of [
+      { raw: Buffer.from('unsupported file').toString('base64'), mediaType: 'image/png' },
+      { data: { question: 'public research' }, mediaType: 'video/mp4' },
+      { raw: 'dGNr', mediaType: 'application/xml' },
+      { raw: 'dGNr', mediaType: 'text/html' },
+      { raw: 'dGNr', mediaType: 'application/octet-stream' },
+      { raw: 'dGNr', mediaType: 'multipart/form-data' },
+      { raw: 'dGNr', mediaType: 'application/x-unsupported-tck-type' },
+    ].entries()) {
+      const response = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ message: { messageId: `unsupported-media-${index}`, role: 'ROLE_USER', parts: [part] } }),
+      });
+      const body = await response.json();
+      assert.equal(response.status, 415, JSON.stringify(body));
+      assert.match(response.headers.get('content-type') || '', /^application\/json\b/i);
+      assert.equal(body.error.code, 415, JSON.stringify(body));
+      assert.equal(body.error.status, 'INVALID_ARGUMENT', JSON.stringify(body));
+      assert.equal(body.error.details[0].reason, 'CONTENT_TYPE_NOT_SUPPORTED');
+    }
+    for (const mediaType of ['text/plain', 'TEXT/PLAIN; charset=UTF-8']) {
+      for (const returnImmediately of [false, true]) {
+        const response = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
+          method: 'POST', headers,
+          body: JSON.stringify({
+            message: {
+              messageId: `unstructured-${mediaType}-${returnImmediately}`, role: 'ROLE_USER',
+              parts: [{ text: 'Please research this without a structured brief.', mediaType }],
+            },
+            configuration: { returnImmediately },
+          }),
+        });
+        const body = await response.json();
+        assert.equal(response.status, 200, JSON.stringify(body));
+        assert.ok(body.task?.id, 'every accepted execution establishes a Task identity');
+        assert.ok(body.task.contextId, 'the Task retains its generated context binding');
+        assert.deepEqual(body.task.artifacts || [], [], 'invalid briefs never fabricate evidence');
+        if (!returnImmediately) {
+          assert.equal(body.task.status.state, 'TASK_STATE_FAILED');
+          assert.match(body.task.status.message.parts[0].text, /A2A_TASK_RECOVERY_INPUT_UNAVAILABLE/);
+          const restored = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/tasks/${body.task.id}`, { headers });
+          assert.equal(restored.status, 200);
+          assert.equal((await restored.json()).status.state, 'TASK_STATE_FAILED');
+        }
+      }
+    }
+    assert.equal(researchRuns, 0);
+  } finally { await started.close(); }
 });
 
 test('ResearchMesh cancellation reaches Agent Card resolution and fences late card responses', async () => {
@@ -285,8 +650,9 @@ test('ResearchMesh cancellation reaches Agent Card resolution and fences late ca
 
   const pending = client.sendResearch({ brief: brief(), signal: controller.signal });
   await Promise.resolve();
-  assert.equal(receivedSignal, controller.signal);
+  assert.ok(receivedSignal, 'the fetch receives a cancellation signal');
   controller.abort(new DOMException('Canceled by caller', 'AbortError'));
+  assert.equal(receivedSignal.aborted, true, 'caller cancellation propagates to the transport');
   releaseResponse({
     ok: true,
     json: async () => { parsedCard = true; return {}; },
@@ -294,4 +660,13 @@ test('ResearchMesh cancellation reaches Agent Card resolution and fences late ca
 
   await assert.rejects(pending, error => error.name === 'AbortError');
   assert.equal(parsedCard, false, 'a response arriving after cancellation is never parsed or used');
+});
+
+test('production ResearchMesh client never falls back to the development token', () => {
+  assert.throws(() => createResearchMeshClient({ env: {
+    NODE_ENV: 'production',
+    AGENT_A2A_RESEARCH_URL: 'https://research.example.test',
+    AGENT_A2A_DEV_TOKEN: 'development-only-token',
+    AGENT_A2A_CARD_SIGNING_PUBLIC_JWK: JSON.stringify({ kty: 'RSA', n: 'test', e: 'AQAB' }),
+  } }), error => error.code === 'A2A_CLIENT_TOKEN_CONFIGURATION_INVALID');
 });

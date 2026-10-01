@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { verifyJWT } from '../middleware/authMiddleware.js';
 import { asyncHandler, createError } from '../middleware/errorHandler.js';
 import { allocationSplitSchema, customPortfolioProjectionSchema, historicalXirrSchema, personalizedProjectionSchema, projectionComparisonSchema, stepUpProjectionSchema, stressScenarioSchema, validateStrict } from '../validation/financialSchemas.js';
-import FinancialProfile from '../models/FinancialProfile.js';
+import { requireCurrentFinancialProfile } from '../services/currentFinancialProfile.js';
 import { generateAllocationSplit, generatePortfolioProjection, generateProjectionComparison, generateProjections, sipFV, stepUpSipFV } from '../services/projectionEngine.js';
 import { computeXIRR, computeSIPXIRR } from '../services/xirrCalculator.js';
 import {
@@ -55,7 +55,7 @@ function assertCustomConcentration(allocations) {
 
 router.post('/stress-test', verifyJWT, validateStrict(stressScenarioSchema), asyncHandler(async (req, res) => {
   const { profileId, instrumentId, principal } = req.body;
-  const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
+  const { profile: stored } = await requireCurrentFinancialProfile({ userId: req.user.userId, profileId });
   if (!stored) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
 
   const profile = buildRecommendationProfile(stored);
@@ -90,7 +90,7 @@ router.post('/stress-test', verifyJWT, validateStrict(stressScenarioSchema), asy
 
 router.post('/custom-portfolio', verifyJWT, validateStrict(customPortfolioProjectionSchema), asyncHandler(async (req, res) => {
   const { profileId, allocations, years } = req.body;
-  const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
+  const { profile: stored } = await requireCurrentFinancialProfile({ userId: req.user.userId, profileId });
   if (!stored) throw createError(404, 'Profile not found or access denied', 'Profile not found.');
   const profile = buildRecommendationProfile(stored);
   const keys = Object.keys(allocations).filter(key => allocations[key] > 0);
@@ -226,7 +226,7 @@ router.post('/step-up', verifyJWT, validateStrict(stepUpProjectionSchema), async
 router.post('/', verifyJWT, validateStrict(personalizedProjectionSchema), asyncHandler(async (req, res) => {
   const { profileId, instruments, monthly_investment, years } = req.body;
 
-  const stored = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
+  const { profile: stored } = await requireCurrentFinancialProfile({ userId: req.user.userId, profileId });
   if (!stored) {
     throw createError(404, `Profile not found: ${profileId}`, 'Profile not found.');
   }

@@ -8,6 +8,8 @@ import json
 import logging
 import os
 import shutil
+import threading
+from functools import wraps
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 import numpy as np
@@ -27,6 +29,16 @@ from rag.vector_store.base import BaseVectorStore
 logger = logging.getLogger("wealthgenie.rag.vector_store")
 
 
+def _synchronized_store_access(method):
+    """Serialize access to one persistent store instance, including atomic saves."""
+    @wraps(method)
+    def synchronized(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return synchronized
+
+
 class PersistentVectorStore(BaseVectorStore):
     """
     Hardened vector database supporting FAISS IndexFlatIP vector search with NumPy fallback,
@@ -38,6 +50,7 @@ class PersistentVectorStore(BaseVectorStore):
     def __init__(self, index_path: Optional[Path] = None, force_numpy: bool = False):
         self.index_path = index_path or RAGConfig().vector_store_path
         self.backup_path = self.index_path.with_suffix(".json.bak")
+        self._lock = threading.RLock()
         self.force_numpy = force_numpy
         self._chunks: List[TextChunk] = []
         self._embeddings: List[List[float]] = []
@@ -51,6 +64,7 @@ class PersistentVectorStore(BaseVectorStore):
         """Returns True if FAISS is active and available for vector search."""
         return FAISS_AVAILABLE and not self.force_numpy
 
+    @_synchronized_store_access
     def add_chunks(self, chunks: List[TextChunk]) -> int:
         """Adds embedded text chunks to store, avoiding duplicate chunk_ids."""
         incoming = [chunk.embedding for chunk in chunks if chunk.embedding]
@@ -103,6 +117,7 @@ class PersistentVectorStore(BaseVectorStore):
         self._faiss_dirty = False
         logger.debug(f"Rebuilt FAISS IndexFlatIP ({index.ntotal} vectors, dim={dim})")
 
+    @_synchronized_store_access
     def search(
         self,
         query_vector: List[float],
@@ -259,6 +274,7 @@ class PersistentVectorStore(BaseVectorStore):
                 )
         return results
 
+    @_synchronized_store_access
     def get_stats(self) -> Dict[str, Any]:
         """Returns metadata stats for the vector store."""
         unique_docs = len({c.document_id for c in self._chunks})
@@ -284,15 +300,18 @@ class PersistentVectorStore(BaseVectorStore):
             "is_using_faiss": self.is_using_faiss,
         }
 
+    @_synchronized_store_access
     def get_chunks(self, document_id: Optional[str] = None) -> List[TextChunk]:
         return [chunk for chunk in self._chunks if document_id is None or chunk.document_id == document_id]
 
+    @_synchronized_store_access
     def get_corpus_revision(self) -> str:
         payload = json.dumps(
             [chunk.model_dump() for chunk in self._chunks], sort_keys=True, separators=(",", ":")
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    @_synchronized_store_access
     def delete_document(self, document_id: str) -> int:
         keep_indices = [i for i, chunk in enumerate(self._chunks) if chunk.document_id != document_id]
         removed = len(self._chunks) - len(keep_indices)
@@ -303,6 +322,7 @@ class PersistentVectorStore(BaseVectorStore):
             self.save()
         return removed
 
+    @_synchronized_store_access
     def set_document_state(self, document_id: str, state: str) -> int:
         allowed = {"PENDING", "ACTIVE", "SUPERSEDED", "SOFT_DELETED", "DELETED", "QUARANTINED", "FAILED"}
         if state not in allowed:
@@ -317,6 +337,7 @@ class PersistentVectorStore(BaseVectorStore):
             self.save()
         return changed
 
+    @_synchronized_store_access
     def update_document_metadata(
         self,
         document_id: str,
@@ -336,6 +357,7 @@ class PersistentVectorStore(BaseVectorStore):
             self.save()
         return changed
 
+    @_synchronized_store_access
     def save(self) -> None:
         """
         Persists chunks and vector embeddings to disk using atomic write and backup snapshot creation.
@@ -370,6 +392,7 @@ class PersistentVectorStore(BaseVectorStore):
         os.replace(tmp_path, self.index_path)
         logger.info(f"Safely persisted vector index (v{self.VERSION}, checksum: {checksum[:8]}) to {self.index_path}")
 
+    @_synchronized_store_access
     def load(self) -> None:
         """Loads index from disk with corruption detection and backup recovery."""
         self._chunks = []

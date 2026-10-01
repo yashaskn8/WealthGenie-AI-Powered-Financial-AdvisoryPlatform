@@ -421,8 +421,6 @@ function researchBriefForPlan(state, mode) {
     requestedFactTypes: ['regulatory_context', 'public_market_context'],
     instrumentCategories: [],
     maxResearchDepth: mode === 'DEEP_RESEARCH' ? 3 : 1,
-    correlationId: state.correlationId || null,
-    runId: state.runId || null,
   });
 }
 

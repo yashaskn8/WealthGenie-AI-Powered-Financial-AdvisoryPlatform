@@ -23,6 +23,7 @@ import { errorHandler } from '../middleware/errorHandler.js';
 import { withServer, rawRequest } from '../test-utils/httpTestUtils.js';
 
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import Goal from '../models/Goal.js';
 import Recommendation from '../models/Recommendation.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
@@ -72,6 +73,13 @@ test.before(async () => {
     userId: userAId,
     ...canonicalProfile({ monthlyTakeHome: 50000, monthlySavings: 15000, age: 30 }),
     recommendationProfileVersion: 'financial-profile-1.0.0',
+  });
+  await FinancialProfileState.create({
+    userId: userAId,
+    currentProfileId: profileA._id,
+    revision: 1,
+    promotionFence: 1,
+    resolutionStatus: 'CURRENT',
   });
 
   goalA = await Goal.create({
@@ -163,6 +171,7 @@ test.after(async () => {
     await Goal.deleteMany({ userId: { $in: [userAId, userBId] } });
     await RecommendationState.deleteMany({ userId: { $in: [userAId, userBId] } });
     await Recommendation.deleteMany({ userId: { $in: [userAId, userBId] } });
+    await FinancialProfileState.deleteMany({ userId: { $in: [userAId, userBId] } });
   } catch (_) {}
   await teardownTestDatabase();
 });

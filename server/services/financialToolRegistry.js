@@ -12,6 +12,7 @@ import { buildRecommendationProfile } from './recommendationProfile.js';
 import {
   assertPortfolioSuitable, enforceAllocationTargets, resolveConcentrationCap,
 } from './RecommendationPipeline.js';
+import { MCP_TOOL_POLICY, isMcpToolAllowed } from '../mcp/toolPolicy.js';
 
 /**
  * WealthGenie Centralized Financial Tool Registry
@@ -28,6 +29,17 @@ const VALID_ASSET_KEYS = [
 ];
 
 const SAFE_ALLOCATION_KEY_REGEX = /^(?!__proto__|constructor|prototype|toString|valueOf)[a-zA-Z0-9_-]{1,50}$/;
+
+function validateIsoCalendarDate(value, helpers) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return helpers.error('string.pattern.base');
+  const [year, month, day] = value.split('-').map(Number);
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthLengths = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > monthLengths[month - 1]) {
+    return helpers.error('string.isoDate');
+  }
+  return value;
+}
 
 function canonicalContextProfile(context) {
   return context?.profile ? buildRecommendationProfile(context.profile) : null;
@@ -90,10 +102,16 @@ function sanitizeToolInputs(obj) {
   return clean;
 }
 
-class ToolRegistry {
-  constructor() {
-    this.tools = new Map();
-    this.registerCoreTools();
+export class ToolRegistry {
+  #tools;
+  #sealed = false;
+
+  constructor({ registerCoreTools = true } = {}) {
+    this.#tools = new Map();
+    if (registerCoreTools) {
+      this.registerCoreTools();
+      this.seal();
+    }
   }
 
   /**
@@ -103,38 +121,58 @@ class ToolRegistry {
    * @param {object} config - { description, schema, executor, version }
    */
   registerTool(name, config) {
+    if (this.#sealed) throw new Error('Tool registry is sealed.');
     if (!name || !config.schema || !config.executor) {
       throw new Error(`Invalid tool registration for '${name}'. Schema and executor are required.`);
     }
-    this.tools.set(name, {
+    if (this.#tools.has(name)) throw new Error(`Tool '${name}' is already registered.`);
+    this.#tools.set(name, Object.freeze({
       name,
       description: config.description || '',
       schema: config.schema,
       executor: config.executor,
       version: config.version || '1.0.0',
-    });
+      // Explicit metadata is required for remote exposure. New tools remain
+      // private unless the central allowlist and registry policy both permit it.
+      mcpPolicy: config.mcpPolicy || null,
+    }));
+  }
+
+  seal() {
+    this.#sealed = true;
+    return this;
+  }
+
+  isSealed() {
+    return this.#sealed;
   }
 
   /**
    * Retrieves a tool definition by name.
    */
   getTool(name) {
-    return this.tools.get(name) || null;
+    return this.#tools.get(name) || null;
   }
 
   hasTool(name) {
-    return this.tools.has(name);
+    return this.#tools.has(name);
   }
 
   /**
    * Returns metadata for all registered tools.
    */
   listTools() {
-    return Array.from(this.tools.values()).map(t => ({
+    return Array.from(this.#tools.values()).map(t => ({
       name: t.name,
       description: t.description,
       version: t.version,
     }));
+  }
+
+  listMcpTools({ transport = 'remote' } = {}) {
+    return Array.from(this.#tools.values())
+      .filter(tool => isMcpToolAllowed(tool, { transport }))
+      .map(({ name, description, version, mcpPolicy }) => ({ name, description, version, mcpPolicy }));
   }
 
   /**
@@ -187,7 +225,11 @@ class ToolRegistry {
         execution_time_ms: Date.now() - startTime,
       };
     } catch (execErr) {
-      console.error(`[ToolRegistry] Error executing tool '${name}':`, execErr.message);
+      if (context?.mcpRequest === true) {
+        console.warn('[ToolRegistry] MCP calculator rejected or failed', { tool: name, code: 'MCP_CALCULATION_REJECTED' });
+      } else {
+        console.error(`[ToolRegistry] Error executing tool '${name}':`, execErr.message);
+      }
       PrometheusMetrics.recordToolExecution(name, false);
       return {
         success: false,
@@ -201,6 +243,7 @@ class ToolRegistry {
   registerCoreTools() {
     // 1. SIP Projection Tool
     this.registerTool('sip_projection', {
+      mcpPolicy: MCP_TOOL_POLICY.sip_projection,
       description: 'Calculates Future Value of a Systematic Investment Plan (SIP) using monthly annuity-due compounding.',
       version: '2.1.0',
       schema: Joi.object({
@@ -228,6 +271,7 @@ class ToolRegistry {
 
     // 2. Lump Sum Projection Tool
     this.registerTool('lump_sum_projection', {
+      mcpPolicy: MCP_TOOL_POLICY.lump_sum_projection,
       description: 'Calculates Future Value of a one-time lump sum investment using compound interest.',
       version: '2.1.0',
       schema: Joi.object({
@@ -253,6 +297,7 @@ class ToolRegistry {
 
     // 3. Reverse SIP Planner Tool
     this.registerTool('reverse_sip', {
+      mcpPolicy: MCP_TOOL_POLICY.reverse_sip,
       description: 'Calculates required monthly SIP to achieve a target financial goal.',
       version: '2.1.0',
       schema: Joi.object({
@@ -277,6 +322,7 @@ class ToolRegistry {
 
     // 4. Tax Calculator Tool
     this.registerTool('tax_calculator', {
+      mcpPolicy: MCP_TOOL_POLICY.tax_calculator,
       description: 'Computes income tax liability under an explicitly selected supported fiscal-year policy.',
       version: '2.2.0',
       schema: Joi.object({
@@ -305,15 +351,16 @@ class ToolRegistry {
 
     // 5. XIRR Calculator Tool
     this.registerTool('xirr_calculator', {
+      mcpPolicy: MCP_TOOL_POLICY.xirr_calculator,
       description: 'Calculates Exact Internal Rate of Return (XIRR) for irregular cash flows.',
       version: '2.1.0',
       schema: Joi.object({
         cashflows: Joi.array().items(
           Joi.object({
-            amount: Joi.number().required(),
-            date: Joi.string().required(),
+            amount: Joi.number().min(-1000000000000).max(1000000000000).required(),
+            date: Joi.string().max(10).pattern(/^\d{4}-\d{2}-\d{2}$/).custom(validateIsoCalendarDate).required(),
           })
-        ).min(2).required(),
+        ).min(2).max(600).required(),
       }),
       executor: async ({ cashflows }) => {
         return { ...computeXIRR(cashflows), classification: 'HISTORICAL_RETURN_CALCULATION' };
@@ -322,6 +369,7 @@ class ToolRegistry {
 
     // 6. Portfolio Optimizer Tool
     this.registerTool('portfolio_optimizer', {
+      mcpPolicy: MCP_TOOL_POLICY.portfolio_optimizer,
       description: 'Optimizes asset weights for minimum variance, maximum Sharpe ratio, or risk parity.',
       version: '2.1.0',
       schema: Joi.object({
@@ -359,6 +407,7 @@ class ToolRegistry {
 
     // 7. Portfolio Rebalance Tool
     this.registerTool('rebalance_calculator', {
+      mcpPolicy: MCP_TOOL_POLICY.rebalance_calculator,
       description: 'Computes portfolio drift and rebalance buy/sell directives.',
       version: '2.1.0',
       schema: Joi.object({
@@ -386,4 +435,7 @@ class ToolRegistry {
   }
 }
 
-export const FinancialToolRegistry = new ToolRegistry();
+export const FinancialToolRegistry = Object.freeze(new ToolRegistry());
+export function createIsolatedToolRegistry() {
+  return new ToolRegistry({ registerCoreTools: false });
+}

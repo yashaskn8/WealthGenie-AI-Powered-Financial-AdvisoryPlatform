@@ -6,7 +6,10 @@ import { WealthGenieMcpServer } from '../mcp/wealthgenieMcpServer.js';
 import { processChat } from '../services/geminiChatService.js';
 import { ProviderManager } from '../services/providerAbstraction.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import Recommendation from '../models/Recommendation.js';
+import RecommendationState from '../models/RecommendationState.js';
+import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import Goal from '../models/Goal.js';
 import User from '../models/User.js';
 import ConversationHistory from '../models/ConversationHistory.js';
@@ -180,20 +183,10 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
 
   // ── MCP Server Unknown Tool Handling ──
 
-  it('MCP executeTool returns error for unknown tool gracefully without throwing', async () => {
-    const result = await WealthGenieMcpServer.executeTool('nonexistent_financial_tool', { x: 1 });
-    assert.equal(result.success, false);
-    assert.match(result.error, /Unknown tool/i);
-    assert.equal(result.result, null);
-  });
-
-  it('MCP executeTool delegates to FinancialToolRegistry and returns identical results', async () => {
-    const payload = { monthlyInvestment: 10000, annualRate: 0.12, years: 10 };
-    const directResult = await FinancialToolRegistry.executeTool('sip_projection', payload);
-    const mcpResult = await WealthGenieMcpServer.executeTool('sip_projection', payload);
-
-    assert.equal(mcpResult.success, directResult.success);
-    assert.deepEqual(mcpResult.result, directResult.result);
+  it('MCP server has no unscoped direct execution bypass', () => {
+    assert.equal(WealthGenieMcpServer.executeTool, undefined);
+    assert.equal(WealthGenieMcpServer.prototype.executeTool, undefined);
+    assert.ok(WealthGenieMcpServer.getToolDefinitions({ transport: 'remote' }).length > 0);
   });
 
   // ── Rejects Unknown Keys at the strict calculation boundary ──
@@ -214,7 +207,10 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
 
   let originalPost;
   let originalProfileFindOne;
+  let originalProfileStateFindOne;
   let originalRecFindOne;
+  let originalRecommendationStateFindOne;
+  let originalAllocationRevisionFindOne;
   let originalGoalFind;
   let originalUserFindById;
   let originalConvFindOne;
@@ -226,7 +222,10 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
   beforeEach(() => {
     originalPost = axios.post;
     originalProfileFindOne = FinancialProfile.findOne;
+    originalProfileStateFindOne = FinancialProfileState.findOne;
     originalRecFindOne = Recommendation.findOne;
+    originalRecommendationStateFindOne = RecommendationState.findOne;
+    originalAllocationRevisionFindOne = RecommendationAllocationRevision.findOne;
     originalGoalFind = Goal.find;
     originalUserFindById = User.findById;
     originalConvFindOne = ConversationHistory.findOne;
@@ -242,8 +241,17 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
     ProviderManager.gemini.recordSuccess();
     ProviderManager.groq.recordSuccess();
 
-    FinancialProfile.findOne = () => ({ sort: () => ({ lean: async () => mockProfile }) });
+    FinancialProfile.findOne = () => ({ sort() { return this; }, lean: async () => mockProfile });
+    FinancialProfileState.findOne = () => ({ lean: async () => ({
+      userId: mockUserId,
+      currentProfileId: mockProfile._id,
+      revision: 1,
+      promotionFence: 1,
+      resolutionStatus: 'CURRENT',
+    }) });
     Recommendation.findOne = () => ({ sort: () => ({ lean: async () => null }) });
+    RecommendationState.findOne = () => ({ lean: async () => null });
+    RecommendationAllocationRevision.findOne = () => ({ sort() { return this; }, lean: async () => null });
     Goal.find = () => ({ sort: () => ({ lean: async () => [] }) });
     User.findById = () => ({ lean: async () => mockUser });
     ConversationHistory.findOne = async () => ({
@@ -268,7 +276,10 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
   afterEach(() => {
     axios.post = originalPost;
     FinancialProfile.findOne = originalProfileFindOne;
+    FinancialProfileState.findOne = originalProfileStateFindOne;
     Recommendation.findOne = originalRecFindOne;
+    RecommendationState.findOne = originalRecommendationStateFindOne;
+    RecommendationAllocationRevision.findOne = originalAllocationRevisionFindOne;
     Goal.find = originalGoalFind;
     User.findById = originalUserFindById;
     ConversationHistory.findOne = originalConvFindOne;

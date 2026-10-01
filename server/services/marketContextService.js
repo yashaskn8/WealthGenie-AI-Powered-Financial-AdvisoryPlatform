@@ -1,5 +1,6 @@
 import { getCache, setCache } from '../config/redis.js';
 import {
+  fetchQualifiedMarketContextSnapshots,
   fetchBenchmarkQuotes,
   fetchNiftyHistoricalCandles,
 } from './marketDataService.js';
@@ -153,6 +154,7 @@ export function buildMarketSnapshot({ quoteSnapshot, historicalSnapshot, feature
       quotes: { provider: quoteSnapshot?.provider ?? null, status: quoteSnapshot?.status ?? AVAILABILITY.UNAVAILABLE },
       history: { provider: historicalSnapshot?.provider ?? null, status: historicalSnapshot?.status ?? AVAILABILITY.UNAVAILABLE },
     },
+    providerSelection: quoteSnapshot?.providerSelection ?? historicalSnapshot?.providerSelection ?? null,
     observedFacts: features?.observedFacts ?? [],
     derivedFacts: features?.derivedFacts ?? [],
     policyOutput,
@@ -246,7 +248,7 @@ async function writeLastKnownGood(value, setLkg, persistDurable) {
   }
 }
 
-function recoverLastKnownGood(lastKnownGood, now, liveReasonCodes = []) {
+function recoverLastKnownGood(lastKnownGood, now, liveReasonCodes = [], liveProviderSelection = null) {
   if (!lastKnownGood?.marketContext?.marketSnapshot) return null;
   const saved = lastKnownGood.marketContext;
   const savedSnapshot = saved.marketSnapshot;
@@ -276,6 +278,7 @@ function recoverLastKnownGood(lastKnownGood, now, liveReasonCodes = []) {
     marketSnapshot: { ...marketSnapshot, recommendationUsability },
     recommendationUsability,
     recoveredFromLastKnownGood: true,
+    liveProviderSelection,
     statePersistence: 'NOT_MUTATED_UNAVAILABLE_OBSERVATION',
   };
 }
@@ -297,21 +300,49 @@ export async function getLiveMarketContext(options = {}, dependencies = {}) {
   const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
   if (Number.isNaN(now.getTime())) throw new TypeError('now must be a valid date.');
 
-  const [quoteResult, historyResult] = await Promise.allSettled([
-    fetchQuotes({ forceRefresh: options.forceQuoteRefresh === true, persist: true }),
-    fetchHistory({ forceRefresh: options.forceHistoryRefresh === true, now }),
-  ]);
+  let quoteResult;
+  let historyResult;
+  let liveProviderSelection = null;
+  const hasLegacyProviderInjection = Boolean(dependencies.fetchBenchmarkQuotes || dependencies.fetchNiftyHistoricalCandles);
+  if (!hasLegacyProviderInjection) {
+    try {
+      const pair = await (dependencies.fetchQualifiedMarketContextSnapshots || fetchQualifiedMarketContextSnapshots)({
+        forceQuoteRefresh: options.forceQuoteRefresh === true,
+        forceHistoryRefresh: options.forceHistoryRefresh === true,
+        now,
+        persist: true,
+      });
+      quoteResult = { status: 'fulfilled', value: pair.quoteSnapshot };
+      historyResult = { status: 'fulfilled', value: pair.historicalSnapshot };
+      liveProviderSelection = pair.providerSelection ?? null;
+    } catch (error) {
+      quoteResult = { status: 'rejected', reason: error };
+      historyResult = { status: 'rejected', reason: error };
+    }
+  } else {
+    [quoteResult, historyResult] = await Promise.allSettled([
+      fetchQuotes({ forceRefresh: options.forceQuoteRefresh === true, persist: true }),
+      fetchHistory({ forceRefresh: options.forceHistoryRefresh === true, now }),
+    ]);
+  }
   const quoteSnapshot = quoteResult.status === 'fulfilled'
     ? quoteResult.value
     : sourceFailureSnapshot('MARKET_QUOTE_REQUEST_FAILED', quoteResult.reason?.message || 'Quote request failed.');
   const historicalSnapshot = historyResult.status === 'fulfilled'
     ? historyResult.value
     : sourceFailureSnapshot('MARKET_HISTORY_REQUEST_FAILED', historyResult.reason?.message || 'History request failed.');
+  liveProviderSelection ||= quoteSnapshot.providerSelection ?? historicalSnapshot.providerSelection ?? null;
 
   const features = computeMarketContextFeatures({ quoteSnapshot, historicalSnapshot });
   const candidate = classifyDeterministicMarketContext(features);
   const evaluatedAt = now.toISOString();
   if (candidate.status !== 'MARKET_CONTEXT_AVAILABLE') {
+    // A partial live response is not a coherent market-context snapshot. Do
+    // not combine its usable fragments with older quote/history evidence, and
+    // do not let the mere presence of one live fact suppress a complete LKG.
+    const storedLkg = await readLastKnownGood(getLkg, getDurableLkg);
+    const recovered = recoverLastKnownGood(storedLkg.value, now, candidate.reasonCodes, liveProviderSelection);
+    if (recovered) return recovered;
     const marketSnapshot = buildMarketSnapshot({
       quoteSnapshot,
       historicalSnapshot,
@@ -320,14 +351,6 @@ export async function getLiveMarketContext(options = {}, dependencies = {}) {
       evaluatedAt,
       now,
     });
-    const currentEvidencePresent = availableFactCount(quoteSnapshot) > 0
-      || (Array.isArray(historicalSnapshot?.candles) && historicalSnapshot.candles.length > 0);
-    const recovered = currentEvidencePresent ? null : recoverLastKnownGood(
-       await readLastKnownGood(getLkg, getDurableLkg).then(result => result.value),
-      now,
-      candidate.reasonCodes,
-    );
-    if (recovered) return recovered;
     const recommendationUsability = recommendationUsabilityFor(marketSnapshot, now);
     return {
       ...candidate,

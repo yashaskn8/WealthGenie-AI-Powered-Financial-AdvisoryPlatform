@@ -3,6 +3,8 @@ import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import test from 'node:test';
 import AgentRun from '../models/AgentRun.js';
+import AgentCheckpoint from '../models/AgentCheckpoint.js';
+import AgentGraphCheckpoint from '../models/AgentGraphCheckpoint.js';
 import { migratePlanReviewPersistenceIndexes } from '../services/planReviewPersistence.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 
@@ -20,6 +22,16 @@ test('Mongo active-dedupe partial unique index permits inactive null/missing row
 
   try {
     await migratePlanReviewPersistenceIndexes();
+    for (const [model, expectedName] of [
+      [AgentCheckpoint, 'ttl_terminal_agent_checkpoints'],
+      [AgentGraphCheckpoint, 'ttl_terminal_agent_graph_checkpoints'],
+    ]) {
+      const checkpointIndexes = await model.collection.indexes();
+      const ttl = checkpointIndexes.find(index => index.name === expectedName);
+      assert.deepEqual(ttl?.key, { expiresAt: 1 });
+      assert.equal(ttl?.expireAfterSeconds, 0, 'terminal checkpoint retention must use an explicit Mongo TTL index');
+    }
+
     const base = runId => ({
       runId,
       agentType: 'PLAN_REVIEW',

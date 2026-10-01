@@ -27,6 +27,16 @@ const CANONICAL_PROFILE = Object.freeze({
 });
 
 describe('frontend API contracts', () => {
+  it('passes tax cancellation as a request option, never a financial input', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ results: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+    await api.computePostTaxReturnBatch([{ instrumentType: 'FD', nominalRate: 0.07, monthlySIP: 10000, holdingYears: 3 }], 1000000, 'new', 30, 'salary', 0.06, 'FY2026-27', { signal: controller.signal, body: { deductions: { section80C: 0 } } });
+    const config = fetchMock.mock.calls[0][1];
+    expect(config.signal).toBeInstanceOf(AbortSignal);
+    expect(JSON.parse(config.body)).toMatchObject({ deductions: { section80C: 0 }, inflationRate: 0.06 });
+    expect(JSON.parse(config.body)).not.toHaveProperty('signal');
+  });
   beforeEach(() => {
     api.clearAuthToken();
     localStorage.clear();
@@ -137,20 +147,59 @@ describe('frontend API contracts', () => {
     await expect(api.getMutualFundNavFacts(['not-a-code'])).rejects.toThrow(/numeric/);
   });
 
-  it('routes personalized product ranking to Express without a client product universe', async () => {
+  it('binds personalized product ranking to the current recommendation state without a client product universe', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ products: [{ id: 'index' }] }));
     vi.stubGlobal('fetch', fetchMock);
 
     await api.rankInvestmentCandidates(
       '64b000000000000000000001',
       'Index_MF',
+      null,
+      {},
+      {
+        profileId: '64b000000000000000000001',
+        profileVersion: 4,
+        recommendationId: '64b000000000000000000002',
+        allocationRevision: 3,
+        allocationRevisionId: '64b000000000000000000003',
+        portfolioFingerprint: 'a'.repeat(64),
+        recommendationFingerprint: 'b'.repeat(64),
+      },
     );
 
     expect(fetchMock.mock.calls[0][0]).toMatch(/\/api\/instruments\/rank-wti$/);
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
       profileId: '64b000000000000000000001',
       parentInstrumentId: 'Index_MF',
+      profileVersion: 4,
+      recommendationId: '64b000000000000000000002',
+      expectedAllocationRevision: 3,
+      expectedAllocationRevisionId: '64b000000000000000000003',
+      expectedPortfolioFingerprint: 'a'.repeat(64),
+      expectedRecommendationFingerprint: 'b'.repeat(64),
     });
+  });
+
+  it('refuses a product-ranking profile that disagrees with its financial-state binding', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(api.rankInvestmentCandidates(
+      '64b000000000000000000001',
+      'Index_MF',
+      null,
+      {},
+      {
+        profileId: '64b000000000000000000099',
+        profileVersion: 4,
+        recommendationId: '64b000000000000000000002',
+        allocationRevision: 3,
+        allocationRevisionId: '64b000000000000000000003',
+        portfolioFingerprint: 'a'.repeat(64),
+        recommendationFingerprint: 'b'.repeat(64),
+      },
+    )).rejects.toThrow(/profile does not match/i);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('runs stress scenarios against the authoritative profile and recommendation instrument', async () => {

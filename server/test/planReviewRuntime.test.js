@@ -14,6 +14,7 @@ import { enqueuePlanReviewRun } from '../agents/planReview/planReviewService.js'
 import { assertPlanReviewGates, gradePlanReviewTrajectory } from '../agents/evals/planReviewEvals.js';
 import { emptyCheckpoint } from '@langchain/langgraph';
 import { MongoPlanReviewCheckpointer } from '../agents/planReview/mongoPlanReviewCheckpointer.js';
+import { buildRecommendationSummary, loadPlanReviewContext } from '../agents/planReview/planReviewTools.js';
 import { completePlanReviewMandateAction, persistPlanReviewAction, reconcileTerminalPlanReviewMandates } from '../agents/planReview/planReviewApproval.js';
 import { createPlanReviewGraph } from '../agents/planReview/planReviewGraph.js';
 
@@ -22,6 +23,15 @@ const profileId = '64b000000000000000000001';
 const snapshotBinding = buildPlanReviewSnapshotBinding({ userId, profileId, currentState: { profileVersion: 1, provenance: { status: 'MISSING' } }, freshness: { fresh: false, reasonCodes: ['RECOMMENDATION_MISSING'] } });
 const snapshotHash = hashPlanReviewSnapshot(snapshotBinding);
 const snapshotResolver = async () => ({ sourceBinding: snapshotBinding, planReviewSnapshotHash: snapshotHash });
+const checkpointRetentionModels = {
+  checkpointModel: { updateMany: async () => ({ modifiedCount: 0 }) },
+  graphCheckpointModel: { updateMany: async () => ({ modifiedCount: 0 }) },
+};
+
+function queueTransactionDependencies() {
+  const session = { withTransaction: async callback => callback(), endSession: async () => undefined };
+  return { admissionModel: { updateOne: async () => ({ modifiedCount: 1 }) }, mongo: { startSession: async () => session } };
+}
 
 test('plan review state machine permits only explicit durable transitions', () => {
   assert.equal(canTransitionPlanReviewState('QUEUED', 'RUNNING'), true);
@@ -50,7 +60,7 @@ test('rejecting a current review closes its active lifecycle with snapshot CAS',
       return document;
     },
   };
-  const saved = await persistPlanReviewAction({ model, userId, runId: 'run-approval', planReviewSnapshotHash: snapshotHash, action: 'REJECT_RECOMPUTE' });
+  const saved = await persistPlanReviewAction({ model, userId, runId: 'run-approval', planReviewSnapshotHash: snapshotHash, action: 'REJECT_RECOMPUTE', ...checkpointRetentionModels });
   assert.equal(saved.status, 'COMPLETED');
   assert.equal(saved.approval.status, 'USER_REJECTED');
   assert.equal('activeDedupeKey' in saved, false);
@@ -81,16 +91,65 @@ test('mandate action keeps a review pending and terminalization is bound to its 
     planReviewSnapshotHash: snapshotHash,
     action: 'APPROVE_RECOMPUTE',
     mandate: { mandateId: 'mandate-1' },
+    ...checkpointRetentionModels,
   });
   assert.equal(pending.status, 'WAITING_FOR_APPROVAL');
   assert.equal(pending.activeDedupeKey, 'active-key');
   assert.equal(pending.approval.status, 'MANDATE_CREATED');
 
-  assert.equal(await completePlanReviewMandateAction({ model, userId, runId: 'run-approval', mandateId: 'another-mandate', outcome: 'REVOKED' }), null);
-  const completed = await completePlanReviewMandateAction({ model, userId, runId: 'run-approval', mandateId: 'mandate-1', outcome: 'EXECUTED' });
+  assert.equal(await completePlanReviewMandateAction({ model, userId, runId: 'run-approval', mandateId: 'another-mandate', outcome: 'REVOKED', ...checkpointRetentionModels }), null);
+  const completed = await completePlanReviewMandateAction({ model, userId, runId: 'run-approval', mandateId: 'mandate-1', outcome: 'EXECUTED', ...checkpointRetentionModels });
   assert.equal(completed.status, 'COMPLETED');
   assert.equal(completed.approval.status, 'MANDATE_EXECUTED');
   assert.equal('activeDedupeKey' in completed, false);
+});
+
+test('approval terminal transitions schedule both checkpoint stores for retention in the same transaction', async () => {
+  const now = new Date('2026-09-26T00:00:00.000Z');
+  const expectedExpiry = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+  async function exercise({ action, mandate = null, outcome = null, initialStatus }) {
+    let inTransaction = false;
+    const session = {
+      async withTransaction(callback) { inTransaction = true; try { await callback(); } finally { inTransaction = false; } },
+      async endSession() {},
+    };
+    const record = { userId, runId: `run-${action}-${outcome || 'direct'}`, status: initialStatus, approval: { mandateId: mandate?.mandateId || 'mandate-1' } };
+    const model = {
+      db: { async startSession() { return session; } },
+      async findOneAndUpdate(_filter, update, options) {
+        assert.equal(inTransaction, true);
+        assert.equal(options.session, session);
+        Object.assign(record, update.$set);
+        return record;
+      },
+    };
+    const seen = [];
+    const retention = store => ({
+      async updateMany(filter, update, options) {
+        assert.equal(inTransaction, true);
+        assert.equal(filter.runId, record.runId);
+        assert.equal(filter.userId, userId);
+        assert.ok(options.session);
+        assert.deepEqual(update.$set.expiresAt, expectedExpiry);
+        seen.push(store);
+        return { modifiedCount: 1 };
+      },
+    });
+    const args = {
+      model,
+      userId,
+      runId: record.runId,
+      now,
+      checkpointModel: retention('checkpoint'),
+      graphCheckpointModel: retention('graph'),
+    };
+    if (outcome) await completePlanReviewMandateAction({ ...args, mandateId: mandate.mandateId, outcome });
+    else await persistPlanReviewAction({ ...args, planReviewSnapshotHash: snapshotHash, action, mandate });
+    assert.deepEqual(seen.sort(), ['checkpoint', 'graph']);
+  }
+
+  await exercise({ action: 'REJECT_RECOMPUTE', initialStatus: 'WAITING_FOR_APPROVAL' });
+  await exercise({ action: 'APPROVE_RECOMPUTE', mandate: { mandateId: 'mandate-1' }, outcome: 'REVOKED', initialStatus: 'WAITING_FOR_APPROVAL' });
 });
 
 test('expired mandates reconcile a waiting run durably and restart sweeps do not repeat work', async () => {
@@ -149,7 +208,7 @@ test('expired mandates reconcile a waiting run durably and restart sweeps do not
     }),
   };
 
-  const first = await reconcileTerminalPlanReviewMandates({ mandateModel, runModel, now });
+  const first = await reconcileTerminalPlanReviewMandates({ mandateModel, runModel, now, ...checkpointRetentionModels });
   assert.deepEqual(first, { scanned: 1, reconciled: 1, processed: 1 });
   assert.equal(mandate.status, 'EXPIRED');
   assert.equal(mandate.sourceRunReconciliationStatus, 'RECONCILED');
@@ -158,10 +217,11 @@ test('expired mandates reconcile a waiting run durably and restart sweeps do not
   assert.equal('activeDedupeKey' in run, false);
   assert.equal(await completePlanReviewMandateAction({
     model: runModel, userId, runId: mandate.runId, mandateId: mandate.mandateId, outcome: 'EXECUTED', now,
+    ...checkpointRetentionModels,
   }), null, 'a stale approval completion cannot reopen an expired source run');
 
   // A fresh worker/process instance can safely resume the sweep from shared state.
-  const restarted = await reconcileTerminalPlanReviewMandates({ mandateModel, runModel, now });
+  const restarted = await reconcileTerminalPlanReviewMandates({ mandateModel, runModel, now, ...checkpointRetentionModels });
   assert.deepEqual(restarted, { scanned: 0, reconciled: 0, processed: 0 });
 
   let freshRun;
@@ -169,9 +229,9 @@ test('expired mandates reconcile a waiting run durably and restart sweeps do not
     async updateMany() { return { modifiedCount: 0 }; },
     findOne() { return { lean: async () => null }; },
     async countDocuments() { return 0; },
-    async create(document) { freshRun = document; return document; },
+    async create(documents) { [freshRun] = documents; return documents; },
   };
-  const fresh = await enqueuePlanReviewRun({ userId, profileId, model: freshModel, snapshotResolver });
+  const fresh = await enqueuePlanReviewRun({ userId, profileId, model: freshModel, snapshotResolver, ...queueTransactionDependencies() });
   assert.equal(fresh.created, true, 'reconciliation releases active capacity for the same canonical financial snapshot');
   assert.equal(freshRun.status, 'QUEUED');
 });
@@ -181,8 +241,9 @@ test('enqueue is idempotent for an active owned profile run bound to the same so
   const model = {
     findOne() { return { lean: async () => active }; },
     create: async () => { throw new Error('should not create a duplicate'); },
+    updateMany: async () => ({ modifiedCount: 0 }),
   };
-  const result = await enqueuePlanReviewRun({ userId, profileId, model, snapshotResolver });
+  const result = await enqueuePlanReviewRun({ userId, profileId, model, snapshotResolver, ...queueTransactionDependencies() });
   assert.equal(result.created, false);
   assert.equal(result.run.runId, active.runId);
 });
@@ -196,6 +257,7 @@ test('enqueue applies per-user and global queue backpressure before creating a r
       return 0;
     },
     async create() { createCalled = true; return null; },
+    async updateMany() { return { modifiedCount: 0 }; },
   };
   await assert.rejects(
     enqueuePlanReviewRun({
@@ -203,6 +265,7 @@ test('enqueue applies per-user and global queue backpressure before creating a r
       profileId,
       model,
       snapshotResolver,
+      ...queueTransactionDependencies(),
       runtimeConfig: { agentPlanReview: { maxQueuedRunsPerUser: 1, maxActiveRunsPerUser: 1, maxGlobalQueuedRuns: 1 } },
     }),
     error => error.status === 429 && error.code === 'AGENT_QUEUE_SATURATED' && error.retryAfterMs === 5000,
@@ -215,6 +278,7 @@ test('WAITING_FOR_APPROVAL consumes active-user capacity in the canonical state 
   let activeFilter;
   const model = {
     findOne() { return { lean: async () => null }; },
+    async updateMany() { return { modifiedCount: 0 }; },
     async countDocuments(filter) {
       if (Array.isArray(filter.status?.$in)) {
         activeFilter = filter.status.$in;
@@ -229,6 +293,7 @@ test('WAITING_FOR_APPROVAL consumes active-user capacity in the canonical state 
     profileId,
     model,
     snapshotResolver,
+    ...queueTransactionDependencies(),
     runtimeConfig: { agentPlanReview: { maxQueuedRunsPerUser: 5, maxActiveRunsPerUser: 1, maxGlobalQueuedRuns: 20 } },
   }), error => error.status === 429 && error.code === 'AGENT_QUEUE_SATURATED');
   assert.deepEqual(activeFilter, ['QUEUED', 'RUNNING', 'WAITING_FOR_APPROVAL']);
@@ -303,6 +368,220 @@ test('Mongo LangGraph checkpointer persists and reloads a run-scoped checkpoint'
   assert.equal(tuple.checkpoint.channel_values.status, 'RUNNING');
   assert.equal(tuple.metadata.runId, 'run-1');
   assert.throws(() => saver.scope('run-1:2'), { code: 'CHECKPOINT_SCOPE_MISMATCH' });
+});
+
+test('Mongo LangGraph checkpointer orders pending writes after an in-flight checkpoint save', async () => {
+  let signalCheckpointSaveStarted;
+  let releaseCheckpointSave;
+  const checkpointSaveStarted = new Promise(resolve => { signalCheckpointSaveStarted = resolve; });
+  const checkpointSaveGate = new Promise(resolve => { releaseCheckpointSave = resolve; });
+  const documents = [];
+  let pendingWriteReads = 0;
+  const model = {
+    async findOneAndUpdate(filter, update) {
+      signalCheckpointSaveStarted();
+      await checkpointSaveGate;
+      let document = documents.find(item => Object.entries(filter).every(([key, value]) => String(item[key]) === String(value)));
+      if (!document) {
+        document = { ...update.$setOnInsert, pendingWrites: [] };
+        documents.push(document);
+      }
+      Object.assign(document, update.$set);
+      return document;
+    },
+    findOne(filter) {
+      pendingWriteReads += 1;
+      const query = {
+        select() { return query; },
+        lean: async () => documents.find(item => Object.entries(filter).every(([key, value]) => String(item[key]) === String(value))),
+      };
+      return query;
+    },
+    async updateOne(filter, update) {
+      const document = documents.find(item => Object.entries(filter).every(([key, value]) => (
+        key === 'pendingWrites' ? JSON.stringify(item[key] || []) === JSON.stringify(value) : String(item[key]) === String(value)
+      )));
+      if (!document) return { matchedCount: 0 };
+      document.pendingWrites.push(...update.$push.pendingWrites.$each);
+      return { matchedCount: 1 };
+    },
+  };
+  const saver = new MongoPlanReviewCheckpointer({ model, runId: 'run-ordered-writes', userId, executionGeneration: 1 });
+  const checkpoint = { ...emptyCheckpoint(), id: 'checkpoint-ordered', channel_values: { status: 'RUNNING' } };
+  const savePromise = saver.put(
+    { configurable: { thread_id: 'run-ordered-writes:1' } },
+    checkpoint,
+    { runId: 'run-ordered-writes' },
+    checkpoint.channel_versions,
+  );
+  await checkpointSaveStarted;
+
+  const writesResult = saver.putWrites(
+    { configurable: { thread_id: 'run-ordered-writes:1', checkpoint_id: 'checkpoint-ordered' } },
+    [['status', 'RUNNING']],
+    'task-ordered',
+  ).then(() => null, error => error);
+  await new Promise(resolve => setImmediate(resolve));
+  const readsBeforeCheckpointCommit = pendingWriteReads;
+  releaseCheckpointSave();
+
+  const savedConfig = await savePromise;
+  const writeError = await writesResult;
+  assert.equal(readsBeforeCheckpointCommit, 0, 'pending writes must wait until the checkpoint record is durable');
+  assert.equal(writeError, null);
+  await Promise.all([
+    saver.putWrites(savedConfig, [['step', 1]], 'task-concurrent-a'),
+    saver.putWrites(savedConfig, [['toolCallCount', 1]], 'task-concurrent-b'),
+  ]);
+  const tuple = await saver.getTuple(savedConfig);
+  assert.deepEqual(tuple.pendingWrites, [
+    ['task-ordered', 'status', 'RUNNING'],
+    ['task-concurrent-a', 'step', 1],
+    ['task-concurrent-b', 'toolCallCount', 1],
+  ]);
+});
+
+test('Mongo LangGraph checkpointer rejects a pending-write batch above its recovery count bound', async () => {
+  let reads = 0;
+  const model = {
+    findOne() {
+      reads += 1;
+      const query = { lean: async () => ({ pendingWrites: [] }) };
+      return query;
+    },
+    async updateOne() { throw new Error('an over-budget batch must never persist'); },
+  };
+  const saver = new MongoPlanReviewCheckpointer({ model, runId: 'run-bounded-count', userId, executionGeneration: 1 });
+  await assert.rejects(
+    saver.putWrites({ configurable: { thread_id: 'run-bounded-count:1', checkpoint_id: 'checkpoint-1' } },
+      Array.from({ length: 101 }, (_, index) => [`channel-${index}`, index]), 'task-1'),
+    error => error.code === 'AGENT_GRAPH_CHECKPOINT_BUDGET_EXCEEDED',
+  );
+  assert.equal(reads, 0, 'reject the oversized batch before reading or mutating persisted state');
+});
+
+test('Mongo LangGraph checkpointer enforces cumulative pending-write byte bounds', async () => {
+  let writes = 0;
+  const prior = ['task-1', 'channel-1', 'json', 'x'.repeat(250 * 1024)];
+  const model = {
+    findOne() {
+      const query = { lean: async () => ({ pendingWrites: [prior] }) };
+      return query;
+    },
+    async updateOne() { writes += 1; return { matchedCount: 1 }; },
+  };
+  const saver = new MongoPlanReviewCheckpointer({ model, runId: 'run-bounded-bytes', userId, executionGeneration: 1 });
+  await assert.rejects(
+    saver.putWrites({ configurable: { thread_id: 'run-bounded-bytes:1', checkpoint_id: 'checkpoint-1' } }, [['channel-2', 'y'.repeat(6 * 1024)]], 'task-2'),
+    error => error.code === 'AGENT_GRAPH_CHECKPOINT_BUDGET_EXCEEDED',
+  );
+  assert.equal(writes, 0, 'cumulative over-budget writes must not reach persistence');
+});
+
+test('production PlanReview graph context excludes bulky persisted snapshots before checkpoint writes', async () => {
+  const largeHistoricalSnapshot = 'historical-generation-payload-'.repeat(16_000);
+  const recommendation = {
+    _id: 'recommendation-1',
+    profileId,
+    generatedAt: new Date('2026-09-01T00:00:00.000Z'),
+    modelVersion: 'deterministic-v1',
+    profileInputHash: 'profile-hash',
+    recommendationPolicyVersion: 'policy-v1',
+    regulatoryRuleVersion: 'regulatory-v1',
+    responseSnapshot: { body: largeHistoricalSnapshot },
+    instruments: [{
+      id: 'instrument-1', name: 'Instrument', type: 'FIXED_INCOME', assetClass: 'FIXED_INCOME',
+      allocation_pct: 100, nominalReturn: 7, riskLevel: 'LOW',
+      returnDataClass: 'MODEL_ASSUMPTION', returnAssumptionVersion: 'assumption-v1',
+      internalCatalogPayload: largeHistoricalSnapshot,
+    }],
+    internalRegistryPayload: largeHistoricalSnapshot,
+  };
+  const currentState = {
+    profile: { version: 3, internalProfilePayload: largeHistoricalSnapshot },
+    profileVersion: 3,
+    currentRecommendationView: recommendation,
+    recommendation,
+    allocationRevision: {
+      _id: 'allocation-1', revision: 4, returnAssumptionVersion: 'assumption-v1',
+      returnAssumptionHash: 'assumption-hash', returnAssumptionSource: 'WEALTHGENIE_MODEL_POLICY',
+      instruments: recommendation.instruments,
+    },
+    currentAllocation: { instruments: recommendation.instruments },
+    financialProfileState: { revision: 5, currentProfileId: profileId, internalStatePayload: largeHistoricalSnapshot },
+    recommendationFingerprint: 'recommendation-fingerprint',
+    portfolioFingerprint: 'portfolio-fingerprint',
+    generationSnapshot: { response: { body: largeHistoricalSnapshot } },
+    provenance: { status: 'PERSISTED_REVISION', internalPayload: largeHistoricalSnapshot },
+    freshness: { fresh: true, reasonCodes: [] },
+  };
+  const profile = {
+    _id: profileId,
+    age: 35,
+    riskTolerance: 'MODERATE',
+    monthlySavings: 27_000,
+    investmentHorizonYears: 12,
+    investmentGoals: ['Wealth Growth'],
+    finalSuitabilityRisk: 'LOW',
+    suitabilityReasonCodes: ['CAPACITY_PULL_DOWN'],
+    email: 'private@example.invalid',
+    internalProfilePayload: largeHistoricalSnapshot,
+  };
+  const snapshot = {
+    profile,
+    canonicalProfile: {
+      age: profile.age,
+      riskTolerance: profile.riskTolerance,
+      monthlySavings: profile.monthlySavings,
+      investmentHorizonYears: profile.investmentHorizonYears,
+      investmentGoals: profile.investmentGoals,
+    },
+    currentState,
+    sourceBinding: { recommendationId: 'recommendation-1', allocationRevisionId: 'allocation-1' },
+    planReviewSnapshotHash: 'bound-snapshot-hash',
+  };
+  const context = await loadPlanReviewContext({
+    userId,
+    profileId,
+    dependencies: { resolvePlanReviewSnapshot: async () => snapshot },
+  });
+
+  assert.equal(context.planReviewSnapshotHash, snapshot.planReviewSnapshotHash);
+  assert.equal(context.sourceBinding, snapshot.sourceBinding);
+  assert.equal(context.recommendation._id, recommendation._id);
+  assert.equal(context.recommendation.responseSnapshotAvailable, true);
+  assert.equal(context.recommendation.instruments[0].assetClass, 'FIXED_INCOME');
+  assert.equal('responseSnapshot' in context.recommendation, false);
+  assert.equal('internalRegistryPayload' in context.recommendation, false);
+  assert.equal('internalProfilePayload' in context.profile, false);
+  assert.equal('generationSnapshot' in context.currentState, false);
+  assert.equal(context.currentState.allocationRevision.revision, 4);
+
+  let persistedWrites;
+  const checkpointModel = {
+    findOne() { return { lean: async () => ({ pendingWrites: [] }) }; },
+    async updateOne(_filter, update) {
+      persistedWrites = update.$push.pendingWrites.$each;
+      return { matchedCount: 1 };
+    },
+  };
+  const saver = new MongoPlanReviewCheckpointer({ model: checkpointModel, runId: 'run-compact-context', userId, executionGeneration: 1 });
+  await saver.putWrites({
+    configurable: { thread_id: 'run-compact-context:1', checkpoint_id: 'checkpoint-1' },
+  }, Object.entries(context), 'load-context-task');
+  assert.ok(persistedWrites);
+  assert.ok(persistedWrites.reduce((total, row) => total + row.reduce((sum, value) => sum + Buffer.byteLength(value), 0), 0) < 256 * 1024);
+});
+
+test('PlanReview summary preserves an explicit unavailable generation snapshot state', () => {
+  const summary = buildRecommendationSummary({
+    _id: 'recommendation-1',
+    responseSnapshotAvailable: false,
+    responseSnapshot: { historical: true },
+    instruments: [],
+  }, { fresh: true });
+
+  assert.equal(summary.responseSnapshotAvailable, false);
 });
 
 test('PlanReview identity includes financial source binding and execution generation', async () => {

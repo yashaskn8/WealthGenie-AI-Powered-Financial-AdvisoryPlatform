@@ -513,7 +513,9 @@ export function generateBeginnerSuitability({ product, profile = {}, parentCatal
   const riskCapacity = profile?.finalSuitabilityRisk || profile?.riskTolerance || 'Moderate';
 
   // 1. Risk Tier
-  let riskTier = 'Moderate Risk';
+  let riskTier = product?.productType === 'ETF' && !product?.riskEvidence
+    ? 'Risk classification unavailable'
+    : 'Moderate Risk';
   if (['ppf', 'sukanya', 'scss', 'nsc', 'kvp', 'pomis', 'po_rd', 'po_td_1yr', 'fd', 'sbi_fd', 'rbi_bonds'].includes(parentId) ||
       canonicalId.includes('ppf') || canonicalId.includes('sbi') || canonicalId.includes('rbi') || canonicalId.includes('govt')) {
     riskTier = 'Very Low Risk';
@@ -526,7 +528,9 @@ export function generateBeginnerSuitability({ product, profile = {}, parentCatal
   }
 
   // 2. Access to Money (Liquidity)
-  let accessToMoney = 'Easy access (redeem anytime, typically 1–3 business days)';
+  let accessToMoney = product?.productType === 'ETF' && !product?.liquidityEvidence
+    ? 'Access terms unavailable'
+    : 'Easy access (redeem anytime, typically 1–3 business days)';
   if (parentId === 'ppf' || canonicalId.includes('ppf')) {
     accessToMoney = '15-year term (partial withdrawal permitted from year 7)';
   } else if (parentId === 'sukanya' || canonicalId.includes('sukanya')) {

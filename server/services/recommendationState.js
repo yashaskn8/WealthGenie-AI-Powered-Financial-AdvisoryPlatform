@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 import crypto from 'node:crypto';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import Recommendation from '../models/Recommendation.js';
 import RecommendationState from '../models/RecommendationState.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
@@ -557,6 +558,13 @@ export function assessGoalCalculationFreshness(goal, state) {
   if (Number(goal.sourceAllocationRevision) !== Number(state.allocationRevision.revision)) reasonCodes.push('STALE_ALLOCATION');
   if (String(goal.sourceAllocationRevisionId || '') !== String(state.allocationRevision._id || '')) reasonCodes.push('STALE_ALLOCATION');
   if (goal.sourceProfileInputHash !== state.recommendation.profileInputHash) reasonCodes.push('STALE_PROFILE');
+  if (!Number.isSafeInteger(Number(goal.sourceFinancialProfileStateRevision))
+      || !Number.isSafeInteger(Number(state.financialProfileState?.revision))) {
+    reasonCodes.push('SOURCE_MISSING');
+  } else if (Number(goal.sourceFinancialProfileStateRevision) !== Number(state.financialProfileState.revision)
+      || String(state.financialProfileState.currentProfileId || '') !== String(goal.profileId || '')) {
+    reasonCodes.push('STALE_PROFILE');
+  }
   if (goal.sourceModelVersion !== state.recommendation.modelVersion) reasonCodes.push('STALE_RECOMMENDATION');
   if (goal.sourceRecommendationPolicyVersion !== (state.recommendation.recommendationPolicyVersion || RECOMMENDATION_POLICY_VERSION)) reasonCodes.push('STALE_POLICY');
   if (goal.sourceRegulatoryRuleVersion !== state.recommendation.regulatoryRuleVersion) reasonCodes.push('STALE_POLICY');
@@ -579,6 +587,7 @@ export function assessGoalCalculationFreshness(goal, state) {
       || !goal.sourceModelVersion || !goal.sourceRecommendationPolicyVersion
       || !goal.sourceRegulatoryRuleVersion || !goal.sourceRecommendationFingerprint || !goal.sourcePortfolioFingerprint
       || !goal.sourceGoalCalculationInputFingerprint || !goal.sourceGoalCalculationPolicyVersion
+      || !goal.sourceFinancialProfileStateRevision
       || (state.profileVersion !== null && state.profileVersion !== undefined && !goal.sourceProfileVersion)) {
     reasonCodes.push('SOURCE_MISSING');
   }
@@ -655,12 +664,32 @@ export async function createManualAllocationRevision({
   let result;
   try {
     await session.withTransaction(async () => {
+      const userProfileState = await FinancialProfileState.findOne({ userId }).session(session).lean();
+      if (!userProfileState || userProfileState.resolutionStatus !== 'CURRENT'
+          || !sameId(userProfileState.currentProfileId, profileId)
+          || !Number.isSafeInteger(Number(userProfileState.revision))) {
+        throw errorWithCode('The requested profile is no longer the canonical current profile.', 'PROFILE_STATE_VERSION_CONFLICT');
+      }
+      if (process.env.NODE_ENV === 'test') {
+        await testHooks.afterFinancialProfileStateRead?.({ session, profileState: userProfileState });
+      }
       const profileDocument = await FinancialProfile.findOne({ _id: profileId, userId }).session(session).lean();
       const recommendation = await Recommendation.findOne({ _id: recommendationId, profileId, userId }).session(session);
       if (!profileDocument || !recommendation) throw errorWithCode('Recommendation state is unavailable.', 'RECOMMENDATION_REQUIRED');
       const { state, revision: current } = await ensurePersistedCurrentState({ session, recommendation });
       if (process.env.NODE_ENV === 'test') {
         await testHooks.afterStateRead?.({ state, revision: current, profile: profileDocument, recommendation });
+      }
+      const profileStateFence = await FinancialProfileState.updateOne({
+        _id: userProfileState._id,
+        userId,
+        currentProfileId: profileId,
+        resolutionStatus: 'CURRENT',
+        revision: userProfileState.revision,
+        promotionFence: userProfileState.promotionFence,
+      }, { $inc: { promotionFence: 1 } }, { session });
+      if (profileStateFence.matchedCount !== 1) {
+        throw errorWithCode('The canonical profile changed before the rebalance completed.', 'PROFILE_STATE_VERSION_CONFLICT');
       }
       const profileVersion = profileDocument.version ?? 1;
       const profileCas = await FinancialProfile.updateOne(

@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import ConversationHistory from '../models/ConversationHistory.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import chatRoutes from '../routes/chatRoutes.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import {
@@ -29,6 +30,7 @@ const profileId = new mongoose.Types.ObjectId();
 const binding = Object.freeze({
   profileId,
   profileVersion: 1,
+  financialProfileStateRevision: 1,
   profileInputHash: 'a'.repeat(64),
   sourceRecommendationId: null,
   sourceAllocationRevisionId: null,
@@ -43,6 +45,7 @@ test.before(async () => {
 
 test.beforeEach(async () => {
   await ConversationHistory.deleteMany({ userId: { $in: [userId, otherUserId] } });
+  await FinancialProfileState.deleteMany({ userId: { $in: [userId, otherUserId] } });
 });
 
 test.after(async () => {
@@ -157,6 +160,7 @@ test('bulkWrite inserts chat identity and applies a safe mutable aggregation upd
     sourceAllocationRevisionId: binding.sourceAllocationRevisionId,
     sourceRecommendationFingerprint: binding.sourceRecommendationFingerprint,
     sourcePortfolioFingerprint: binding.sourcePortfolioFingerprint,
+    financialProfileStateRevision: binding.financialProfileStateRevision,
     messages: [],
     message_count: 0,
     message_sequence: 0,
@@ -269,6 +273,10 @@ test('HTTP same-session POST by another user creates a separate owned row and ca
       profileRecord(profileAId, userId),
       profileRecord(profileBId, otherUserId),
     ]);
+    await FinancialProfileState.create([
+      { userId, currentProfileId: profileAId, revision: 1, promotionFence: 0, resolutionStatus: 'CURRENT' },
+      { userId: otherUserId, currentProfileId: profileBId, revision: 1, promotionFence: 0, resolutionStatus: 'CURRENT' },
+    ]);
     const app = express();
     app.use(express.json());
     app.use('/api/chat', chatRoutes);
@@ -351,6 +359,7 @@ test('HTTP same-session POST by another user creates a separate owned row and ca
   } finally {
     await ConversationHistory.deleteMany({ userId: { $in: [userId, otherUserId] }, session_id: sessionId });
     await FinancialProfile.deleteMany({ _id: { $in: [profileAId, profileBId] } });
+    await FinancialProfileState.deleteMany({ userId: { $in: [userId, otherUserId] } });
     if (previousSecret === undefined) delete process.env.JWT_SECRET;
     else process.env.JWT_SECRET = previousSecret;
   }
@@ -376,6 +385,9 @@ test('HTTP same-user chat turn returns a schema-valid busy conflict while a dura
 
   try {
     await FinancialProfile.create(profileRecord);
+    await FinancialProfileState.create({
+      userId, currentProfileId: profileId, revision: 1, promotionFence: 0, resolutionStatus: 'CURRENT',
+    });
     // Hold the actual Mongo-backed lease as an in-flight turn would. The HTTP
     // request below must observe that claim rather than relying on timing.
     activeClaim = await defaultChatSessionStore.acquire({ userId, sessionId, binding: leaseBinding });
@@ -410,6 +422,7 @@ test('HTTP same-user chat turn returns a schema-valid busy conflict while a dura
     if (activeClaim) await defaultChatSessionStore.release(activeClaim);
     await ConversationHistory.deleteMany({ userId, session_id: sessionId });
     await FinancialProfile.deleteOne({ _id: profileId, userId });
+    await FinancialProfileState.deleteMany({ userId });
     if (previousSecret === undefined) delete process.env.JWT_SECRET; else process.env.JWT_SECRET = previousSecret;
   }
 });

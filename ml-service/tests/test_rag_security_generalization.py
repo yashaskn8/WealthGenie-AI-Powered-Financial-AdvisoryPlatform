@@ -120,6 +120,7 @@ FINANCIAL_BENCHMARK_30 = [
 ]
 
 
+@pytest.mark.model_integration
 def test_external_public_dataset_benchmark():
     """
     Evaluates external attack prompts pulled from public datasets (pr1m8, PayloadsAllTheThings, TakSec).
@@ -128,6 +129,7 @@ def test_external_public_dataset_benchmark():
     """
     sanitizer = PromptSanitizer(block_on_injection=False)
     guard = sanitizer.semantic_guard
+    assert guard.provider_name == "SentenceTransformerEmbeddingProvider"
 
     for attack in EXTERNAL_ATTACKS:
         is_semantic, max_sim, matched_intent = guard.check_semantic_similarity(attack["text"])
@@ -140,6 +142,7 @@ def test_external_public_dataset_benchmark():
         )
 
 
+@pytest.mark.model_integration
 def test_legitimate_financial_queries_batch_30_zero_false_positives():
     """
     Tests 30 varied, real-world financial questions across 6 domains.
@@ -147,6 +150,7 @@ def test_legitimate_financial_queries_batch_30_zero_false_positives():
     """
     sanitizer = PromptSanitizer(block_on_injection=False)
     guard = sanitizer.semantic_guard
+    assert guard.provider_name == "SentenceTransformerEmbeddingProvider"
 
     for query in FINANCIAL_BENCHMARK_30:
         is_semantic, max_sim, matched_intent = guard.check_semantic_similarity(query)

@@ -5,6 +5,7 @@ import { checkMLHealth } from '../services/mlClient.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import logger from '../utils/logger.js';
 import { verifyPersistenceIndexes } from '../services/persistenceIndexReadiness.js';
+import { verifyAgentRuntimePersistence } from '../services/planHealthPersistence.js';
 
 function withTimeout(promise, timeoutMs, label) {
   let timer;
@@ -17,7 +18,16 @@ function withTimeout(promise, timeoutMs, label) {
   ]).finally(() => clearTimeout(timer));
 }
 
-export function createHealthRouter({ runtimeState = null, requireRedis = false, timeoutMs = 3000 } = {}) {
+export function createHealthRouter({
+  runtimeState = null,
+  requireRedis = false,
+  requireAgentRuntimePersistence = false,
+  requireMcp = false,
+  mcpRuntime = null,
+  mcpCapacity = null,
+  timeoutMs = 3000,
+  verifyAgentRuntime = verifyAgentRuntimePersistence,
+} = {}) {
   const router = Router();
 
 /**
@@ -35,6 +45,7 @@ export function createHealthRouter({ runtimeState = null, requireRedis = false, 
     database: { status: 'DOWN', critical: true },
     redis:    { status: 'DOWN', critical: false },
     ml:       { status: 'DOWN', critical: false },
+    mcp:      { status: requireMcp ? 'DOWN' : 'DISABLED', critical: requireMcp },
   };
 
   // 1. Check MongoDB (critical)
@@ -74,12 +85,18 @@ export function createHealthRouter({ runtimeState = null, requireRedis = false, 
     logger.warn('ML service health check failed', { message: err.message });
   }
 
+  if (requireMcp) {
+    let capacityReady = false;
+    try { capacityReady = await withTimeout(mcpCapacity?.probe?.() || Promise.resolve(false), timeoutMs, 'MCP capacity probe'); } catch { capacityReady = false; }
+    checks.mcp.status = mcpRuntime?.isReady() && capacityReady && mcpCapacity?.isReady() ? 'UP' : 'DOWN';
+  }
+
   // Determine overall status
   checks.redis.critical = requireRedis;
   const criticalDown = Object.values(checks).some(svc => svc.critical && svc.status === 'DOWN');
   const lifecycleReady = runtimeState ? runtimeState.isReady() : true;
 
-  const allUp = Object.values(checks).every(svc => svc.status === 'UP');
+  const allUp = Object.values(checks).every(svc => svc.status === 'UP' || svc.status === 'DISABLED');
 
   // Build backward-compatible response (flat strings for services)
   const health = {
@@ -91,6 +108,7 @@ export function createHealthRouter({ runtimeState = null, requireRedis = false, 
       database: checks.database.status,
       redis: checks.redis.status,
       ml: checks.ml.status,
+      mcp: checks.mcp.status,
     }
   };
 
@@ -116,12 +134,28 @@ export function createHealthRouter({ runtimeState = null, requireRedis = false, 
     if (runtimeState && !runtimeState.isReady()) reasons.push(`Application lifecycle is ${runtimeState.snapshot().phase}`);
     if (mongoose.connection.readyState !== 1) reasons.push('Database not connected');
     if (requireRedis && (!redisAvailable || !redisClient?.isReady)) reasons.push('Redis not connected');
+    if (requireMcp) {
+      let capacityReady = false;
+      try { capacityReady = await withTimeout(mcpCapacity?.probe?.() || Promise.resolve(false), timeoutMs, 'MCP capacity probe'); } catch { capacityReady = false; }
+      if (!mcpRuntime?.isReady() || !capacityReady || !mcpCapacity?.isReady()) {
+        reasons.push('Required MCP runtime or distributed capacity/auth controls are not ready');
+      }
+    }
     if (mongoose.connection.readyState === 1) {
       try {
         await verifyPersistenceIndexes();
       } catch {
         reasons.push('Required persistence indexes are not ready');
       }
+      if (requireAgentRuntimePersistence) {
+        try {
+          await verifyAgentRuntime({ force: true });
+        } catch {
+          reasons.push('Required agent queue-admission persistence is not ready');
+        }
+      }
+    } else if (requireAgentRuntimePersistence) {
+      reasons.push('Required agent queue-admission persistence is not ready');
     }
     if (reasons.length > 0) {
       return res.status(503).json({

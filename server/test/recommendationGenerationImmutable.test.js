@@ -114,7 +114,7 @@ test('a persisted recommendation cannot change its generation through document s
     effectiveYield: 7,
     returnBasis: 'PRE_TAX_NOMINAL',
     returnDataClass: 'MODEL_ASSUMPTION',
-    returnAssumptionVersion: 'wealthgenie-projection-assumptions-1.0.0',
+    returnAssumptionVersion: 'wealthgenie-projection-assumptions-1.1.0',
     returnSource: 'WEALTHGENIE_MODEL_POLICY',
     observedMarketFact: false,
     providerForecast: false,

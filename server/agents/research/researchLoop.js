@@ -8,10 +8,29 @@ import { detectResearchContradictions, verifyResearchArtifact } from './research
 
 function throwIfAborted(signal) {
   if (!signal?.aborted) return;
+  if (signal.reason instanceof Error && signal.reason.code
+      && !['RESEARCH_CANCELED', 'ABORT_ERR', 'RESEARCH_FETCH_ABORTED'].includes(signal.reason.code)) throw signal.reason;
   const error = new Error('Research task was canceled.');
   error.code = 'RESEARCH_CANCELED';
   error.name = 'AbortError';
   throw error;
+}
+
+function awaitWithAbort(value, signal) {
+  if (!signal) return Promise.resolve(value);
+  const aborted = () => signal.reason instanceof Error && signal.reason.code
+      && !['RESEARCH_CANCELED', 'ABORT_ERR', 'RESEARCH_FETCH_ABORTED'].includes(signal.reason.code)
+    ? signal.reason
+    : Object.assign(new Error('Research task was canceled.'), { code: 'RESEARCH_CANCELED', name: 'AbortError' });
+  if (signal.aborted) return Promise.reject(aborted());
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(aborted());
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(value).then(
+      result => { signal.removeEventListener('abort', onAbort); resolve(result); },
+      error => { signal.removeEventListener('abort', onAbort); reject(error); },
+    );
+  });
 }
 
 function buildQueries(brief) {
@@ -21,6 +40,10 @@ function buildQueries(brief) {
     `${brief.topic} ${factTypes} ${brief.jurisdiction}`,
     `${brief.jurisdiction} ${brief.topic} official source`,
   ])];
+}
+
+function publisherFromUrl(value) {
+  try { return new URL(value).hostname.toLowerCase(); } catch { return null; }
 }
 
 function isFresh(publicationDate, brief, now) {
@@ -73,10 +96,11 @@ function checkTimeAndUsageBudget(usage, budget, startedAt) {
   return true;
 }
 
-function buildFailureArtifact({ brief, taskId, usage, status, unresolvedGaps, claims, evidenceUnits, sources, contradictions, startedAt }) {
+function buildFailureArtifact({ brief, taskId, artifactId, usage, status, unresolvedGaps, claims, evidenceUnits, sources, contradictions, startedAt }) {
   return buildResearchArtifact({
     brief,
     taskId,
+    artifactId,
     status,
     claims,
     evidenceUnits,
@@ -95,6 +119,7 @@ function buildFailureArtifact({ brief, taskId, usage, status, unresolvedGaps, cl
 export async function runResearch({
   brief,
   taskId = null,
+  artifactId,
   provider,
   documentFetcher,
   budget: budgetOverrides = {},
@@ -124,8 +149,13 @@ export async function runResearch({
 
   const safeBrief = validation.value;
   const budget = boundedResearchBudget(budgetOverrides);
+  const deadlineController = new AbortController();
+  const deadlineError = Object.assign(new Error('Research exceeded its hard execution deadline.'), { code: 'RESEARCH_DEADLINE_EXCEEDED' });
+  const deadlineTimer = setTimeout(() => deadlineController.abort(deadlineError), budget.maxDurationMs);
+  const operationSignal = signal && AbortSignal.any ? AbortSignal.any([signal, deadlineController.signal]) : (signal || deadlineController.signal);
   const usage = emptyResearchBudgetUsage();
   const startedAt = Date.now();
+  try {
   const evidenceUnits = [];
   const sources = [];
   const claims = [];
@@ -136,46 +166,62 @@ export async function runResearch({
   const queries = buildQueries(safeBrief);
 
   for (let round = 0; round < budget.maxResearchRounds && round < safeBrief.maxResearchDepth; round += 1) {
-    throwIfAborted(signal);
+    throwIfAborted(operationSignal);
     if (!checkTimeAndUsageBudget(usage, budget, startedAt)) break;
     usage.rounds += 1;
-    await onProgress({ type: 'RESEARCH_SEARCH_ROUND', round: usage.rounds });
+    await awaitWithAbort(onProgress({ type: 'RESEARCH_SEARCH_ROUND', round: usage.rounds }), operationSignal);
     const query = queries[round % queries.length];
     if (!query || usage.queryCount >= budget.maxSearchQueries) break;
     usage.queryCount += 1;
     PrometheusMetrics.inc('research_queries_total');
     let results;
     try {
-      results = await provider.search({ query, brief: safeBrief, maxResults: budget.maxResultsPerQuery, signal });
+      results = await awaitWithAbort(provider.search({ query, brief: safeBrief, maxResults: budget.maxResultsPerQuery, signal: operationSignal }), operationSignal);
     } catch (error) {
       PrometheusMetrics.inc('research_provider_failures_total');
       throw error;
     }
     const candidates = Array.isArray(results) ? results : [];
     for (const candidate of candidates) {
-      throwIfAborted(signal);
+      throwIfAborted(operationSignal);
       if (seenDocuments.size >= budget.maxUniqueDocuments || !checkTimeAndUsageBudget(usage, budget, startedAt)) break;
-      if (!candidate?.url || seenDocuments.has(candidate.url)) continue;
-      seenDocuments.add(candidate.url);
+      if (!candidate?.url) continue;
+      let candidateUrl;
+      try { candidateUrl = validatePublicUrl(candidate.url).toString(); } catch {
+        unresolvedGaps.push({ gapId: stableResearchId('G', String(candidate.url).slice(0, 240)), factType: safeBrief.requestedFactTypes[0], status: 'UNRESOLVED', reasonCode: 'RESEARCH_SOURCE_URL_REJECTED' });
+        continue;
+      }
+      if (seenDocuments.has(candidateUrl)) continue;
+      seenDocuments.add(candidateUrl);
       let document = candidate;
       const fixtureInlineContent = provider.name === 'fixture' && Boolean(candidate.content);
       if (!fixtureInlineContent) {
-        document = await documentFetcher.fetchDocument(candidate.url, { signal });
-        document = { ...candidate, ...document, content: document.body };
-      } else {
-        validatePublicUrl(candidate.url);
+        const fetched = await awaitWithAbort(documentFetcher.fetchDocument(candidateUrl, { signal: operationSignal }), operationSignal);
+        // Search-provider labels and dates are discovery hints, not source provenance.
+        // Only fixture documents may supply these fields; live evidence uses the URL
+        // actually fetched and leaves legal/publication time unknown absent a parser.
+        document = {
+          url: fetched.url,
+          content: fetched.body,
+          retrievedAt: fetched.retrievedAt,
+          title: null,
+          publisher: publisherFromUrl(fetched.url),
+          publicationDate: null,
+        };
       }
       const extracted = extractDocumentEvidence({
         document: {
           ...document,
-          url: document.url || candidate.url,
+          url: document.url || candidateUrl,
           body: document.content || document.body,
           retrievedAt: document.retrievedAt || new Date().toISOString(),
         },
-        factType: candidate.factType || safeBrief.requestedFactTypes[0],
-        title: candidate.title,
-        publisher: candidate.publisher,
-        publicationDate: candidate.publicationDate,
+        factType: fixtureInlineContent && safeBrief.requestedFactTypes.includes(candidate.factType)
+          ? candidate.factType
+          : safeBrief.requestedFactTypes[0],
+        title: fixtureInlineContent ? candidate.title : null,
+        publisher: fixtureInlineContent ? candidate.publisher : publisherFromUrl(document.url || candidateUrl),
+        publicationDate: fixtureInlineContent ? candidate.publicationDate : null,
       });
       if (extracted.promptInjectionDetected) {
         unresolvedGaps.push({ gapId: stableResearchId('G', candidate.url), factType: candidate.factType || 'public_fact', status: 'UNRESOLVED', reasonCode: 'PROMPT_INJECTION_IN_DOCUMENT' });
@@ -193,7 +239,7 @@ export async function runResearch({
         seenClaims.add(claim.text.toLowerCase());
         claims.push(claim);
       }
-      await onProgress({ type: 'RESEARCH_SOURCES_FOUND', documentCount: usage.documentCount });
+      await awaitWithAbort(onProgress({ type: 'RESEARCH_SOURCES_FOUND', documentCount: usage.documentCount }), operationSignal);
     }
     contradictions = detectResearchContradictions(claims, evidenceUnits);
     if (claims.length > 0 && contradictions.length === 0) break;
@@ -220,6 +266,7 @@ export async function runResearch({
   const artifact = buildFailureArtifact({
     brief: safeBrief,
     taskId,
+    artifactId,
     usage,
     status,
     unresolvedGaps,
@@ -229,7 +276,8 @@ export async function runResearch({
     contradictions,
     startedAt,
   });
-  await onProgress({ type: 'RESEARCH_VERIFYING', claimCount: claims.length });
+  await awaitWithAbort(onProgress({ type: 'RESEARCH_VERIFYING', claimCount: claims.length }), operationSignal);
+  throwIfAborted(operationSignal);
   const verification = verifyResearchArtifact(artifact, { brief: safeBrief, now });
   if (!verification.valid) {
     PrometheusMetrics.inc('research_verification_failures_total');
@@ -241,6 +289,10 @@ export async function runResearch({
   }
   if (usage.exhausted) PrometheusMetrics.inc('research_budget_exhausted_total');
   PrometheusMetrics.inc('research_duration_seconds_total', usage.durationMs / 1000);
-  await onProgress({ type: 'RESEARCH_COMPLETED', status: artifact.status, claimCount: verification.verifiedClaims.length });
+  await awaitWithAbort(onProgress({ type: 'RESEARCH_COMPLETED', status: artifact.status, claimCount: verification.verifiedClaims.length }), operationSignal);
+  throwIfAborted(operationSignal);
   return { artifact, verification, budget, usage };
+  } finally {
+    clearTimeout(deadlineTimer);
+  }
 }

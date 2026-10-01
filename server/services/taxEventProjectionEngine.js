@@ -670,7 +670,7 @@ export function projectPostTaxCashFlows({ postTaxResult, instrument, context = {
     taxDragCAGR: round4(Math.max(0, (nominalCagr || 0) - (postTaxCagr || 0))),
     nominalReturnPercent: round4(instrument.nominalRate * 100),
     postTaxReturnPercent: round4((postTaxCagr ?? postTaxResult.postTaxReturn) * 100),
-    realReturnPercent: round4(((postTaxCagr ?? postTaxResult.postTaxReturn) / Math.pow(1 + inflationRate, 1) - 1) * 100),
+    realReturnPercent: round4(((1 + (postTaxCagr ?? postTaxResult.postTaxReturn)) / (1 + inflationRate) - 1) * 100),
     effectiveTaxPercent: gross.balance > gross.totalInvested
       ? round4((taxTotal / Math.max(1, gross.balance - gross.totalInvested)) * 100)
       : 0,

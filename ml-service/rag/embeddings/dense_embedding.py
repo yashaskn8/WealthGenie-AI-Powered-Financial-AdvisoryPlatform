@@ -9,9 +9,7 @@ Contains:
 import logging
 import hashlib
 import json
-import math
 import os
-import re
 import time
 from typing import List, Optional, cast
 
@@ -19,6 +17,7 @@ import numpy as np
 
 from rag.embeddings.base import BaseEmbeddingProvider
 from rag.embeddings.cache import EmbeddingCache
+from lexical_embedding import stable_lexical_embedding, tokenize_subwords
 
 logger = logging.getLogger("wealthgenie.rag.embeddings")
 
@@ -54,15 +53,7 @@ class DenseVectorEmbeddingProvider(BaseEmbeddingProvider):
 
     def _tokenize(self, text: str) -> List[str]:
         """Extracts lowercase word and subword n-grams."""
-        cleaned = re.sub(r"[^\w\s]", " ", text.lower())
-        tokens = cleaned.split()
-        ngrams = []
-        for token in tokens:
-            ngrams.append(token)
-            if len(token) >= 4:
-                ngrams.append(token[:3])
-                ngrams.append(token[-3:])
-        return ngrams
+        return tokenize_subwords(text)
 
     def embed_text(self, text: str) -> List[float]:
         """Generates unit L2-normalized vector embedding for input text."""
@@ -71,28 +62,7 @@ class DenseVectorEmbeddingProvider(BaseEmbeddingProvider):
             if cached is not None:
                 return cached
 
-        tokens = self._tokenize(text)
-        vec = np.zeros(self._dim, dtype=np.float32)
-
-        if not tokens:
-            norm_vec = vec.tolist()
-            if self.cache and self.enable_cache:
-                self.cache.put(text, norm_vec)
-            return norm_vec
-
-        # Subword feature hashing trick
-        for token in tokens:
-            digest = hashlib.sha256(token.encode("utf-8")).digest()
-            h = int.from_bytes(digest[:8], byteorder="big", signed=False) % self._dim
-            weight = math.log(1.0 + len(token))
-            vec[h] += weight
-
-        # L2 Normalization
-        norm = np.linalg.norm(vec)
-        if norm > 0:
-            vec = vec / norm
-
-        result = vec.tolist()
+        result = stable_lexical_embedding(text, self._dim)
         if self.cache and self.enable_cache:
             self.cache.put(text, result)
 

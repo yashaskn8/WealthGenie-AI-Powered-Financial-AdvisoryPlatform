@@ -1,6 +1,8 @@
 import FinancialProfile from '../../models/FinancialProfile.js';
+import FinancialProfileState from '../../models/FinancialProfileState.js';
 import { buildRecommendationProfile } from '../../services/recommendationProfile.js';
 import { resolveCurrentRecommendationState } from '../../services/recommendationState.js';
+import { resolveCurrentFinancialProfile } from '../../services/currentFinancialProfile.js';
 import { buildPlanReviewSnapshotBinding, hashPlanReviewSnapshot } from './planReviewRuntime.js';
 
 function notFoundError() {
@@ -14,10 +16,24 @@ export async function resolvePlanReviewSnapshot({
   userId,
   profileId,
   profileModel = FinancialProfile,
+  profileStateModel = FinancialProfileState,
   session = null,
   dependencies = {},
 } = {}) {
   if (!userId || !profileId) throw notFoundError();
+  const canonical = await resolveCurrentFinancialProfile({
+    userId,
+    stateModel: profileStateModel,
+    profileModel,
+    session,
+    requireRecommendation: false,
+  });
+  if (!canonical.profile || String(canonical.profile._id) !== String(profileId)) {
+    const error = new Error('PlanReview source profile is no longer the canonical current profile.');
+    error.status = 409;
+    error.code = 'PLAN_REVIEW_SOURCE_SUPERSEDED';
+    throw error;
+  }
   let profileQuery = profileModel.findOne({ _id: profileId, userId });
   if (session && typeof profileQuery?.session === 'function') profileQuery = profileQuery.session(session);
   const storedProfile = await profileQuery.lean();
@@ -43,6 +59,7 @@ export async function resolvePlanReviewSnapshot({
   const sourceBinding = buildPlanReviewSnapshotBinding({
     userId,
     profileId,
+    financialProfileStateRevision: canonical.state.revision,
     currentState: stateWithCanonicalProfile,
     freshness: currentState?.freshness,
   });

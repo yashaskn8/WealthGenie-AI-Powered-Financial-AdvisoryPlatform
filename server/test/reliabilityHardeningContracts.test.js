@@ -27,15 +27,17 @@ test('GET goals is a lean read path and explicit advice refresh remains separate
   assert.match(source, /router\.patch\('\/:goalId\/refresh-advice'/);
 });
 
-test('MCP sessions retain ownership and reject capacity overflow without eviction', () => {
+test('MCP is stateless, bearer-authenticated, and rejects legacy session transport', () => {
   const source = read('server/mcp/wealthgenieMcpServer.js');
-  assert.match(source, /userId: String\(userId\)/);
-  assert.match(source, /session\.userId !== String\(req\.user\?\.userId/);
-  assert.match(source, /MAX_GLOBAL_SESSIONS|process\.env\.MAX_GLOBAL_SESSIONS/);
-  assert.match(source, /MAX_SESSIONS_PER_USER|process\.env\.MAX_SESSIONS_PER_USER/);
-  assert.match(source, /MCP_GLOBAL_SESSION_LIMIT/);
-  assert.match(source, /MCP_USER_SESSION_LIMIT/);
-  assert.doesNotMatch(source, /oldestSessionId/);
+  const router = read('server/routes/mcpRouter.js');
+  const runtime = read('server/mcp/mcpRuntime.js');
+  assert.match(source, /StreamableHTTPServerTransport/);
+  assert.match(source, /sessionIdGenerator: undefined/);
+  assert.match(router, /verifyMcpBearer/);
+  assert.match(router, /MCP_DISABLED/);
+  assert.match(runtime, /MCP_DRAINING/);
+  assert.doesNotMatch(source, /SSEServerTransport|sseTransports|mcpServerInstance/);
+  assert.doesNotMatch(router, /\/sse|\/messages/);
 });
 
 test('production overlay requires HTTPS host and pre-created TLS/DocumentDB CA secrets', () => {

@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   formatMarketTimestamp,
   formatNullablePercent,
+  getMarketAttemptedProvider,
   getMarketDisplayState,
   getMarketEvidenceSource,
   nullableMarketNumber,
+  readableSource,
+  safeSourceUrl,
 } from './marketDataDisplay';
 
 describe('nullable market-data presentation', () => {
@@ -13,7 +16,25 @@ describe('nullable market-data presentation', () => {
     expect(nullableMarketNumber(undefined)).toBeNull();
     expect(nullableMarketNumber('')).toBeNull();
     expect(nullableMarketNumber('unavailable')).toBeNull();
+    for (const value of ['  ', false, true, [], {}]) expect(nullableMarketNumber(value)).toBeNull();
     expect(formatNullablePercent(null)).toBeNull();
+  });
+
+  it('never calls a retained snapshot current after revalidation failed', () => {
+    const current = { marketSnapshot: { status: 'CURRENT' } };
+    expect(getMarketDisplayState(current).key).toBe('CURRENT');
+    expect(getMarketDisplayState(current, { refreshFailed: true }).key).toBe('LAST_AVAILABLE');
+    expect(getMarketDisplayState({ marketSnapshot: { status: 'STALE' } }).key).not.toBe('CURRENT');
+    expect(getMarketDisplayState({ status: 'MARKET_CONTEXT_UNAVAILABLE' }).key).toBe('UNAVAILABLE');
+  });
+
+  it('humanizes provenance without accepting unsafe evidence links', () => {
+    expect(readableSource('GOVERNMENT_OF_INDIA')).toBe('Government of India');
+    expect(readableSource('OFFICIAL_BANK_PUBLISHED_RATE')).toBe('Official bank published rate');
+    expect(safeSourceUrl('https://www.rbi.org.in/')).toBe('https://www.rbi.org.in/');
+    for (const value of ['javascript:alert(1)', 'https://secret@example.com/', '/relative', null]) {
+      expect(safeSourceUrl(value)).toBeNull();
+    }
   });
 
   it('preserves a genuinely observed zero', () => {
@@ -25,9 +46,22 @@ describe('nullable market-data presentation', () => {
     expect(getMarketDisplayState(null, { loading: true }).key).toBe('LOADING');
     expect(getMarketDisplayState({ status: 'MARKET_CONTEXT_AVAILABLE', context: 'NORMAL' }).key).toBe('LAST_AVAILABLE');
     expect(getMarketDisplayState({ marketSnapshot: { status: 'MARKET_CLOSED' } }).label).toBe('Market closed');
-    expect(getMarketEvidenceSource({
+    const failed = {
       marketSnapshot: { providerStatus: { quotes: { provider: 'NSE' } } },
-    })).toBe('NSE');
+    };
+    expect(getMarketEvidenceSource(failed)).toBeNull();
+    expect(getMarketAttemptedProvider(failed)).toBe('NSE');
+    expect(getMarketEvidenceSource({ marketSnapshot: { observedFacts: [
+      { availabilityStatus: 'AVAILABLE', source: { provider: 'UPSTOX' } },
+      { availabilityStatus: 'UNAVAILABLE', source: { provider: 'NSE' } },
+    ] } })).toBe('UPSTOX');
+    expect(getMarketAttemptedProvider({ marketSnapshot: {
+      providerSelection: { attemptedProviders: ['NSE', 'UPSTOX'], selectedProvider: 'UPSTOX' },
+    } })).toBe('NSE, UPSTOX');
+    expect(getMarketAttemptedProvider({
+      liveProviderSelection: { attemptedProviders: ['NSE', 'UPSTOX'], selectedProvider: null },
+      marketSnapshot: { observedFacts: [{ availabilityStatus: 'AVAILABLE', source: { provider: 'NSE' } }] },
+    })).toBe('NSE, UPSTOX');
   });
 
   it('formats only valid observed timestamps', () => {

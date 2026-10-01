@@ -1,9 +1,46 @@
 import AgentRun from '../../models/AgentRun.js';
+import AgentCheckpoint from '../../models/AgentCheckpoint.js';
+import AgentGraphCheckpoint from '../../models/AgentGraphCheckpoint.js';
 import UserIntentMandate from '../../models/UserIntentMandate.js';
 import { PrometheusMetrics } from '../../services/metricsCollector.js';
+import { PLAN_REVIEW_CHECKPOINT_RETENTION_MS } from './planReviewRuntime.js';
 
 async function resolve(query) {
   return typeof query?.lean === 'function' ? query.lean() : query;
+}
+
+async function inRunTransaction(model, callback) {
+  // Real Mongoose models always have a connection. Dependency-injected unit
+  // fixtures may omit it; the production path must never silently downgrade
+  // an authoritative terminal transition to non-transactional writes.
+  if (!model?.db) return callback(null);
+  if (typeof model.db.startSession !== 'function') {
+    throw Object.assign(new Error('PlanReview terminal transitions require MongoDB transaction support.'), {
+      status: 503,
+      code: 'AGENT_RUNTIME_PERSISTENCE_UNAVAILABLE',
+    });
+  }
+  const session = await model.db.startSession();
+  try {
+    let result;
+    await session.withTransaction(async () => {
+      result = await callback(session);
+    });
+    return result;
+  } finally {
+    await session.endSession();
+  }
+}
+
+async function retainTerminalCheckpoints({ runId, userId, now, session, checkpointModel, graphCheckpointModel }) {
+  const expiresAt = new Date(now.getTime() + PLAN_REVIEW_CHECKPOINT_RETENTION_MS);
+  const options = session ? { session } : {};
+  await checkpointModel.updateMany({ runId, userId }, { $set: { expiresAt } }, options);
+  await graphCheckpointModel.updateMany({ runId, userId }, { $set: { expiresAt } }, options);
+}
+
+function withSession(query, session) {
+  return session && typeof query?.session === 'function' ? query.session(session) : query;
 }
 
 /** CAS-bound review-action metadata and lifecycle transition. */
@@ -15,6 +52,8 @@ export async function persistPlanReviewAction({
   action,
   mandate = null,
   now = new Date(),
+  checkpointModel = AgentCheckpoint,
+  graphCheckpointModel = AgentGraphCheckpoint,
 }) {
   const isApprovalAction = action === 'APPROVE_RECOMPUTE' || action === 'REJECT_RECOMPUTE';
   if (!['APPROVE_RECOMPUTE', 'REJECT_RECOMPUTE', 'OPEN_PROFILE', 'OPEN_GOALS'].includes(action)) {
@@ -45,10 +84,27 @@ export async function persistPlanReviewAction({
     update.$set.leaseUntil = null;
     update.$unset = { activeDedupeKey: 1 };
   }
-  return resolve(model.findOneAndUpdate(filter, update, { new: true }));
+  const terminal = isApprovalAction && !mandate;
+  return inRunTransaction(model, async session => {
+    const query = model.findOneAndUpdate(filter, update, { new: true, ...(session ? { session } : {}) });
+    const saved = await resolve(withSession(query, session));
+    if (saved && terminal) {
+      await retainTerminalCheckpoints({ runId, userId, now, session, checkpointModel, graphCheckpointModel });
+    }
+    return saved;
+  });
 }
 
-export async function completePlanReviewMandateAction({ model = AgentRun, userId, runId, mandateId, outcome, now = new Date() }) {
+export async function completePlanReviewMandateAction({
+  model = AgentRun,
+  userId,
+  runId,
+  mandateId,
+  outcome,
+  now = new Date(),
+  checkpointModel = AgentCheckpoint,
+  graphCheckpointModel = AgentGraphCheckpoint,
+}) {
   if (!['EXECUTED', 'REJECTED', 'REVOKED', 'EXPIRED', 'FAILED'].includes(outcome)) {
     throw new TypeError('Unsupported PlanReview mandate outcome.');
   }
@@ -68,12 +124,19 @@ export async function completePlanReviewMandateAction({ model = AgentRun, userId
   if (runStatus === 'FAILED') {
     update.$set.failure = { code: `MANDATE_${outcome}`, message: `The approval mandate ended with ${outcome.toLowerCase()}.` };
   }
-  return resolve(model.findOneAndUpdate({
-    userId,
-    runId,
-    status: 'WAITING_FOR_APPROVAL',
-    'approval.mandateId': mandateId,
-  }, update, { new: true }));
+  return inRunTransaction(model, async session => {
+    const query = model.findOneAndUpdate({
+      userId,
+      runId,
+      status: 'WAITING_FOR_APPROVAL',
+      'approval.mandateId': mandateId,
+    }, update, { new: true, ...(session ? { session } : {}) });
+    const saved = await resolve(withSession(query, session));
+    if (saved) {
+      await retainTerminalCheckpoints({ runId, userId, now, session, checkpointModel, graphCheckpointModel });
+    }
+    return saved;
+  });
 }
 
 /**
@@ -84,6 +147,8 @@ export async function completePlanReviewMandateAction({ model = AgentRun, userId
 export async function reconcileTerminalPlanReviewMandates({
   mandateModel = UserIntentMandate,
   runModel = AgentRun,
+  checkpointModel = AgentCheckpoint,
+  graphCheckpointModel = AgentGraphCheckpoint,
   now = new Date(),
   limit = 100,
 } = {}) {
@@ -112,6 +177,8 @@ export async function reconcileTerminalPlanReviewMandates({
       mandateId: mandate.mandateId,
       outcome: mandate.status,
       now,
+      checkpointModel,
+      graphCheckpointModel,
     });
     let reconciliationStatus = result ? 'RECONCILED' : null;
     if (!result) {

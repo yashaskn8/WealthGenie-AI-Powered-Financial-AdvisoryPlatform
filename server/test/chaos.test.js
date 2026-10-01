@@ -277,14 +277,14 @@ test('Chaos: ML service timeout / failure returns rule-based recommendations', a
   const token = signToken();
   await withServer(async (baseUrl) => {
     // 1. Build a profile (MongoDB is online, so this succeeds)
-    const { response: profileRes, body: profileBody } = await jsonFetch(`${baseUrl}/api/profile/build`, {
+    const { response: profileRes, body: profileBody } = await jsonFetch(`${baseUrl}/api/profile/complete`, {
       method: 'POST',
       body: JSON.stringify(VALID_PROFILE_BODY),
       headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
     });
     console.log(`[CHAOS-3] Profile build: status=${profileRes.status}`);
-    assert.equal(profileRes.status, 201, `Profile creation should succeed, got ${profileRes.status}`);
-    const profileId = profileBody.profileId;
+    assert.equal(profileRes.status, 200, `Profile completion should succeed, got ${profileRes.status}`);
+    const profileId = profileBody.profile.profileId;
 
     // 2. Request recommendation — ML service gets REAL ECONNREFUSED
     const { response: recRes, body: recBody } = await jsonFetch(`${baseUrl}/api/recommend`, {
@@ -336,14 +336,14 @@ test('Chaos: all explanation providers offline returns grounded deterministic ad
   const token = signToken();
   await withServer(async (baseUrl) => {
     // 1. Build profile
-    const { response: profileRes, body: profileBody } = await jsonFetch(`${baseUrl}/api/profile/build`, {
+    const { response: profileRes, body: profileBody } = await jsonFetch(`${baseUrl}/api/profile/complete`, {
       method: 'POST',
       body: JSON.stringify(VALID_PROFILE_BODY),
       headers: { authorization: `Bearer ${token}`, 'idempotency-key': crypto.randomUUID() },
     });
     console.log(`[CHAOS-4] Profile build: status=${profileRes.status}`);
-    assert.equal(profileRes.status, 201);
-    const profileId = profileBody.profileId;
+    assert.equal(profileRes.status, 200);
+    const profileId = profileBody.profile.profileId;
 
     // 2. Get recommendations — both Gemini and Groq are unconfigured
     const { response: recRes, body: recBody } = await jsonFetch(`${baseUrl}/api/recommend`, {

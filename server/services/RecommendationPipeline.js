@@ -20,6 +20,10 @@ import {
   supportsAmfiParentCategory,
 } from './mutualFundProductRanking.js';
 import {
+  rankQualifiedNiftyEtfProducts,
+  supportsQualifiedEtfParentCategory,
+} from './niftyEtfProductRanking.js';
+import {
   compareVerifiedFixedIncomeProducts,
   fixedIncomeProviderForParent,
   supportsFixedIncomeParentCategory,
@@ -487,7 +491,9 @@ function referenceMetadata(parent, entry) {
 export function getWhereToInvestProviderCoverageMatrix() {
   return investmentDatabase.map(instrument => {
     const fixedIncomeProvider = fixedIncomeProviderForParent(instrument.id);
-    const provider = fixedIncomeProvider || (supportsAmfiParentCategory(instrument.id) ? PROVIDERS.AMFI : null);
+    const hasAmfiProductPath = supportsAmfiParentCategory(instrument.id)
+      || supportsQualifiedEtfParentCategory(instrument.id);
+    const provider = fixedIncomeProvider || (hasAmfiProductPath ? PROVIDERS.AMFI : null);
     const canBeRecommended = resolveBackendType(instrument) !== null && getInstrumentRisk(instrument) !== null;
     return {
       parentInstrumentId: instrument.id,
@@ -501,6 +507,8 @@ export function getWhereToInvestProviderCoverageMatrix() {
       currentFailureMode: provider
         ? 'QUALIFIED_PROVIDER_RESPONSE_REQUIRED'
         : 'NO_QUALIFIED_WTI_PROVIDER_FAIL_CLOSED',
+      identityAuthority: supportsQualifiedEtfParentCategory(instrument.id) ? 'NSE_SCHEME_DISCLOSURE' : null,
+      benchmarkAuthority: supportsQualifiedEtfParentCategory(instrument.id) ? 'ISSUER_SCHEME_INVESTMENT_PHILOSOPHY' : null,
       productSubstitutionAllowed: false,
     };
   });
@@ -592,7 +600,8 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
     });
   }
 
-  if (!supportsAmfiParentCategory(catalog.id)) {
+  const hasQualifiedEtfPath = supportsQualifiedEtfParentCategory(catalog.id);
+  if (!supportsAmfiParentCategory(catalog.id) && !hasQualifiedEtfPath) {
     const result = rankVerifiedMutualFundProducts({
       parentInstrumentId: catalog.id,
       currentSnapshot: null,
@@ -614,11 +623,17 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
   const historicalSnapshot = targetDate
     ? await fetchHistorical({ targetDate })
     : null;
-  const result = rankVerifiedMutualFundProducts({
-    parentInstrumentId: catalog.id,
-    currentSnapshot,
-    historicalSnapshot,
-  });
+  const result = hasQualifiedEtfPath
+    ? rankQualifiedNiftyEtfProducts({
+      parentInstrumentId: catalog.id,
+      currentSnapshot,
+      historicalSnapshot,
+    })
+    : rankVerifiedMutualFundProducts({
+      parentInstrumentId: catalog.id,
+      currentSnapshot,
+      historicalSnapshot,
+    });
   return formatOutput(result.products, {
     excluded,
     riskReconciliation,

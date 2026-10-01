@@ -18,6 +18,7 @@ const TaxesHub = ({
   onTabChange,
   profile,
   recommendations,
+  recommendationMeta,
   onLearnMore,
 }) => {
   const currentTab = activeTab === 'real-returns' ? 'real-returns' : 'regime-savings';
@@ -91,6 +92,7 @@ const TaxesHub = ({
               <PostTaxAnalysis
                 profile={profile}
                 recommendations={recommendations}
+                recommendationMeta={recommendationMeta}
               />
             </ErrorBoundary>
           </div>

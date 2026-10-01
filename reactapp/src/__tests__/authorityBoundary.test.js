@@ -36,6 +36,7 @@ describe('frontend financial authority boundary', () => {
     expect(whereToInvest).not.toContain('WHERE_TO_INVEST');
     expect(whereToInvest).not.toContain('rankWhereToInvest(');
     expect(whereToInvest).not.toContain('shouldRecommendETF(');
-    expect(whereToInvest).toContain('No provider ranking is shown.');
+    expect(whereToInvest).toContain('hasCompleteWtiStateBinding(financialStateBinding)');
+    expect(whereToInvest).toContain('sameWtiStateBinding(result?.financialStateBinding, financialStateBinding)');
   });
 });

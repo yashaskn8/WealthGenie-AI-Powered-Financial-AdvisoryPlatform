@@ -5,10 +5,11 @@ import AuditRecord from '../../models/AuditRecord.js';
 import { buildRecommendationProfile } from '../../services/recommendationProfile.js';
 import { getCurrentRegulatoryRuleVersion } from '../../services/taxEngine.js';
 import { assessRecommendationFreshness } from '../../services/recommendationFreshness.js';
-import { assessGoalCalculationFreshness, resolveCurrentRecommendationState } from '../../services/recommendationState.js';
+import { assessGoalCalculationFreshness } from '../../services/recommendationState.js';
 import { buildGroundedEvidencePacket, makeEvidenceEntry } from '../../services/groundedEvidence.js';
 import { SAFE_PLAN_REVIEW_TOOLS } from './planReviewSchemas.js';
 import { buildPlanReviewSnapshotBinding, hashPlanReviewSnapshot } from './planReviewRuntime.js';
+import { resolvePlanReviewSnapshot } from './planReviewSnapshot.js';
 
 function idOf(value) {
   return value?._id ? String(value._id) : value ? String(value) : null;
@@ -51,7 +52,9 @@ export function buildRecommendationSummary(recommendation, freshness = null) {
     modelVersion: recommendation.modelVersion ?? null,
     regulatoryRuleVersion: recommendation.regulatoryRuleVersion ?? null,
     profileInputHash: recommendation.profileInputHash ?? null,
-    responseSnapshotAvailable: Boolean(recommendation.responseSnapshot),
+    responseSnapshotAvailable: recommendation.responseSnapshotAvailable === undefined
+      ? Boolean(recommendation.responseSnapshot)
+      : recommendation.responseSnapshotAvailable === true,
     currentAllocationSource: recommendation.currentAllocationSource ?? null,
     instruments: Array.isArray(recommendation.instruments)
       ? recommendation.instruments.slice(0, 8).map(instrument => ({
@@ -67,6 +70,82 @@ export function buildRecommendationSummary(recommendation, freshness = null) {
         returnAssumptionVersion: instrument.returnAssumptionVersion ?? null,
       }))
       : [],
+  };
+}
+
+function planReviewEvidenceProfile(profileContext) {
+  if (!profileContext) return null;
+  return {
+    age: profileContext.age ?? null,
+    monthlySavings: profileContext.monthlySavings ?? null,
+    riskTolerance: profileContext.riskTolerance ?? null,
+    suitabilityRisk: profileContext.suitabilityRisk ?? null,
+    investmentHorizonYears: profileContext.investmentHorizonYears ?? null,
+    investmentGoals: Array.isArray(profileContext.investmentGoals) ? [...profileContext.investmentGoals] : [],
+    suitabilityReasonCodes: Array.isArray(profileContext.suitabilityReasonCodes)
+      ? [...profileContext.suitabilityReasonCodes]
+      : [],
+  };
+}
+
+function planReviewRecommendationView(recommendation) {
+  if (!recommendation) return null;
+  return {
+    _id: recommendation._id,
+    profileId: recommendation.profileId,
+    generatedAt: recommendation.generatedAt ?? null,
+    modelVersion: recommendation.modelVersion ?? null,
+    profileInputHash: recommendation.profileInputHash ?? null,
+    recommendationPolicyVersion: recommendation.recommendationPolicyVersion ?? null,
+    regulatoryRuleVersion: recommendation.regulatoryRuleVersion ?? null,
+    currentAllocationSource: recommendation.currentAllocationSource ?? null,
+    responseSnapshotAvailable: recommendation.responseSnapshotAvailable === undefined
+      ? Boolean(recommendation.responseSnapshot)
+      : recommendation.responseSnapshotAvailable === true,
+    instruments: Array.isArray(recommendation.instruments)
+      ? recommendation.instruments.slice(0, 8).map(instrument => ({
+        id: instrument.id,
+        name: instrument.name,
+        type: instrument.type,
+        assetClass: instrument.assetClass,
+        allocation_pct: instrument.allocation_pct ?? null,
+        allocationWeight: instrument.allocationWeight ?? null,
+        nominalReturn: instrument.nominalReturn ?? null,
+        riskLevel: instrument.riskLevel ?? null,
+        returnDataClass: instrument.returnDataClass ?? null,
+        returnAssumptionVersion: instrument.returnAssumptionVersion ?? null,
+      }))
+      : [],
+  };
+}
+
+function planReviewGoalFreshnessState(currentState) {
+  if (!currentState) return null;
+  const recommendation = planReviewRecommendationView(
+    currentState.currentRecommendationView || currentState.recommendation,
+  );
+  const allocation = currentState.allocationRevision || currentState.currentAllocation || null;
+  const financialProfileState = currentState.financialProfileState || null;
+  return {
+    recommendation,
+    allocationRevision: allocation ? {
+      _id: allocation._id,
+      revision: allocation.revision,
+      returnAssumptionVersion: allocation.returnAssumptionVersion ?? null,
+      returnAssumptionHash: allocation.returnAssumptionHash ?? null,
+      returnAssumptionSource: allocation.returnAssumptionSource ?? null,
+    } : null,
+    financialProfileState: financialProfileState ? {
+      revision: financialProfileState.revision,
+      currentProfileId: financialProfileState.currentProfileId,
+    } : null,
+    profileVersion: currentState.profileVersion ?? null,
+    recommendationFingerprint: currentState.recommendationFingerprint ?? null,
+    portfolioFingerprint: currentState.portfolioFingerprint ?? null,
+    freshness: currentState.freshness ? {
+      fresh: currentState.freshness.fresh === true,
+      reasonCodes: [...new Set(currentState.freshness.reasonCodes || [])],
+    } : null,
   };
 }
 
@@ -212,6 +291,35 @@ export async function loadPlanReviewContext({ userId, profileId, dependencies = 
   const profileModel = dependencies.profileModel || FinancialProfile;
   const recommendationModel = dependencies.recommendationModel || Recommendation;
   const auditModel = dependencies.auditModel || AuditRecord;
+  if (!dependencies.profileModel && !dependencies.recommendationModel && !dependencies.auditModel) {
+    // Queue admission, graph execution, and publication must hash the exact
+    // same canonical source binding. In particular, the profile-state revision
+    // is part of the binding and cannot be omitted by the worker context loader.
+    const resolveSnapshot = dependencies.resolvePlanReviewSnapshot || resolvePlanReviewSnapshot;
+    const snapshot = await resolveSnapshot({
+      userId,
+      profileId,
+      profileStateModel: dependencies.profileStateModel,
+      dependencies,
+    });
+    const currentState = snapshot.currentState;
+    const recommendation = planReviewRecommendationView(
+      currentState?.currentRecommendationView || currentState?.recommendation || null,
+    );
+    const freshness = currentState?.freshness || null;
+    const profileContext = buildProfileContext(snapshot.profile, snapshot.canonicalProfile);
+    return {
+      profile: planReviewEvidenceProfile(profileContext),
+      profileContext,
+      recommendation,
+      currentState: planReviewGoalFreshnessState(currentState),
+      sourceBinding: snapshot.sourceBinding,
+      planReviewSnapshotHash: snapshot.planReviewSnapshotHash,
+      recommendationSummary: buildRecommendationSummary(recommendation, freshness),
+      freshness,
+    };
+  }
+
   const storedProfile = await profileModel.findOne({ _id: profileId, userId }).lean();
   if (!storedProfile) {
     const freshness = assessRecommendationFreshness({ profile: null, recommendation: null });
@@ -230,18 +338,10 @@ export async function loadPlanReviewContext({ userId, profileId, dependencies = 
   }
 
   const profile = buildRecommendationProfile(storedProfile);
-  let recommendation;
-  let freshness;
-  let currentState = null;
-  if (!dependencies.profileModel && !dependencies.recommendationModel && !dependencies.auditModel) {
-    currentState = await resolveCurrentRecommendationState({ userId, profileId, profile });
-    recommendation = currentState.currentRecommendationView;
-    freshness = currentState.freshness;
-  } else {
-    // Test/adapter callers may provide isolated model doubles. Their path is
-    // still read-only; production uses the canonical resolver above.
-    recommendation = await latestOwnedRecommendationQuery(profileId, userId, recommendationModel);
-  }
+  // Test/adapter callers may provide isolated model doubles. Their path is
+  // still read-only; production returns above through the canonical snapshot
+  // resolver used at enqueue and commit time.
+  const recommendation = await latestOwnedRecommendationQuery(profileId, userId, recommendationModel);
   let recommendationRegulatoryRuleVersion = recommendation?.regulatoryRuleVersion ?? null;
   if (recommendation && !recommendationRegulatoryRuleVersion && auditModel) {
     const audit = await auditModel.findOne({ recommendationId: recommendation._id, userId })
@@ -250,13 +350,13 @@ export async function loadPlanReviewContext({ userId, profileId, dependencies = 
     recommendationRegulatoryRuleVersion = audit?.regulatory_rule_version || null;
   }
   const currentRegulatoryRuleVersion = (dependencies.getCurrentRegulatoryRuleVersion || getCurrentRegulatoryRuleVersion)();
-  freshness ||= assessRecommendationFreshness({
+  const freshness = assessRecommendationFreshness({
     profile,
     recommendation,
     currentRegulatoryRuleVersion,
     recommendationRegulatoryRuleVersion,
   });
-  currentState ||= {
+  const currentState = {
     profile: storedProfile,
     profileVersion: Number(storedProfile.version) || null,
     recommendation,

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import mongoose from 'mongoose';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import Recommendation from '../models/Recommendation.js';
 import AuditRecord from '../models/AuditRecord.js';
 import AuditChainHead from '../models/AuditChainHead.js';
@@ -95,6 +96,7 @@ async function createAdvisory(index) {
     },
     response: { recommendationId, audit_id: auditId, audit_hash: 'pending' },
     idempotencyClaim: claim,
+    profileStateBinding: { revision: 1, currentProfileId: String(profileId) },
   });
 }
 
@@ -115,6 +117,9 @@ test.before(async () => {
     ...canonicalProfile(),
     recommendationProfileVersion: FINANCIAL_PROFILE_SCHEMA_VERSION,
   });
+  await FinancialProfileState.create({
+    userId, currentProfileId: profileId, revision: 1, promotionFence: 0, resolutionStatus: 'CURRENT',
+  });
 });
 
 test.beforeEach(clearAuditState);
@@ -122,6 +127,7 @@ test.beforeEach(clearAuditState);
 test.after(async () => {
   await clearAuditState().catch(() => {});
   await FinancialProfile.deleteOne({ _id: profileId, userId }).catch(() => {});
+  await FinancialProfileState.deleteOne({ userId }).catch(() => {});
   await teardownTestDatabase();
 });
 

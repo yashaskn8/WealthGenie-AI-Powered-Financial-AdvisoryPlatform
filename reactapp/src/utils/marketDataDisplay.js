@@ -1,6 +1,8 @@
 /** Keep absent financial facts absent. JavaScript's Number(null) === 0 must not leak into UI. */
 export function nullableMarketNumber(value) {
-  if (value === null || value === undefined || value === '') return null;
+  if (value === null || value === undefined
+      || !['number', 'string'].includes(typeof value)
+      || (typeof value === 'string' && value.trim() === '')) return null;
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -51,15 +53,38 @@ const MARKET_DISPLAY_COPY = Object.freeze({
   },
 });
 
-export function getMarketDisplayState(marketContext, { loading = false } = {}) {
+export function getMarketDisplayState(marketContext, { loading = false, refreshFailed = false } = {}) {
   const key = loading
     ? MARKET_DISPLAY_STATES.LOADING
+    : refreshFailed && marketContext
+      ? MARKET_DISPLAY_STATES.LAST_AVAILABLE
     : marketContext?.marketSnapshot?.status
       || (marketContext?.status === 'MARKET_CONTEXT_AVAILABLE'
         ? MARKET_DISPLAY_STATES.LAST_AVAILABLE
         : MARKET_DISPLAY_STATES.UNAVAILABLE);
   const safeKey = MARKET_DISPLAY_COPY[key] ? key : MARKET_DISPLAY_STATES.UNAVAILABLE;
   return { key: safeKey, ...MARKET_DISPLAY_COPY[safeKey] };
+}
+
+export function readableSource(value) {
+  if (typeof value !== 'string' || !value.trim()) return 'Unavailable';
+  const known = {
+    GOVERNMENT_OF_INDIA: 'Government of India',
+    INDIA_POST: 'India Post',
+    OFFICIAL_BANK_PUBLISHED_RATE: 'Official bank published rate',
+    OFFICIAL_RBI_FLOATING_COUPON_RATE: 'Official RBI floating coupon',
+    QUARTERLY_OFFICIAL_RATE: 'Official quarterly rate',
+    VERIFIED_COMPARABLE_OPTION: 'Verified comparable option',
+    EVIDENCE_RANKED: 'Evidence ranked',
+  };
+  return known[value] || value.replaceAll('_', ' ');
+}
+
+export function safeSourceUrl(value) {
+  try {
+    const url = new URL(value);
+    return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password ? url.href : null;
+  } catch { return null; }
 }
 
 export function formatMarketTimestamp(value) {
@@ -74,8 +99,22 @@ export function formatMarketTimestamp(value) {
 
 export function getMarketEvidenceSource(marketContext) {
   const snapshot = marketContext?.marketSnapshot;
-  const provider = snapshot?.providerStatus?.quotes?.provider
-    || snapshot?.provenance?.sources?.find(source => source?.provider)?.provider
-    || marketContext?.sources?.find(source => source?.provider)?.provider;
-  return provider || null;
+  const providers = [...new Set((snapshot?.observedFacts || [])
+    .filter(fact => fact?.availabilityStatus === 'AVAILABLE' && fact?.source?.provider)
+    .map(fact => fact.source.provider))];
+  return providers.length ? providers.join(', ') : null;
+}
+
+export function getMarketAttemptedProvider(marketContext) {
+  const snapshot = marketContext?.marketSnapshot;
+  const selection = marketContext?.liveProviderSelection || snapshot?.providerSelection;
+  if (Array.isArray(selection?.attemptedProviders) && selection.attemptedProviders.length > 0) {
+    return [...new Set(selection.attemptedProviders)].join(', ');
+  }
+  const providers = [...new Set([
+    snapshot?.providerStatus?.quotes?.provider,
+    snapshot?.providerStatus?.history?.provider,
+    ...(snapshot?.providerStatus?.attemptedProviders || []),
+  ].filter(value => typeof value === 'string' && value.trim()))];
+  return providers.length ? providers.join(', ') : null;
 }

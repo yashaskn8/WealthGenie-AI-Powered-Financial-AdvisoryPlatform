@@ -6,6 +6,8 @@ import { customGoalSchema, customGoalUpdateSchema, goalSimulationSchema, validat
 import Goal from '../models/Goal.js';
 import RecommendationState from '../models/RecommendationState.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
+import { requireCurrentFinancialProfile, resolveCurrentFinancialProfile } from '../services/currentFinancialProfile.js';
 import { reverseSIP, runMonteCarloWithGoal } from '../services/monteCarloEngine.js';
 import { buildCovarianceMatrix, portfolioReturn, portfolioVol } from '../services/portfolioEngine.js';
 import { getGoalAdvisory } from '../services/geminiService.js';
@@ -72,7 +74,7 @@ function toDecimalRate(value) {
 
 /** Uses only the persisted authoritative recommendation for this exact profile. */
 export async function _getBlendedPortfolioMetrics(userId, profileId, profile = undefined) {
-  const state = await requireFreshRecommendationState({ userId, profileId, profile });
+  const state = await resolveCurrentGoalSourceState({ userId, profileId, profile });
   const recommendation = state.currentRecommendationView;
   const instruments = recommendation?.instruments;
   if (!instruments?.length) {
@@ -116,6 +118,18 @@ export async function _getBlendedPortfolioMetrics(userId, profileId, profile = u
     recommendationFingerprint: state.recommendationFingerprint || null,
     state,
   };
+}
+
+async function resolveCurrentGoalSourceState({ userId, profileId, profile } = {}) {
+  const currentProfile = await requireCurrentFinancialProfile({ userId, profileId });
+  const state = await requireFreshRecommendationState({ userId, profileId, profile: profile || currentProfile.profile });
+  state.financialProfileState = {
+    stateId: currentProfile.state._id,
+    currentProfileId: String(currentProfile.state.currentProfileId),
+    revision: Number(currentProfile.state.revision),
+    promotionFence: Number(currentProfile.state.promotionFence),
+  };
+  return state;
 }
 
 function validateMonteCarlo(result) {
@@ -223,8 +237,15 @@ function plannedStateMatches(current, planned) {
 }
 
 async function assertGoalPlanStateCurrent({ userId, profileId, profile, plannedState }) {
-  const current = await requireFreshRecommendationState({ userId, profileId, profile });
+  const current = await resolveCurrentGoalSourceState({ userId, profileId, profile });
   if (!plannedStateMatches(current, plannedState)) throw goalStateConflict();
+  if (!plannedState?.financialProfileState
+      || current.financialProfileState?.currentProfileId !== String(profileId)
+      || Number(current.financialProfileState?.revision) !== Number(plannedState.financialProfileState.revision)) {
+    throw createError(409, 'The canonical financial profile changed while the goal calculation was running.', 'Recalculate the goal before saving it.', {
+      code: 'PROFILE_STATE_VERSION_CONFLICT',
+    });
+  }
   return current;
 }
 
@@ -242,28 +263,168 @@ function committedGoalReconciliationError(goal, cause) {
   return error;
 }
 
+const POST_COMMIT_GOAL_RECONCILIATION_ATTEMPTS = 3;
+const GOAL_FINANCIAL_POINTER_FIELDS = Object.freeze([
+  'currentRecommendationId', 'currentAllocationRevision', 'currentAllocationRevisionId',
+  'generationRevision', 'profileInputHash', 'profileVersion', 'portfolioFingerprint',
+  'returnAssumptionVersion', 'returnAssumptionHash', 'returnAssumptionSource',
+]);
+
+function sameGoalSnapshot(left, right) {
+  return Boolean(left && right)
+    && String(left._id) === String(right._id)
+    && String(left.userId) === String(right.userId)
+    && String(left.profileId) === String(right.profileId)
+    && Number(left.version ?? 1) === Number(right.version ?? 1)
+    && buildGoalCalculationInputFingerprint(left) === buildGoalCalculationInputFingerprint(right)
+    && String(left.sourceRecommendationId || '') === String(right.sourceRecommendationId || '')
+    && String(left.sourceAllocationRevisionId || '') === String(right.sourceAllocationRevisionId || '')
+    && String(left.sourcePortfolioFingerprint || '') === String(right.sourcePortfolioFingerprint || '')
+    && String(left.advisoryMetadata?.goalCalculationFingerprint || '')
+      === String(right.advisoryMetadata?.goalCalculationFingerprint || '');
+}
+
+function sameGoalCurrentSource(snapshot, current) {
+  const leftFinancial = snapshot?.state?.financialProfileState;
+  const rightFinancial = current?.state;
+  if (!leftFinancial || !rightFinancial
+      || String(leftFinancial.stateId || '') !== String(rightFinancial._id || '')
+      || String(leftFinancial.currentProfileId || '') !== String(rightFinancial.currentProfileId || '')
+      || Number(leftFinancial.revision) !== Number(rightFinancial.revision)
+      || Number(leftFinancial.promotionFence) !== Number(rightFinancial.promotionFence)
+      || String(snapshot.currentProfileId || '') !== String(current.profile?._id || '')) return false;
+
+  const leftPointer = snapshot.state?.statePointer;
+  const rightPointer = current.recommendationState;
+  return !leftPointer || (rightPointer && GOAL_FINANCIAL_POINTER_FIELDS.every(field => (
+    String(leftPointer[field] ?? '') === String(rightPointer[field] ?? '')
+  )));
+}
+
 async function resolveGoalResponseAfterCommit(goal, userId) {
-  let state;
   try {
-    state = await resolveCurrentRecommendationState({
-      userId,
-      profileId: goal.profileId,
-      requireFresh: false,
+    for (let attempt = 1; attempt <= POST_COMMIT_GOAL_RECONCILIATION_ATTEMPTS; attempt += 1) {
+      const session = await mongoose.startSession();
+      let snapshot = null;
+      try {
+        await session.withTransaction(async () => {
+          snapshot = null;
+          const currentGoal = await Goal.findOne({ _id: goal._id, userId }).session(session).lean();
+          if (!currentGoal) {
+            snapshot = { goal: null, state: null, currentProfileId: null, deleted: true };
+            return;
+          }
+          await reachFinancialStateTestHook('goal.post_commit.after_resource_read', {
+            userId: String(userId),
+            goalId: String(goal._id),
+            goalVersion: Number(currentGoal.version ?? 1),
+            attempt,
+          });
+
+          const currentProfile = await resolveCurrentFinancialProfile({
+            userId,
+            session,
+            requireRecommendation: false,
+          });
+          const financialProfileState = {
+            stateId: currentProfile.state?._id || null,
+            currentProfileId: currentProfile.state?.currentProfileId
+              ? String(currentProfile.state.currentProfileId)
+              : null,
+            revision: Number(currentProfile.state?.revision ?? 0),
+            promotionFence: Number(currentProfile.state?.promotionFence ?? 0),
+          };
+          if (!currentProfile.profile || String(currentProfile.profile._id) !== String(currentGoal.profileId)) {
+            snapshot = {
+              goal: currentGoal,
+              state: { recommendation: null, financialProfileState },
+              currentProfileId: currentProfile.profile?._id ? String(currentProfile.profile._id) : null,
+              deleted: false,
+            };
+            return;
+          }
+
+          const state = await resolveCurrentRecommendationState({
+            userId,
+            profileId: currentGoal.profileId,
+            profile: currentProfile.profile,
+            session,
+          });
+          if (state.provenance?.status !== 'PERSISTED_REVISION') {
+            throw Object.assign(new Error('Canonical recommendation state integrity check failed.'), {
+              code: state.provenance?.reasonCode || state.provenance?.status || 'FINANCIAL_STATE_UNVERIFIABLE',
+            });
+          }
+          state.financialProfileState = financialProfileState;
+          snapshot = {
+            goal: currentGoal,
+            state,
+            currentProfileId: String(currentProfile.profile._id),
+            deleted: false,
+          };
+        }, {
+          readPreference: 'primary',
+          readConcern: { level: 'snapshot' },
+          writeConcern: { w: 'majority' },
+        });
+      } finally {
+        await session.endSession();
+      }
+
+      if (snapshot?.deleted) return snapshot;
+      if (!snapshot?.goal || !snapshot.state) throw new Error('Goal response snapshot could not be reconstructed.');
+      const confirmedGoal = await Goal.findOne({ _id: goal._id, userId }).lean();
+      if (!confirmedGoal) return { goal: null, state: null, currentProfileId: null, deleted: true };
+      const confirmedProfile = await resolveCurrentFinancialProfile({
+        userId,
+        requireRecommendation: Boolean(snapshot.state?.statePointer),
+      });
+      if (sameGoalSnapshot(snapshot.goal, confirmedGoal) && sameGoalCurrentSource(snapshot, confirmedProfile)) return snapshot;
+    }
+    throw Object.assign(new Error('The goal or its financial source changed during response reconciliation.'), {
+      code: 'GOAL_POST_COMMIT_STATE_UNSTABLE',
     });
   } catch (error) {
     throw committedGoalReconciliationError(goal, error);
   }
-  if (state.provenance?.status !== 'PERSISTED_REVISION') {
-    throw committedGoalReconciliationError(goal, Object.assign(new Error('Canonical recommendation state integrity check failed.'), {
-      code: state.provenance?.reasonCode || state.provenance?.status || 'FINANCIAL_STATE_UNVERIFIABLE',
-    }));
-  }
-  return state;
+}
+
+function committedGoalDeletedError(goal) {
+  return createError(
+    409,
+    'The goal operation committed, but the goal was deleted before its response was reconciled.',
+    'Your change was saved and the goal was subsequently deleted. Refresh your goals before continuing.',
+    {
+      code: 'GOAL_DELETED_AFTER_COMMIT',
+      details: {
+        operation_committed: true,
+        resource_type: 'Goal',
+        goalId: String(goal._id),
+        committed_goal_version: Number(goal.version ?? 1),
+      },
+    },
+  );
 }
 
 async function holdGoalSourceState(session, { userId, profileId, state }) {
   const stateId = state?.provenance?.stateId;
-  if (!stateId || !state.recommendation?._id || !state.allocationRevision?._id) throw goalStateConflict();
+  const profileBinding = state?.financialProfileState;
+  if (!stateId || !state.recommendation?._id || !state.allocationRevision?._id
+      || !profileBinding?.stateId || Number(profileBinding.revision) < 1
+      || String(profileBinding.currentProfileId) !== String(profileId)) throw goalStateConflict();
+  const profileStateFence = await FinancialProfileState.updateOne({
+    _id: profileBinding.stateId,
+    userId,
+    currentProfileId: profileId,
+    resolutionStatus: 'CURRENT',
+    revision: profileBinding.revision,
+    promotionFence: profileBinding.promotionFence,
+  }, { $inc: { promotionFence: 1 } }).session(session);
+  if (profileStateFence.matchedCount !== 1) {
+    throw createError(409, 'The canonical financial profile changed before the goal write completed.', 'Refresh the current profile and retry.', {
+      code: 'PROFILE_STATE_VERSION_CONFLICT',
+    });
+  }
   if (state.profileVersion !== null && state.profileVersion !== undefined) {
     const profileResult = await FinancialProfile.updateOne({
       _id: profileId,
@@ -336,8 +497,8 @@ async function saveGoalWithSourceState(goal, { userId, profileId, sourceState, e
   let transactionCommitted = false;
   try {
     await session.withTransaction(async () => {
-      await holdGoalSourceState(session, { userId, profileId, state: sourceState });
       updatedGoal = await updateGoalWithCAS(goal, { userId, expectedVersion: expectedGoalVersion, session });
+      await holdGoalSourceState(session, { userId, profileId, state: sourceState });
     });
     transactionCommitted = true;
   } finally {
@@ -457,6 +618,7 @@ router.post('/create', verifyJWT, validateStrict(customGoalSchema), idempotency(
     sourceAllocationRevisionId: plan.metrics.state?.allocationRevision?._id || null,
     sourceProfileInputHash: plan.metrics.state?.recommendation?.profileInputHash || null,
     sourceProfileVersion: plan.metrics.state?.profileVersion || null,
+    sourceFinancialProfileStateRevision: plan.metrics.state?.financialProfileState?.revision ?? null,
     sourceModelVersion: plan.metrics.state?.recommendation?.modelVersion || null,
     sourceRecommendationPolicyVersion: plan.metrics.state?.recommendation?.recommendationPolicyVersion || null,
     sourceRegulatoryRuleVersion: plan.metrics.state?.recommendation?.regulatoryRuleVersion || null,
@@ -513,8 +675,13 @@ router.post('/create', verifyJWT, validateStrict(customGoalSchema), idempotency(
     operationId: req.idempotencyClaim.operationId,
   });
   void triggerPlanHealthCheck({ userId: req.user.userId, profileId });
-  const currentState = await resolveGoalResponseAfterCommit(goal, req.user.userId);
-  res.status(201).json({ goal: buildCurrentGoalResponse(goal, { state: currentState }) });
+  const reconciliation = await resolveGoalResponseAfterCommit(goal, req.user.userId);
+  if (reconciliation.deleted) throw committedGoalDeletedError(goal);
+  res.status(201).json({
+    goal: buildCurrentGoalResponse(reconciliation.goal, {
+      state: reconciliation.state?.recommendation ? reconciliation.state : null,
+    }),
+  });
 }));
 
 router.get('/', verifyJWT, asyncHandler(async (req, res) => {
@@ -524,11 +691,22 @@ router.get('/', verifyJWT, asyncHandler(async (req, res) => {
   const stateByProfile = new Map();
   await Promise.all([...new Set(goals.map(goal => String(goal.profileId)))].map(async profileId => {
     try {
+      const profileState = await resolveCurrentFinancialProfile({ userId: req.user.userId, requireRecommendation: false });
+      if (!profileState.profile || String(profileState.profile._id) !== profileId) {
+        stateByProfile.set(profileId, { recommendation: null, financialProfileState: profileState.state });
+        return;
+      }
       const state = await resolveCurrentRecommendationState({
         userId: req.user.userId,
         profileId,
         requireFresh: false,
       });
+      state.financialProfileState = {
+        stateId: profileState.state._id,
+        currentProfileId: String(profileState.state.currentProfileId),
+        revision: Number(profileState.state.revision),
+        promotionFence: Number(profileState.state.promotionFence),
+      };
       stateByProfile.set(profileId, state);
     } catch (error) {
       stateByProfile.set(profileId, { error });
@@ -613,7 +791,7 @@ router.patch('/:goalId/refresh-advice', verifyJWT, asyncHandler(async (req, res)
   const stored = await findOwnedProfile(goal.profileId, req.user.userId);
   if (!stored) throw createError(409, 'The goal profile is unavailable.', 'Financial profile unavailable.');
   const profile = buildRecommendationProfile(stored);
-  const state = await requireFreshRecommendationState({ userId: req.user.userId, profileId: goal.profileId, profile });
+  const state = await resolveCurrentGoalSourceState({ userId: req.user.userId, profileId: goal.profileId, profile });
   const existingFreshness = assessGoalCalculationFreshness(goal, state);
   if (!existingFreshness.fresh) {
     throw createError(409, 'Goal calculation is stale for the current financial state.', 'Recalculate the goal before refreshing its advisory.', {
@@ -635,8 +813,11 @@ router.patch('/:goalId/refresh-advice', verifyJWT, asyncHandler(async (req, res)
   await reachFinancialStateTestHook('goal.advisory.afterCommitBeforeResponse', {
     userId: String(req.user.userId), goalId: String(goal._id), sourceState: state,
   });
-  const currentState = await resolveGoalResponseAfterCommit(goal, req.user.userId);
-  const currentGoal = buildCurrentGoalResponse(goal, { state: currentState.recommendation ? currentState : null });
+  const reconciliation = await resolveGoalResponseAfterCommit(goal, req.user.userId);
+  if (reconciliation.deleted) throw committedGoalDeletedError(goal);
+  const currentGoal = buildCurrentGoalResponse(reconciliation.goal, {
+    state: reconciliation.state?.recommendation ? reconciliation.state : null,
+  });
   res.json({
     goal: currentGoal,
     goalId: goal._id,
@@ -696,6 +877,7 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
     goal.sourceAllocationRevisionId = plan.metrics.state?.allocationRevision?._id || null;
     goal.sourceProfileInputHash = plan.metrics.state?.recommendation?.profileInputHash || null;
     goal.sourceProfileVersion = plan.metrics.state?.profileVersion || null;
+    goal.sourceFinancialProfileStateRevision = plan.metrics.state?.financialProfileState?.revision ?? null;
     goal.sourceModelVersion = plan.metrics.state?.recommendation?.modelVersion || null;
     goal.sourceRecommendationPolicyVersion = plan.metrics.state?.recommendation?.recommendationPolicyVersion || null;
     goal.sourceRegulatoryRuleVersion = plan.metrics.state?.recommendation?.regulatoryRuleVersion || null;
@@ -735,15 +917,31 @@ router.patch('/:goalId', verifyJWT, validateStrict(customGoalUpdateSchema), asyn
     });
   } else {
     goal.version = expectedGoalVersion + 1;
-    persistedGoal = await updateGoalWithCAS(goal, { userId: req.user.userId, expectedVersion: expectedGoalVersion });
+    const sourceState = await resolveCurrentGoalSourceState({
+      userId: req.user.userId,
+      profileId: goal.profileId,
+      profile,
+    });
+    persistedGoal = await saveGoalWithSourceState(goal, {
+      userId: req.user.userId,
+      profileId: goal.profileId,
+      sourceState,
+      expectedGoalVersion,
+    });
   }
   await reachFinancialStateTestHook('goal.update.afterCommitBeforeResponse', {
     userId: String(req.user.userId), goalId: String(persistedGoal._id),
     goalVersion: Number(persistedGoal.version),
   });
-  void triggerPlanHealthCheck({ userId: req.user.userId, profileId: goal.profileId });
-  const currentState = await resolveGoalResponseAfterCommit(persistedGoal, req.user.userId);
-  res.json({ success: true, goal: buildCurrentGoalResponse(persistedGoal, { state: currentState }) });
+  const reconciliation = await resolveGoalResponseAfterCommit(persistedGoal, req.user.userId);
+  if (reconciliation.deleted) throw committedGoalDeletedError(persistedGoal);
+  void triggerPlanHealthCheck({ userId: req.user.userId, profileId: reconciliation.goal.profileId });
+  res.json({
+    success: true,
+    goal: buildCurrentGoalResponse(reconciliation.goal, {
+      state: reconciliation.state?.recommendation ? reconciliation.state : null,
+    }),
+  });
 }));
 
 router.delete('/:goalId', verifyJWT, asyncHandler(async (req, res) => {

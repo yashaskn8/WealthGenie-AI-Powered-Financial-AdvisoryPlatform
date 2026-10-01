@@ -15,6 +15,7 @@ import Recommendation from '../models/Recommendation.js';
 import Goal from '../models/Goal.js';
 import ConversationHistory from '../models/ConversationHistory.js';
 import User from '../models/User.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
 import { installMockChatSessionStore } from './helpers/mockChatSessionStore.js';
 
@@ -44,6 +45,7 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
   let originalGoalFind;
   let originalConvFindOne;
   let originalUserFindById;
+  let originalProfileStateFindOne;
   let originalEnvironment;
   let restoreChatStore;
 
@@ -53,6 +55,7 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
     originalGoalFind = Goal.find;
     originalConvFindOne = ConversationHistory.findOne;
     originalUserFindById = User.findById;
+    originalProfileStateFindOne = FinancialProfileState.findOne;
     originalEnvironment = {
       nvidia: process.env.NVIDIA_API_KEY,
       gemini: process.env.GEMINI_API_KEY,
@@ -62,10 +65,22 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
     process.env.GEMINI_API_KEY = '';
     process.env.GROQ_API_KEY = '';
 
-    FinancialProfile.findOne = (query) => ({
-      sort: () => ({
-        lean: async () => (query?.userId === mockUserId ? mockProfile : null),
-      }),
+    FinancialProfile.findOne = (query) => {
+      const profileQuery = {
+        lean: async () => (String(query?.userId) === mockUserId
+          && String(query?._id) === String(mockProfile._id) ? mockProfile : null),
+        sort: () => profileQuery,
+      };
+      return profileQuery;
+    };
+    FinancialProfileState.findOne = query => ({
+      lean: async () => (String(query?.userId) === mockUserId ? {
+        userId: mockUserId,
+        currentProfileId: mockProfile._id,
+        revision: 1,
+        promotionFence: 0,
+        resolutionStatus: 'CURRENT',
+      } : null),
     });
 
     Recommendation.findOne = () => ({
@@ -90,6 +105,7 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
       userId,
       profileId: mockProfile._id,
       profileVersion: mockProfile.version || 1,
+      financialProfileStateRevision: 1,
       session_id: sessionId,
       messages: [],
       message_sequence: 0,
@@ -110,6 +126,7 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
     ConversationHistory.findOne = originalConvFindOne;
     restoreChatStore?.();
     User.findById = originalUserFindById;
+    FinancialProfileState.findOne = originalProfileStateFindOne;
     if (originalEnvironment.nvidia === undefined) delete process.env.NVIDIA_API_KEY; else process.env.NVIDIA_API_KEY = originalEnvironment.nvidia;
     if (originalEnvironment.gemini === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = originalEnvironment.gemini;
     if (originalEnvironment.groq === undefined) delete process.env.GROQ_API_KEY; else process.env.GROQ_API_KEY = originalEnvironment.groq;
@@ -166,6 +183,7 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
       profileId: new mongoose.Types.ObjectId(),
       session_id: 'rag-test-session-001',
       profileVersion: 1,
+      financialProfileStateRevision: 1,
       profileInputHash: 'a'.repeat(64),
       messages: [
         {

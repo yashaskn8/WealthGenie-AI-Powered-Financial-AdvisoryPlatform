@@ -8,6 +8,7 @@ import recommendRoutes, { persistAdvisoryIfCurrent } from '../routes/recommend.j
 import projectionRoutes from '../routes/projection.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import FinancialProfile from '../models/FinancialProfile.js';
+import FinancialProfileState from '../models/FinancialProfileState.js';
 import Recommendation from '../models/Recommendation.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import RecommendationState from '../models/RecommendationState.js';
@@ -32,6 +33,7 @@ import Goal from '../models/Goal.js';
 import goalsRoutes from '../routes/goals.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { canonicalProfilePayload } from './helpers/canonicalProfile.js';
+import { ProviderManager } from '../services/providerAbstraction.js';
 import { buildPortfolioFingerprint, buildRecommendationFingerprint } from '../services/recommendationFingerprint.js';
 import { assertFetchResponseMatchesOpenApi } from './helpers/openapiRuntimeContract.js';
 import {
@@ -100,6 +102,9 @@ async function createFixture({ userId = userA, stale = false, regulatoryRuleVers
     responseSnapshot,
   });
   await createCanonicalState(recommendation);
+  await FinancialProfileState.create({
+    userId, currentProfileId: storedProfile._id, revision: 1, promotionFence: 0, resolutionStatus: 'CURRENT',
+  });
   return storedProfile;
 }
 
@@ -214,6 +219,9 @@ async function createAdvisoryLifecycleFixture() {
     responseSnapshot,
   });
   const state = await createCanonicalState(recommendation);
+  await FinancialProfileState.create({
+    userId: userA, currentProfileId: storedProfile._id, revision: 1, promotionFence: 0, resolutionStatus: 'CURRENT',
+  });
   await Recommendation.updateOne({ _id: recommendationId }, { $set: {
     advisoryMetadata: {
       status: 'READY',
@@ -386,6 +394,7 @@ async function persistNextRecommendation(profile, suffix) {
     },
     response: { recommendationId, audit_id: auditId, advisory_text: advisoryText, model_version: modelVersion },
     idempotencyClaim: claim,
+    profileStateBinding: { revision: 1, currentProfileId: String(profile._id) },
   });
 }
 
@@ -443,6 +452,7 @@ test.beforeEach(async () => {
     FinancialProfile.deleteMany({ userId: { $in: [userA, userB] } }),
     Recommendation.deleteMany({ userId: { $in: [userA, userB] } }),
     RecommendationState.deleteMany({ userId: { $in: [userA, userB] } }),
+    FinancialProfileState.deleteMany({ userId: { $in: [userA, userB] } }),
     Goal.deleteMany({ userId: { $in: [userA, userB] } }),
     AuditRecord.collection.deleteMany({ userId: { $in: [userA, userB] } }),
     AuditChainHead.deleteMany({ _id: { $in: [userA, userB] } }),
@@ -759,6 +769,64 @@ test('committed rebalance reconciles to a later canonical revision instead of re
   assert.notEqual(bodyA.allocation_revision_id, bodyA.operation_result.generated_allocation_revision_id);
 });
 
+test('committed rebalance retries reconciliation when allocation advances after the current-profile read', async () => {
+  const profile = await createFixture();
+  const initial = await request(profile._id);
+  const initialBody = await initial.json();
+  const payload = {
+    profileId: String(profile._id),
+    recommendationId: initialBody.recommendationId,
+    expectedAllocationRevision: initialBody.allocation_revision,
+    expectedPortfolioFingerprint: initialBody.portfolio_fingerprint,
+    weights: Object.fromEntries(initialBody.instruments.map(item => [item.id, item.allocationWeight])),
+  };
+  const barrier = createBarrier();
+  let paused = false;
+  const uninstall = installFinancialStateTestHook(async boundary => {
+    if (boundary === 'post_commit.after_current_profile_read' && !paused) {
+      paused = true;
+      await barrier.pause();
+    }
+  });
+
+  const pendingA = submitWeights(payload);
+  try {
+    await barrier.entered;
+    const inputB = await rebalanceInput(profile, 'post-commit-pointer-read-supersession-B');
+    assert.equal(inputB.expectedRevision, 2, 'A has committed allocation revision N+1 before the reconciliation pointer read');
+    const committedB = await createManualAllocationRevision(inputB);
+    assert.equal(committedB.revision.revision, 3);
+  } finally {
+    barrier.release();
+    uninstall();
+  }
+
+  const responseA = await pendingA;
+  const bodyA = await responseA.json();
+  assert.equal(responseA.status, 200, JSON.stringify(bodyA));
+  assert.equal(bodyA.response_state, 'CURRENT');
+  assert.equal(bodyA.calculation_freshness.fresh, true);
+  assert.equal(bodyA.allocation_revision, 3);
+  assert.equal(bodyA.operation_result.generated_allocation_revision, 2);
+  assert.equal(bodyA.operation_result.superseded_before_response, true);
+
+  const [pointer, revisions, audits, currentResponse] = await Promise.all([
+    RecommendationState.findOne({ userId: userA, profileId: profile._id }).lean(),
+    RecommendationAllocationRevision.find({ recommendationId: initialBody.recommendationId }).sort({ revision: 1 }).lean(),
+    AuditRecord.find({ userId: userA, recommendationId: initialBody.recommendationId }).sort({ chain_sequence: 1 }).lean(),
+    request(profile._id),
+  ]);
+  const currentBody = await currentResponse.json();
+  assert.equal(pointer.currentAllocationRevision, 3);
+  assert.equal(String(bodyA.allocation_revision_id), String(pointer.currentAllocationRevisionId));
+  assert.equal(bodyA.portfolio_fingerprint, pointer.portfolioFingerprint);
+  assert.equal(currentBody.allocation_revision_id, bodyA.allocation_revision_id);
+  assert.deepEqual(revisions.map(revision => revision.revision), [1, 2, 3]);
+  assert.equal(new Set(revisions.map(revision => String(revision._id))).size, 3);
+  assert.equal(audits.length, 2);
+  assert.equal((await verifyAuditChain(userA)).valid, true);
+});
+
 test('committed rebalance fails closed when canonical state is corrupted before reconciliation', async () => {
   const profile = await createFixture();
   const initial = await request(profile._id);
@@ -893,6 +961,7 @@ test('transaction aborts at every rebalance write boundary leave no partial fina
   const profile = await createFixture();
   const args = await rebalanceInput(profile, 'fault-injected-rebalance-abort');
   const initialProfile = await FinancialProfile.findById(profile._id).lean();
+  const initialProfileState = await FinancialProfileState.findOne({ userId: userA }).lean();
   const initialState = await RecommendationState.findOne({ userId: userA, profileId: profile._id }).lean();
   const failureBoundaries = [
     'afterProfileFence',
@@ -912,8 +981,9 @@ test('transaction aborts at every rebalance write boundary leave no partial fina
       error => error.code === 'INJECTED_ABORT',
     );
 
-    const [afterProfile, afterState, revisions, audits, auditHead] = await Promise.all([
+    const [afterProfile, afterUserProfileState, afterState, revisions, audits, auditHead] = await Promise.all([
       FinancialProfile.findById(profile._id).lean(),
+      FinancialProfileState.findOne({ userId: userA }).lean(),
       RecommendationState.findOne({ userId: userA, profileId: profile._id }).lean(),
       RecommendationAllocationRevision.find({ recommendationId: args.recommendationId }).sort({ revision: 1 }).lean(),
       AuditRecord.find({ userId: userA, recommendationId: args.recommendationId }).lean(),
@@ -922,6 +992,7 @@ test('transaction aborts at every rebalance write boundary leave no partial fina
 
     assert.equal(afterProfile.version, initialProfile.version, `${boundary}: profile version`);
     assert.equal(afterProfile.financialStateFence || 0, initialProfile.financialStateFence || 0, `${boundary}: profile fence`);
+    assert.equal(afterUserProfileState.promotionFence, initialProfileState.promotionFence, `${boundary}: user profile promotion fence`);
     assert.equal(String(afterState.currentRecommendationId), String(initialState.currentRecommendationId), `${boundary}: recommendation pointer`);
     assert.equal(afterState.currentAllocationRevision, initialState.currentAllocationRevision, `${boundary}: allocation revision`);
     assert.equal(String(afterState.currentAllocationRevisionId), String(initialState.currentAllocationRevisionId), `${boundary}: allocation pointer`);
@@ -991,6 +1062,48 @@ test('barrier-controlled profile edit defeats an in-flight rebalance without fin
   await assert.rejects(requireFreshRecommendationState({ userId: userA, profileId: profile._id }));
 });
 
+test('manual rebalance refuses a profile that is no longer the user canonical profile', async () => {
+  const profile = await createFixture();
+  const args = await rebalanceInput(profile, 'historical-profile-rebalance-rejected');
+  await FinancialProfileState.updateOne({ userId: userA }, {
+    $set: { currentProfileId: new mongoose.Types.ObjectId() },
+    $inc: { revision: 1, promotionFence: 1 },
+  });
+
+  await assert.rejects(createManualAllocationRevision(args), error => error.code === 'PROFILE_STATE_VERSION_CONFLICT');
+  assert.equal(await RecommendationAllocationRevision.countDocuments({ recommendationId: args.recommendationId }), 1);
+  assert.equal(await AuditRecord.countDocuments({ recommendationId: args.recommendationId }), 0);
+});
+
+test('rebalance transaction is fenced when the canonical profile pointer advances after its read', async () => {
+  const profile = await createFixture();
+  const args = await rebalanceInput(profile, 'profile-pointer-race-rebalance');
+  const barrier = createBarrier();
+  let paused = false;
+  const pending = createManualAllocationRevision({
+    ...args,
+    testHooks: {
+      afterFinancialProfileStateRead: async () => {
+        if (!paused) {
+          paused = true;
+          await barrier.pause();
+        }
+      },
+    },
+  });
+  await barrier.entered;
+  await FinancialProfileState.updateOne({ userId: userA }, {
+    $set: { currentProfileId: new mongoose.Types.ObjectId() },
+    $inc: { revision: 1, promotionFence: 1 },
+  });
+  barrier.release();
+  const result = await Promise.allSettled([pending]);
+  assert.equal(result[0].status, 'rejected');
+  assert.ok(['PROFILE_STATE_VERSION_CONFLICT', 'ALLOCATION_REVISION_CONFLICT'].includes(result[0].reason.code));
+  assert.equal(await RecommendationAllocationRevision.countDocuments({ recommendationId: args.recommendationId }), 1);
+  assert.equal(await AuditRecord.countDocuments({ recommendationId: args.recommendationId }), 0);
+});
+
 test('barrier-controlled recommendation refresh supersedes a paused old-state rebalance', async () => {
   const profile = await createFixture();
   const args = await rebalanceInput(profile, 'barrier-refresh-race');
@@ -1047,6 +1160,96 @@ test('barrier-controlled recommendation advisory loses to a rebalance and is nev
   assert.equal(currentResponse.status, 200);
   assert.equal(currentBody.advisory_text, null);
   assert.equal(currentBody.advisory_explanation.status, 'STALE');
+});
+
+test('persisted deferred advisory is reconciled against a rebalance before its response and stale READY advice can be refreshed', async () => {
+  const profile = await createFixture();
+  const current = await request(profile._id);
+  const currentBody = await current.json();
+  const recommendationId = String(currentBody.recommendationId);
+  const barrier = createBarrier();
+  const originalPrimaryProvider = process.env.LLM_PRIMARY_PROVIDER;
+  const originalGenerate = ProviderManager.nvidia.generate;
+  let providerCalls = 0;
+  process.env.LLM_PRIMARY_PROVIDER = 'NVIDIA_NIM';
+  ProviderManager.nvidia.generate = async ({ recentHistory }) => {
+    providerCalls += 1;
+    const prompt = recentHistory?.[0]?.parts?.[0]?.text;
+    const evidencePacket = JSON.parse(prompt).EVIDENCE_PACKET;
+    const evidenceId = evidencePacket.entries[0].id;
+    const text = `This recommendation is grounded in the verified evidence [${evidenceId}].`;
+    return {
+      text: JSON.stringify({
+        text,
+        evidenceIdsUsed: [evidenceId],
+        claims: [{ text, evidenceIds: [evidenceId] }],
+        unavailableFacts: [],
+      }),
+      provider: 'nvidia_nim',
+      model: 'post-commit-race-test',
+      tokensUsed: 0,
+    };
+  };
+
+  let paused = false;
+  const uninstall = installFinancialStateTestHook(async boundary => {
+    if (boundary === 'recommendation.advisory.afterPersistenceBeforeResponse' && !paused) {
+      paused = true;
+      await barrier.pause();
+    }
+  });
+  let pending;
+  try {
+    pending = fetch(`${baseUrl}/api/recommend/${recommendationId}/advisory`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${signToken(userA)}` },
+    });
+    await barrier.entered;
+    const rebalance = await createManualAllocationRevision(await rebalanceInput(profile, 'advisory-post-persist-race'));
+    assert.equal(rebalance.revision.revision, 2);
+  } finally {
+    barrier.release();
+    uninstall();
+  }
+
+  try {
+    const response = await pending;
+    const body = await response.json();
+    await assertFetchResponseMatchesOpenApi(response, 'POST', '/api/recommend/{recommendationId}/advisory', { body });
+    assert.equal(response.status, 200, JSON.stringify(body));
+    assert.equal(body.allocation_revision, 2);
+    assert.equal(body.advisory_text, null, 'text generated for revision 1 must not be presented as revision 2 advice');
+    assert.equal(body.advisory_explanation.status, 'STALE');
+    const [stored, pointer] = await Promise.all([
+      Recommendation.findById(recommendationId).lean(),
+      RecommendationState.findOne({ userId: userA, profileId: profile._id }).lean(),
+    ]);
+    assert.equal(stored.advisoryMetadata.allocationRevision, 1, 'historical advisory provenance remains the state actually explained');
+    assert.ok(stored.advisoryText, 'the successfully generated historical advisory remains persisted');
+    assert.equal(pointer.currentAllocationRevision, 2);
+    assert.equal(body.allocation_revision_id, String(pointer.currentAllocationRevisionId));
+    assert.equal(body.portfolio_fingerprint, pointer.portfolioFingerprint);
+
+    const refreshedResponse = await fetch(`${baseUrl}/api/recommend/${recommendationId}/advisory`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${signToken(userA)}` },
+    });
+    const refreshed = await refreshedResponse.json();
+    await assertFetchResponseMatchesOpenApi(refreshedResponse, 'POST', '/api/recommend/{recommendationId}/advisory', { body: refreshed });
+    assert.equal(refreshedResponse.status, 200, JSON.stringify(refreshed));
+    assert.equal(refreshed.allocation_revision, 2);
+    assert.equal(refreshed.allocation_revision_id, String(pointer.currentAllocationRevisionId));
+    assert.equal(refreshed.advisory_explanation.status, 'GROUNDED_EXPLANATION_AVAILABLE');
+    assert.ok(refreshed.advisory_text);
+    assert.equal(providerCalls, 2, 'stale READY advisory must be claimable for a fresh current-state generation');
+    const refreshedRecord = await Recommendation.findById(recommendationId).lean();
+    assert.equal(refreshedRecord.advisoryMetadata.allocationRevision, 2);
+    assert.equal(refreshedRecord.advisoryMetadata.allocationRevisionId, String(pointer.currentAllocationRevisionId));
+  } finally {
+    ProviderManager.nvidia.generate = originalGenerate;
+    if (originalPrimaryProvider === undefined) delete process.env.LLM_PRIMARY_PROVIDER;
+    else process.env.LLM_PRIMARY_PROVIDER = originalPrimaryProvider;
+  }
 });
 
 test('barrier-controlled recommendation advisory loses to a profile edit with no advisory side effect', async () => {

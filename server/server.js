@@ -15,9 +15,11 @@ import logger from './utils/logger.js';
 import { createRuntimeState } from './services/runtimeState.js';
 import { warmAdvisoryPersistence } from './services/advisoryPersistence.js';
 import { verifyPlanReviewPersistenceIndexes } from './services/planReviewPersistence.js';
+import { verifyAgentRuntimePersistence } from './services/planHealthPersistence.js';
 import AgentRunEvent from './models/AgentRunEvent.js';
 import { warmAuthorizationPersistence } from './services/authorizationPersistence.js';
 import { reconcileAuthorizedExecutions } from './agents/authorization/executionRecovery.js';
+import { createMcpRuntime } from './mcp/mcpRuntime.js';
 
 let server = null;
 let shuttingDown = false;
@@ -25,6 +27,12 @@ let processHandlersInstalled = false;
 const runtimeState = createRuntimeState();
 let activeConfig = null;
 let authorizedRecoveryTimer = null;
+let activeMcpRuntime = null;
+
+export async function verifyEnabledApiAgentPersistence(config, verifier = verifyAgentRuntimePersistence) {
+  if (!config.agenticPlanReviewEnabled) return { ready: true, skipped: true };
+  return verifier({ force: true });
+}
 
 function configureHttpServer(httpServer, config) {
   httpServer.requestTimeout = config.http.requestTimeoutMs;
@@ -64,6 +72,11 @@ export async function startServer({ env = process.env } = {}) {
   assertValidRuntimeConfig(config);
   activeConfig = config;
   runtimeState.markStarting();
+  const mcpRuntime = createMcpRuntime({
+    toolTimeoutMs: config.mcp.toolTimeoutMs,
+    shutdownGraceMs: config.mcp.shutdownGraceMs,
+  });
+  activeMcpRuntime = mcpRuntime;
 
   try {
     await connectDB({
@@ -84,14 +97,21 @@ export async function startServer({ env = process.env } = {}) {
       requireTransactions: true,
     });
     await warmAdvisoryPersistence();
-    if (config.agenticPlanReviewEnabled) await verifyPlanReviewPersistenceIndexes();
+    if (config.agenticPlanReviewEnabled) {
+      await verifyPlanReviewPersistenceIndexes();
+      await verifyEnabledApiAgentPersistence(config);
+    }
     if (config.authorization.verifiableActionsEnabled) await warmAuthorizationPersistence();
     await connectRedis({ url: env.REDIS_URL });
     if (config.requireRedis && !redisAvailable) {
       throw new Error('Redis is required in this environment but is unavailable');
     }
 
-    const app = createApp({ env, runtimeState });
+    const app = createApp({ env, runtimeState, mcpRuntime });
+    if (config.isProduction && config.mcp.enabled && config.mcp.remoteEnabled
+        && !(await app.locals.mcpCapacity.probe())) {
+      throw new Error('MCP distributed capacity and revocation dependencies failed their readiness contract probe.');
+    }
     server = createHttpServer(app);
     configureHttpServer(server, config);
     await new Promise((resolve, reject) => {
@@ -118,12 +138,15 @@ export async function startServer({ env = process.env } = {}) {
       authorizedRecoveryTimer.unref?.();
     }
     runtimeState.markReady();
+    mcpRuntime.markReady();
     logger.info('WealthGenie API started', { port: config.port, env: config.nodeEnv });
     return server;
   } catch (error) {
+    await mcpRuntime.drain({ graceMs: 0 }).catch(() => {});
     runtimeState.markStopped();
     await closeHttpServer(server).catch(() => {});
     server = null;
+    activeMcpRuntime = null;
     await closeInfrastructure({ stopAgentWorker: config.agentWorkerMode === 'embedded' });
     throw error;
   }
@@ -133,6 +156,7 @@ export async function stopServer({ signal = 'manual', timeoutMs } = {}) {
   if (shuttingDown) return;
   shuttingDown = true;
   runtimeState.markDraining();
+  const mcpRuntime = activeMcpRuntime;
   const config = activeConfig || getRuntimeConfig(process.env);
   const deadlineMs = timeoutMs || config.http.shutdownTimeoutMs;
   logger.info('Graceful shutdown initiated', { signal, deadlineMs });
@@ -149,6 +173,7 @@ export async function stopServer({ signal = 'manual', timeoutMs } = {}) {
   try {
     await Promise.race([
       (async () => {
+        await mcpRuntime?.drain({ graceMs: config.mcp.shutdownGraceMs });
         await closeHttpServer(server);
         await closeInfrastructure({ stopAgentWorker: config.agentWorkerMode === 'embedded' });
       })(),
@@ -160,6 +185,7 @@ export async function stopServer({ signal = 'manual', timeoutMs } = {}) {
     runtimeState.markStopped();
     server = null;
     activeConfig = null;
+    activeMcpRuntime = null;
     shuttingDown = false;
   }
 }

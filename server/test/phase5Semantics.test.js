@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   PROJECTION_ASSUMPTION_DATA_CLASS,
+  PROJECTION_ASSUMPTION_POLICY_HASH,
   PROJECTION_ASSUMPTION_SOURCE,
   PROJECTION_ASSUMPTION_VERSION,
   INSTRUMENT_PARAMS,
@@ -143,6 +144,7 @@ test('legacy catalog return fields are explicitly classified as model assumption
   for (const instrument of investmentDatabase) {
     assert.equal(instrument.returnDataClass, 'MODEL_ASSUMPTION');
     assert.equal(instrument.returnAssumptionVersion, PROJECTION_ASSUMPTION_VERSION);
+    assert.equal(instrument.returnAssumptionHash, PROJECTION_ASSUMPTION_POLICY_HASH);
     assert.equal(instrument.returnSource, PROJECTION_ASSUMPTION_SOURCE);
     assert.equal(instrument.observedMarketFact, false);
     assert.equal(instrument.providerForecast, false);
@@ -155,6 +157,7 @@ test('authoritative recommendations preserve model-assumption provenance per ins
   for (const instrument of result.instruments) {
     assert.equal(instrument.returnDataClass, 'MODEL_ASSUMPTION');
     assert.equal(instrument.returnAssumptionVersion, PROJECTION_ASSUMPTION_VERSION);
+    assert.equal(instrument.returnAssumptionHash, PROJECTION_ASSUMPTION_POLICY_HASH);
     assert.equal(instrument.returnSource, 'WEALTHGENIE_MODEL_POLICY');
     assert.equal(instrument.observedMarketFact, false);
     assert.equal(instrument.providerForecast, false);

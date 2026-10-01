@@ -31,8 +31,6 @@ export const researchBriefSchema = Joi.object({
   knownSourceDates: Joi.array().items(knownSourceDateSchema).max(40).default([]),
   freshnessRequirement: freshnessRequirementSchema,
   maxResearchDepth: Joi.number().integer().min(0).max(3).required(),
-  correlationId: id.allow(null).default(null),
-  runId: id.allow(null).default(null),
 }).unknown(false);
 
 const sourceSchema = Joi.object({
@@ -79,8 +77,9 @@ const claimSchema = Joi.object({
 
 export const researchArtifactSchema = Joi.object({
   artifactId: id.required(),
-  version: Joi.string().valid('1.0.0').required(),
+  version: Joi.string().valid('1.1.0').required(),
   researchBriefId: id.required(),
+  researchBriefHash: Joi.string().hex().length(64).required(),
   taskId: id.allow(null).required(),
   agentVersion: Joi.string().trim().max(120).required(),
   researchPolicyVersion: Joi.string().trim().max(120).required(),
@@ -106,6 +105,19 @@ export const researchArtifactSchema = Joi.object({
 const PRIVATE_KEYS = new Set([
   'email',
   'phone',
+  'mobile',
+  'pan',
+  'pannumber',
+  'aadhaar',
+  'aadhar',
+  'aadhaarnumber',
+  'accountnumber',
+  'bankaccount',
+  'bankaccountnumber',
+  'salary',
+  'ctc',
+  'annualincome',
+  'monthlyincome',
   'monthlyTakeHome',
   'monthly_income',
   'monthlyIncome',
@@ -116,9 +128,16 @@ const PRIVATE_KEYS = new Set([
   'password',
   'passwordHash',
   'bankDetails',
+  'profileId',
+  'runId',
+  'correlationId',
 ]);
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
 const JWT_PATTERN = /\beyJ[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\b/;
+const PAN_PATTERN = /\b[A-Z]{5}[0-9]{4}[A-Z]\b/i;
+const AADHAAR_PATTERN = /\b(?:\d[ -]?){11}\d\b/;
+const INDIAN_MOBILE_PATTERN = /(?:\+91[\s-]?)?[6-9]\d{4}[\s-]?\d{5}\b/;
+const LABELED_ACCOUNT_PATTERN = /\b(?:account|acct|phone|mobile|aadhaar|aadhar|pan)\s*(?:number|no\.?|#|:)?\s*[-:]?\s*[A-Z0-9 -]{8,20}\b/i;
 
 export function assertResearchBriefPrivacy(value, path = 'researchBrief') {
   if (!value || typeof value !== 'object') return;
@@ -127,12 +146,18 @@ export function assertResearchBriefPrivacy(value, path = 'researchBrief') {
     return;
   }
   for (const [key, child] of Object.entries(value)) {
-    if (PRIVATE_KEYS.has(key)) {
+    const normalizedKey = key.replace(/[^a-z0-9]/gi, '').toLowerCase();
+    if (PRIVATE_KEYS.has(key) || [...PRIVATE_KEYS].some(privateKey => privateKey.replace(/[^a-z0-9]/gi, '').toLowerCase() === normalizedKey)) {
       const error = new Error(`ResearchBrief contains a private field: ${path}.${key}`);
       error.code = 'RESEARCH_BRIEF_PRIVACY_VIOLATION';
       throw error;
     }
-    if (typeof child === 'string' && (EMAIL_PATTERN.test(child) || JWT_PATTERN.test(child))) {
+    if (typeof child === 'string' && (EMAIL_PATTERN.test(child)
+        || JWT_PATTERN.test(child)
+        || PAN_PATTERN.test(child)
+        || AADHAAR_PATTERN.test(child)
+        || INDIAN_MOBILE_PATTERN.test(child)
+        || LABELED_ACCOUNT_PATTERN.test(child))) {
       const error = new Error(`ResearchBrief contains private credentials or identifiers: ${path}.${key}`);
       error.code = 'RESEARCH_BRIEF_PRIVACY_VIOLATION';
       throw error;
@@ -156,37 +181,21 @@ export function validateResearchArtifact(value) {
   return researchArtifactSchema.validate(value, { abortEarly: false, convert: false });
 }
 
-export function createResearchBrief({
-  researchBriefId = crypto.randomUUID(),
-  topic,
-  question,
-  jurisdiction = 'IN',
-  asOf = new Date().toISOString(),
-  requestedFactTypes,
-  instrumentCategories = [],
-  regulatoryContext = {},
-  knownEvidenceIds = [],
-  knownSourceDates = [],
-  freshnessRequirement = {},
-  maxResearchDepth = 1,
-  correlationId = null,
-  runId = null,
-} = {}) {
+export function createResearchBrief(options = {}) {
   const result = validateResearchBrief({
-    researchBriefId,
-    topic,
-    question,
-    jurisdiction,
-    asOf,
-    requestedFactTypes,
-    instrumentCategories,
-    regulatoryContext,
-    knownEvidenceIds,
-    knownSourceDates,
-    freshnessRequirement,
-    maxResearchDepth,
-    correlationId,
-    runId,
+    // Generated opaque IDs must not accidentally match the private-number
+    // filters. The disjoint digit-to-letter mapping preserves UUID uniqueness;
+    // explicitly supplied IDs still pass through unchanged and are validated.
+    researchBriefId: crypto.randomUUID().replace(/\d/g, digit => 'ghijklmnop'[Number(digit)]),
+    jurisdiction: 'IN',
+    asOf: new Date().toISOString(),
+    instrumentCategories: [],
+    regulatoryContext: {},
+    knownEvidenceIds: [],
+    knownSourceDates: [],
+    freshnessRequirement: {},
+    maxResearchDepth: 1,
+    ...options,
   });
   if (result.error) {
     const error = new Error('Invalid ResearchBrief.');

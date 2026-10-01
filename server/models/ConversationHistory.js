@@ -37,6 +37,7 @@ const MessageSchema = new mongoose.Schema({
     generated_at: Date,
     message_sequence: { type: Number, min: 1 },
     profileId: { type: mongoose.Schema.Types.ObjectId, ref: 'FinancialProfile' },
+    financialProfileStateRevision: { type: Number, min: 0, validate: Number.isSafeInteger },
     profileVersion: { type: Number, min: 1 },
     profileInputHash: { type: String, match: /^[a-f0-9]{64}$/ },
     recommendationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Recommendation' },
@@ -64,6 +65,7 @@ const ConversationHistorySchema = new mongoose.Schema({
     maxlength: 100,
   },
   profileVersion: { type: Number, min: 1, required: true },
+  financialProfileStateRevision: { type: Number, min: 0, required: true, validate: Number.isSafeInteger },
   profileInputHash: { type: String, required: true, match: /^[a-f0-9]{64}$/ },
   sourceRecommendationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Recommendation', default: null },
   sourceAllocationRevisionId: { type: mongoose.Schema.Types.ObjectId, ref: 'RecommendationAllocationRevision', default: null },
@@ -103,6 +105,7 @@ ConversationHistorySchema.index({ userId: 1, is_active: 1, updated_at: -1 });
 
 protectImmutableIdentity(ConversationHistorySchema, [
   'userId', 'profileId', 'session_id', 'profileVersion', 'profileInputHash',
+  'financialProfileStateRevision',
   'sourceRecommendationId', 'sourceAllocationRevisionId',
   'sourceRecommendationFingerprint', 'sourcePortfolioFingerprint',
 ], {

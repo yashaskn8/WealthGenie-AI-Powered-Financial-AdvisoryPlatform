@@ -18,6 +18,14 @@ class MetricsCollector {
       tool_execution_total: 0,
       tool_execution_success_total: 0,
       tool_execution_failure_total: 0,
+      mcp_requests_total: 0,
+      mcp_request_failures_total: 0,
+      mcp_tool_calls_total: 0,
+      mcp_tool_successes_total: 0,
+      mcp_tool_failures_total: 0,
+      mcp_tool_timeouts_total: 0,
+      mcp_capacity_rejections_total: 0,
+      mcp_auth_rejections_total: 0,
       arithmetic_corrections_total: 0,
       arithmetic_corrections_post_pass2_total: 0,
       invalid_action_cards_total: 0,
@@ -34,6 +42,7 @@ class MetricsCollector {
       profile_complete_candidate_version_mismatch_total: 0,
       profile_complete_recomputed_total: 0,
       post_commit_reconciled_to_newer_recommendation_total: 0,
+      post_commit_reconciled_to_newer_profile_total: 0,
       agent_runs_completed_total: 0,
       agent_runs_failed_total: 0,
       agent_tool_calls_total: 0,
@@ -57,10 +66,19 @@ class MetricsCollector {
       agent_worker_lease_conflicts_total: 0,
       agent_worker_stale_write_rejections_total: 0,
       agent_worker_recovered_runs_total: 0,
+      agent_worker_heartbeat_failures_total: 0,
       plan_health_scans_total: 0,
       plan_health_users_scanned_total: 0,
       plan_health_events_created_total: 0,
       plan_health_events_deduplicated_total: 0,
+      plan_health_profile_timeouts_total: 0,
+      plan_health_scan_failures_total: 0,
+      plan_health_scan_errors_total: 0,
+      plan_health_scheduler_failures_total: 0,
+      plan_health_lease_conflicts_total: 0,
+      plan_health_lease_renewal_failures_total: 0,
+      agent_worker_poll_failures_total: 0,
+      agent_worker_recovery_failures_total: 0,
       agent_live_eval_failures_total: 0,
       mandates_created_total: 0,
       mandates_authorized_total: 0,
@@ -94,7 +112,18 @@ class MetricsCollector {
     this.gauges = {
       agent_worker_jobs_active: 0,
       agent_queue_oldest_age_seconds: 0,
+      mcp_active_tool_executions: 0,
     };
+
+    this.deadLetterReasons = Object.fromEntries([
+      'INTERNAL_RUNTIME_FAILURE',
+      'PROVIDER_UNAVAILABLE',
+      'PLAN_REVIEW_TIMEOUT',
+      'CHECKPOINT_FAILURE',
+      'TOOL_FAILURE',
+      'BUDGET_RESERVATION_UNAVAILABLE',
+      'OTHER',
+    ].map(reason => [reason, 0]));
 
     this.toolUsage = {}; // tool_name -> count
     this.latencies = []; // rolling window of latency entries
@@ -109,6 +138,11 @@ class MetricsCollector {
       count: 0,
       sumMs: 0,
       buckets: { 50: 0, 100: 0, 250: 0, 500: 0, 1000: 0, 3000: 0, 10000: 0 },
+    };
+    this.mcpToolDuration = {
+      count: 0,
+      sumMs: 0,
+      buckets: { 10: 0, 50: 0, 100: 0, 250: 0, 500: 0, 1000: 0, 5000: 0, 30000: 0 },
     };
     this.httpInFlight = 0;
     this.httpInFlightPeak = 0;
@@ -131,8 +165,11 @@ class MetricsCollector {
     } else {
       this.inc('tool_execution_failure_total');
     }
-    const current = this.toolUsage[toolName] || 0;
-    this.toolUsage[toolName] = current + 1;
+    const boundedToolName = typeof toolName === 'string'
+      && ['sip_projection', 'lump_sum_projection', 'reverse_sip', 'tax_calculator', 'xirr_calculator', 'portfolio_optimizer', 'rebalance_calculator'].includes(toolName)
+      ? toolName : 'other';
+    const current = this.toolUsage[boundedToolName] || 0;
+    this.toolUsage[boundedToolName] = current + 1;
   }
 
   recordLatency(provider, latencyMs) {
@@ -151,9 +188,23 @@ class MetricsCollector {
     }
   }
 
+  recordMcpToolDuration(durationMs) {
+    const safeDuration = Math.max(0, Number(durationMs) || 0);
+    this.mcpToolDuration.count += 1;
+    this.mcpToolDuration.sumMs += safeDuration;
+    for (const boundary of Object.keys(this.mcpToolDuration.buckets).map(Number)) {
+      if (safeDuration <= boundary) this.mcpToolDuration.buckets[boundary] += 1;
+    }
+  }
+
   recordAgentRun(status) {
     if (status === 'completed') this.inc('agent_runs_completed_total');
     else this.inc('agent_runs_failed_total');
+  }
+
+  recordAgentDeadLetter(reason) {
+    const key = Object.hasOwn(this.deadLetterReasons, reason) ? reason : 'OTHER';
+    this.deadLetterReasons[key] += 1;
   }
 
   recordAgentToolCall(_toolName, success) {
@@ -226,6 +277,24 @@ class MetricsCollector {
     lines.push(`wealthgenie_tool_executions_total{status="success"} ${this.counters.tool_execution_success_total}`);
     lines.push(`wealthgenie_tool_executions_total{status="failure"} ${this.counters.tool_execution_failure_total}`);
 
+    lines.push('\n# HELP wealthgenie_mcp_total MCP request and tool outcomes');
+    lines.push('# TYPE wealthgenie_mcp_total counter');
+    for (const [event, counter] of Object.entries({
+      requests: 'mcp_requests_total', request_failures: 'mcp_request_failures_total', calls: 'mcp_tool_calls_total', successes: 'mcp_tool_successes_total',
+      failures: 'mcp_tool_failures_total', timeouts: 'mcp_tool_timeouts_total',
+      capacity_rejections: 'mcp_capacity_rejections_total', auth_rejections: 'mcp_auth_rejections_total',
+    })) lines.push(`wealthgenie_mcp_total{event="${event}"} ${this.counters[counter]}`);
+    lines.push('# TYPE wealthgenie_mcp_active_tool_executions gauge');
+    lines.push(`wealthgenie_mcp_active_tool_executions ${this.gauges.mcp_active_tool_executions}`);
+    lines.push('# HELP wealthgenie_mcp_tool_execution_duration_ms MCP tool execution duration in milliseconds');
+    lines.push('# TYPE wealthgenie_mcp_tool_execution_duration_ms histogram');
+    for (const [boundary, count] of Object.entries(this.mcpToolDuration.buckets)) {
+      lines.push(`wealthgenie_mcp_tool_execution_duration_ms_bucket{le="${boundary}"} ${count}`);
+    }
+    lines.push(`wealthgenie_mcp_tool_execution_duration_ms_bucket{le="+Inf"} ${this.mcpToolDuration.count}`);
+    lines.push(`wealthgenie_mcp_tool_execution_duration_ms_sum ${this.mcpToolDuration.sumMs.toFixed(3)}`);
+    lines.push(`wealthgenie_mcp_tool_execution_duration_ms_count ${this.mcpToolDuration.count}`);
+
     for (const [tool, count] of Object.entries(this.toolUsage)) {
       lines.push(`wealthgenie_tool_usage_total{tool="${tool}"} ${count}`);
     }
@@ -258,16 +327,33 @@ class MetricsCollector {
       'agent_worker_lease_conflicts_total',
       'agent_worker_stale_write_rejections_total',
       'agent_worker_recovered_runs_total',
+      'agent_worker_heartbeat_failures_total',
+      'agent_worker_poll_failures_total',
+      'agent_worker_recovery_failures_total',
       'plan_health_scans_total',
       'plan_health_users_scanned_total',
       'plan_health_events_created_total',
       'plan_health_events_deduplicated_total',
+      'plan_health_scheduler_failures_total',
+      'plan_health_profile_timeouts_total',
+      'plan_health_scan_failures_total',
+      'plan_health_scan_errors_total',
+      'plan_health_lease_conflicts_total',
+      'plan_health_lease_renewal_failures_total',
+      'agent_worker_poll_failures_total',
+      'agent_worker_recovery_failures_total',
       'agent_live_eval_failures_total',
       'post_commit_reconciled_to_newer_recommendation_total',
+      'post_commit_reconciled_to_newer_profile_total',
     ];
     for (const name of workerCounters) {
       lines.push(`# TYPE wealthgenie_${name} counter`);
       lines.push(`wealthgenie_${name} ${this.counters[name]}`);
+    }
+    lines.push('# HELP wealthgenie_agent_dead_letter_total Terminal PlanReview runs by bounded failure reason');
+    lines.push('# TYPE wealthgenie_agent_dead_letter_total counter');
+    for (const [reason, count] of Object.entries(this.deadLetterReasons)) {
+      lines.push(`wealthgenie_agent_dead_letter_total{reason="${reason}"} ${count}`);
     }
     const authorizationCounters = [
       'mandates_created_total', 'mandates_authorized_total', 'mandates_rejected_total',
@@ -376,6 +462,7 @@ class MetricsCollector {
 
     return {
       counters: { ...this.counters },
+      agent_dead_letter: { ...this.deadLetterReasons },
       gauges: { ...this.gauges },
       tool_usage: { ...this.toolUsage },
       average_latency_ms: parseFloat(avgLatency),
