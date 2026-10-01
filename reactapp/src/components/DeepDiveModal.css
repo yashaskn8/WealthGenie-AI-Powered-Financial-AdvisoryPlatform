@@ -3559,6 +3559,7 @@ input[type=range]::-moz-range-thumb:hover {
 .ddm-content::before {
   opacity: 0.35;
   animation: none;
+  right: 0;
 }
 
 .ddm-sticky-header {

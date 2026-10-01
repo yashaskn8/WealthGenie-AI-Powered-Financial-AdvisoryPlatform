@@ -74,11 +74,11 @@ describe('SebiDisclaimer Component', () => {
     expect(matches.length).toBeGreaterThan(0);
     expect(await screen.findByText(/Verified Products \(2 Comparable Options\)/i)).toBeTruthy();
     expect(await screen.findByText('Verified Fund 2')).toBeTruthy();
-    expect((await screen.findAllByText('VERIFIED COMPARABLE OPTION')).length).toBe(2);
+    expect((await screen.findAllByText('Verified comparable option')).length).toBe(2);
     expect(screen.getByText('Plan: UNAVAILABLE')).toBeTruthy();
     expect(screen.getByTestId('wti-comparison-universe')).toBeTruthy();
     expect(screen.queryByText('Top Pick')).toBeNull();
-    expect(await screen.findByText('UNAVAILABLE')).toBeTruthy();
+    expect(await screen.findByText('Market data unavailable', { selector: '.wti-beginner-market-badge' })).toBeTruthy();
     expect(screen.getByTestId('market-data-status')).toHaveTextContent(/Market data unavailable/i);
     expect(screen.getByText(/PROVIDER_NOT_CONFIGURED/)).toBeTruthy();
   });

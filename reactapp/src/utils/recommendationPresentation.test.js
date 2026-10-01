@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertBackendRecommendationInstrument } from './recommendationPresentation';
+import { assertBackendRecommendationInstrument, formatINR } from './recommendationPresentation';
 import { assertKnownBackendInstrumentTypes, backendToLocalInstrument } from './instrumentTypeMap';
 
 const valid = {
@@ -11,6 +11,11 @@ const valid = {
 };
 
 describe('recommendation presentation authority boundary', () => {
+  it('formats genuine zero and Indian currency but never coerces absent financial facts', () => {
+    expect(formatINR(0)).toBe('₹0');
+    expect(formatINR(125000.4)).toBe('₹1,25,000');
+    for (const value of [null, undefined, '', ' ', false, [], NaN, Infinity]) expect(formatINR(value)).toBe('—');
+  });
   it('accepts a complete authoritative recommendation instrument', () => {
     expect(assertBackendRecommendationInstrument(valid)).toBe(valid);
     expect(backendToLocalInstrument('Index_MF')).toBe('index_mf');

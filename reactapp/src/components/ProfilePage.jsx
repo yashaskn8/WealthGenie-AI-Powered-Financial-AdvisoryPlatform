@@ -387,7 +387,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
                     placeholder="65000" 
                     value={monthlyTakeHome ?? ''} 
                     onChange={e => {
-                      let val = e.target.value.replace(/^0+/, '');
+                      let val = e.target.value.replace(/^0+(?=\d)/, '');
                       let num = val === '' ? '' : Number(val);
                       setMonthlyTakeHome(num);
                     }} 
@@ -404,7 +404,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
                     placeholder="12000" 
                     value={monthlySavings ?? ''} 
                     onChange={e => {
-                      let val = e.target.value.replace(/^0+/, '');
+                      let val = e.target.value.replace(/^0+(?=\d)/, '');
                       if (val === '') {
                         setMonthlySavings('');
                       } else {
@@ -428,7 +428,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
                   placeholder="32" 
                   value={age ?? ''} 
                   onChange={e => {
-                    let val = e.target.value.replace(/^0+/, '');
+                    let val = e.target.value.replace(/^0+(?=\d)/, '');
                     setAge(val === '' ? '' : Number(val));
                   }} 
                   min="18" 
@@ -463,7 +463,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
                     placeholder="2000000" 
                     value={soldPropertyAmount ?? ''} 
                     onChange={e => {
-                      let val = e.target.value.replace(/^0+/, '');
+                      let val = e.target.value.replace(/^0+(?=\d)/, '');
                       setSoldPropertyAmount(val === '' ? '' : Number(val));
                     }} 
                   />
@@ -504,7 +504,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
                     placeholder="50000" 
                     value={liquidSavings ?? ''} 
                     onChange={e => {
-                      let val = e.target.value.replace(/^0+/, '');
+                      let val = e.target.value.replace(/^0+(?=\d)/, '');
                       setLiquidSavings(val === '' ? '' : Number(val));
                     }} 
                   />
@@ -517,7 +517,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
                   placeholder="0" 
                   value={existingDebt ?? ''} 
                   onChange={e => {
-                    let val = e.target.value.replace(/^0+/, '');
+                    let val = e.target.value.replace(/^0+(?=\d)/, '');
                     let num = val === '' ? '' : Number(val);
                     if (num > 100) num = 100;
                     setExistingDebt(num);
@@ -537,7 +537,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
                   placeholder="0" 
                   value={dependents ?? ''} 
                   onChange={e => {
-                    let val = e.target.value.replace(/^0+/, '');
+                    let val = e.target.value.replace(/^0+(?=\d)/, '');
                     setDependents(val === '' ? '' : Number(val));
                   }} 
                   min="0"
@@ -551,7 +551,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
                   placeholder="6" 
                   value={emergencyFundMonths ?? ''} 
                   onChange={e => {
-                    let val = e.target.value.replace(/^0+/, '');
+                    let val = e.target.value.replace(/^0+(?=\d)/, '');
                     setEmergencyFundMonths(val === '' ? '' : Number(val));
                   }} 
                   min="0"
@@ -573,7 +573,7 @@ const ProfilePage = ({ onCompleteProfile: _onCompleteProfile, children }) => {
                     placeholder="2000000" 
                     value={lumpSumAmount ?? ''} 
                     onChange={e => {
-                      let val = e.target.value.replace(/^0+/, '');
+                      let val = e.target.value.replace(/^0+(?=\d)/, '');
                       setLumpSumAmount(val === '' ? '' : Number(val));
                     }} 
                   />

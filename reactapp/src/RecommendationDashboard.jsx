@@ -2,7 +2,8 @@ import React, { useState, useMemo } from 'react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, ReferenceLine } from 'recharts';
 import { ChevronRight, ChevronDown, Filter, Info, Shield, TrendingUp, Zap, Trophy, BarChart3, AlertCircle, Calendar, Target, Activity, Wallet, PiggyBank, Clock, HelpCircle, Building2, MapPin, Star, User, Edit3, Sparkles, ShieldAlert, CheckCircle2 } from 'lucide-react';
 import { RISK_COLORS, CHART_COLORS } from './investmentDatabase';
-import { getWhy } from './utils/recommendationPresentation';
+import { formatINR, getWhy } from './utils/recommendationPresentation';
+import { nullableMarketNumber } from './utils/marketDataDisplay';
 import { getConfidenceLabel } from './utils/confidenceLabels';
 import { INSTRUMENT_EXPLAINERS, CARD_SUBTITLES, RISK_PLAIN_LABELS, getLockInWarning } from './utils/instrumentExplainers';
 import SebiDisclaimer from './components/SebiDisclaimer';
@@ -162,17 +163,18 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
 
       // Table Data grouping
       if (!tableGroupMap[cat]) tableGroupMap[cat] = [];
-      const nominalReturn = Number(rec.nominalReturn);
-      const projectedValue = Number(projectedByInstrument[rec.id]);
+      const nominalReturn = nullableMarketNumber(rec.nominalReturn);
+      const projectedValue = nullableMarketNumber(projectedByInstrument[rec.id]);
       tableGroupMap[cat].push({
         instId: rec.id,
         name: rec.abbr || rec.name,
         fullName: rec.name,
-        weight: 0, // calculated later
+        weight: nullableMarketNumber(rec.allocation_pct)
+          ?? (nullableMarketNumber(rec.allocationWeight) === null ? null : rec.allocationWeight * 100),
         ret: Number.isFinite(nominalReturn) ? `${nominalReturn.toFixed(1)}%` : '—',
         risk: rec.riskLabel || rec.risk_level || 'Unavailable',
         alloc: rec.monthly_allocation,
-        current: (rec.monthly_allocation * 12).toLocaleString(),
+        current: (rec.monthly_allocation * 12).toLocaleString('en-IN'),
         proj: Number.isFinite(projectedValue) ? projectedValue : null,
         lockIn: rec.lock_in_years ?? rec.lockIn ?? null,
         taxBadge: rec.taxClassification?.dataClass === 'VERIFIED_PRODUCT_FACT',
@@ -189,12 +191,9 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
       color: CATEGORY_COLORS[k] || '#888'
     }));
 
-    // Calculate weights and format table
+    // Format server weights; rounded monthly amounts are not allocation authority.
     const formattedTable = Object.keys(tableGroupMap).map((cat, i) => {
-      const children = tableGroupMap[cat].map(c => {
-         c.weight = (c.alloc / totalMonthly) * 100;
-         return c;
-      });
+      const children = tableGroupMap[cat];
       return {
         id: i.toString(),
         class: cat,
@@ -206,7 +205,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
     const suppliedPerformance = Array.isArray(dashboardProjection?.performance_data)
       ? dashboardProjection.performance_data
       : [];
-    const suppliedProjected = Number(dashboardProjection?.total_projected);
+    const suppliedProjected = nullableMarketNumber(dashboardProjection?.total_projected);
 
     return {
       allocationDataOuter: outerData,
@@ -222,9 +221,9 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
     if (!recommendations || recommendations.length === 0) return { low: [], medium: [], high: [] };
     
     return {
-      low: recommendations.filter(r => Number.isFinite(Number(r.risk)) && Number(r.risk) <= 2),
-      medium: recommendations.filter(r => Number(r.risk) === 3),
-      high: recommendations.filter(r => Number.isFinite(Number(r.risk)) && Number(r.risk) >= 4),
+      low: recommendations.filter(r => nullableMarketNumber(r.risk) !== null && nullableMarketNumber(r.risk) <= 2),
+      medium: recommendations.filter(r => nullableMarketNumber(r.risk) === 3),
+      high: recommendations.filter(r => nullableMarketNumber(r.risk) !== null && nullableMarketNumber(r.risk) >= 4),
     };
   }, [recommendations]);
 
@@ -399,7 +398,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                         <div>
                           <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginBottom: 2 }}>Monthly Investment Capacity</div>
                           <div style={{ fontSize: '1.15rem', fontWeight: 800, color: '#4ade80' }}>
-                            {hasSavings ? `₹${monthlySavings.toLocaleString()}/mo` : (currentMonthly > 0 ? `₹${currentMonthly.toLocaleString()}/mo` : 'Not specified')}
+                            {hasSavings ? `${formatINR(monthlySavings)}/mo` : (currentMonthly > 0 ? `${formatINR(currentMonthly)}/mo` : 'Not specified')}
                           </div>
                         </div>
                         <div>
@@ -626,7 +625,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                     <PiggyBank size={13} color="#4ade80" />
                     <span style={{ fontSize: '0.58rem', color: '#4ade80', opacity: 0.85, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.4px' }}>Savings</span>
                     <span style={{ fontSize: '0.8rem', fontWeight: 800, color: '#4ade80' }}>
-                      {hasSavings ? `₹${monthlySavings.toLocaleString()}` : 'N/A'} {savingsRate !== null && <span style={{ fontSize: '0.68rem', color: '#34d399', fontWeight: 700 }}>({savingsRate}%)</span>}
+                      {hasSavings ? formatINR(monthlySavings) : 'N/A'} {savingsRate !== null && <span style={{ fontSize: '0.68rem', color: '#34d399', fontWeight: 700 }}>({savingsRate}%)</span>}
                     </span>
                   </div>
 
@@ -788,7 +787,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                 }}>
                   <PiggyBank size={15} color="#dfbd69" style={{flexShrink:0}} />
                   <span style={{color:'#94a3b8', fontWeight:600, fontSize:'0.75rem'}}>SIP Budget</span>
-                  <span style={{marginLeft:'auto', fontWeight: 800, color: '#e2e8f0', fontSize: '0.85rem'}}>{hasSavingsBudget ? `₹${monthlySavings.toLocaleString()}` : 'N/A'}</span>
+                  <span style={{marginLeft:'auto', fontWeight: 800, color: '#e2e8f0', fontSize: '0.85rem'}}>{hasSavingsBudget ? formatINR(monthlySavings) : 'N/A'}</span>
                 </div>
 
                 <div className="status-item" style={{
@@ -800,8 +799,8 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                   <span style={{color:'#94a3b8', fontWeight:600, fontSize:'0.75rem'}}>Allocated</span>
                   <span style={{marginLeft:'auto', color: hasSavingsBudget && currentMonthly === monthlySavings ? '#4ade80' : '#f59e0b', fontWeight: 800, fontSize: '0.85rem'}}>
                     {hasSavingsBudget
-                      ? `₹${currentMonthly.toLocaleString()} of ₹${monthlySavings.toLocaleString()} allocated`
-                      : `₹${currentMonthly.toLocaleString()} allocated`}{' '}
+                      ? `${formatINR(currentMonthly)} of ${formatINR(monthlySavings)} allocated`
+                      : `${formatINR(currentMonthly)} allocated`}{' '}
                     {budgetUsed !== null && <span style={{fontSize:'0.68rem', color:'#64748b', fontWeight: 600}}>({budgetUsed}%)</span>}
                   </span>
                 </div>
@@ -837,7 +836,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
 
             <div className="param-row" style={{ marginTop: 10 }}>
               <span><JargonTooltip term="SIP">Monthly SIP</JargonTooltip></span>
-              <span style={{color: '#4ade80', fontWeight: 700, fontSize: '0.9rem'}}>₹{currentMonthly.toLocaleString()}</span>
+              <span style={{color: '#4ade80', fontWeight: 700, fontSize: '0.9rem'}}>{formatINR(currentMonthly)}</span>
             </div>
 
             <div style={{height: 1, background: 'rgba(255,255,255,0.04)', margin: '14px 0'}} />
@@ -881,7 +880,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                         ))}
                       </Pie>
                       <RechartsTooltip 
-                        formatter={(val) => [`₹${val.toLocaleString()}/mo`, 'Allocation']} 
+                        formatter={(val) => [`${formatINR(val)}/mo`, 'Allocation']}
                         contentStyle={{
                           background: 'rgba(15, 23, 42, 0.95)', 
                           border: '1px solid rgba(255, 255, 255, 0.1)', 
@@ -897,7 +896,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                   {/* Center projected value */}
                    <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', textAlign: 'center', pointerEvents: 'none', width: '100%' }}>
                      {(() => {
-                       const val = Number(totalProjected);
+                       const val = nullableMarketNumber(totalProjected);
                        if (!Number.isFinite(val)) {
                          return (
                            <>
@@ -982,8 +981,8 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
               if (isEF) {
                 const projection = recommendationMeta?.dashboard_projection;
                 const chartData = Array.isArray(projection?.monthly_timeline) ? projection.monthly_timeline : [];
-                const emergencyTarget = Number(projection?.total_projected);
-                const savings = Number(projection?.monthly_contribution);
+                const emergencyTarget = nullableMarketNumber(projection?.total_projected);
+                const savings = nullableMarketNumber(projection?.monthly_contribution);
                 const targetMonthReached = chartData.length > 0 ? chartData[chartData.length - 1].month : null;
                 const hasEmergencyProjection = Number.isFinite(emergencyTarget)
                   && Number.isFinite(savings)
@@ -993,7 +992,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                   <>
                     <div style={{ fontSize: '0.7rem', color: '#94a3b8', marginBottom: 6, padding: '5px 10px', background: 'rgba(10,16,30,0.5)', borderRadius: 8, display: 'inline-block', border: '1px solid rgba(255,255,255,0.03)' }}>
                       {hasEmergencyProjection
-                        ? `Projected: ₹${(emergencyTarget/100000).toFixed(1)}L · ${targetMonthReached} months @ ₹${savings.toLocaleString()}/mo`
+                        ? `Projected: ₹${(emergencyTarget/100000).toFixed(1)}L · ${targetMonthReached} months @ ${formatINR(savings)}/mo`
                         : 'Emergency-fund projection is waiting for the recommendation service.'}
                     </div>
                     <div style={{ height: 200, fontSize: '0.7rem' }}>
@@ -1234,7 +1233,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                       {isGroupExpanded(group.id) && sortedChildren.map((child, idx) => {
                         const isUnfunded = child.weight < 0.1 || child.alloc === 0;
                         return (
-                          <tr key={`${group.id}-${idx}`} style={{ opacity: isUnfunded ? 0.6 : 1 }}>
+                          <tr key={`${group.id}-${idx}`} data-testid={`recommendation-row-${child.instId}`} style={{ opacity: isUnfunded ? 0.6 : 1 }}>
                             <td style={{ paddingLeft: 32 }}>
                                {child.taxBadge ? <span className="tax-badge">{child.taxLabel || 'Tax'}</span> : <span style={{color: '#475569', fontSize: '0.75rem'}}>—</span>}
                             </td>
@@ -1266,7 +1265,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                                {(() => {
                                  const recObj = (recommendations || []).find(r => r.id === child.instId);
                                  const score = recObj ? computeSuitabilityMatch(recObj, userProfile) : null;
-                                 if (!score) return <span style={{color:'#475569', fontSize:'0.72rem'}}>—</span>;
+                                 if (score === null) return <span style={{color:'#475569', fontSize:'0.72rem'}}>—</span>;
                                  const scoreColor = score >= 90 ? '#10b981' : score >= 75 ? '#38bdf8' : score >= 60 ? '#f59e0b' : '#94a3b8';
                                  const scoreBg = score >= 90 ? 'rgba(16, 185, 129, 0.12)' : score >= 75 ? 'rgba(56, 189, 248, 0.12)' : score >= 60 ? 'rgba(245, 158, 11, 0.12)' : 'rgba(148, 163, 184, 0.1)';
                                  const scoreBorder = score >= 90 ? 'rgba(16, 185, 129, 0.28)' : score >= 75 ? 'rgba(56, 189, 248, 0.28)' : score >= 60 ? 'rgba(245, 158, 11, 0.28)' : 'rgba(148, 163, 184, 0.2)';
@@ -1288,7 +1287,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                             <td className="col-weight" style={{ color: '#94a3b8' }}>
                               {isUnfunded
                                 ? <span style={{display: 'inline-block', whiteSpace: 'nowrap', color: '#f59e0b', fontSize: '0.75rem', background: 'rgba(245, 158, 11, 0.1)', padding: '2px 8px', borderRadius: 6, lineHeight: 1.2}}>Not Funded</span>
-                                : <span style={{ color: '#fff' }}>{child.weight.toFixed(1)}%</span>
+                                : <span style={{ color: '#fff' }}>{Number.isFinite(child.weight) ? `${child.weight.toFixed(1)}%` : 'Unavailable'}</span>
                               }
                             </td>
                             <td className="col-exp-return" style={{ color: '#38bdf8', fontWeight: 600 }}>{child.ret}</td>
@@ -1315,7 +1314,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                                 );
                               })()}
                             </td>
-                            <td style={{ color: '#e2e8f0' }}>₹{child.alloc.toLocaleString()}</td>
+                            <td style={{ color: '#e2e8f0' }}>{formatINR(child.alloc)}</td>
                             <td style={{color: '#4ade80', fontSize: '1.05em'}}>{Number.isFinite(child.proj) ? formatCompactINR(child.proj) : '—'}</td>
                           </tr>
                         );
@@ -1341,7 +1340,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                 {(() => {
                   const isEF = (userProfile?.investment_goals || []).includes('Emergency Fund');
                   const projection = recommendationMeta?.dashboard_projection;
-                  const projectedValue = Number(projection?.total_projected);
+                  const projectedValue = nullableMarketNumber(projection?.total_projected);
                   const projectedMonth = Array.isArray(projection?.monthly_timeline) && projection.monthly_timeline.length > 0
                     ? projection.monthly_timeline[projection.monthly_timeline.length - 1].month
                     : null;
@@ -1361,7 +1360,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                       </>
                     );
                   }
-                  const wealthMultiplier = Number(projection?.wealth_multiple);
+                  const wealthMultiplier = nullableMarketNumber(projection?.wealth_multiple);
                   return (
                     <>
                       <div>
@@ -1382,7 +1381,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
 
               <div className="stats-grid" style={{paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.04)'}}>
                 <div className="mini-stat">
-                  Monthly SIP <strong className="stat-green">₹{currentMonthly.toLocaleString()}</strong>
+                  Monthly SIP <strong className="stat-green">{formatINR(currentMonthly)}</strong>
                 </div>
                 <div className="mini-stat" style={{textAlign: 'right'}}>
                   Horizon <strong>{horizon ? `${horizon} Yrs` : 'N/A'}</strong>
@@ -1416,7 +1415,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
               <div className="panel-title" style={{marginBottom: 12, fontSize: '0.6rem'}}>PORTFOLIO INSIGHTS</div>
               {(() => {
                 const recs = recommendations || [];
-                const returnAssumption = Number(recommendationMeta?.portfolio_return_assumption);
+                const returnAssumption = nullableMarketNumber(recommendationMeta?.portfolio_return_assumption);
                 const avgReturn = Number.isFinite(returnAssumption) ? returnAssumption.toFixed(1) : null;
                 const assetAllocations = Object.entries(recommendationMeta?.asset_class_allocation || {})
                   .sort((a, b) => b[1] - a[1]);
@@ -1487,7 +1486,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                   fontSize: '1.15rem', fontWeight: 800, margin: 0, letterSpacing: '-0.4px',
                   background: 'linear-gradient(135deg, #e2e8f0, #94a3b8)',
                   WebkitBackgroundClip: 'text', backgroundClip: 'text', WebkitTextFillColor: 'transparent'
-                }}>AI Ranked Recommendations</h2>
+                }}>Your Ranked Recommendations</h2>
                 <span style={{fontSize: '0.65rem', color: '#546178', fontWeight: 400}}>Personalised for your goals & risk profile</span>
               </div>
               <div style={{
@@ -1603,7 +1602,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 14 }}>
                       <div className="stat-box">
                         <div style={{ fontSize: '0.6rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 4, fontWeight: 500 }}>Model Return Assumption</div>
-                        <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#4ade80', fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.3px' }}>{Number.isFinite(Number(rec.nominalReturn)) ? `${Number(rec.nominalReturn).toFixed(1)}%` : 'N/A'}</div>
+                        <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#4ade80', fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.3px' }}>{nullableMarketNumber(rec.nominalReturn) !== null ? `${nullableMarketNumber(rec.nominalReturn).toFixed(1)}%` : 'N/A'}</div>
                       </div>
                       <div className="stat-box">
                         <div style={{ fontSize: '0.6rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 4, fontWeight: 500 }}>Risk Level</div>
@@ -1611,7 +1610,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                       </div>
                       <div className="stat-box">
                         <div style={{ fontSize: '0.6rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 4, fontWeight: 500 }}>Monthly SIP</div>
-                        <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#e2e8f0', fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.3px' }}>₹{rec.monthly_allocation?.toLocaleString()}</div>
+                        <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#e2e8f0', fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.3px' }}>{formatINR(rec.monthly_allocation)}</div>
                       </div>
                       <div className="stat-box">
                         <div style={{ fontSize: '0.6rem', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.8px', marginBottom: 4, fontWeight: 500 }}>Lock-in</div>
@@ -1621,7 +1620,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                             : undefined}
                         >{rec.lock_in_years != null
                             ? (rec.lock_in_years === 0 ? 'None' : `${rec.lock_in_years}Y`)
-                            : (rec.lockIn ? `${rec.lockIn}Y` : 'None')}
+                            : (rec.lockIn == null ? 'Unavailable' : rec.lockIn === 0 ? 'None' : `${rec.lockIn}Y`)}
                         </div>
                       </div>
                     </div>
@@ -1647,7 +1646,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                       if (!hasRealConfidence) {
                         return (
                           <div className="confidence-unavailable" style={{ fontSize: '0.7rem', color: '#64748b', fontStyle: 'italic', marginBottom: 8 }}>
-                            ML scoring unavailable for this instrument
+                            ML shadow observation unavailable; ranking remains backend-owned
                           </div>
                         );
                       }
@@ -1657,7 +1656,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                       return (
                         <>
                           <div className="confidence-bar-container" style={{ marginBottom: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span style={{ fontSize: '0.68rem', color: '#94a3b8', fontWeight: 500 }}>ML Confidence</span>
+                            <span style={{ fontSize: '0.68rem', color: '#94a3b8', fontWeight: 500 }}>ML Shadow Confidence (not ranking authority)</span>
                             <span className="confidence-value" style={{ fontSize: '0.72rem', color: confLabel.colour, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
                               {confLabel.label || `${displayPct}%`}
                             </span>
@@ -2058,7 +2057,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                             <div>
                               <div style={{ fontWeight: 600, fontSize: '0.9rem', color: '#e2e8f0' }}>{inv.abbr || inv.name}</div>
                               <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
-                                Model assumption (pre-tax): {Number.isFinite(Number(inv.nominalReturn)) ? `${Number(inv.nominalReturn).toFixed(1)}%` : 'N/A'} &bull; <span style={{ color: RISK_COLORS[inv.riskLabel] }}>{inv.riskLabel}</span>
+                                Model assumption (pre-tax): {nullableMarketNumber(inv.nominalReturn) !== null ? `${nullableMarketNumber(inv.nominalReturn).toFixed(1)}%` : 'N/A'} &bull; <span style={{ color: RISK_COLORS[inv.riskLabel] }}>{inv.riskLabel}</span>
                               </div>
                             </div>
                             <button
@@ -2137,7 +2136,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                         <div>
                           <div style={{ fontWeight: 600, fontSize: '0.9rem', color: '#e2e8f0' }}>{inv.abbr || inv.name}</div>
                           <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
-                            Model assumption (pre-tax): {Number.isFinite(Number(inv.nominalReturn)) ? `${Number(inv.nominalReturn).toFixed(1)}%` : 'N/A'} · <span style={{ color: RISK_COLORS[inv.riskLabel] }}>{inv.riskLabel}</span>
+                            Model assumption (pre-tax): {nullableMarketNumber(inv.nominalReturn) !== null ? `${nullableMarketNumber(inv.nominalReturn).toFixed(1)}%` : 'N/A'} · <span style={{ color: RISK_COLORS[inv.riskLabel] }}>{inv.riskLabel}</span>
                           </div>
                         </div>
                         <button
@@ -2189,7 +2188,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                         <div>
                           <div style={{ fontWeight: 600, fontSize: '0.9rem', color: '#e2e8f0' }}>{inv.abbr || inv.name}</div>
                           <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
-                            Model assumption (pre-tax): {Number.isFinite(Number(inv.nominalReturn)) ? `${Number(inv.nominalReturn).toFixed(1)}%` : 'N/A'} · <span style={{ color: RISK_COLORS[inv.riskLabel] }}>{inv.riskLabel}</span>
+                            Model assumption (pre-tax): {nullableMarketNumber(inv.nominalReturn) !== null ? `${nullableMarketNumber(inv.nominalReturn).toFixed(1)}%` : 'N/A'} · <span style={{ color: RISK_COLORS[inv.riskLabel] }}>{inv.riskLabel}</span>
                           </div>
                         </div>
                         <button
@@ -2241,7 +2240,7 @@ const RecommendationDashboard = ({ userProfile, recommendations: propRecommendat
                         <div>
                           <div style={{ fontWeight: 600, fontSize: '0.9rem', color: '#e2e8f0' }}>{inv.abbr || inv.name}</div>
                           <div style={{ fontSize: '0.75rem', color: '#64748b' }}>
-                            Model assumption (pre-tax): {Number.isFinite(Number(inv.nominalReturn)) ? `${Number(inv.nominalReturn).toFixed(1)}%` : 'N/A'} · <span style={{ color: RISK_COLORS[inv.riskLabel] }}>{inv.riskLabel}</span>
+                            Model assumption (pre-tax): {nullableMarketNumber(inv.nominalReturn) !== null ? `${nullableMarketNumber(inv.nominalReturn).toFixed(1)}%` : 'N/A'} · <span style={{ color: RISK_COLORS[inv.riskLabel] }}>{inv.riskLabel}</span>
                           </div>
                         </div>
                         <button

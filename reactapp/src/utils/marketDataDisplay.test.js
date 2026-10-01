@@ -5,6 +5,8 @@ import {
   getMarketDisplayState,
   getMarketEvidenceSource,
   nullableMarketNumber,
+  readableSource,
+  safeSourceUrl,
 } from './marketDataDisplay';
 
 describe('nullable market-data presentation', () => {
@@ -13,7 +15,25 @@ describe('nullable market-data presentation', () => {
     expect(nullableMarketNumber(undefined)).toBeNull();
     expect(nullableMarketNumber('')).toBeNull();
     expect(nullableMarketNumber('unavailable')).toBeNull();
+    for (const value of ['  ', false, true, [], {}]) expect(nullableMarketNumber(value)).toBeNull();
     expect(formatNullablePercent(null)).toBeNull();
+  });
+
+  it('never calls a retained snapshot current after revalidation failed', () => {
+    const current = { marketSnapshot: { status: 'CURRENT' } };
+    expect(getMarketDisplayState(current).key).toBe('CURRENT');
+    expect(getMarketDisplayState(current, { refreshFailed: true }).key).toBe('LAST_AVAILABLE');
+    expect(getMarketDisplayState({ marketSnapshot: { status: 'STALE' } }).key).not.toBe('CURRENT');
+    expect(getMarketDisplayState({ status: 'MARKET_CONTEXT_UNAVAILABLE' }).key).toBe('UNAVAILABLE');
+  });
+
+  it('humanizes provenance without accepting unsafe evidence links', () => {
+    expect(readableSource('GOVERNMENT_OF_INDIA')).toBe('Government of India');
+    expect(readableSource('OFFICIAL_BANK_PUBLISHED_RATE')).toBe('Official bank published rate');
+    expect(safeSourceUrl('https://www.rbi.org.in/')).toBe('https://www.rbi.org.in/');
+    for (const value of ['javascript:alert(1)', 'https://secret@example.com/', '/relative', null]) {
+      expect(safeSourceUrl(value)).toBeNull();
+    }
   });
 
   it('preserves a genuinely observed zero', () => {

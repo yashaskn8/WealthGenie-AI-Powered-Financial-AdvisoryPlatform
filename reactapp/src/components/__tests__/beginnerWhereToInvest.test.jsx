@@ -3,7 +3,7 @@
  */
 import React from 'react';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { act, render, screen, fireEvent, cleanup, within } from '@testing-library/react';
 import WhereToInvestTab from '../deepdive/WhereToInvestTab';
 import * as api from '../../services/api';
 import { resetMarketContextStoreForTest } from '../../state/useMarketContext';
@@ -20,6 +20,60 @@ vi.mock('../../services/api', () => ({
 }));
 
 describe('Beginner-First Where-To-Invest UX', () => {
+  it('excludes an obsolete product response after profile-version replacement even if abort is ignored', async () => {
+    let resolveOld;
+    api.rankInvestmentCandidates.mockReturnValueOnce(new Promise(done => { resolveOld = done; }));
+    const inv = { id: 'ppf', name: 'PPF', riskScore: 1 };
+    const profile = { profileId: '64b000000000000000000001', version: 1 };
+    const view = render(<WhereToInvestTab inv={inv} userProfile={profile} />);
+    const oldSignal = api.rankInvestmentCandidates.mock.calls[0][3].signal;
+    view.rerender(<WhereToInvestTab inv={inv} userProfile={{ ...profile, version: 2 }} />);
+    expect(await screen.findByTestId('wti-product-ppf:fact')).toBeVisible();
+    expect(oldSignal.aborted).toBe(true);
+    await act(async () => resolveOld({ products: [{ id: 'obsolete', name: 'Obsolete product', officialRate: { value: 99 } }] }));
+    expect(screen.queryByText('Obsolete product')).toBeNull();
+    expect(screen.getAllByTestId('wti-product-ppf:fact')).toHaveLength(1);
+  });
+
+  it('keeps history, NAV, official rates and missing evidence distinct without expected-return substitution', async () => {
+    const shared = { source: { provider: 'AMFI', url: 'javascript:alert(1)' }, presentationStatus: 'EVIDENCE_RANKED' };
+    api.rankInvestmentCandidates.mockResolvedValueOnce({ products: [
+      { ...shared, id: 'history', name: 'Historical fund', historicalReturn: { valuePct: 0, startDate: '2025-09-01', endDate: '2026-09-01' }, nav: { value: 123.456, observedAt: '2026-09-01T10:00:00Z' } },
+      { ...shared, id: 'nav', name: 'NAV fund', nav: { value: 123.456 } },
+      { ...shared, id: 'unknown', name: 'Unknown fund', nominalReturn: 99, expectedReturn: 99, nav: { value: null } },
+    ] });
+    render(<WhereToInvestTab inv={{ id: 'index_mf', name: 'Index Fund' }} userProfile={{ profileId: '64b000000000000000000001' }} />);
+    const history = within(await screen.findByTestId('wti-product-history'));
+    expect(history.getByText('Historical 1Y return')).toBeVisible();
+    expect(history.getByText('0.00% historical')).toBeVisible();
+    expect(history.getByText(/Source: AMFI/, { selector: 'span' })).toBeVisible();
+    expect(history.getByText(/As of: 1 Sept 2026/)).toBeVisible();
+    expect(history.queryByRole('link')).toBeNull();
+    const nav = within(screen.getByTestId('wti-product-nav'));
+    expect(nav.getByText('Current NAV')).toBeVisible();
+    expect(nav.getByText('₹123.456')).toBeVisible();
+    const unavailable = within(screen.getByTestId('wti-product-unknown'));
+    expect(unavailable.getAllByText('Unavailable').length).toBeGreaterThan(0);
+    expect(unavailable.queryByText(/99/)).toBeNull();
+  });
+
+  it('marks retained market facts previous after a failed provider refresh and never invents risk for null', async () => {
+    api.getCurrentMarketContext.mockResolvedValueOnce({ status: 'MARKET_CONTEXT_AVAILABLE', context: 'NORMAL', marketSnapshot: { status: 'CURRENT' }, signals: {} });
+    render(<WhereToInvestTab inv={{ id: 'ppf', name: 'PPF', riskScore: null }} userProfile={{ profileId: '64b000000000000000000001' }} />);
+    expect(await screen.findByText('Current verified data')).toBeVisible();
+    api.getCurrentMarketContext.mockRejectedValueOnce(new Error('503 provider unavailable'));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh market data' }));
+    expect(await screen.findByText('Last available data')).toBeVisible();
+    expect(screen.queryByText('Current verified data')).toBeNull();
+    expect(screen.getByText(/Refresh failed; showing the last verified snapshot/i)).toBeVisible();
+  });
+
+  it('shows a product-provider failure without retaining a previous financial-state result', async () => {
+    api.rankInvestmentCandidates.mockRejectedValueOnce(new Error('503'));
+    render(<WhereToInvestTab inv={{ id: 'ppf', name: 'PPF' }} userProfile={{ profileId: '64b000000000000000000001' }} />);
+    expect(await screen.findByText(/Authoritative product ranking is temporarily unavailable/i)).toBeVisible();
+    expect(screen.queryByTestId('wti-product-ppf:fact')).toBeNull();
+  });
   afterEach(() => {
     cleanup();
     resetMarketContextStoreForTest();
@@ -211,7 +265,7 @@ describe('Beginner-First Where-To-Invest UX', () => {
       />
     );
 
-    expect(await screen.findByText('HIGH_VOLATILITY')).toBeTruthy();
+    expect(await screen.findByText('HIGH VOLATILITY')).toBeTruthy();
     expect(screen.getByText(/Markets are moving more sharply than usual/i)).toBeTruthy();
 
     cleanup();
@@ -235,7 +289,7 @@ describe('Beginner-First Where-To-Invest UX', () => {
       />
     );
 
-    expect(await screen.findByText('RISK_OFF')).toBeTruthy();
+    expect(await screen.findByText('RISK OFF')).toBeTruthy();
     expect(screen.getByText(/Market risk is elevated right now/i)).toBeTruthy();
   });
 
@@ -259,7 +313,7 @@ describe('Beginner-First Where-To-Invest UX', () => {
 
     fireEvent.click(previewBtn);
 
-    expect(api.previewMarketContextAdjustment).toHaveBeenCalledWith('64b000000000000000000001');
+    expect(api.previewMarketContextAdjustment).toHaveBeenCalledWith('64b000000000000000000001', { signal: expect.any(AbortSignal) });
     expect(await screen.findByText(/Adjustment Preview Ready ✓/i)).toBeTruthy();
     expect(screen.getByText(/bounded 3.5% total tilt/i)).toBeTruthy();
   });

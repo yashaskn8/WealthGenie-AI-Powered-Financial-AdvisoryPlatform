@@ -1,4 +1,7 @@
+import { isPresentFiniteNumber } from './financialValues';
+
 export function formatINR(value) {
+  if (!isPresentFiniteNumber(value)) return '—';
   const number = Number(value);
   return Number.isFinite(number) ? `₹${Math.round(number).toLocaleString('en-IN')}` : '—';
 }

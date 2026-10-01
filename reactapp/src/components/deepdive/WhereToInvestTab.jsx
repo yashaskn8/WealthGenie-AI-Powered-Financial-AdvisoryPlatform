@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Building2,
   Shield,
@@ -26,7 +26,10 @@ import {
   getMarketDisplayState,
   getMarketEvidenceSource,
   nullableMarketNumber,
+  readableSource,
+  safeSourceUrl,
 } from '../../utils/marketDataDisplay';
+import { formatINR } from '../../utils/recommendationPresentation';
 import { toOptionalNumber } from '../../utils/financialValues';
 import { useMarketContext } from '../../state/useMarketContext';
 
@@ -150,7 +153,12 @@ function getRiskTierColor(tier) {
 const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const profileId = userProfile?.profileId;
   const parentInstrumentId = inv?.id;
-  const requestKey = `${profileId || 'missing-profile'}:${parentInstrumentId || 'missing-instrument'}`;
+  const financialKey = JSON.stringify({
+    profileId, profileVersion: userProfile?.version, parentInstrumentId,
+    recommendationId: recommendationMeta?.recommendationId,
+    revisionId: recommendationMeta?.allocation_revision_id,
+    portfolioFingerprint: recommendationMeta?.portfolio_fingerprint,
+  });
 
   const [rankingResult, setRankingResult] = useState({
     requestKey: null,
@@ -162,11 +170,11 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
     error: null,
   });
 
-  const wtiData = useMemo(() => rankingResult.catalog || ({
+  const wtiData = useMemo(() => (rankingResult.financialKey === financialKey && rankingResult.catalog) || ({
     riskLevel: inv?.riskScore ?? inv?.risk ?? null,
     note: null,
     howToStart: null,
-  }), [inv, rankingResult.catalog]);
+  }), [inv, rankingResult, financialKey]);
 
   const subCategoryMap = wtiData?.sectors || wtiData?.subCategories || null;
   const subKeys = subCategoryMap ? Object.keys(subCategoryMap) : [];
@@ -174,6 +182,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const [contextPreview, setContextPreview] = useState(null);
   const [contextPreviewError, setContextPreviewError] = useState(null);
   const [contextPreviewLoading, setContextPreviewLoading] = useState(false);
+  const previewController = useRef(null);
   const {
     marketContext,
     marketContextError,
@@ -207,6 +216,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const [taxPolicyMetadata, setTaxPolicyMetadata] = useState(null);
   const [taxPolicyError, setTaxPolicyError] = useState(null);
   const [activeTaxContext, setActiveTaxContext] = useState(null);
+  const requestKey = JSON.stringify({ financialKey, activeTaxContext, illustrativePrincipal });
 
   useEffect(() => {
     if (typeof api.getTaxPolicyMetadata !== 'function') return undefined;
@@ -215,20 +225,22 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
       .then((metadata) => {
         if (cancelled) return;
         setTaxPolicyMetadata(metadata);
-        if (!taxFiscalYear && metadata?.currentFiscalYearVerified && metadata.currentFiscalYear) {
-          setTaxFiscalYear(metadata.currentFiscalYear);
+        if (metadata?.currentFiscalYearVerified && metadata.currentFiscalYear) {
+          setTaxFiscalYear(current => current || metadata.currentFiscalYear);
         }
       })
       .catch((error) => {
         if (!cancelled) setTaxPolicyError(error?.message || 'Verified tax policy metadata is unavailable.');
       });
     return () => { cancelled = true; };
-  }, [taxFiscalYear]);
+  }, []);
 
   useEffect(() => {
     setContextPreview(null);
     setContextPreviewError(null);
-  }, [parentInstrumentId]);
+    setActiveTaxContext(null);
+    setTaxAnnualIncome('');
+  }, [financialKey]);
 
   useEffect(() => {
     if (userProfile?.age !== undefined && userProfile?.age !== null) {
@@ -238,6 +250,11 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
 
   const currentMarketSnapshot = marketContext?.marketSnapshot || null;
   const currentSnapshotFingerprint = marketSnapshotFingerprint(currentMarketSnapshot);
+  useEffect(() => {
+    previewController.current?.abort();
+    setContextPreviewLoading(false);
+    return () => previewController.current?.abort();
+  }, [financialKey, currentSnapshotFingerprint]);
   useEffect(() => {
     if (contextPreview && contextPreview.__marketSnapshotFingerprint !== currentSnapshotFingerprint) {
       setContextPreview(null);
@@ -254,19 +271,23 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
       setContextPreviewError('A live market context and saved Financial Profile are required.');
       return;
     }
+    const controller = new AbortController();
+    previewController.current = controller;
     try {
       setContextPreviewLoading(true);
       setContextPreviewError(null);
-      const result = await api.previewMarketContextAdjustment(profileId);
+      const result = await api.previewMarketContextAdjustment(profileId, { signal: controller.signal });
+      if (controller.signal.aborted) return;
       setContextPreview({
         ...result,
         __marketSnapshotFingerprint: marketSnapshotFingerprint(result?.marketContext?.marketSnapshot),
       });
     } catch (error) {
+      if (controller.signal.aborted) return;
       setContextPreview(null);
       setContextPreviewError(error.message || 'Market-context adjustment preview is unavailable.');
     } finally {
-      setContextPreviewLoading(false);
+      if (!controller.signal.aborted) setContextPreviewLoading(false);
     }
   };
 
@@ -286,9 +307,11 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
 
     api.rankInvestmentCandidates(profileId, parentInstrumentId, currentTaxContext, { signal: controller.signal })
       .then((result) => {
+        if (controller.signal.aborted) return;
         const ranked = Array.isArray(result?.products) ? result.products : [];
         setRankingResult({
           requestKey,
+          financialKey,
           products: ranked.map((product) => {
             const historicalReturn = nullableMarketNumber(product.historicalReturn?.valuePct);
             const nav = nullableMarketNumber(product.nav?.value);
@@ -320,9 +343,10 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
         });
       })
       .catch((error) => {
-        if (error?.code === 'REQUEST_ABORTED') return;
+        if (controller.signal.aborted || error?.code === 'REQUEST_ABORTED') return;
         setRankingResult({
           requestKey,
+          financialKey,
           products: [],
           catalog: null,
           suitability: null,
@@ -333,7 +357,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
       });
 
     return () => controller.abort();
-  }, [parentInstrumentId, profileId, requestKey, activeTaxContext, illustrativePrincipal]);
+  }, [parentInstrumentId, profileId, financialKey, requestKey, activeTaxContext, illustrativePrincipal]);
 
   const requiredTaxInputs = useMemo(() => (
     [...new Set((rankingResult.products || []).flatMap(product => product.postTaxAnalysis?.requiredTaxInputs || []))]
@@ -344,7 +368,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
     setTaxFormError('');
     const incomeNum = Number(taxAnnualIncome);
     const ageNum = Number(taxUserAge);
-    if (!Number.isFinite(incomeNum) || incomeNum < 0 || !Number.isInteger(ageNum) || ageNum < 18 || ageNum > 120
+    if (taxAnnualIncome === '' || !Number.isFinite(incomeNum) || incomeNum < 0 || !Number.isInteger(ageNum) || ageNum < 18 || ageNum > 120
       || !taxIncomeSource || !taxRegime || !taxFiscalYear) {
       setTaxFormError('Enter the required income, age, regime, income source, and fiscal year facts.');
       return;
@@ -403,7 +427,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
     );
   }
 
-  const riskLevel = Number(wtiData.riskLevel);
+  const riskLevel = nullableMarketNumber(wtiData.riskLevel);
   const level = Number.isFinite(riskLevel) ? Math.max(0, Math.min(5, riskLevel - 1)) : null;
   const risk = level === null
     ? { label: 'Not available', color: '#64748b', desc: 'The backend did not provide a parent-category suitability risk classification.' }
@@ -443,6 +467,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const marketSnapshot = marketContext?.marketSnapshot || null;
   const marketDisplay = getMarketDisplayState(marketContext, {
     loading: marketContextLoading && marketContext === null && !marketContextError,
+    refreshFailed: marketContextTransport?.revalidationStatus === 'FAILED',
   });
   const marketEvidenceSource = getMarketEvidenceSource(marketContext);
   const marketObservedAt = formatMarketTimestamp(marketSnapshot?.observedAt || marketContext?.observedAt);
@@ -520,7 +545,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
               borderColor: marketBadgeBorder,
             }}
           >
-            {contextAvailable ? contextRawState : marketDisplay.key}
+            {contextAvailable ? contextRawState.replaceAll('_', ' ') : marketDisplay.label}
           </span>
         </div>
 
@@ -586,7 +611,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
 
         {contextPreview && (
           <p className="wti-preview-feedback">
-            Server preview {contextPreview.applied ? 'applied' : 'did not apply'} a bounded {contextPreview.actualTotalTiltPct ?? 0}% total tilt across {contextPreview.explanations?.length ?? 0} allocation change{contextPreview.explanations?.length === 1 ? '' : 's'}. It is not persisted and does not execute trades.
+            Server preview {contextPreview.applied ? 'applied' : 'did not apply'} a bounded {contextPreview.actualTotalTiltPct ?? 'unavailable'}% total tilt across {contextPreview.explanations?.length ?? 'unavailable'} allocation change{contextPreview.explanations?.length === 1 ? '' : 's'}. It is not persisted and does not execute trades.
           </p>
         )}
         {contextPreviewError && (
@@ -1251,6 +1276,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
           return (
             <div
               key={product.id}
+              data-testid={`wti-product-${product.id}`}
               className={`wti-item ${isEvidenceRanked && product.rank === 1 && rankingResult.ranking?.hasUniqueLeader ? 'wti-item--featured' : ''}`}
             >
               <div
@@ -1274,16 +1300,16 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
                           borderColor: isEvidenceRanked ? 'rgba(34, 197, 94, 0.3)' : 'rgba(56, 189, 248, 0.25)',
                         }}
                       >
-                        {product.presentationStatus?.replaceAll('_', ' ') || 'UNAVAILABLE'}
+                        {readableSource(product.presentationStatus)}
                       </span>
                       {product.tiedRank && <span className="wti-badge">TIED RANK</span>}
                     </div>
 
                     <span className="wti-provider">
-                      {product.provider || 'Provider unavailable'} · {product.source?.provider || 'Source unavailable'}
+                      {readableSource(product.provider)} · {readableSource(product.source?.provider)}
                     </span>
                     <div className="wti-card-evidence-row">
-                      <span>Source: {product.source?.provider || 'Unavailable'}</span>
+                      <span>Source: {readableSource(product.source?.provider)}</span>
                       <span>As of: {productObservedAt || 'Unavailable'}</span>
                     </div>
 
@@ -1341,19 +1367,19 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
                     <div className="wti-illustrative-grid">
                       <div>
                         <span>You invest</span>
-                        <strong>₹{postTax.illustrativePrincipal.toLocaleString('en-IN')}</strong>
+                        <strong>{formatINR(postTax.illustrativePrincipal)}</strong>
                       </div>
                       <div>
                         <span>Gross return</span>
-                        <strong>₹{Number.isFinite(postTax.grossGain) ? postTax.grossGain.toLocaleString('en-IN') : 'Unavailable'}</strong>
+                        <strong>{formatINR(postTax.grossGain)}</strong>
                       </div>
                       <div>
                         <span>Tax on gain</span>
-                        <strong>₹{Number.isFinite(postTax.incrementalTax) ? postTax.incrementalTax.toLocaleString('en-IN') : 'Unavailable'}</strong>
+                        <strong>{formatINR(postTax.incrementalTax)}</strong>
                       </div>
                       <div className="wti-keep-highlight">
                         <span>You keep</span>
-                        <strong>₹{Number.isFinite(postTax.netGain) ? postTax.netGain.toLocaleString('en-IN') : 'Unavailable'}</strong>
+                        <strong>{formatINR(postTax.netGain)}</strong>
                       </div>
                     </div>
 
@@ -1419,10 +1445,12 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
                   </summary>
 
                   <div className="wti-meta-footer">
-                    <div className="meta-box"><Building2 size={12} /> Source: {product.source?.provider || 'UNAVAILABLE'}</div>
+                    <div className="meta-box"><Building2 size={12} /> Source: {readableSource(product.source?.provider)}</div>
+                    <div className="meta-box">Product type: {readableSource(product.productType)}</div>
+                    {safeSourceUrl(product.source?.url) && <a href={safeSourceUrl(product.source.url)} target="_blank" rel="noreferrer">Official source</a>}
                     {product.nav && <div className="meta-box"><Wallet size={12} /> NAV: {Number.isFinite(nullableMarketNumber(product.nav?.value)) ? `₹${nullableMarketNumber(product.nav.value).toLocaleString('en-IN')}` : 'UNAVAILABLE'}</div>}
                     {product.nav && <div className="meta-box"><HistoryIcon size={12} /> Valuation: {product.valuationDate || 'UNAVAILABLE'}</div>}
-                    {product.officialRate && <div className="meta-box"><Wallet size={12} /> Rate class: {product.officialRate.dataClass?.replaceAll('_', ' ') || 'UNAVAILABLE'}</div>}
+                    {product.officialRate && <div className="meta-box"><Wallet size={12} /> Rate class: {readableSource(product.officialRate.dataClass)}</div>}
                     {product.officialRate && <div className="meta-box"><HistoryIcon size={12} /> Effective: {product.officialRate.effectiveFrom || 'UNAVAILABLE'} → {product.officialRate.effectiveTo || 'until revised'}</div>}
                     <div className="meta-box"><Activity size={12} /> Freshness: {product.freshness?.status || 'UNAVAILABLE'}</div>
                     <div className="meta-box">Eligibility: {product.productEligibility?.status?.replaceAll('_', ' ') || 'UNAVAILABLE'}</div>

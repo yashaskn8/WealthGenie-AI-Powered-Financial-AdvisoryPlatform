@@ -27,6 +27,16 @@ const CANONICAL_PROFILE = Object.freeze({
 });
 
 describe('frontend API contracts', () => {
+  it('passes tax cancellation as a request option, never a financial input', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ results: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+    await api.computePostTaxReturnBatch([{ instrumentType: 'FD', nominalRate: 0.07, monthlySIP: 10000, holdingYears: 3 }], 1000000, 'new', 30, 'salary', 0.06, 'FY2026-27', { signal: controller.signal, body: { deductions: { section80C: 0 } } });
+    const config = fetchMock.mock.calls[0][1];
+    expect(config.signal).toBeInstanceOf(AbortSignal);
+    expect(JSON.parse(config.body)).toMatchObject({ deductions: { section80C: 0 }, inflationRate: 0.06 });
+    expect(JSON.parse(config.body)).not.toHaveProperty('signal');
+  });
   beforeEach(() => {
     api.clearAuthToken();
     localStorage.clear();

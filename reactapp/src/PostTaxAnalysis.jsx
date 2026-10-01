@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } from 'recharts';
 import { motion, AnimatePresence } from 'framer-motion';
 import { AlertCircle, TrendingUp, TrendingDown, ShieldCheck, Layers, Award, ChevronDown, Zap, ArrowRight, Sparkles, Target } from 'lucide-react';
@@ -7,7 +7,7 @@ import { isPresentFiniteNumber, toOptionalNumber } from './utils/financialValues
 import * as api from './services/api';
 import './PostTaxAnalysis.css';
 
-const PostTaxAnalysis = ({ profile, recommendations }) => {
+const PostTaxAnalysis = ({ profile, recommendations, recommendationMeta }) => {
   const [showBreakdown, setShowBreakdown] = useState(true);
   const [grossAnnualIncome, setGrossAnnualIncome] = useState('');
   const [incomeSource, setIncomeSource] = useState('');
@@ -18,11 +18,33 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
   const [nps80CCD1B, setNps80CCD1B] = useState('');
   const [section112AExemptionUsed, setSection112AExemptionUsed] = useState('');
   const [advancedDeductions, setAdvancedDeductions] = useState({});
-  const [backendPostTaxData, setBackendPostTaxData] = useState(null);
+  const [savedAnalysis, setSavedAnalysis] = useState(null);
   const [taxPolicyMetadata, setTaxPolicyMetadata] = useState(null);
   const [taxPolicyError, setTaxPolicyError] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const requestController = useRef(null);
+  // This is a display/request identity, not a financial calculation or authority.
+  const inputKey = JSON.stringify({
+    profileId: profile?.profileId, version: profile?.version,
+    age: profile?.age, horizon: profile?.investment_horizon_years,
+    recommendationId: recommendationMeta?.recommendationId,
+    allocationRevision: recommendationMeta?.allocation_revision_id,
+    portfolioFingerprint: recommendationMeta?.portfolio_fingerprint,
+    instruments: (recommendations || []).map(({ id, type, nominalReturn, monthly_allocation }) => (
+      { id, type, nominalReturn, monthly_allocation }
+    )),
+    grossAnnualIncome, incomeSource, regime, fiscalYear, inflationRate,
+    section80C, nps80CCD1B, section112AExemptionUsed, advancedDeductions,
+  });
+  const backendPostTaxData = savedAnalysis?.inputKey === inputKey ? savedAnalysis.data : null;
+
+  useEffect(() => {
+    requestController.current?.abort();
+    setLoading(false);
+    setError('');
+    return () => requestController.current?.abort();
+  }, [inputKey]);
 
   useEffect(() => {
     if (typeof api.getTaxPolicyMetadata !== 'function') return undefined;
@@ -44,12 +66,12 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
   const calculate = async event => {
     event.preventDefault();
     setError('');
-    setBackendPostTaxData(null);
+    setSavedAnalysis(null);
     const annualIncome = Number(grossAnnualIncome);
     const explicitInflationRate = Number(inflationRate);
     const horizon = Number(profile?.investment_horizon_years);
     const age = Number(profile?.age);
-    if (!Number.isFinite(annualIncome) || annualIncome < 0 || !incomeSource || !regime || !fiscalYear) {
+    if (!isPresentFiniteNumber(grossAnnualIncome) || annualIncome < 0 || !incomeSource || !regime || !fiscalYear) {
       setError('Enter gross annual income before allowed deductions, income source, tax regime, and fiscal year explicitly.');
       return;
     }
@@ -59,6 +81,11 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
     }
     if (!Number.isInteger(age) || !Number.isFinite(horizon) || horizon <= 0) {
       setError('The Financial Profile must provide age and investment horizon before this analysis can run.');
+      return;
+    }
+    if (recommendations.some(instrument => !isPresentFiniteNumber(instrument.nominalReturn)
+        || !isPresentFiniteNumber(instrument.monthly_allocation))) {
+      setError('The backend recommendation is missing required return or allocation facts.');
       return;
     }
     const instruments = recommendations.map(instrument => ({
@@ -72,6 +99,9 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
       setError('The backend recommendation is missing required return or allocation facts.');
       return;
     }
+    const controller = new AbortController();
+    requestController.current?.abort();
+    requestController.current = controller;
     try {
       setLoading(true);
       const deductions = Object.fromEntries(Object.entries({
@@ -98,21 +128,24 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
         incomeSource,
         explicitInflationRate / 100,
         fiscalYear,
-        { body: {
+        { signal: controller.signal, body: {
           deductions,
           ...(toOptionalNumber(section112AExemptionUsed) !== undefined
             ? { section112AExemptionUsed: toOptionalNumber(section112AExemptionUsed) }
             : {}),
         } },
       );
+      if (controller.signal.aborted) return;
       const requiredResultFields = [
         'effectiveTaxPercent', 'postTaxGain', 'taxDragWealth', 'taxDragCAGR',
         'totalInvested', 'nominalReturnPercent', 'postTaxReturnPercent', 'realReturnPercent',
       ];
+      const unavailableResultFields = ['effectiveTaxPercent', 'postTaxGain', 'taxDragWealth', 'taxDragCAGR', 'postTaxReturnPercent', 'realReturnPercent'];
       if (!Array.isArray(data?.results) || data.results.length !== recommendations.length
-          || data.results.some(result => !result?.status
+          || data.results.some((result, index) => !result?.status || result.instrumentType !== instruments[index].instrumentType
+            || (result.status !== 'CALCULATED' && unavailableResultFields.some(field => result[field] != null))
             || (result.status === 'CALCULATED' && (!result.taxType || requiredResultFields.some(
-              field => !isPresentFiniteNumber(result[field]),
+              field => !Number.isFinite(result[field]),
             ))))) {
         throw new TypeError('The tax service returned an incomplete instrument analysis.');
       }
@@ -124,17 +157,20 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
       if (!['COMPLETE', 'PARTIAL', 'UNAVAILABLE'].includes(portfolioStatus)) {
         throw new TypeError('The tax service returned no truthful portfolio status.');
       }
-      if (portfolioStatus === 'COMPLETE' && requiredSummaryFields.some(field => !isPresentFiniteNumber(data?.summary?.[field]))) {
+      if (portfolioStatus !== 'UNAVAILABLE' && requiredSummaryFields.some(field => !isPresentFiniteNumber(data?.summary?.[field]))) {
         throw new TypeError('The tax service returned an incomplete portfolio summary.');
       }
       if (portfolioStatus === 'UNAVAILABLE' && requiredSummaryFields.some(field => data?.summary?.[field] !== null)) {
         throw new TypeError('Unavailable tax summaries must remain null.');
       }
-      setBackendPostTaxData(data);
+      if (!isPresentFiniteNumber(data?.assumptions?.inflationRate)) {
+        throw new TypeError('The tax service returned no inflation assumption.');
+      }
+      setSavedAnalysis({ inputKey, data });
     } catch (requestError) {
-      setError(requestError?.message || 'Authoritative post-tax analysis is unavailable.');
+      if (!controller.signal.aborted) setError(requestError?.message || 'Authoritative post-tax analysis is unavailable.');
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   };
 
@@ -411,6 +447,11 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
         <small style={{ gridColumn: '1 / -1', color: '#64748b', lineHeight: 1.5 }}>
            MODELLED_POST_TAX_PROJECTION: gross cash flows are projected first, then backend tax events are applied. Generic product classes remain unavailable unless qualified.
          </small>
+        {savedAnalysis && !backendPostTaxData && (
+          <small role="status" style={{ gridColumn: '1 / -1', color: '#fbbf24' }}>
+            Your financial profile, portfolio or tax inputs changed. Recalculate this result before using it.
+          </small>
+        )}
          {taxPolicyError && <small role="alert" style={{ gridColumn: '1 / -1', color: '#fbbf24' }}>{taxPolicyError}</small>}
         {backendPostTaxData?.policyVersion && (
           <small style={{ gridColumn: '1 / -1', color: '#94a3b8', lineHeight: 1.5 }}>
@@ -499,6 +540,7 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
             </div>
 
             <div className="pta-chart-wrap">
+              {!backendPostTaxData ? <p role="status">{loading ? 'Calculating backend tax estimates…' : 'Enter your tax inputs and calculate to view return estimates.'}</p> :
               <ResponsiveContainer width="100%" height="100%" initialDimension={{ width: 1, height: 1 }}>
                 <BarChart data={postTaxData} margin={{ top: 10, right: 10, left: -20, bottom: 5 }}>
                   <defs>
@@ -516,7 +558,9 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" vertical={false} />
-                  <XAxis dataKey="name" tick={{ fill: '#64748b', fontSize: 11, fontWeight: 600 }} axisLine={false} tickLine={false} interval={0} />
+                  <XAxis dataKey="name" tick={{ fill: '#64748b', fontSize: 10, fontWeight: 600 }} axisLine={false} tickLine={false}
+                    interval={0} angle={-35} textAnchor="end" height={70}
+                    tickFormatter={name => name.length > 12 ? `${name.slice(0, 11)}…` : name} />
                   <YAxis tick={{ fill: '#475569', fontSize: 11, fontWeight: 500 }} tickFormatter={(val) => `${val}%`} axisLine={false} tickLine={false} />
                   <Tooltip
                     cursor={{ fill: 'rgba(255,255,255,0.03)', radius: 6 }}
@@ -526,15 +570,18 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
                   <Legend verticalAlign="top" height={40} iconType="circle" iconSize={8} wrapperStyle={{ fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8', letterSpacing: '0.3px' }}/>
                   <Bar dataKey="nominalReturn" name="Model assumption (pre-tax)" fill="url(#gradNominal)" radius={[6,6,0,0]} barSize={22} />
                   <Bar dataKey="postTaxReturn" name="Estimated after tax" fill="url(#gradPostTax)" radius={[6,6,0,0]} barSize={22} />
-                  <Bar dataKey="realReturn" name="Real Return" fill="url(#gradReal)" radius={[6,6,0,0]} barSize={22} />
+                  <Bar dataKey="realReturn" name="Real return after inflation" fill="url(#gradReal)" radius={[6,6,0,0]} barSize={22} />
                 </BarChart>
-              </ResponsiveContainer>
+              </ResponsiveContainer>}
             </div>
           </motion.div>
 
           {/* Detailed Rates Table */}
           <motion.div className="pta-card pta-card--flush" variants={itemVariants}>
-            <div className="pta-table-header" onClick={() => setShowBreakdown(!showBreakdown)} role="button" tabIndex={0}>
+            <div className="pta-table-header" onClick={() => setShowBreakdown(!showBreakdown)} role="button" tabIndex={0}
+              aria-expanded={showBreakdown} onKeyDown={event => {
+                if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setShowBreakdown(value => !value); }
+              }}>
               <div className="pta-table-header-left">
                 <h3 className="pta-card-title">Detailed Breakdown</h3>
                 <span className="pta-table-count">{postTaxData.length} assets</span>
@@ -562,21 +609,21 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
                   transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
                   style={{ overflow: 'hidden' }}
                 >
-                  <div className="pta-table-scroll">
+                  <div className="pta-table-scroll" role="region" aria-label="Post-tax instrument calculations" tabIndex={0}>
                     <table className="pta-table">
                       <thead>
                         <tr>
                           <th className="pta-th--left">Asset</th>
                           <th className="pta-th--left">Tax Treatment</th>
-                          <th className="pta-th--center">Nominal</th>
-                          <th className="pta-th--center">Post-Tax</th>
-                          <th className="pta-th--center">Real</th>
-                          <th className="pta-th--right">Projected</th>
+                          <th className="pta-th--center">Model assumption (pre-tax)</th>
+                          <th className="pta-th--center">Estimated after tax</th>
+                          <th className="pta-th--center">Real return after inflation</th>
+                          <th className="pta-th--right">Post-tax gain</th>
                         </tr>
                       </thead>
                       <tbody>
                         {postTaxData.map((data, i) => (
-                          <tr key={i} className="pta-table-row">
+                          <tr key={data.id} className="pta-table-row" data-testid={`post-tax-row-${data.id}`}>
                             <td className="pta-td--asset">
                               <div className="pta-asset-color" style={{ background: barColors[i % barColors.length] }} />
                               <div>
@@ -592,20 +639,30 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
                                 <span className="pta-asset-cat">No zero substituted</span>
                               )}
                             </td>
-                            <td className="pta-td--mono pta-td--center pta-td--dim">
+                            <td data-testid="nominal-return" className="pta-td--mono pta-td--center pta-td--dim">
                               {Number.isFinite(data.nominalReturn) ? `${data.nominalReturn.toFixed(1)}%` : '—'}
                             </td>
-                            <td className="pta-td--mono pta-td--center pta-td--purple">
+                            <td data-testid="post-tax-return" className="pta-td--mono pta-td--center pta-td--purple">
                               {Number.isFinite(data.postTaxReturn) ? `${data.postTaxReturn.toFixed(1)}%` : '—'}
                             </td>
-                            <td className={`pta-td--mono pta-td--center ${data.realReturn > 0 ? 'pta-td--green' : 'pta-td--rose'}`}>
+                            <td data-testid="real-return" className={`pta-td--mono pta-td--center ${data.realReturn > 0 ? 'pta-td--green' : 'pta-td--rose'}`}>
                               <span className="pta-real-cell">
                                 {Number.isFinite(data.realReturn) && (data.realReturn > 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />)}
                                 {Number.isFinite(data.realReturn) ? `${data.realReturn > 0 ? '+' : ''}${data.realReturn.toFixed(1)}%` : '—'}
                               </span>
                             </td>
                             <td className="pta-td--mono pta-td--right pta-td--blue pta-td--bold">
-                              {!isPresentFiniteNumber(data.wealthGained) ? '—' : formatINR(data.wealthGained)}
+                              <span data-testid="post-tax-gain">{formatINR(data.wealthGained)}</span>
+                              <details className="pta-calculation-details">
+                                <summary>Calculation details</summary>
+                                <dl>
+                                  <dt>Total invested</dt><dd data-testid="total-invested">{formatINR(data.totalInvested)}</dd>
+                                  <dt>Effective tax</dt><dd data-testid="effective-tax">{isPresentFiniteNumber(data.taxDetails.taxRatePercent) ? `${Number(data.taxDetails.taxRatePercent).toFixed(1)}%` : '—'}</dd>
+                                  <dt>Tax drag (wealth)</dt><dd data-testid="tax-drag-wealth">{formatINR(data.taxDetails.taxDragWealth)}</dd>
+                                  <dt>Tax drag (CAGR)</dt><dd data-testid="tax-drag-cagr">{isPresentFiniteNumber(data.taxDetails.taxDragCAGR) ? `${data.taxDetails.taxDragCAGR.toFixed(2)}%` : '—'}</dd>
+                                  <dt>Calculation status</dt><dd>{data.resultStatus}</dd>
+                                </dl>
+                              </details>
                             </td>
                           </tr>
                         ))}
@@ -621,10 +678,10 @@ const PostTaxAnalysis = ({ profile, recommendations }) => {
         {/* ─── RIGHT COLUMN ─── */}
         <div className="pta-col">
           {/* Profit Retention Efficiency - Hero Widget */}
-          {portfolioStatus === 'UNAVAILABLE' ? (
+          {!backendPostTaxData || portfolioStatus === 'UNAVAILABLE' ? (
             <motion.div className="pta-card pta-retention-hero" variants={itemVariants}>
-              <h3 className="pta-retention-label">Profit retention unavailable</h3>
-              <p className="pta-retention-footnote">The selected instruments do not have complete qualified tax projections. No gauge or zero value is shown.</p>
+              <h3 className="pta-retention-label">{backendPostTaxData ? 'Profit retention unavailable' : 'Profit retention not calculated'}</h3>
+              <p className="pta-retention-footnote">{backendPostTaxData ? 'The selected instruments do not have complete qualified tax projections.' : 'Calculate with explicit tax inputs to view this estimate.'} No gauge or zero value is shown.</p>
             </motion.div>
           ) : <motion.div className="pta-card pta-retention-hero" variants={itemVariants}>
             <h3 className="pta-retention-label">Profit Retention Efficiency</h3>

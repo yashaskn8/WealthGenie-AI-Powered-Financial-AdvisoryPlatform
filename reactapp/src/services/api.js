@@ -716,10 +716,11 @@ export async function computePostTaxReturn(instrumentType, nominalRate, annualIn
 }
 
 export async function computePostTaxReturnBatch(instruments, annualIncome, regime, userAge, incomeSource, inflationRate, fiscalYear, options = {}) {
+  const { body = {}, ...requestOptions } = options;
   return request('POST', '/tax/post-tax-return/batch', {
     instruments, annualIncome, regime, userAge, incomeSource, inflationRate, fiscalYear,
-    ...(options.body || options),
-  });
+    ...body,
+  }, requestOptions);
 }
 
 // Default export for convenience

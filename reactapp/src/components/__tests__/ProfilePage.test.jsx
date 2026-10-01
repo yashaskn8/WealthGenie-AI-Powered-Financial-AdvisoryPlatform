@@ -41,6 +41,21 @@ async function fillValidForm() {
 }
 
 describe('ProfilePage backend version contract', () => {
+  it('preserves explicitly entered optional zeros instead of turning them into unknown facts', async () => {
+    vi.spyOn(api, 'getCurrentProfile').mockRejectedValue({ status: 404 });
+    const precompute = vi.spyOn(api, 'precomputeProfile').mockResolvedValue({ candidateId: 'candidate' });
+    render(<ProfilePage><ProfileProbe /></ProfilePage>);
+    await screen.findByTestId('profile-save');
+    await fillValidForm();
+    for (const text of ['Sold Property Proceeds (₹)', 'Liquid Savings (₹)', 'Monthly EMI Burden (%)', 'Financial Dependents', 'Emergency Fund (Months)']) {
+      const input = screen.getByText(text, { selector: 'label' }).closest('.pf-field').querySelector('input');
+      fireEvent.change(input, { target: { value: '0' } });
+      expect(input.value).toBe('0');
+    }
+    await waitFor(() => expect(precompute).toHaveBeenCalledWith(expect.objectContaining({
+      sold_property_proceeds: 0, liquid_savings: 0, emi_burden_pct: 0, financial_dependents: 0, emergency_fund_months: 0,
+    }), expect.any(Object)));
+  });
   beforeEach(() => {
     vi.useRealTimers();
     localStorage.clear();

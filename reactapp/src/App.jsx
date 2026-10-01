@@ -425,9 +425,9 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
         abbr: dbMatch?.abbr || bi.type,
         color: dbMatch?.color || '#38bdf8',
         desc: dbMatch?.desc || '',
-        category: dbMatch?.category || dbMatch?.cat || 'Other',
-        cat: dbMatch?.cat || dbMatch?.category || 'Other',
-        assetClass: dbMatch?.assetClass || 'Other',
+        category: bi.assetClass,
+        cat: bi.assetClass,
+        assetClass: bi.assetClass,
         riskLabel: bi.riskLevel,
         risk: bi.riskScore,
         lockIn: bi.lockIn,
@@ -442,10 +442,16 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
         nominalReturn: bi.nominalReturn,
         rate: bi.nominalReturn,
         expectedReturn: bi.nominalReturn,
+        // A reference-catalog range must not replace the current server assumption.
+        returnRange: undefined,
+        expected_return_min: undefined,
+        expected_return_max: undefined,
+        returnAssumptionVersion: currentRecommendationState.return_assumption_version,
         allocationWeight: backendWeight,
         allocation_pct: Number(bi.allocation_pct),
         score: Number(bi.score),
         scoreFactors: { ...bi.scoreFactors },
+        taxClassification: bi.taxClassification ?? null,
         ml_confidence: currentRecommendationState.confidence_scores?.[bi.type] ?? null,
         advisory_text: currentRecommendationState.advisory_text,
         _source: 'backend',
@@ -722,6 +728,7 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
               onTabChange={(newTab) => navigateTo({ page: NAV_PAGES.TAXES, tab: newTab })}
               profile={userProfile}
               recommendations={recommendations}
+              recommendationMeta={currentRecommendationState}
               onLearnMore={handleLearnMore}
             />
           </ErrorBoundary>

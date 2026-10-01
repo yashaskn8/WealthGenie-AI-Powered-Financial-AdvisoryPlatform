@@ -120,7 +120,7 @@ const DeepDiveModal = ({ isOpen, onClose, investment, onSelectInvestment, allRec
   }, [investment]);
 
   // Reset calculator state when instrument changes
-  if (investment?.id !== prevInvestmentId || horizon !== prevHorizon) {
+  if (investment && (investment.id !== prevInvestmentId || horizon !== prevHorizon)) {
     setPrevInvestmentId(investment?.id);
     setPrevHorizon(horizon);
 

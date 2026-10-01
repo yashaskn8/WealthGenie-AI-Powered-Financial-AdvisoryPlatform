@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import RecommendationDashboard from './RecommendationDashboard.jsx';
 
@@ -13,6 +13,24 @@ beforeEach(() => localStorage.removeItem('wg_onboarded'));
 afterEach(cleanup);
 
 describe('RecommendationDashboard authority boundary', () => {
+  it('renders server weights even when rounded rupee amounts imply different proportions', () => {
+    render(<RecommendationDashboard userProfile={profile} recommendations={[
+      { id: 'fd', name: 'Server Deposit', cat: 'Debt', nominalReturn: 0, monthly_allocation: 1, allocation_pct: 50, score: 0, lockIn: 0 },
+      { id: 'ppf', name: 'Server Saving', cat: 'Debt', nominalReturn: null, monthly_allocation: 2, allocation_pct: 50, lockIn: null },
+    ]} recommendationMeta={{ dashboard_projection: { total_projected: null, wealth_multiple: null }, portfolio_return_assumption: null }} />);
+    const deposit = within(screen.getByTestId('recommendation-row-fd'));
+    expect(deposit.getByText('50.0%')).toBeVisible();
+    expect(deposit.getByText('₹1')).toBeVisible();
+    expect(deposit.getByText('0.0%')).toBeVisible();
+    const saving = within(screen.getByTestId('recommendation-row-ppf'));
+    expect(saving.getByText('50.0%')).toBeVisible();
+    expect(saving.getByText('₹2')).toBeVisible();
+    expect(saving.queryByText('0.0%')).toBeNull();
+    expect(saving.getAllByText('—').length).toBeGreaterThan(0);
+    expect(screen.queryByText('0.00x')).toBeNull();
+    expect(within(document.getElementById('rec-card-fd')).getByText('None', { exact: true })).toBeVisible();
+    expect(within(document.getElementById('rec-card-ppf')).getAllByText('Unavailable', { exact: true }).length).toBeGreaterThan(0);
+  });
   it('shows no portfolio when the backend supplies no recommendations', () => {
     render(<RecommendationDashboard userProfile={profile} recommendations={[]} />);
     expect(screen.getByText(/No personalized recommendation is being shown/i)).toBeVisible();
