@@ -144,7 +144,7 @@ describe('Beginner-First Where-To-Invest UX', () => {
     expect(card.getByText('Historical 1Y return')).toBeVisible();
     expect(card.getByText('2.30% historical')).toBeVisible();
     expect(card.getByText(/No defensible merit order is claimed for this comparable option/)).toBeVisible();
-    expect(card.getByText(/A verified historical return is shown for context only; historical performance is not an expected return/)).toBeVisible();
+    expect(card.getByText(/A verified historical return is shown for context only\. Historical performance is not an expected return/)).toBeVisible();
     expect(card.getByText('Risk classification unavailable')).toBeVisible();
     expect(card.getByText('Access terms unavailable')).toBeVisible();
     expect(card.getByText(/tax classification unavailable/)).toBeVisible();
