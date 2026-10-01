@@ -155,7 +155,8 @@ async function products(dialog: Locator, result: JsonObject, parentId: string) {
   if (ranking.status === 'UNAVAILABLE') {
     expect(entries).toEqual([]);
     expect(array(ranking.reasonCodes, 'ranking.reasonCodes').length).toBeGreaterThan(0);
-    await expect(dialog.getByRole('status').filter({ hasText: 'UNAVAILABLE:' })).toBeVisible();
+    await expect(dialog.getByRole('status'))
+      .toContainText('No current source-qualified products are available for this category. No static fallback values were inserted.');
     await expect(cards).toHaveCount(0);
     return;
   }
