@@ -200,13 +200,15 @@ async function products(dialog: Locator, result: JsonObject, parentId: string) {
       await expect(card.getByRole('link').filter({ hasText: /source/i })).toHaveCount(0);
     }
 
-    // Absence of officialRate is an established MF DTO shape; a malformed
-    // officialRate/nav/history object is never treated as unavailable.
+    // Absence of officialRate is expected for fund/ETF evidence DTOs; ETFs
+    // still use verified NAV/history facts but must retain their ETF identity.
     const official = product.officialRate === undefined || product.officialRate === null
       ? null : object(product.officialRate, `${id}.officialRate`);
     const nav = product.nav === null ? null : object(product.nav, `${id}.nav`);
     const history = product.historicalReturn === null ? null : object(product.historicalReturn, `${id}.historicalReturn`);
-    if (!official) expect(product.productType).toBe('MUTUAL_FUND');
+    if (!official) {
+      expect(product.productType).toBe(parentId === 'nifty_etf' ? 'ETF' : 'MUTUAL_FUND');
+    }
     if (nav) {
       expect(number(nav.value, `${id}.nav.value`)).toBeGreaterThan(0);
       await expect(details).toContainText(`NAV: ₹${number(nav.value, `${id}.nav.value`).toLocaleString('en-IN')}`);
