@@ -110,6 +110,12 @@ describe('Beginner-First Where-To-Invest UX', () => {
         }],
         source: { provider: 'AMFI', url: 'https://portal.amfiindia.com/spages/NAVAll.txt' },
         nav: { value: 250.25, unit: 'NAV_PER_UNIT', observedAt: '2026-10-01T09:55:00.000Z' },
+        historicalReturn: {
+          valuePct: 2.3,
+          basis: 'HISTORICAL_NAV_RETURN',
+          startDate: '2025-10-01',
+          endDate: '2026-10-01',
+        },
         marketPrice: { value: null, availabilityStatus: 'UNAVAILABLE' },
         productEligibility: { status: 'PARENT_SUITABILITY_PASSED_PRODUCT_ACCESS_FACTS_UNAVAILABLE' },
         riskEvidence: null,
@@ -135,6 +141,10 @@ describe('Beginner-First Where-To-Invest UX', () => {
     expect(card.getByText('ISIN: INF204KB14I2')).toBeVisible();
     expect(card.getByText('Exchange market price: Unavailable')).toBeVisible();
     expect(card.getByText('Fund NAV: ₹250.25')).toBeVisible();
+    expect(card.getByText('Historical 1Y return')).toBeVisible();
+    expect(card.getByText('2.30% historical')).toBeVisible();
+    expect(card.getByText(/No defensible merit order is claimed for this comparable option/)).toBeVisible();
+    expect(card.getByText(/A verified historical return is shown for context only; historical performance is not an expected return/)).toBeVisible();
     expect(card.getByText('Risk classification unavailable')).toBeVisible();
     expect(card.getByText('Access terms unavailable')).toBeVisible();
     expect(card.getByText(/tax classification unavailable/)).toBeVisible();

@@ -1523,6 +1523,9 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
                     : isEvidenceRanked
                     ? 'Ranked only among explicitly sourced Direct Growth options in the exact AMFI category by verified one-year historical NAV return. Historical performance is not an expected return.'
                     : 'Verified AMFI category and fresh NAV. No defensible merit order is claimed for this comparable option.'}
+                  {!isEvidenceRanked && Number.isFinite(nullableMarketNumber(product.historicalReturn?.valuePct))
+                    ? ' A verified historical return is shown for context only; historical performance is not an expected return.'
+                    : ''}
                 </p>
 
                 {product.taxSavingsNote && (
