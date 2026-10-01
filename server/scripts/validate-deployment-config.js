@@ -239,6 +239,17 @@ if (!(dbApply.index < secrets.index
 const tckWorkflow = read('.github/workflows/a2a-tck.yml');
 const pinnedTckSha = '263b9cfaf16a554bdfb166a7ba5b67716e946349';
 const tckPolicy = JSON.parse(read('.github/a2a-tck-known-blockers.json'));
+const expectedTckIssueClasses = {
+  'https://github.com/a2aproject/a2a-tck/issues/202': 'MISSING_EXPECTED_ERROR_ASSERTION',
+  'https://github.com/a2aproject/a2a-tck/issues/229': 'FIXTURE_APPLICABILITY',
+};
+const tckIssueClasses = Object.fromEntries(
+  (Array.isArray(tckPolicy.upstream_issues) ? tckPolicy.upstream_issues : [])
+    .map(issue => [issue?.url, issue?.classification]),
+);
+const tckCoreSendException = Array.isArray(tckPolicy.known_failures)
+  ? tckPolicy.known_failures.find(testCase => testCase?.requirement_id === 'CORE-SEND-003')
+  : null;
 if (!tckWorkflow.includes(`A2A_TCK_SHA: ${pinnedTckSha}`)
     || !tckWorkflow.includes('git -C .a2a-tck fetch --depth 1 origin "$A2A_TCK_SHA"')
     || !tckWorkflow.includes('test "$(git -C .a2a-tck rev-parse HEAD)" = "$A2A_TCK_SHA"')
@@ -250,9 +261,18 @@ if (!tckWorkflow.includes(`A2A_TCK_SHA: ${pinnedTckSha}`)
     || tckWorkflow.includes('continue-on-error: true')
     || tckPolicy.tck_sha !== pinnedTckSha
     || tckPolicy.tck_repository !== 'a2aproject/a2a-tck'
-    || tckPolicy.known_failures?.length !== 5
+    || tckPolicy.policy_schema_version !== 2
+    || tckPolicy.classification !== 'KNOWN_UPSTREAM_TCK_EXCEPTIONS'
+    || Object.keys(tckIssueClasses).length !== 2
+    || Object.entries(expectedTckIssueClasses).some(([url, classification]) => tckIssueClasses[url] !== classification)
+    || !Array.isArray(tckPolicy.known_failures)
+    || tckPolicy.known_failures.length !== 6
+    || tckPolicy.known_failures.filter(testCase => testCase?.upstream_issue === 'https://github.com/a2aproject/a2a-tck/issues/229').length !== 5
+    || tckCoreSendException?.node_id !== 'tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-SEND-003-http_json]'
+    || tckCoreSendException?.upstream_issue !== 'https://github.com/a2aproject/a2a-tck/issues/202'
+    || !tckCoreSendException?.failure_fragment?.includes('Operation failed: [415] Unsupported input media type "application/x-unsupported-tck-type"')
     || tckPolicy.acceptance?.allow_unknown_failures !== false
     || tckPolicy.acceptance?.allow_skipped_known_tests !== false) {
-  throw new Error('A2A TCK workflow must run the pinned upstream suite through the explicit fail-closed applicability policy');
+  throw new Error('A2A TCK workflow must run the pinned upstream suite through the exact fail-closed exception policy');
 }
 console.log(`Validated ${deploymentFiles.length} deployment YAML files, ordered Phase 2/3/4/5/7 migrations in Browser CI, production-edge E2E and Kind CD, Compose API/worker separation, and worker probes.`);
