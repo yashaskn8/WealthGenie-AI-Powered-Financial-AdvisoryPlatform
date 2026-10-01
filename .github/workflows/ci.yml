@@ -158,6 +158,11 @@ jobs:
           cache: 'npm'
           cache-dependency-path: server/package-lock.json
 
+      - name: Setup Python 3.12 for backend cross-language tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Install Backend Dependencies
         run: |
           cd server
