@@ -459,6 +459,27 @@ test('official A2A client/server boundary resolves card, returns artifact, and c
         }],
       },
     });
+    const unsupportedInputMediaType = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${env.AGENT_A2A_DEV_TOKEN}`,
+        'A2A-Version': '1.0',
+      },
+      body: JSON.stringify({
+        message: {
+          role: 'ROLE_USER',
+          parts: [{ raw: 'dGNr', mediaType: 'application/x-unsupported-tck-type' }],
+          messageId: 'unsupported-media-regression',
+        },
+      }),
+    });
+    assert.equal(unsupportedInputMediaType.status, 400);
+    const unsupportedInputBody = await unsupportedInputMediaType.json();
+    assert.equal(unsupportedInputBody.error.code, 400);
+    assert.equal(unsupportedInputBody.error.details[0]['@type'], 'type.googleapis.com/google.rpc.ErrorInfo');
+    assert.equal(unsupportedInputBody.error.details[0].reason, 'CONTENT_TYPE_NOT_SUPPORTED');
+    assert.equal(unsupportedInputBody.error.details[0].domain, 'a2a-protocol.org');
     const missingTask = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/tasks/nonexistent-a2a-task`, {
       headers: { authorization: `Bearer ${env.AGENT_A2A_DEV_TOKEN}`, 'A2A-Version': '1.0' },
     });

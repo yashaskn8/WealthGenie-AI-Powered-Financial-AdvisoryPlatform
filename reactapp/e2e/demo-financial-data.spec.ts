@@ -295,11 +295,31 @@ async function market(dialog: Locator, body: JsonObject) {
   await expect(region.getByTestId('market-data-status')).toContainText(MARKET_LABELS[displayStatus]);
   const providerStatus = object(snapshot.providerStatus, 'marketSnapshot.providerStatus');
   const quotes = object(providerStatus.quotes, 'marketSnapshot.providerStatus.quotes');
-  const provenance = object(snapshot.provenance, 'marketSnapshot.provenance');
-  const snapshotSources = array(provenance.sources, 'marketSnapshot.provenance.sources').map(item => object(item, 'snapshot source'));
-  const source = quotes.provider ?? snapshotSources.find(item => item.provider)?.provider ?? sources.find(item => item.provider)?.provider;
-  const displaySource = source === null || source === undefined ? 'Unavailable' : sourceLabel(string(source, 'market source'));
-  await expect(region.getByTestId('market-data-status')).toContainText(`As of: ${snapshotObserved ? ist(snapshotObserved) : 'Unavailable'} · Source: ${displaySource}`);
+  const observedFacts = Array.isArray(snapshot.observedFacts)
+    ? snapshot.observedFacts.map((item, index) => object(item, `marketSnapshot.observedFacts[${index}]`))
+    : [];
+  const verifiedProviders = [...new Set(observedFacts
+    .filter(fact => fact.availabilityStatus === 'AVAILABLE')
+    .map(fact => fact.source && object(fact.source, 'observed fact source').provider)
+    .filter((provider): provider is string => typeof provider === 'string' && provider.trim().length > 0))];
+  const displaySource = verifiedProviders.length ? verifiedProviders.join(', ') : 'Unavailable';
+  const providerSelectionValue = body.liveProviderSelection ?? snapshot.providerSelection;
+  const providerSelection = providerSelectionValue && typeof providerSelectionValue === 'object' && !Array.isArray(providerSelectionValue)
+    ? object(providerSelectionValue, 'liveProviderSelection')
+    : null;
+  const selectedAttempts = Array.isArray(providerSelection?.attemptedProviders)
+    ? providerSelection.attemptedProviders.filter((provider): provider is string => typeof provider === 'string' && provider.trim().length > 0)
+    : [];
+  const historyStatus = providerStatus.history && typeof providerStatus.history === 'object' && !Array.isArray(providerStatus.history)
+    ? object(providerStatus.history, 'marketSnapshot.providerStatus.history')
+    : null;
+  const fallbackAttempts = [quotes.provider, historyStatus?.provider, ...(
+    Array.isArray(providerStatus.attemptedProviders) ? providerStatus.attemptedProviders : []
+  )].filter((provider): provider is string => typeof provider === 'string' && provider.trim().length > 0);
+  const attemptedProviders = [...new Set(selectedAttempts.length ? selectedAttempts : fallbackAttempts)];
+  const displayAttemptedProvider = attemptedProviders.length ? attemptedProviders.join(', ') : 'Unavailable';
+  const marketStatus = region.getByTestId('market-data-status');
+  await expect(marketStatus).toContainText(`As of: ${snapshotObserved ? ist(snapshotObserved) : 'Unavailable'} · Verified source: ${displaySource} · Attempted provider: ${displayAttemptedProvider}`);
   const toggle = region.getByRole('button', { name: 'Technical details', exact: true });
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
   await toggle.click();

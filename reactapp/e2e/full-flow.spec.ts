@@ -194,7 +194,16 @@ test.describe('real WealthGenie dependency lifecycle', () => {
     });
 
     const wtiResponse = await page.request.post(apiUrl('/instruments/rank-wti'), {
-      data: { profileId: profile.profileId, parentInstrumentId: 'liquid_mf' },
+      data: {
+        profileId: profile.profileId,
+        profileVersion: Number(profileUpdateBody.recommendation.profile_version),
+        recommendationId: profileUpdateBody.recommendation.recommendationId,
+        expectedAllocationRevision: Number(profileUpdateBody.recommendation.allocation_revision),
+        expectedAllocationRevisionId: profileUpdateBody.recommendation.allocation_revision_id,
+        expectedPortfolioFingerprint: profileUpdateBody.recommendation.portfolio_fingerprint,
+        expectedRecommendationFingerprint: profileUpdateBody.recommendation.recommendation_fingerprint,
+        parentInstrumentId: 'liquid_mf',
+      },
       headers: writeHeaders(),
       timeout: 120_000,
     });
