@@ -33,6 +33,7 @@ import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelp
 import { withServer, jsonRequest as jsonFetch, rawRequest } from '../test-utils/httpTestUtils.js';
 import { canonicalProfile, canonicalProfilePayload } from './helpers/canonicalProfile.js';
 import { assertRuntimeResponseMatchesContract } from './helpers/openapiRuntimeContract.js';
+import { requireFreshRecommendationState } from '../services/recommendationState.js';
 
 process.env.JWT_SECRET = 'security-test-secret';
 process.env.NODE_ENV = 'test';
@@ -207,6 +208,7 @@ function buildInstrumentApp() {
   const app = express();
   app.use(enforceJsonContentType);
   app.use(express.json());
+  app.use('/api/profile', profileRoutes);
   app.use('/api/instruments', instrumentRoutes);
   app.use(errorHandler);
   return app;
@@ -259,35 +261,65 @@ test('WG-005: POST /api/instruments/rank-wti rejects legacy inline user profiles
 
 test('WG-005: POST /api/instruments/rank-wti returns 200 for valid authenticated request', async () => {
   await ensureDb();
+  await clearUserFinancialState(USER_A_ID);
   const token = signToken(USER_A_ID);
-  let profile = await FinancialProfile.findOne({ userId: USER_A_ID });
-  if (!profile) {
-    profile = await FinancialProfile.create({
-      userId: USER_A_ID,
-      ...canonicalProfile({ monthlyTakeHome: 80000, monthlySavings: 20000, age: 30 }),
-      recommendationProfileVersion: 'financial-profile-1.0.0',
+  try {
+    await withServer(buildInstrumentApp(), async (baseUrl) => {
+      const completion = await completeCurrentProfile(baseUrl, token);
+      const profileId = completion.profile.profileId;
+      const state = await requireFreshRecommendationState({ userId: USER_A_ID, profileId });
+      const binding = {
+        profileId,
+        profileVersion: state.profileVersion,
+        recommendationId: String(state.recommendation._id),
+        expectedAllocationRevision: state.allocationRevision.revision,
+        expectedAllocationRevisionId: String(state.allocationRevision._id),
+        expectedPortfolioFingerprint: state.portfolioFingerprint,
+        expectedRecommendationFingerprint: state.recommendationFingerprint,
+      };
+      const parentInstrumentId = state.currentAllocation.instruments[0]?.id;
+      assert.ok(parentInstrumentId, 'fixture must have a canonical current recommendation instrument');
+
+      const { response, body } = await jsonFetch(`${baseUrl}/api/instruments/rank-wti`, {
+        method: 'POST',
+        body: JSON.stringify({ ...binding, parentInstrumentId }),
+        headers: { authorization: `Bearer ${token}` },
+      });
+      assert.equal(response.status, 200, 'rank-wti must succeed only with a complete current-state binding');
+      assertRuntimeResponseMatchesContract({
+        method: 'POST', path: '/api/instruments/rank-wti', status: response.status,
+        contentType: response.headers.get('content-type'), body,
+      });
+      assert.deepEqual(body.financialStateBinding, {
+        profileId,
+        profileVersion: state.profileVersion,
+        recommendationId: String(state.recommendation._id),
+        allocationRevision: state.allocationRevision.revision,
+        allocationRevisionId: String(state.allocationRevision._id),
+        portfolioFingerprint: state.portfolioFingerprint,
+        recommendationFingerprint: state.recommendationFingerprint,
+      });
+      assert.ok(Array.isArray(body.products), 'Response should include products array');
+
+      const stale = await jsonFetch(`${baseUrl}/api/instruments/rank-wti`, {
+        method: 'POST',
+        body: JSON.stringify({ ...binding, profileVersion: binding.profileVersion + 1, parentInstrumentId }),
+        headers: { authorization: `Bearer ${token}` },
+      });
+      assert.equal(stale.response.status, 409);
+      assert.equal(stale.body.code, 'FINANCIAL_STATE_CHANGED');
+
+      const forgedParent = await jsonFetch(`${baseUrl}/api/instruments/rank-wti`, {
+        method: 'POST',
+        body: JSON.stringify({ ...binding, parentInstrumentId: 'ppf' }),
+        headers: { authorization: `Bearer ${token}` },
+      });
+      assert.equal(forgedParent.response.status, 409);
+      assert.equal(forgedParent.body.code, 'RECOMMENDATION_PARENT_MISMATCH');
     });
+  } finally {
+    await clearUserFinancialState(USER_A_ID);
   }
-  await withServer(buildInstrumentApp(), async (baseUrl) => {
-    const { response, body } = await jsonFetch(`${baseUrl}/api/instruments/rank-wti`, {
-      method: 'POST',
-      body: JSON.stringify({
-        profileId: profile._id.toString(),
-        parentInstrumentId: 'index_mf',
-      }),
-      headers: { authorization: `Bearer ${token}` },
-    });
-    assert.equal(response.status, 200, 'rank-wti must succeed with valid auth + valid payload');
-    assertRuntimeResponseMatchesContract({
-      method: 'POST', path: '/api/instruments/rank-wti', status: response.status,
-      contentType: response.headers.get('content-type'), body,
-    });
-    assert.ok(body.success, 'Response should include success flag');
-    assert.ok(Array.isArray(body.products), 'Response should include products array');
-    assert.equal(body.total, 0, 'Unsupported product categories must not receive fallback products');
-    assert.equal(body.ranking.status, 'UNAVAILABLE');
-    assert.deepEqual(body.ranking.reasonCodes, ['PRODUCT_CLASS_NOT_SUPPORTED_PHASE_2']);
-  });
 });
 
 // ── 6. WG-018: GET /api/metrics auth + old path dead ────────────────

@@ -380,6 +380,9 @@ npm run test:e2e       # Run Playwright E2E full user journey against live local
 ```
 > **CI integration:** The required browser job provisions a real replica-set-capable MongoDB, Redis, FastAPI, Express, and Vite before running Playwright. A local run needs the same dependencies; a standalone MongoDB cannot prove the transactional lifecycle.
 
+### Explicit Live-Demo Readiness Gate
+For an operator-run, non-mocked check of current provider evidence, authenticated profile completion, current financial-state binding, product/tax workflow, service readiness, and the production frontend build, see [`docs/demo-readiness-preflight.md`](docs/demo-readiness-preflight.md). The gate requires an explicit opt-in and a disposable demo identity/database; it fails closed when exact source-qualified NIFTY ETF evidence is unavailable.
+
 ### Static Docs-vs-Code Sync Check
 To verify that documentation claims match code imports and API routes:
 ```bash

@@ -99,8 +99,22 @@ export function formatMarketTimestamp(value) {
 
 export function getMarketEvidenceSource(marketContext) {
   const snapshot = marketContext?.marketSnapshot;
-  const provider = snapshot?.providerStatus?.quotes?.provider
-    || snapshot?.provenance?.sources?.find(source => source?.provider)?.provider
-    || marketContext?.sources?.find(source => source?.provider)?.provider;
-  return provider || null;
+  const providers = [...new Set((snapshot?.observedFacts || [])
+    .filter(fact => fact?.availabilityStatus === 'AVAILABLE' && fact?.source?.provider)
+    .map(fact => fact.source.provider))];
+  return providers.length ? providers.join(', ') : null;
+}
+
+export function getMarketAttemptedProvider(marketContext) {
+  const snapshot = marketContext?.marketSnapshot;
+  const selection = marketContext?.liveProviderSelection || snapshot?.providerSelection;
+  if (Array.isArray(selection?.attemptedProviders) && selection.attemptedProviders.length > 0) {
+    return [...new Set(selection.attemptedProviders)].join(', ');
+  }
+  const providers = [...new Set([
+    snapshot?.providerStatus?.quotes?.provider,
+    snapshot?.providerStatus?.history?.provider,
+    ...(snapshot?.providerStatus?.attemptedProviders || []),
+  ].filter(value => typeof value === 'string' && value.trim()))];
+  return providers.length ? providers.join(', ') : null;
 }

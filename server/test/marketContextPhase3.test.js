@@ -18,7 +18,7 @@ const NOW = new Date('2026-09-08T12:00:00.000Z');
 const NIFTY = 'NSE_INDEX|Nifty 50';
 const VIX = 'NSE_INDEX|India VIX';
 
-function quoteFact(instrumentId, canonicalProductId, value, { previousClose = null, freshness = 'FRESH' } = {}) {
+function quoteFact(instrumentId, canonicalProductId, value, { previousClose = null, freshness = 'FRESH', provider = 'NSE' } = {}) {
   return {
     canonicalProductId,
     value,
@@ -27,30 +27,31 @@ function quoteFact(instrumentId, canonicalProductId, value, { previousClose = nu
     fetchedAt: NOW.toISOString(),
     dataClass: 'LIVE',
     freshness: { status: freshness, ageSeconds: 60, maxAgeSeconds: 900 },
-    source: { provider: 'NSE', instrumentId, url: 'https://www.nseindia.com/api/allIndices' },
+    source: { provider, instrumentId, url: provider === 'NSE' ? 'https://www.nseindia.com/api/allIndices' : 'https://api.upstox.com/v3/market-quote/quotes' },
     metrics: { previousClose },
   };
 }
 
-function quoteSnapshot({ nifty = 160, previousClose = 159, vix = 14, niftyFreshness = 'FRESH', vixFreshness = 'FRESH', includeVix = true } = {}) {
+function quoteSnapshot({ nifty = 160, previousClose = 159, vix = 14, niftyFreshness = 'FRESH', vixFreshness = 'FRESH', includeVix = true, provider = 'NSE' } = {}) {
   return {
     status: 'AVAILABLE',
     facts: [
-      quoteFact(NIFTY, MARKET_BENCHMARKS.NIFTY_50.canonicalProductId, nifty, { previousClose, freshness: niftyFreshness }),
-      ...(includeVix ? [quoteFact(VIX, MARKET_BENCHMARKS.INDIA_VIX.canonicalProductId, vix, { freshness: vixFreshness })] : []),
+      quoteFact(NIFTY, MARKET_BENCHMARKS.NIFTY_50.canonicalProductId, nifty, { previousClose, freshness: niftyFreshness, provider }),
+      ...(includeVix ? [quoteFact(VIX, MARKET_BENCHMARKS.INDIA_VIX.canonicalProductId, vix, { freshness: vixFreshness, provider })] : []),
     ],
+    provider,
   };
 }
 
-function historySnapshot(closes, { freshness = 'FRESH', status = 'AVAILABLE' } = {}) {
+function historySnapshot(closes, { freshness = 'FRESH', status = 'AVAILABLE', provider = 'NSE' } = {}) {
   const start = Date.parse('2026-06-01T00:00:00.000Z');
   return {
     status,
-    provider: 'NSE',
+    provider,
     fetchedAt: NOW.toISOString(),
     observedAt: new Date(start + (closes.length - 1) * 86400000).toISOString(),
     freshness: { status: freshness, ageSeconds: 86400, maxAgeSeconds: 345600 },
-    source: { provider: 'NSE', instrumentId: 'NIFTY 50', url: 'https://www.nseindia.com/api/historicalOR/indicesHistory' },
+    source: { provider, instrumentId: 'NIFTY 50', url: provider === 'NSE' ? 'https://www.nseindia.com/api/historicalOR/indicesHistory' : 'https://api.upstox.com/v3/historical-candle' },
     candles: closes.map((close, index) => ({
       timestamp: new Date(start + index * 86400000).toISOString(),
       open: close,
@@ -219,6 +220,34 @@ test('unconfigured provider and provider failures never create a normal fallback
   assert.equal(failed.statePersistence, 'NOT_WRITTEN_UNAVAILABLE_OBSERVATION');
 });
 
+test('market snapshot preserves qualified failover diagnostics and selected-provider provenance', async () => {
+  resetMarketContextProcessStateForTest();
+  const selection = {
+    attemptedProviders: ['NSE', 'UPSTOX'],
+    selectedProvider: 'UPSTOX',
+    providerFailures: [{ provider: 'NSE', reasonCodes: ['MARKET_HISTORY_SOURCE_ERROR'] }],
+    fallbackUsed: true,
+  };
+  const pair = await getLiveMarketContext({ now: NOW }, {
+    fetchQualifiedMarketContextSnapshots: async () => ({
+      quoteSnapshot: { ...quoteSnapshot({ provider: 'UPSTOX' }), providerSelection: selection },
+      historicalSnapshot: {
+        ...historySnapshot(Array.from({ length: 60 }, (_, index) => 100 + index), { provider: 'UPSTOX' }),
+        providerSelection: selection,
+      },
+      providerSelection: selection,
+    }),
+    getCache: async () => null,
+    setCache: async () => false,
+    persistDurableLkg: async () => ({ status: 'PERSISTED' }),
+  });
+  assert.equal(pair.marketSnapshot.providerSelection.selectedProvider, 'UPSTOX');
+  assert.deepEqual(pair.marketSnapshot.providerSelection.attemptedProviders, ['NSE', 'UPSTOX']);
+  assert.equal(pair.marketSnapshot.providerSelection.fallbackUsed, true);
+  assert(pair.marketSnapshot.observedFacts.every(fact => fact.source.provider === 'UPSTOX'));
+  assert(pair.marketSnapshot.provenance.sources.every(source => source.provider === 'UPSTOX'));
+});
+
 test('qualified market context survives hot-cache expiry through last-known-good recommendation reads', async () => {
   resetMarketContextProcessStateForTest();
   const values = new Map();
@@ -250,6 +279,38 @@ test('qualified market context survives hot-cache expiry through last-known-good
   assert.equal(unavailable.recoveredFromLastKnownGood, true);
   assert.equal(unavailable.marketSnapshot.status, 'LAST_AVAILABLE');
   assert.equal(unavailable.recommendationUsability.status, 'USABLE');
+});
+
+test('partial live evidence uses one complete LKG snapshot instead of suppressing recovery or mixing epochs', async () => {
+  resetMarketContextProcessStateForTest();
+  const values = new Map();
+  const cache = {
+    get: async key => values.get(key) ?? null,
+    set: async (key, value) => { values.set(key, value); return true; },
+  };
+  const completeHistory = historySnapshot(Array.from({ length: 60 }, (_, index) => 100 + index));
+  const qualified = await getLiveMarketContext({ now: NOW }, {
+    fetchBenchmarkQuotes: async () => quoteSnapshot(),
+    fetchNiftyHistoricalCandles: async () => completeHistory,
+    getCache: cache.get,
+    setCache: cache.set,
+  });
+  assert.equal(qualified.recommendationUsability.status, 'USABLE');
+
+  const partialQuotes = quoteSnapshot({ includeVix: false, nifty: 999 });
+  const recovered = await getLiveMarketContext({ now: new Date('2026-09-08T12:05:00.000Z') }, {
+    fetchBenchmarkQuotes: async () => partialQuotes,
+    fetchNiftyHistoricalCandles: async () => completeHistory,
+    getCache: cache.get,
+    setCache: cache.set,
+  });
+
+  assert.equal(recovered.recoveredFromLastKnownGood, true);
+  assert.equal(recovered.marketSnapshot.status, 'LAST_AVAILABLE');
+  assert.equal(recovered.marketSnapshot.observedFacts.find(fact => fact.key === 'nifty50Current').value, 160);
+  assert.equal(recovered.marketSnapshot.provenance.sources[0].provider, 'NSE');
+  assert(recovered.reasonCodes.includes('RECOVERED_LAST_KNOWN_GOOD'));
+  assert(recovered.reasonCodes.includes('INDIA_VIX_UNAVAILABLE'));
 });
 
 test('qualified market context survives Redis and process-memory loss through durable observation recovery', async () => {

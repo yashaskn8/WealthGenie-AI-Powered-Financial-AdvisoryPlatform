@@ -147,20 +147,59 @@ describe('frontend API contracts', () => {
     await expect(api.getMutualFundNavFacts(['not-a-code'])).rejects.toThrow(/numeric/);
   });
 
-  it('routes personalized product ranking to Express without a client product universe', async () => {
+  it('binds personalized product ranking to the current recommendation state without a client product universe', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ products: [{ id: 'index' }] }));
     vi.stubGlobal('fetch', fetchMock);
 
     await api.rankInvestmentCandidates(
       '64b000000000000000000001',
       'Index_MF',
+      null,
+      {},
+      {
+        profileId: '64b000000000000000000001',
+        profileVersion: 4,
+        recommendationId: '64b000000000000000000002',
+        allocationRevision: 3,
+        allocationRevisionId: '64b000000000000000000003',
+        portfolioFingerprint: 'a'.repeat(64),
+        recommendationFingerprint: 'b'.repeat(64),
+      },
     );
 
     expect(fetchMock.mock.calls[0][0]).toMatch(/\/api\/instruments\/rank-wti$/);
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
       profileId: '64b000000000000000000001',
       parentInstrumentId: 'Index_MF',
+      profileVersion: 4,
+      recommendationId: '64b000000000000000000002',
+      expectedAllocationRevision: 3,
+      expectedAllocationRevisionId: '64b000000000000000000003',
+      expectedPortfolioFingerprint: 'a'.repeat(64),
+      expectedRecommendationFingerprint: 'b'.repeat(64),
     });
+  });
+
+  it('refuses a product-ranking profile that disagrees with its financial-state binding', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(api.rankInvestmentCandidates(
+      '64b000000000000000000001',
+      'Index_MF',
+      null,
+      {},
+      {
+        profileId: '64b000000000000000000099',
+        profileVersion: 4,
+        recommendationId: '64b000000000000000000002',
+        allocationRevision: 3,
+        allocationRevisionId: '64b000000000000000000003',
+        portfolioFingerprint: 'a'.repeat(64),
+        recommendationFingerprint: 'b'.repeat(64),
+      },
+    )).rejects.toThrow(/profile does not match/i);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('runs stress scenarios against the authoritative profile and recommendation instrument', async () => {

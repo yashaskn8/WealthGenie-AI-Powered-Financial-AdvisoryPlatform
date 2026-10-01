@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   formatMarketTimestamp,
   formatNullablePercent,
+  getMarketAttemptedProvider,
   getMarketDisplayState,
   getMarketEvidenceSource,
   nullableMarketNumber,
@@ -45,9 +46,22 @@ describe('nullable market-data presentation', () => {
     expect(getMarketDisplayState(null, { loading: true }).key).toBe('LOADING');
     expect(getMarketDisplayState({ status: 'MARKET_CONTEXT_AVAILABLE', context: 'NORMAL' }).key).toBe('LAST_AVAILABLE');
     expect(getMarketDisplayState({ marketSnapshot: { status: 'MARKET_CLOSED' } }).label).toBe('Market closed');
-    expect(getMarketEvidenceSource({
+    const failed = {
       marketSnapshot: { providerStatus: { quotes: { provider: 'NSE' } } },
-    })).toBe('NSE');
+    };
+    expect(getMarketEvidenceSource(failed)).toBeNull();
+    expect(getMarketAttemptedProvider(failed)).toBe('NSE');
+    expect(getMarketEvidenceSource({ marketSnapshot: { observedFacts: [
+      { availabilityStatus: 'AVAILABLE', source: { provider: 'UPSTOX' } },
+      { availabilityStatus: 'UNAVAILABLE', source: { provider: 'NSE' } },
+    ] } })).toBe('UPSTOX');
+    expect(getMarketAttemptedProvider({ marketSnapshot: {
+      providerSelection: { attemptedProviders: ['NSE', 'UPSTOX'], selectedProvider: 'UPSTOX' },
+    } })).toBe('NSE, UPSTOX');
+    expect(getMarketAttemptedProvider({
+      liveProviderSelection: { attemptedProviders: ['NSE', 'UPSTOX'], selectedProvider: null },
+      marketSnapshot: { observedFacts: [{ availabilityStatus: 'AVAILABLE', source: { provider: 'NSE' } }] },
+    })).toBe('NSE, UPSTOX');
   });
 
   it('formats only valid observed timestamps', () => {

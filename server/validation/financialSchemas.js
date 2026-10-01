@@ -70,6 +70,12 @@ export const financialProfileCompletionSchema = financialProfileCreateSchema.key
 
 export const rankWtiProfileSchema = Joi.object({
   profileId: objectId.required(),
+  profileVersion: Joi.number().integer().min(1).required(),
+  recommendationId: objectId.required(),
+  expectedAllocationRevision: Joi.number().integer().min(1).required(),
+  expectedAllocationRevisionId: objectId.required(),
+  expectedPortfolioFingerprint: Joi.string().pattern(/^[a-f0-9]{64}$/).required(),
+  expectedRecommendationFingerprint: Joi.string().pattern(/^[a-f0-9]{64}$/).required(),
   parentInstrumentId: Joi.string().trim().max(50).required(),
   taxCalculationContext: taxCalculationContextSchema.optional(),
 }).unknown(false);

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { StrictMode } from 'react';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import DeepDiveModal from '../DeepDiveModal';
@@ -20,4 +20,31 @@ it('can close and reopen a real instrument without interpreting an absent select
   expect(screen.queryByRole('dialog')).toBeNull();
   view.rerender(<DeepDiveModal {...props} isOpen investment={instrument} />);
   expect(screen.getByRole('dialog', { name: 'Server PPF' })).toBeVisible();
+});
+
+it('switches instrument, horizon, and recommendation in StrictMode without render-phase state updates', () => {
+  const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const first = { id: 'ppf', name: 'Server PPF', nominalReturn: 7.1, riskLabel: 'Very Low' };
+  const second = { id: 'index_mf', name: 'Index category', nominalReturn: 11, riskLabel: 'High' };
+  const view = render(
+    <StrictMode>
+      <DeepDiveModal
+        isOpen investment={first} horizon={15} recommendationMeta={{ recommendationId: 'rec-1', allocation_revision: 1 }}
+        onClose={vi.fn()} allRecommendations={[first, second]}
+      />
+    </StrictMode>,
+  );
+
+  view.rerender(
+    <StrictMode>
+      <DeepDiveModal
+        isOpen investment={second} horizon={7} recommendationMeta={{ recommendationId: 'rec-2', allocation_revision: 2 }}
+        onClose={vi.fn()} allRecommendations={[first, second]}
+      />
+    </StrictMode>,
+  );
+
+  expect(screen.getByRole('dialog', { name: 'Index category' })).toBeVisible();
+  expect(consoleError.mock.calls.flat().join(' ')).not.toMatch(/cannot update a component while rendering|too many re-renders/i);
+  consoleError.mockRestore();
 });

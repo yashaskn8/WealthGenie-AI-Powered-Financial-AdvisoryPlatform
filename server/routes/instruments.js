@@ -6,8 +6,8 @@ import { instrumentListQuerySchema, validateQuery } from '../validation/schemas.
 import Instrument from '../models/Instrument.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import { getCache, setCache } from '../config/redis.js';
-import { buildRecommendationProfile } from '../services/recommendationProfile.js';
 import { serializeCachedInstrumentPage, serializeInstrumentPage } from '../services/instrumentDto.js';
+import { rankWtiAgainstCurrentState } from '../services/currentWtiRanking.js';
 
 const router = Router();
 
@@ -55,30 +55,63 @@ router.get('/', validateQuery(instrumentListQuerySchema), asyncHandler(async (re
   res.json(result);
 }));
 
-import { rankWhereToInvestBackend } from '../services/RecommendationPipeline.js';
-
 /**
  * POST /api/instruments/rank-wti [Protected]
  * Returns a suitability-filtered, source-qualified product comparison. Phase 2
  * supports exact AMFI mutual-fund categories and fails closed for other classes.
  */
 router.post('/rank-wti', verifyJWT, validateStrict(rankWtiProfileSchema), asyncHandler(async (req, res) => {
-  const { profileId, parentInstrumentId, taxCalculationContext } = req.body;
+  const {
+    profileId,
+    profileVersion,
+    recommendationId,
+    expectedAllocationRevision,
+    expectedAllocationRevisionId,
+    expectedPortfolioFingerprint,
+    expectedRecommendationFingerprint,
+    parentInstrumentId,
+    taxCalculationContext,
+  } = req.body;
   const profile = await FinancialProfile.findOne({ _id: profileId, userId: req.user.userId }).lean();
   if (!profile) {
     return sendError(req, res, 404, 'Profile not found or access denied', 'PROFILE_NOT_FOUND');
   }
-  const canonicalProfile = buildRecommendationProfile(profile);
-  const ranked = await rankWhereToInvestBackend(canonicalProfile, { parentInstrumentId, taxCalculationContext });
+
+  const requestedBinding = {
+    profileId: String(profileId),
+    profileVersion: Number(profileVersion),
+    recommendationId: String(recommendationId),
+    allocationRevision: Number(expectedAllocationRevision),
+    allocationRevisionId: String(expectedAllocationRevisionId),
+    portfolioFingerprint: expectedPortfolioFingerprint,
+    recommendationFingerprint: expectedRecommendationFingerprint,
+  };
+  let result;
+  try {
+    result = await rankWtiAgainstCurrentState({
+      userId: req.user.userId,
+      profileId,
+      parentInstrumentId,
+      expectedBinding: requestedBinding,
+      taxCalculationContext,
+    });
+  } catch (error) {
+    if (['FINANCIAL_STATE_CHANGED', 'RECOMMENDATION_PARENT_MISMATCH'].includes(error?.code)) {
+      return sendError(req, res, error.status || 409, error.clientMessage || error.message, error.code);
+    }
+    throw error;
+  }
+
   res.json({
     success: true,
-    total: ranked.length,
-    products: ranked,
-    excluded: ranked.metadata?.excluded || [],
-    suitability: ranked.metadata?.riskReconciliation || null,
-    catalog: ranked.metadata?.catalog || null,
-    ranking: ranked.metadata?.ranking || null,
-    comparisonUniverse: ranked.metadata?.comparisonUniverse || null,
+    financialStateBinding: result.financialStateBinding,
+    total: result.ranked.length,
+    products: result.ranked,
+    excluded: result.ranked.metadata?.excluded || [],
+    suitability: result.ranked.metadata?.riskReconciliation || null,
+    catalog: result.ranked.metadata?.catalog || null,
+    ranking: result.ranked.metadata?.ranking || null,
+    comparisonUniverse: result.ranked.metadata?.comparisonUniverse || null,
   });
 }));
 
