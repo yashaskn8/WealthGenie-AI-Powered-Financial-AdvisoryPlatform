@@ -1,46 +1,76 @@
 {
-  "policy_schema_version": 1,
+  "policy_schema_version": 2,
   "tck_repository": "a2aproject/a2a-tck",
   "tck_sha": "263b9cfaf16a554bdfb166a7ba5b67716e946349",
-  "upstream_issue": "https://github.com/a2aproject/a2a-tck/issues/229",
-  "classification": "KNOWN_UPSTREAM_APPLICABILITY_EXCEPTION",
+  "classification": "KNOWN_UPSTREAM_TCK_EXCEPTIONS",
   "test_case_count": 235,
-  "rationale": "The pinned TCK sends the same generic prompt to a domain-bounded research agent and expects different canned artifact or direct-message scenarios. The prompt does not select those scenario semantics. This policy accepts only the exact pinned fixture failures and does not change product behavior or protocol validation.",
+  "upstream_issues": [
+    {
+      "url": "https://github.com/a2aproject/a2a-tck/issues/229",
+      "classification": "FIXTURE_APPLICABILITY",
+      "rationale": "The pinned TCK sends one generic prompt to a domain-bounded research agent but expects different canned artifact and direct-Message scenarios. No request-visible semantic selector distinguishes those scenarios."
+    },
+    {
+      "url": "https://github.com/a2aproject/a2a-tck/issues/202",
+      "classification": "MISSING_EXPECTED_ERROR_ASSERTION",
+      "rationale": "CORE-SEND-003 describes the required ContentTypeNotSupportedError but omits expected_error in its test data; the shared TCK validator consequently reports the correct non-2xx protocol error as an operation failure."
+    }
+  ],
+  "rationale": "This policy accepts only exact failures from the pinned, unmodified TCK, each tied to a reviewed upstream issue and an exact failure signature. It does not alter product behavior, protocol validation, authentication, or the TCK.",
   "known_failures": [
     {
       "node_id": "tests/compatibility/core_operations/test_artifacts.py::TestTextArtifact::test_task_has_text_artifact[http_json]",
       "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestTextArtifact",
       "junit_name": "test_task_has_text_artifact[http_json]",
       "requirement_id": "DM-ART-001",
-      "failure_fragment": "Response contains no artifacts"
+      "failure_fragment": "Response contains no artifacts",
+      "upstream_issue": "https://github.com/a2aproject/a2a-tck/issues/229",
+      "classification": "FIXTURE_APPLICABILITY"
     },
     {
       "node_id": "tests/compatibility/core_operations/test_artifacts.py::TestFileArtifact::test_task_has_file_artifact[http_json]",
       "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestFileArtifact",
       "junit_name": "test_task_has_file_artifact[http_json]",
       "requirement_id": "DM-ART-001",
-      "failure_fragment": "Response contains no artifacts"
+      "failure_fragment": "Response contains no artifacts",
+      "upstream_issue": "https://github.com/a2aproject/a2a-tck/issues/229",
+      "classification": "FIXTURE_APPLICABILITY"
     },
     {
       "node_id": "tests/compatibility/core_operations/test_artifacts.py::TestFileUrlArtifact::test_task_has_file_url_artifact[http_json]",
       "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestFileUrlArtifact",
       "junit_name": "test_task_has_file_url_artifact[http_json]",
       "requirement_id": "DM-ART-001",
-      "failure_fragment": "Response contains no artifacts"
+      "failure_fragment": "Response contains no artifacts",
+      "upstream_issue": "https://github.com/a2aproject/a2a-tck/issues/229",
+      "classification": "FIXTURE_APPLICABILITY"
     },
     {
       "node_id": "tests/compatibility/core_operations/test_artifacts.py::TestDataArtifact::test_task_has_data_artifact[http_json]",
       "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestDataArtifact",
       "junit_name": "test_task_has_data_artifact[http_json]",
       "requirement_id": "DM-ART-001",
-      "failure_fragment": "Response contains no artifacts"
+      "failure_fragment": "Response contains no artifacts",
+      "upstream_issue": "https://github.com/a2aproject/a2a-tck/issues/229",
+      "classification": "FIXTURE_APPLICABILITY"
     },
     {
       "node_id": "tests/compatibility/core_operations/test_artifacts.py::TestMessageResponse::test_returns_message_with_text_part[http_json]",
       "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestMessageResponse",
       "junit_name": "test_returns_message_with_text_part[http_json]",
       "requirement_id": "DM-MSG-001",
-      "failure_fragment": "Expected a Message response, but got a Task or no payload"
+      "failure_fragment": "Expected a Message response, but got a Task or no payload",
+      "upstream_issue": "https://github.com/a2aproject/a2a-tck/issues/229",
+      "classification": "FIXTURE_APPLICABILITY"
+    },
+    {
+      "node_id": "tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-SEND-003-http_json]",
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-SEND-003-http_json]",
+      "requirement_id": "CORE-SEND-003",
+      "failure_fragment": "Operation failed: [415] Unsupported input media type \"application/x-unsupported-tck-type\"",
+      "upstream_issue": "https://github.com/a2aproject/a2a-tck/issues/202",
+      "classification": "MISSING_EXPECTED_ERROR_ASSERTION"
     }
   ],
   "acceptance": {

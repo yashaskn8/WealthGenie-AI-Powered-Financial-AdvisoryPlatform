@@ -266,9 +266,26 @@ function buildSemanticReplayArtifact({ sourceTask, targetTask }) {
   return verifyResearchArtifact(artifact, { brief: targetBriefResult.value }).valid ? artifact : null;
 }
 
+export function mapA2AHttpErrorResponse(body) {
+  const details = body?.error?.details;
+  if (!Array.isArray(details) || !details.some(detail => detail?.reason === 'CONTENT_TYPE_NOT_SUPPORTED')) return null;
+  return {
+    status: 415,
+    body: {
+      ...body,
+      error: { ...body.error, code: 415 },
+    },
+  };
+}
+
 function enforceHttpJsonContract(req, res, next) {
   const sendJson = res.json.bind(res);
   res.json = body => {
+    const mappedError = mapA2AHttpErrorResponse(body);
+    if (mappedError) {
+      res.status(mappedError.status);
+      body = mappedError.body;
+    }
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     return sendJson(body);
   };

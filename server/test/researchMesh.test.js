@@ -13,7 +13,7 @@ import { assertSafePublicUrl, validatePublicUrl, SafePublicDocumentFetcher, requ
 import { extractDocumentEvidence } from '../agents/research/documentEvidenceExtractor.js';
 import { runResearch } from '../agents/research/researchLoop.js';
 import { buildScenarioAnalysisArtifact } from '../agents/research/scenarioAnalysis.js';
-import { startResearchAgentServer } from '../agents/research/researchAgentServer.js';
+import { mapA2AHttpErrorResponse, startResearchAgentServer } from '../agents/research/researchAgentServer.js';
 import { ResearchMeshClient, createResearchMeshClient } from '../agents/research/researchMeshClient.js';
 import { invokePlanReviewGraph } from '../agents/planReview/planReviewGraph.js';
 import { classifyResearchSource } from '../agents/research/sourceTrust.js';
@@ -44,6 +44,23 @@ async function freePort() {
   await new Promise(resolve => server.close(resolve));
   return port;
 }
+
+test('A2A REST maps unsupported-media semantics to HTTP 415 without mutating the SDK payload', () => {
+  const sdkBody = {
+    error: {
+      code: 400,
+      status: 'INVALID_ARGUMENT',
+      message: 'Unsupported input media type.',
+      details: [{ reason: 'CONTENT_TYPE_NOT_SUPPORTED' }],
+    },
+  };
+  const mapped = mapA2AHttpErrorResponse(sdkBody);
+
+  assert.equal(mapped.status, 415);
+  assert.equal(mapped.body.error.code, 415);
+  assert.equal(sdkBody.error.code, 400, 'the SDK-owned response object is not mutated');
+  assert.equal(mapA2AHttpErrorResponse({ error: { code: 400, details: [{ reason: 'INVALID_PARAMS' }] } }), null);
+});
 
 test('generated ResearchBrief IDs cannot accidentally resemble private numbers', t => {
   let uuid = '00000000-0000-4000-8000-612345678901';
@@ -440,25 +457,27 @@ test('official A2A client/server boundary resolves card, returns artifact, and c
         details: [],
       },
     });
-    const unsupportedContentType = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
-      method: 'POST',
-      headers: { 'content-type': 'text/plain', authorization: `Bearer ${env.AGENT_A2A_DEV_TOKEN}` },
-      body: '{}',
-    });
-    assert.equal(unsupportedContentType.status, 415);
-    assert.match(unsupportedContentType.headers.get('content-type') || '', /^application\/json\b/i);
-    assert.deepEqual(await unsupportedContentType.json(), {
-      error: {
-        code: 415,
-        status: 'INVALID_ARGUMENT',
-        message: 'Unsupported Content-Type "text/plain"; expected application/json or application/a2a+json.',
-        details: [{
-          '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
-          reason: 'CONTENT_TYPE_NOT_SUPPORTED',
-          domain: 'a2a-protocol.org',
-        }],
-      },
-    });
+    for (const contentType of ['text/plain', 'application/xml', 'text/html', 'application/octet-stream', 'multipart/form-data', 'not a media type']) {
+      const unsupportedContentType = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
+        method: 'POST',
+        headers: { 'content-type': contentType, authorization: `Bearer ${env.AGENT_A2A_DEV_TOKEN}` },
+        body: '{}',
+      });
+      assert.equal(unsupportedContentType.status, 415, contentType);
+      assert.match(unsupportedContentType.headers.get('content-type') || '', /^application\/json\b/i);
+      assert.deepEqual(await unsupportedContentType.json(), {
+        error: {
+          code: 415,
+          status: 'INVALID_ARGUMENT',
+          message: `Unsupported Content-Type "${contentType}"; expected application/json or application/a2a+json.`,
+          details: [{
+            '@type': 'type.googleapis.com/google.rpc.ErrorInfo',
+            reason: 'CONTENT_TYPE_NOT_SUPPORTED',
+            domain: 'a2a-protocol.org',
+          }],
+        },
+      });
+    }
     const unsupportedInputMediaType = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
       method: 'POST',
       headers: {
@@ -474,9 +493,12 @@ test('official A2A client/server boundary resolves card, returns artifact, and c
         },
       }),
     });
-    assert.equal(unsupportedInputMediaType.status, 400);
+    assert.equal(unsupportedInputMediaType.status, 415);
+    assert.match(unsupportedInputMediaType.headers.get('content-type') || '', /^application\/json\b/i);
     const unsupportedInputBody = await unsupportedInputMediaType.json();
-    assert.equal(unsupportedInputBody.error.code, 400);
+    assert.equal(unsupportedInputBody.error.code, 415);
+    assert.equal(unsupportedInputBody.error.status, 'INVALID_ARGUMENT');
+    assert.match(unsupportedInputBody.error.message, /Unsupported input media type/);
     assert.equal(unsupportedInputBody.error.details[0]['@type'], 'type.googleapis.com/google.rpc.ErrorInfo');
     assert.equal(unsupportedInputBody.error.details[0].reason, 'CONTENT_TYPE_NOT_SUPPORTED');
     assert.equal(unsupportedInputBody.error.details[0].domain, 'a2a-protocol.org');
@@ -566,39 +588,47 @@ test('A2A rejects unsupported part media and returns failed Tasks for unstructur
     for (const [index, part] of [
       { raw: Buffer.from('unsupported file').toString('base64'), mediaType: 'image/png' },
       { data: { question: 'public research' }, mediaType: 'video/mp4' },
+      { raw: 'dGNr', mediaType: 'application/xml' },
+      { raw: 'dGNr', mediaType: 'text/html' },
+      { raw: 'dGNr', mediaType: 'application/octet-stream' },
+      { raw: 'dGNr', mediaType: 'multipart/form-data' },
+      { raw: 'dGNr', mediaType: 'application/x-unsupported-tck-type' },
     ].entries()) {
       const response = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
         method: 'POST', headers,
         body: JSON.stringify({ message: { messageId: `unsupported-media-${index}`, role: 'ROLE_USER', parts: [part] } }),
       });
       const body = await response.json();
-      assert.equal(response.status, 400, JSON.stringify(body));
+      assert.equal(response.status, 415, JSON.stringify(body));
       assert.match(response.headers.get('content-type') || '', /^application\/json\b/i);
+      assert.equal(body.error.code, 415, JSON.stringify(body));
       assert.equal(body.error.status, 'INVALID_ARGUMENT', JSON.stringify(body));
       assert.equal(body.error.details[0].reason, 'CONTENT_TYPE_NOT_SUPPORTED');
     }
-    for (const returnImmediately of [false, true]) {
-      const response = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
-        method: 'POST', headers,
-        body: JSON.stringify({
-          message: {
-            messageId: `unstructured-${returnImmediately}`, role: 'ROLE_USER',
-            parts: [{ text: 'Please research this without a structured brief.', mediaType: 'text/plain' }],
-          },
-          configuration: { returnImmediately },
-        }),
-      });
-      const body = await response.json();
-      assert.equal(response.status, 200, JSON.stringify(body));
-      assert.ok(body.task?.id, 'every accepted execution establishes a Task identity');
-      assert.ok(body.task.contextId, 'the Task retains its generated context binding');
-      assert.deepEqual(body.task.artifacts || [], [], 'invalid briefs never fabricate evidence');
-      if (!returnImmediately) {
-        assert.equal(body.task.status.state, 'TASK_STATE_FAILED');
-        assert.match(body.task.status.message.parts[0].text, /A2A_TASK_RECOVERY_INPUT_UNAVAILABLE/);
-        const restored = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/tasks/${body.task.id}`, { headers });
-        assert.equal(restored.status, 200);
-        assert.equal((await restored.json()).status.state, 'TASK_STATE_FAILED');
+    for (const mediaType of ['text/plain', 'TEXT/PLAIN; charset=UTF-8']) {
+      for (const returnImmediately of [false, true]) {
+        const response = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/message:send`, {
+          method: 'POST', headers,
+          body: JSON.stringify({
+            message: {
+              messageId: `unstructured-${mediaType}-${returnImmediately}`, role: 'ROLE_USER',
+              parts: [{ text: 'Please research this without a structured brief.', mediaType }],
+            },
+            configuration: { returnImmediately },
+          }),
+        });
+        const body = await response.json();
+        assert.equal(response.status, 200, JSON.stringify(body));
+        assert.ok(body.task?.id, 'every accepted execution establishes a Task identity');
+        assert.ok(body.task.contextId, 'the Task retains its generated context binding');
+        assert.deepEqual(body.task.artifacts || [], [], 'invalid briefs never fabricate evidence');
+        if (!returnImmediately) {
+          assert.equal(body.task.status.state, 'TASK_STATE_FAILED');
+          assert.match(body.task.status.message.parts[0].text, /A2A_TASK_RECOVERY_INPUT_UNAVAILABLE/);
+          const restored = await fetch(`${env.AGENT_A2A_PUBLIC_URL}/a2a/tasks/${body.task.id}`, { headers });
+          assert.equal(restored.status, 200);
+          assert.equal((await restored.json()).status.state, 'TASK_STATE_FAILED');
+        }
       }
     }
     assert.equal(researchRuns, 0);

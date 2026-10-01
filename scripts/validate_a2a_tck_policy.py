@@ -16,6 +16,10 @@ from typing import Any
 
 
 REQUIREMENT_ID = re.compile(r"\b(?:DM|CORE)-[A-Z]+-\d{3}\b")
+EXPECTED_UPSTREAM_ISSUES = {
+    "https://github.com/a2aproject/a2a-tck/issues/229": "FIXTURE_APPLICABILITY",
+    "https://github.com/a2aproject/a2a-tck/issues/202": "MISSING_EXPECTED_ERROR_ASSERTION",
+}
 
 
 @dataclass
@@ -36,30 +40,46 @@ class Outcome:
 
 def _policy_cases(policy: dict[str, Any], outcome: Outcome) -> dict[tuple[str, str], dict[str, str]]:
     cases = policy.get("known_failures")
-    if not isinstance(cases, list) or len(cases) != 5:
-        outcome.violations.append("policy must contain exactly the five reviewed upstream scenarios")
+    if not isinstance(cases, list) or len(cases) != 6:
+        outcome.violations.append("policy must contain exactly the six reviewed pinned-TCK exceptions")
         return {}
 
+    issue_entries = policy.get("upstream_issues")
+    if not isinstance(issue_entries, list):
+        issue_entries = []
+    issue_classifications = {
+        issue.get("url"): issue.get("classification")
+        for issue in issue_entries
+        if isinstance(issue, dict)
+    }
     indexed: dict[tuple[str, str], dict[str, str]] = {}
     node_ids: set[str] = set()
     for case in cases:
         if not isinstance(case, dict):
             outcome.violations.append("policy contains a malformed known-failure entry")
             continue
-        required = ("node_id", "junit_classname", "junit_name", "requirement_id", "failure_fragment")
+        required = (
+            "node_id", "junit_classname", "junit_name", "requirement_id",
+            "failure_fragment", "upstream_issue", "classification",
+        )
         if any(not isinstance(case.get(key), str) or not case[key] for key in required):
             outcome.violations.append("policy known-failure entry is missing required identity or failure metadata")
+            continue
+        if issue_classifications.get(case["upstream_issue"]) != case["classification"]:
+            outcome.violations.append(f"policy case has an unreviewed upstream issue/classification: {case['node_id']}")
             continue
         key = (case["junit_classname"], case["junit_name"])
         if key in indexed or case["node_id"] in node_ids:
             outcome.violations.append("policy contains duplicate known-failure identities")
             continue
-        module_and_class = case["junit_classname"].rsplit(".", 1)
-        if len(module_and_class) != 2:
-            outcome.violations.append(f"policy has invalid JUnit class identity for {case['node_id']}")
-            continue
-        expected_node_id = f"{module_and_class[0].replace('.', '/')}.py::{module_and_class[1]}::{case['junit_name']}"
-        if case["node_id"] != expected_node_id:
+        dotted_identity = case["junit_classname"].split(".")
+        module_path = "/".join(dotted_identity)
+        valid_node_ids = {f"{module_path}.py::{case['junit_name']}"}
+        if len(dotted_identity) > 1:
+            class_name = dotted_identity[-1]
+            class_module_path = "/".join(dotted_identity[:-1])
+            valid_node_ids.add(f"{class_module_path}.py::{class_name}::{case['junit_name']}")
+        if case["node_id"] not in valid_node_ids:
             outcome.violations.append(f"policy node ID does not match JUnit identity: {case['node_id']}")
             continue
         indexed[key] = case
@@ -141,16 +161,31 @@ def evaluate_report(
         outcome.violations.append(f"could not read valid A2A policy: {error}")
         return outcome, {}
 
-    if policy.get("policy_schema_version") != 1:
+    if policy.get("policy_schema_version") != 2:
         outcome.violations.append("unsupported A2A policy schema version")
     pinned_sha = policy.get("tck_sha")
     if not isinstance(pinned_sha, str) or tck_sha.lower() != pinned_sha.lower():
         outcome.violations.append("supplied TCK SHA does not match the policy pin")
     if policy.get("tck_repository") != "a2aproject/a2a-tck":
         outcome.violations.append("policy TCK repository is not the official upstream repository")
-    if policy.get("upstream_issue") != "https://github.com/a2aproject/a2a-tck/issues/229":
-        outcome.violations.append("policy does not reference the reviewed upstream applicability issue")
-    if policy.get("classification") != "KNOWN_UPSTREAM_APPLICABILITY_EXCEPTION":
+    issues = policy.get("upstream_issues")
+    actual_issues: dict[str, str] = {}
+    if not isinstance(issues, list):
+        outcome.violations.append("policy upstream issue catalog is missing or malformed")
+    else:
+        for issue in issues:
+            if not isinstance(issue, dict) or not all(
+                isinstance(issue.get(key), str) and issue[key]
+                for key in ("url", "classification", "rationale")
+            ):
+                outcome.violations.append("policy contains malformed upstream issue metadata")
+                continue
+            if issue["url"] in actual_issues:
+                outcome.violations.append("policy contains duplicate upstream issue metadata")
+            actual_issues[issue["url"]] = issue["classification"]
+        if actual_issues != EXPECTED_UPSTREAM_ISSUES:
+            outcome.violations.append("policy upstream issues/classifications differ from the reviewed exact set")
+    if policy.get("classification") != "KNOWN_UPSTREAM_TCK_EXCEPTIONS":
         outcome.violations.append("policy classification is invalid")
     if policy.get("acceptance") != {
         "allow_skipped_known_tests": False,
@@ -286,7 +321,7 @@ def evaluate_report(
 def format_summary(outcome: Outcome, policy: dict[str, Any], tck_sha: str) -> str:
     accepted_known = len(outcome.accepted_known_failures)
     if outcome.accepted and accepted_known:
-        classification = "PASS_WITH_KNOWN_UPSTREAM_APPLICABILITY_BLOCKER"
+        classification = "PASS_WITH_KNOWN_UPSTREAM_TCK_EXCEPTIONS"
     elif outcome.accepted:
         classification = "PASS_ALL_PINNED_MUST_SCENARIOS"
     else:
@@ -302,7 +337,11 @@ def format_summary(outcome: Outcome, policy: dict[str, Any], tck_sha: str) -> st
         f"Raw TCK JUnit result: {raw}",
         f"Known expected upstream failures: {accepted_known}",
         f"Unknown failures: {len(outcome.unknown_failures)}",
-        f"Known blocker: {policy.get('upstream_issue', 'unavailable')}",
+        "Reviewed upstream issues: " + ", ".join(
+            issue.get("url", "unavailable")
+            for issue in policy.get("upstream_issues", [])
+            if isinstance(issue, dict)
+        ),
         f"Classification: `{classification}`",
         "",
         "Product conformance claims: do not claim `100% A2A conformant`.",
@@ -310,9 +349,19 @@ def format_summary(outcome: Outcome, policy: dict[str, Any], tck_sha: str) -> st
     if accepted_known:
         lines.extend([
             "",
-            "All applicable MUST checks passed; the exact prompt-dependent TCK fixture scenarios listed below remain tracked under upstream issue #229.",
-            *[f"- `{node_id}`" for node_id in outcome.accepted_known_failures],
+            "The raw TCK failures below remain visible and are accepted only as exact, reviewed upstream TCK exceptions. This result is not a claim of 100% conformance.",
         ])
+        case_by_node = {
+            case.get("node_id"): case
+            for case in policy.get("known_failures", [])
+            if isinstance(case, dict)
+        }
+        for node_id in outcome.accepted_known_failures:
+            case = case_by_node.get(node_id, {})
+            lines.append(
+                f"- `{node_id}` — {case.get('classification', 'unavailable')}; "
+                f"{case.get('upstream_issue', 'upstream issue unavailable')}"
+            )
     if outcome.unknown_failures:
         lines.extend(["", "Unapproved failures:", *[f"- `{item}`" for item in outcome.unknown_failures]])
     if outcome.violations:
