@@ -2,15 +2,27 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assessCurrentMarketContext,
+  BACKEND_HTTP_HARD_TIMEOUT_MS,
+  DASHBOARD_BROWSER_TIMEOUT_MS,
   checkBrowserAndFinancialFlow,
   EXPECTED_PREFLIGHT_CHECKS,
   hasAuthenticatedDashboard,
   hasCurrentFinancialBinding,
   isRedisRequired,
+  LOGIN_BROWSER_TIMEOUT_MS,
+  MARKET_DEPENDENCY_PROBE_TIMEOUT_MS,
   makeReporter,
+  matchesBuildSha,
   matchesRecommendationBinding,
+  PROFILE_USER_FLOW_TIMEOUT_MS,
+  readJson,
+  REDIS_PROBE_TIMEOUT_MS,
   reportWtiProductChecks,
   qualifiesExactNiftyEtf,
+  qualifiesWtiResponse,
+  qualifiesCalculatedNiftyEtfTax,
+  runDemoPreflight,
+  WTI_USER_FLOW_TIMEOUT_MS,
 } from '../scripts/demoPreflight.js';
 
 const currentBinding = () => ({
@@ -62,6 +74,35 @@ const qualifiedNiftyEtf = () => ({
   },
 });
 
+const qualifiedWtiResponse = (products = [qualifiedNiftyEtf()], recommendation = currentBinding()) => ({
+  success: true,
+  financialStateBinding: {
+    profileId: recommendation.profileId,
+    profileVersion: recommendation.profile_version,
+    recommendationId: recommendation.recommendationId,
+    allocationRevision: recommendation.allocation_revision,
+    allocationRevisionId: recommendation.allocation_revision_id,
+    portfolioFingerprint: recommendation.portfolio_fingerprint,
+    recommendationFingerprint: recommendation.recommendation_fingerprint,
+  },
+  total: products.length,
+  products,
+  ranking: {
+    version: 'nifty-etf-ranking-1.0.0',
+    status: 'VERIFIED_COMPARABLE_OPTIONS',
+    authority: 'OFFICIAL_SCHEME_IDENTITY_AND_AMFI_CURRENT_NAV',
+    method: null,
+    hasUniqueLeader: false,
+  },
+  comparisonUniverse: {
+    parentInstrumentId: 'nifty_etf',
+    sourceProvider: 'AMFI',
+    verifiedIdentityCount: products.length,
+    freshNavProductCount: products.length,
+    returnedProductCount: products.length,
+  },
+});
+
 function fakeHttpResponse(status, body, { malformed = false } = {}) {
   return {
     ok: () => status >= 200 && status < 300,
@@ -87,6 +128,33 @@ function browserFlowFixture(scenario = {}) {
     recommendationFingerprint: recommendation.recommendation_fingerprint,
   };
   const login = fakeHttpResponse(scenario.loginStatus ?? 200, {});
+  const uiProduct = {
+    ...qualifiedNiftyEtf(),
+    postTaxAnalysis: { status: scenario.frontendWtiTaxCalculated ? 'CALCULATED' : 'TAX_CLASSIFICATION_UNAVAILABLE' },
+  };
+  if (scenario.frontendWtiWrongProduct) uiProduct.canonicalProductId = 'etf:isin:OTHER';
+  const uiWtiBody = qualifiedWtiResponse([uiProduct], recommendation);
+  if (scenario.frontendWtiBindingMismatch) uiWtiBody.financialStateBinding.allocationRevision += 1;
+  if (scenario.frontendWtiResponseMutation) scenario.frontendWtiResponseMutation(uiWtiBody);
+  let wtiUiRequested = false;
+  let resolveWtiUiResponse;
+  const createWtiUiResponse = () => ({
+    ...fakeHttpResponse(200, uiWtiBody),
+    url: () => 'http://127.0.0.1:5000/api/instruments/rank-wti',
+    request: () => ({
+      method: () => 'POST',
+      postDataJSON: () => ({
+        profileId: recommendation.profileId,
+        profileVersion: recommendation.profile_version + (scenario.frontendWtiRequestBindingMismatch ? 1 : 0),
+        recommendationId: recommendation.recommendationId,
+        expectedAllocationRevision: recommendation.allocation_revision,
+        expectedAllocationRevisionId: recommendation.allocation_revision_id,
+        expectedPortfolioFingerprint: recommendation.portfolio_fingerprint,
+        expectedRecommendationFingerprint: recommendation.recommendation_fingerprint,
+        parentInstrumentId: 'nifty_etf',
+      }),
+    }),
+  });
   const page = {
     on(event, callback) { if (event === 'request') requestListener = callback; },
     async goto(url) {
@@ -112,27 +180,63 @@ function browserFlowFixture(scenario = {}) {
       return fakeHttpResponse(200, {});
     },
     locator(selector) {
+      const isWtiCategory = selector === '[data-testid="wti-category-nifty_etf"]';
+      const isWtiProduct = selector === '[data-testid="wti-product-etf:isin:INF204KB14I2"]'
+        || selector === '[data-testid="nav-investments"] [data-testid="wti-product-etf:isin:INF204KB14I2"]';
+      const isUnavailableTax = selector.includes('wti-post-tax-cta-box');
       return {
         async waitFor() {
           if (selector === 'aside.sidebar' && scenario.dashboardError) throw Object.assign(new Error('secret dashboard detail'), { code: 'DASHBOARD_FAILED' });
           if (selector === 'aside.sidebar' && scenario.sidebarMissing) throw Object.assign(new Error('sidebar missing'), { name: 'TimeoutError' });
           if (selector === '#login-form' && scenario.loginFormError) throw Object.assign(new Error('secret login detail'), { code: 'LOGIN_FORM_TIMEOUT' });
           if (selector !== '#login-form' && selector !== 'aside.sidebar' && scenario.loginControlError) throw Object.assign(new Error('secret login control detail'), { code: 'LOGIN_CONTROL_TIMEOUT' });
+          if (isWtiCategory && scenario.frontendWtiMissing) throw Object.assign(new Error('category missing'), { name: 'TimeoutError' });
+          if (isWtiProduct && (scenario.frontendWtiWrongProduct || scenario.frontendWtiBindingMismatch)) throw Object.assign(new Error('product unavailable'), { name: 'TimeoutError' });
+          if (isUnavailableTax && (scenario.frontendWtiTaxHidden || scenario.frontendWtiTaxCalculated)) throw Object.assign(new Error('tax unavailable state missing'), { name: 'TimeoutError' });
         },
         async fill() {},
-        async click() {},
-        async isVisible() { return selector !== 'aside.sidebar' || !scenario.sidebarMissing; },
+        async click() {
+          if (selector === '[data-testid="wti-category-nifty_etf"]') {
+            if (scenario.frontendWtiDirectProviderRequest) requestListener?.({ url: () => 'https://portal.amfiindia.com/spages/NAVAll.txt' });
+            wtiUiRequested = true;
+            resolveWtiUiResponse?.(createWtiUiResponse());
+          }
+        },
+        async isVisible() {
+          if (selector === 'aside.sidebar') return !scenario.sidebarMissing;
+          if (isWtiCategory) return !scenario.frontendWtiMissing;
+          if (isWtiProduct) return !scenario.frontendWtiWrongProduct && !scenario.frontendWtiBindingMismatch;
+          if (isUnavailableTax) return !scenario.frontendWtiTaxHidden && !scenario.frontendWtiTaxCalculated;
+          if (selector.includes('.wti-post-tax-box')) return false;
+          return true;
+        },
+        async innerText() { return 'Exact-product tax illustration: tax classification unavailable.'; },
+        locator(childSelector) { return page.locator(`${selector} ${childSelector}`); },
       };
     },
     async waitForResponse(predicate) {
-      const response = {
+      const loginResponse = {
         ...login,
         url: () => 'http://127.0.0.1:5000/api/auth/login',
         request: () => ({ method: () => 'POST' }),
       };
-      assert.equal(predicate(response), true);
-      return response;
+      if (predicate(loginResponse)) return loginResponse;
+      if (wtiUiRequested) {
+        const response = createWtiUiResponse();
+        if (predicate(response)) return response;
+      }
+      return new Promise((resolve, reject) => {
+        resolveWtiUiResponse = response => {
+          try {
+            if (predicate(response)) resolve(response);
+            else reject(new Error('unexpected frontend WTI response'));
+          } catch (error) {
+            reject(error);
+          }
+        };
+      });
     },
+    async evaluate() { return scenario.frontendBuildSha ?? 'c'.repeat(40); },
     url: () => currentUrl,
     request: {
       async post(url) {
@@ -143,12 +247,12 @@ function browserFlowFixture(scenario = {}) {
           if (scenario.wtiError) throw scenario.wtiError;
           if (scenario.wtiStatus) return fakeHttpResponse(scenario.wtiStatus, { code: scenario.wtiCode || 'UPSTREAM_UNAVAILABLE' });
           if (scenario.wtiMalformed) return fakeHttpResponse(200, null, { malformed: true });
-          return fakeHttpResponse(200, {
-            ...(scenario.wtiMissingBinding ? {} : {
-              financialStateBinding: scenario.wtiBindingMismatch ? { ...rankBinding, allocationRevision: 99 } : rankBinding,
-            }),
-            products: scenario.products ?? [{ ...qualifiedNiftyEtf(), postTaxAnalysis: { status: 'TAX_CLASSIFICATION_UNAVAILABLE' } }],
-          });
+          const products = scenario.products ?? [{ ...qualifiedNiftyEtf(), postTaxAnalysis: { status: 'TAX_CLASSIFICATION_UNAVAILABLE' } }];
+          const body = qualifiedWtiResponse(products, recommendation);
+          if (scenario.wtiMissingBinding) delete body.financialStateBinding;
+          if (scenario.wtiBindingMismatch) body.financialStateBinding = { ...rankBinding, allocationRevision: 99 };
+          if (scenario.wtiMetadataMutation) scenario.wtiMetadataMutation(body);
+          return fakeHttpResponse(200, body);
         }
         throw new Error('unexpected fake POST endpoint');
       },
@@ -188,6 +292,7 @@ async function runBrowserFlow(scenario = {}) {
     password: 'fixture-password',
     idempotencyKey: 'fixture-idempotency-key',
     parentInstrumentId: scenario.parentInstrumentId ?? 'nifty_etf',
+    expectedBuildSha: 'c'.repeat(40),
   }, fixture);
   return { ...reporter.finish(), lines };
 }
@@ -379,6 +484,319 @@ test('preflight reporter rejects duplicate and unknown writes and protects final
   assert.ok(result.checks.filter(check => check.state === 'NOT_EVALUATED').every(check => !check.passed));
 });
 
+test('runDemoPreflight accepts injected environment and output while preserving terminal check accounting', async () => {
+  const output = [];
+  const result = await runDemoPreflight({
+    environment: { DEMO_LIVE_PREFLIGHT: '0' },
+    write: line => output.push(line),
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.checks.length, EXPECTED_PREFLIGHT_CHECKS.length);
+  assert.equal(result.checks.filter(check => check.passed).length, 0);
+  assert.equal(result.checks.filter(check => check.state === 'NOT_EVALUATED').length, EXPECTED_PREFLIGHT_CHECKS.length - 1);
+  assert.equal(result.checks.find(check => check.name === 'Explicit live-demo mode').state, 'FAIL');
+  assert.equal(output.length, EXPECTED_PREFLIGHT_CHECKS.length + 2);
+  assert.match(output.at(-2), /Live-demo preflight: 0 PASS, 22 FAIL/);
+});
+
+function injectedOrchestrationDependencies({ marketStatus = 'CURRENT', backendSha = 'e'.repeat(40), userPathPass = false } = {}) {
+  const expectedSha = 'e'.repeat(40);
+  const marketBody = {
+    status: 'MARKET_CONTEXT_AVAILABLE',
+    marketSnapshot: {
+      status: marketStatus,
+      availability: 'AVAILABLE',
+      observedAt: '2026-10-01T09:30:00.000Z',
+      providerSelection: { selectedProvider: 'NSE' },
+      providerStatus: { quotes: { provider: 'NSE' }, history: { provider: 'NSE' } },
+      observedFacts: ['nifty50Current', 'indiaVixCurrent'].map((key, index) => ({
+        key,
+        value: index === 0 ? 24000 : 14,
+        availabilityStatus: 'AVAILABLE',
+        observedAt: '2026-10-01T09:29:00.000Z',
+        freshness: { status: 'FRESH' },
+        source: { provider: 'NSE' },
+      })),
+      derivedFacts: [{ value: 0.25, availabilityStatus: 'AVAILABLE', freshness: { status: 'FRESH' } }],
+    },
+  };
+  const response = (status, body) => ({ response: { ok: status >= 200 && status < 300, status }, body });
+  const environment = {
+    DEMO_LIVE_PREFLIGHT: '1',
+    DEMO_API_BASE_URL: 'http://127.0.0.1:5000/api',
+    DEMO_FRONTEND_URL: 'http://127.0.0.1:5173',
+    DEMO_PROFILE_COMPLETION_FILE: 'fixture-profile.json',
+    DEMO_TAX_CONTEXT_FILE: 'fixture-tax.json',
+    DEMO_EMAIL: 'demo@example.invalid',
+    DEMO_PASSWORD: 'fixture-only',
+    DEMO_COMPLETION_IDEMPOTENCY_KEY: 'fixture-idempotency-key',
+    DEMO_NIFTY_ETF_PARENT_ID: 'nifty_etf',
+    DEMO_EXPECTED_BUILD_SHA: expectedSha,
+    NODE_ENV: 'test',
+  };
+  const dependencies = {
+    async loadJson(filePath, label, reporter) {
+      reporter.add(label, true, 'fixture JSON validated');
+      return label === 'Profile completion payload' ? { profile: true } : { fiscalYear: 'FY2026-27' };
+    },
+    async readHttp(url) {
+      if (url.endsWith('/health/live')) return response(200, { status: 'ALIVE', buildSha: backendSha });
+      if (url.endsWith('/health/ready')) return response(200, { status: 'READY' });
+      if (url.endsWith('/health/verification')) return response(200, {
+        status: 'VERIFIED',
+        buildSha: expectedSha,
+        mongo: { connected: true, transactionCapable: true },
+        redis: { required: false, connected: false },
+      });
+      if (url.endsWith('/health/deep')) return response(200, { services: { database: 'UP', redis: 'DOWN' } });
+      if (url.endsWith('/regime/current')) return response(200, marketBody);
+      if (url.endsWith('/tax/policies')) return response(200, {
+        currentFiscalYearVerified: true,
+        currentFiscalYear: 'FY2026-27',
+      });
+      throw new Error('Unexpected injected HTTP probe');
+    },
+    async verifyBrowser(reporter, { taxContext, parentInstrumentId }) {
+      reporter.add('Profile completion/auth', true, 'fixture success');
+      reporter.add('Recommendation current-state binding', true, 'fixture success');
+      await reportWtiProductChecks(reporter, {
+        requestWti: async () => ({ ok: true, status: 200, json: async () => qualifiedWtiResponse([{
+          ...qualifiedNiftyEtf(),
+          postTaxAnalysis: { status: 'TAX_CLASSIFICATION_UNAVAILABLE' },
+        }]) }),
+        recommendation: currentBinding(),
+        parentInstrumentId,
+        taxContext,
+      });
+      reporter.add('Critical browser path', userPathPass, userPathPass ? 'fixture user flow verified' : 'fixture browser journey did not verify');
+    },
+    async verifyBuild() { return { passed: true, detail: 'fixture build succeeded' }; },
+  };
+  return { environment, dependencies };
+}
+
+test('live orchestration retains all checks and successful probes cannot override market, tax, or user-flow failures', async () => {
+  const output = [];
+  const fixture = injectedOrchestrationDependencies({ marketStatus: 'LAST_AVAILABLE', userPathPass: false });
+  const result = await runDemoPreflight({ ...fixture, write: line => output.push(line) });
+
+  assert.equal(result.checks.length, 22);
+  assert.deepEqual(result.checks.map(check => check.name), EXPECTED_PREFLIGHT_CHECKS);
+  assert.equal(result.checks.filter(check => check.passed).length + result.failed, 22);
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.checks.find(check => check.name === 'Mongo/transaction support').passed, true);
+  assert.equal(result.checks.find(check => check.name === 'Redis if required').passed, true);
+  assert.equal(result.checks.find(check => check.name === 'Market context').passed, false);
+  assert.equal(result.checks.find(check => check.name === 'Product tax workflow').passed, false);
+  assert.match(result.checks.find(check => check.name === 'Product tax workflow').detail, /TAX_CLASSIFICATION_UNAVAILABLE/);
+  assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
+  assert.equal(output.length, EXPECTED_PREFLIGHT_CHECKS.length + 2);
+  assert.match(output.at(-2), /19 PASS, 3 FAIL/);
+});
+
+test('live orchestration rejects a backend process whose explicit SHA differs from the expected build', async () => {
+  const fixture = injectedOrchestrationDependencies({ backendSha: 'f'.repeat(40), userPathPass: true });
+  const result = await runDemoPreflight({ ...fixture, write: () => {} });
+  assert.equal(result.checks.find(check => check.name === 'Backend').passed, false);
+  assert.equal(result.exitCode, 1);
+});
+
+test('market dependency probe tolerates a virtual 13-second response under its independent budget', async () => {
+  let now = 0;
+  const timers = new Map();
+  let nextTimerId = 0;
+  const timerOptions = {
+    setTimeout(callback, delay) {
+      const id = ++nextTimerId;
+      timers.set(id, { callback, at: now + delay });
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
+  };
+  const advanceBy = milliseconds => {
+    now += milliseconds;
+    for (const [id, timer] of timers) {
+      if (timer.at <= now) {
+        timers.delete(id);
+        timer.callback();
+      }
+    }
+  };
+  let resolveFetch;
+  const pendingFetch = new Promise(resolve => { resolveFetch = resolve; });
+  const resultPromise = readJson('http://127.0.0.1:5000/api/regime/current', {
+    timeoutMs: MARKET_DEPENDENCY_PROBE_TIMEOUT_MS,
+    fetchImpl: async () => pendingFetch,
+    createAbortSignal: () => undefined,
+    timerOptions,
+  });
+
+  advanceBy(13_001);
+  resolveFetch({ ok: true, status: 200, json: async () => ({ status: 'MARKET_CONTEXT_AVAILABLE' }) });
+  const result = await resultPromise;
+  assert.equal(result.body.status, 'MARKET_CONTEXT_AVAILABLE');
+  assert.ok(MARKET_DEPENDENCY_PROBE_TIMEOUT_MS > 12_000);
+  assert.ok(MARKET_DEPENDENCY_PROBE_TIMEOUT_MS < PROFILE_USER_FLOW_TIMEOUT_MS);
+  assert.ok(WTI_USER_FLOW_TIMEOUT_MS <= 90_000);
+  assert.ok(BACKEND_HTTP_HARD_TIMEOUT_MS < PROFILE_USER_FLOW_TIMEOUT_MS);
+  assert.ok(LOGIN_BROWSER_TIMEOUT_MS < DASHBOARD_BROWSER_TIMEOUT_MS);
+  assert.ok(REDIS_PROBE_TIMEOUT_MS > 0);
+});
+
+test('WTI verifier cannot certify a result after the shared frontend user-flow budget', async () => {
+  let now = 0;
+  const timers = new Map();
+  let nextTimerId = 0;
+  const timerOptions = {
+    setTimeout(callback, delay) {
+      const id = ++nextTimerId;
+      timers.set(id, { callback, at: now + delay });
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
+  };
+  const advanceBy = milliseconds => {
+    now += milliseconds;
+    for (const [id, timer] of timers) {
+      if (timer.at <= now) {
+        timers.delete(id);
+        timer.callback();
+      }
+    }
+  };
+  let settled = false;
+  const reporter = makeReporter(() => {});
+  const checking = reportWtiProductChecks(reporter, {
+    requestWti: () => new Promise(() => {}),
+    recommendation: currentBinding(),
+    parentInstrumentId: 'nifty_etf',
+    taxContext: { fiscalYear: 'FY2026-27' },
+    timerOptions,
+  }).then(() => { settled = true; });
+
+  advanceBy(WTI_USER_FLOW_TIMEOUT_MS + 1);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, true, 'the verifier must terminate at the user-flow deadline');
+  await checking;
+  const result = reporter.finish();
+  assert.equal(result.checks.find(check => check.name === 'ETF product source').passed, false);
+  assert.match(result.checks.find(check => check.name === 'ETF product source').detail, /timeout/i);
+  assert.equal(WTI_USER_FLOW_TIMEOUT_MS, 90_000);
+});
+
+test('build SHA attestation requires exact explicit backend and frontend runtime identity', () => {
+  const expected = 'a'.repeat(40);
+  assert.equal(matchesBuildSha(expected, expected), true);
+  assert.equal(matchesBuildSha(expected, 'A'.repeat(40)), true, 'hex SHA comparison is case-insensitive');
+  assert.equal(matchesBuildSha(expected, 'b'.repeat(40)), false);
+  assert.equal(matchesBuildSha(undefined, expected), false);
+  assert.equal(matchesBuildSha(expected, undefined), false);
+  assert.equal(matchesBuildSha('abc', 'abc'), false);
+  assert.equal(matchesBuildSha(`${expected}a`, expected), false);
+  assert.equal(matchesBuildSha(` ${expected}`, expected), false);
+  assert.equal(matchesBuildSha(expected, `${expected}?build=${expected}`), false);
+});
+
+test('WTI verifier requires a coherent exact single-product route response', () => {
+  const valid = qualifiedWtiResponse();
+  assert.equal(qualifiesWtiResponse(valid, currentBinding(), 'nifty_etf'), true);
+
+  const unrelated = { canonicalProductId: 'etf:isin:OTHER', parentInstrumentId: 'nifty_etf' };
+  const mutations = [
+    body => { body.products = [qualifiedNiftyEtf(), unrelated]; },
+    body => { body.total = 2; },
+    body => { body.comparisonUniverse.returnedProductCount = 0; },
+    body => { body.comparisonUniverse.verifiedIdentityCount = 0; },
+    body => { body.comparisonUniverse.freshNavProductCount = 0; },
+    body => { body.comparisonUniverse.parentInstrumentId = 'liquid_etf'; },
+    body => { body.comparisonUniverse.sourceProvider = 'OTHER'; },
+    body => { body.ranking.status = 'UNAVAILABLE'; },
+    body => { body.financialStateBinding.allocationRevision = 999; },
+    body => { body.success = false; },
+  ];
+  for (const mutate of mutations) {
+    const body = structuredClone(valid);
+    mutate(body);
+    assert.equal(qualifiesWtiResponse(body, currentBinding(), 'nifty_etf'), false);
+  }
+  assert.equal(qualifiesWtiResponse(valid, currentBinding(), 'liquid_etf'), false);
+});
+
+function syntheticQualifiedNiftyTaxProduct() {
+  const product = qualifiedNiftyEtf();
+  const productRule = {
+    authority: 'Income Tax Department — Government of India',
+    title: 'Income-tax Act, 2025 as amended by Finance Act, 2026',
+    url: 'https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf',
+    role: 'PRODUCT_RULE',
+  };
+  product.historicalReturn = {
+    valuePct: 12.4,
+    basis: 'HISTORICAL_POINT_TO_POINT_NAV_RETURN_1Y',
+    annualized: true,
+    isExpectedReturn: false,
+  };
+  product.taxMetadata = {
+    sourceQualified: true,
+    taxClass: 'EQUITY_MF_SECTION_112A',
+    sourceReferences: [productRule],
+  };
+  product.postTaxAnalysis = {
+    status: 'CALCULATED',
+    fiscalYear: 'FY2026-27',
+    policyVersion: 'tax-policy-FY2026-27-v2',
+    taxClass: 'EQUITY_MF_SECTION_112A',
+    taxClassification: 'EQUITY_MF_SECTION_112A',
+    calculationClass: 'HISTORICAL_RETURN_POST_TAX_ILLUSTRATION',
+    inputBasis: 'HISTORICAL_PROVIDER_FACT_PLUS_EXPLICIT_TAX_INPUTS',
+    dataClass: 'HISTORICAL_PROVIDER_FACT',
+    isHistoricalEstimate: true,
+    historicalObservationWindowMonths: 12,
+    disclosure: 'HISTORICAL — NOT A FORECAST. Verified trailing observation only.',
+    principal: 10000,
+    grossGain: 1240,
+    taxableGain: 1240,
+    exemptionApplied: 0,
+    incrementalTax: 124,
+    cess: 4,
+    surcharge: 0,
+    netGain: 1116,
+    postTaxRatePct: 11.16,
+    sourceReferences: [productRule],
+  };
+  return product;
+}
+
+test('NIFTY ETF tax verifier fails closed unless a calculated result has matching source-qualified provenance', () => {
+  const taxContext = { fiscalYear: 'FY2026-27' };
+  const validProduct = syntheticQualifiedNiftyTaxProduct();
+  assert.equal(qualifiesCalculatedNiftyEtfTax(validProduct, taxContext), true);
+
+  const mutations = [
+    product => { delete product.taxMetadata; },
+    product => { product.taxMetadata.sourceQualified = false; },
+    product => { delete product.taxMetadata.taxClass; },
+    product => { product.taxMetadata.taxClass = 'UNSUPPORTED_CLASS'; },
+    product => { product.taxMetadata.sourceReferences = []; },
+    product => { product.taxMetadata.sourceReferences = [{}]; },
+    product => { product.taxMetadata.sourceReferences[0].url = 'http://www.incometaxindia.gov.in/rule'; },
+    product => { delete product.postTaxAnalysis.policyVersion; },
+    product => { product.postTaxAnalysis.fiscalYear = 'FY2025-26'; },
+    product => { delete product.postTaxAnalysis.calculationClass; },
+    product => { product.postTaxAnalysis.calculationClass = 'CURRENT_RATE_POST_TAX_ILLUSTRATION'; },
+    product => { product.postTaxAnalysis.taxClass = 'BANK_DEPOSIT_INTEREST'; },
+    product => { product.postTaxAnalysis.sourceReferences[0].url = 'https://incometaxindia.gov.in.evil.example/fake'; },
+    product => { product.canonicalProductId = 'etf:isin:OTHER'; },
+  ];
+  for (const mutate of mutations) {
+    const product = syntheticQualifiedNiftyTaxProduct();
+    mutate(product);
+    assert.equal(qualifiesCalculatedNiftyEtfTax(product, taxContext), false);
+  }
+  assert.equal(qualifiesCalculatedNiftyEtfTax(validProduct, taxContext, { financialBindingValid: false }), false);
+});
+
 test('WTI HTTP failures stay under WTI checks and never become browser failures', async () => {
   for (const status of [409, 500]) {
     const lines = [];
@@ -507,7 +925,7 @@ test('CSRF and profile-completion failures remain distinct from the authenticate
   assert.equal(missingCsrf.checks.find(check => check.name === 'Profile completion/auth').passed, false);
   assert.match(missingCsrf.checks.find(check => check.name === 'Profile completion/auth').detail, /CSRF_COOKIE_MISSING/);
   assert.equal(missingCsrf.checks.find(check => check.name === 'Critical browser path').passed, true);
-  assert.match(missingCsrf.checks.find(check => check.name === 'Critical browser path').detail, /authenticated profile\/dashboard shell/);
+  assert.match(missingCsrf.checks.find(check => check.name === 'Critical browser path').detail, /frontend Where to Invest journey/);
 
   const missingCsrfAndDashboard = await runBrowserFlow({ missingCsrfCookie: true, dashboardError: true });
   assert.equal(missingCsrfAndDashboard.checks.find(check => check.name === 'Profile completion/auth').passed, false);
@@ -516,7 +934,7 @@ test('CSRF and profile-completion failures remain distinct from the authenticate
   const completionConflict = await runBrowserFlow({ completionStatus: 409 });
   assert.equal(completionConflict.checks.find(check => check.name === 'Profile completion/auth').passed, false);
   assert.equal(completionConflict.checks.find(check => check.name === 'Critical browser path').passed, true);
-  assert.match(completionConflict.checks.find(check => check.name === 'Critical browser path').detail, /authenticated profile\/dashboard shell/);
+  assert.match(completionConflict.checks.find(check => check.name === 'Critical browser path').detail, /frontend Where to Invest journey/);
 });
 
 test('authenticated profile navigation must return successfully, remain on /profile, and render the sidebar', async () => {
@@ -529,6 +947,32 @@ test('authenticated profile navigation must return successfully, remain on /prof
     const result = await runBrowserFlow(scenario);
     assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
   }
+});
+
+test('critical browser path requires the real frontend WTI request, exact ETF render, and unavailable-tax state', async () => {
+  const verified = await runBrowserFlow();
+  assert.equal(verified.checks.find(check => check.name === 'Critical browser path').passed, true,
+    verified.checks.find(check => check.name === 'Critical browser path').detail);
+  assert.match(verified.checks.find(check => check.name === 'Critical browser path').detail, /frontend Where to Invest journey/i);
+
+  for (const scenario of [
+    { frontendWtiMissing: true },
+    { frontendWtiBindingMismatch: true },
+    { frontendWtiWrongProduct: true },
+    { frontendWtiTaxHidden: true },
+    { frontendWtiTaxCalculated: true },
+    { frontendWtiRequestBindingMismatch: true },
+    { frontendWtiDirectProviderRequest: true },
+  ]) {
+    const result = await runBrowserFlow(scenario);
+    assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false, JSON.stringify(scenario));
+  }
+});
+
+test('critical browser path rejects a frontend runtime built from a different revision', async () => {
+  const result = await runBrowserFlow({ frontendBuildSha: 'd'.repeat(40) });
+  assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
+  assert.match(result.checks.find(check => check.name === 'Critical browser path').detail, /build identity/i);
 });
 
 test('profile and recommendation failures retain all dependent checks as NOT_EVALUATED', async () => {

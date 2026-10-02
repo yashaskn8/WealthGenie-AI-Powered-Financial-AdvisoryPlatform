@@ -658,6 +658,14 @@ paths:
     get: { operationId: getReadiness, tags: [Health], security: [], responses: { '200': { $ref: '#/components/responses/Health' }, '503': { $ref: '#/components/responses/Unavailable' } } }
   /health/live:
     get: { operationId: getLiveness, tags: [Health], security: [], responses: { '200': { $ref: '#/components/responses/Health' } } }
+  /health/verification:
+    get:
+      operationId: getRuntimeDependencyVerification
+      tags: [Health]
+      security: []
+      responses:
+        '200': { description: Runtime build and connected dependency capabilities verified, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeDependencyVerification' } } } }
+        '503': { description: Runtime build or required dependency capability could not be verified, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeDependencyVerification' } } } }
   /ready:
     get: { operationId: redirectReadiness, tags: [Health], security: [], responses: { '307': { description: Redirect to /health/ready } } }
   /live:
@@ -1459,3 +1467,24 @@ components:
       additionalProperties: true
     RegimeAdjustRequest: { type: object, additionalProperties: false, required: [profileId], properties: { profileId: { type: string, pattern: '^[0-9a-fA-F]{24}$' } } }
     HealthStatus: { type: object, required: [status], properties: { status: { type: string }, timestamp: { type: string, format: date-time }, service: { type: string } }, additionalProperties: true }
+    RuntimeDependencyVerification:
+      type: object
+      required: [status, buildSha, mongo, redis]
+      properties:
+        status: { type: string, enum: [VERIFIED, NOT_VERIFIED] }
+        buildSha: { type: [string, 'null'], pattern: '^[a-f0-9]{40}$' }
+        mongo:
+          type: object
+          required: [connected, transactionCapable]
+          properties:
+            connected: { type: boolean }
+            transactionCapable: { type: boolean }
+          additionalProperties: false
+        redis:
+          type: object
+          required: [required, connected]
+          properties:
+            required: { type: boolean }
+            connected: { type: boolean }
+          additionalProperties: false
+      additionalProperties: false

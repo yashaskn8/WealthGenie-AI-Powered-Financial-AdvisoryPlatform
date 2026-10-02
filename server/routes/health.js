@@ -6,6 +6,8 @@ import { asyncHandler } from '../middleware/errorHandler.js';
 import logger from '../utils/logger.js';
 import { verifyPersistenceIndexes } from '../services/persistenceIndexReadiness.js';
 import { verifyAgentRuntimePersistence } from '../services/planHealthPersistence.js';
+import { normalizeBuildSha } from '../../shared/buildIdentity.js';
+import { REDIS_PROBE_TIMEOUT_MS } from '../../shared/demoPreflightContracts.js';
 
 function withTimeout(promise, timeoutMs, label) {
   let timer;
@@ -26,7 +28,12 @@ export function createHealthRouter({
   mcpRuntime = null,
   mcpCapacity = null,
   timeoutMs = 3000,
+  verificationTimeoutMs = REDIS_PROBE_TIMEOUT_MS,
   verifyAgentRuntime = verifyAgentRuntimePersistence,
+  buildSha = process.env.APP_BUILD_SHA,
+  verifyMongoTransaction = verifyConnectedMongoTransaction,
+  verifyRedisConnection = verifyConnectedRedis,
+  isMongoConnected = () => mongoose.connection.readyState === 1,
 } = {}) {
   const router = Router();
 
@@ -180,12 +187,57 @@ export function createHealthRouter({
   router.get('/live', (_req, res) => {
   res.status(200).json({
     status: 'ALIVE',
+    buildSha: normalizeBuildSha(buildSha),
     uptime_seconds: Math.round(process.uptime()),
     timestamp: new Date().toISOString(),
   });
   });
 
+  router.get('/verification', asyncHandler(async (_req, res) => {
+    const [transactionCapable, redisConnected] = await Promise.all([
+      withTimeout(verifyMongoTransaction({ timeoutMs, connection: mongoose.connection }), timeoutMs, 'Mongo verification probe').catch(() => false),
+      withTimeout(verifyRedisConnection({ timeoutMs: verificationTimeoutMs, client: redisClient, available: redisAvailable }), verificationTimeoutMs, 'Redis verification probe').catch(() => false),
+    ]);
+    const mongoConnected = isMongoConnected();
+    const verified = mongoConnected && transactionCapable && (!requireRedis || redisConnected);
+    const body = {
+      status: verified ? 'VERIFIED' : 'NOT_VERIFIED',
+      buildSha: normalizeBuildSha(buildSha),
+      mongo: { connected: mongoConnected, transactionCapable: Boolean(mongoConnected && transactionCapable) },
+      redis: { required: requireRedis, connected: Boolean(redisConnected) },
+    };
+    return res.status(verified ? 200 : 503).json(body);
+  }));
+
   return router;
+}
+
+async function verifyConnectedMongoTransaction({ timeoutMs, connection }) {
+  if (!connection || connection.readyState !== 1 || !connection.db) return false;
+  let session;
+  try {
+    const hello = await withTimeout(connection.db.admin().command({ hello: 1 }), timeoutMs, 'Mongo verification hello');
+    if (!hello.setName) return false;
+    session = await withTimeout(mongoose.startSession(), timeoutMs, 'Mongo verification session');
+    session.startTransaction();
+    await withTimeout(connection.db.collection('financialprofiles').findOne({}, { session }), timeoutMs, 'Mongo verification read');
+    await withTimeout(session.commitTransaction(), timeoutMs, 'Mongo verification commit');
+    return true;
+  } catch {
+    if (session?.inTransaction()) await session.abortTransaction().catch(() => {});
+    return false;
+  } finally {
+    await session?.endSession().catch(() => {});
+  }
+}
+
+async function verifyConnectedRedis({ timeoutMs, client, available }) {
+  if (!available || !client?.isReady) return false;
+  try {
+    return await withTimeout(client.ping(), timeoutMs, 'Redis verification ping') === 'PONG';
+  } catch {
+    return false;
+  }
 }
 
 const router = createHealthRouter();
