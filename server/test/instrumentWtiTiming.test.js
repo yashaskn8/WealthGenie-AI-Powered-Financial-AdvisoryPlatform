@@ -44,3 +44,32 @@ test('WTI timing logger rejects unknown stages and neutralizes uncontrolled stat
     status: 'UNKNOWN',
   });
 });
+
+test('WTI persistence timings distinguish coalesced work from intentionally skipped writes', () => {
+  assert.deepEqual(sanitizeWtiTiming({
+    stage: 'amfi_current_persistence',
+    elapsedMs: 2,
+    status: 'PERSISTED',
+    code: 'MARKET_PERSISTENCE_COALESCED',
+    provider: 'AMFI',
+  }), {
+    stage: 'amfi_current_persistence',
+    elapsedMs: 2,
+    status: 'PERSISTED',
+    code: 'MARKET_PERSISTENCE_COALESCED',
+    provider: 'AMFI',
+  });
+  assert.deepEqual(sanitizeWtiTiming({
+    stage: 'amfi_historical_persistence',
+    elapsedMs: 0,
+    status: 'NOT_REQUESTED',
+    code: 'PERSISTENCE_NOT_REQUESTED',
+    provider: 'AMFI',
+  }), {
+    stage: 'amfi_historical_persistence',
+    elapsedMs: 0,
+    status: 'NOT_REQUESTED',
+    code: 'PERSISTENCE_NOT_REQUESTED',
+    provider: 'AMFI',
+  });
+});

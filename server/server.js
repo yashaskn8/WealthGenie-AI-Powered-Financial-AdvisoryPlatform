@@ -14,6 +14,7 @@ import { startPlanReviewWorker, stopPlanReviewWorker } from './agents/planReview
 import logger from './utils/logger.js';
 import { createRuntimeState } from './services/runtimeState.js';
 import { warmAdvisoryPersistence } from './services/advisoryPersistence.js';
+import { verifyMarketDataPersistenceIndexes } from './services/persistenceIndexReadiness.js';
 import { verifyPlanReviewPersistenceIndexes } from './services/planReviewPersistence.js';
 import { verifyAgentRuntimePersistence } from './services/planHealthPersistence.js';
 import AgentRunEvent from './models/AgentRunEvent.js';
@@ -97,6 +98,7 @@ export async function startServer({ env = process.env } = {}) {
       requireTransactions: true,
     });
     await warmAdvisoryPersistence();
+    await verifyMarketDataPersistenceIndexes({ force: true });
     if (config.agenticPlanReviewEnabled) {
       await verifyPlanReviewPersistenceIndexes();
       await verifyEnabledApiAgentPersistence(config);

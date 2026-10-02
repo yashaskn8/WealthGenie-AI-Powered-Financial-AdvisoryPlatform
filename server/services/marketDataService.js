@@ -84,6 +84,8 @@ async function measuredAmfiStage(onStageTiming, stage, operation) {
     status = typeof result?.status === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(result.status)
       ? result.status
       : 'COMPLETED';
+    code = safeTimingCode({ code: result?.code || result?.error?.code })
+      || (result?.coalesced ? 'MARKET_PERSISTENCE_COALESCED' : null);
     if (result?.provider === 'AMFI') provider = 'AMFI';
     return result;
   } catch (error) {
@@ -123,9 +125,9 @@ async function persistFreshSnapshot(snapshot) {
 export async function fetchAmfiProductSnapshot({ forceRefresh = false, persist = true, onStageTiming } = {}) {
   const snapshot = await measuredAmfiStage(onStageTiming, 'amfi_current_fetch',
     () => amfiProvider.getSnapshot({ forceRefresh }));
-  const persistence = persist
-    ? await measuredAmfiStage(onStageTiming, 'amfi_current_persistence', () => persistFreshSnapshot(snapshot))
-    : { status: 'NOT_REQUESTED' };
+  const persistence = await measuredAmfiStage(onStageTiming, 'amfi_current_persistence', () => persist
+    ? persistFreshSnapshot(snapshot)
+    : { status: 'NOT_REQUESTED', code: 'PERSISTENCE_NOT_REQUESTED' });
   return { ...snapshot, persistence };
 }
 
@@ -142,9 +144,9 @@ export async function fetchAmfiHistoricalNavSnapshot({
     targetDate: target.toISOString().slice(0, 10),
     forceRefresh,
   }));
-  const persistence = persist
-    ? await measuredAmfiStage(onStageTiming, 'amfi_historical_persistence', () => persistFreshSnapshot(snapshot))
-    : { status: 'NOT_REQUESTED' };
+  const persistence = await measuredAmfiStage(onStageTiming, 'amfi_historical_persistence', () => persist
+    ? persistFreshSnapshot(snapshot)
+    : { status: 'NOT_REQUESTED', code: 'PERSISTENCE_NOT_REQUESTED' });
   return { ...snapshot, persistence };
 }
 

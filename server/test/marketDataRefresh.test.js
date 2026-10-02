@@ -5,6 +5,8 @@ import {
   MARKET_CONTEXT_CLOSED_REFRESH_MS,
   MARKET_CONTEXT_HOLIDAY_REFRESH_MS,
   MARKET_CONTEXT_OPEN_REFRESH_MS,
+  collectAmfiPersistenceFailures,
+  refreshAmfiSnapshots,
   withMarketRefreshLease,
 } from '../jobs/marketDataRefresh.js';
 import {
@@ -136,4 +138,85 @@ test('production refresh skips safely when Redis cannot provide a lease', async 
     if (previousEnvironment === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previousEnvironment;
   }
+});
+
+test('scheduled AMFI refresh remains the forced durable persistence owner', async () => {
+  const calls = [];
+  const infoEvents = [];
+  const errorEvents = [];
+  const result = await refreshAmfiSnapshots({
+    fetchCurrent: async options => {
+      calls.push(['current', options]);
+      return { status: 'AVAILABLE', productCount: 14_366, persistence: { status: 'PERSISTED' } };
+    },
+    fetchHistorical: async options => {
+      calls.push(['historical', options]);
+      return { status: 'AVAILABLE', productCount: 8_275, persistence: { status: 'PERSISTED' } };
+    },
+    log: {
+      info: (message, fields) => infoEvents.push([message, fields]),
+      error: (message, fields) => errorEvents.push([message, fields]),
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ['current', { forceRefresh: true }],
+    ['historical', { forceRefresh: true }],
+  ]);
+  assert.equal(result.current.persistence.status, 'PERSISTED');
+  assert.equal(result.historical.persistence.status, 'PERSISTED');
+  assert.equal(infoEvents.length, 1);
+  assert.equal(infoEvents[0][1].persistenceOwner, 'SCHEDULED_REFRESH');
+  assert.equal(infoEvents[0][1].currentPersistenceStatus, 'PERSISTED');
+  assert.equal(errorEvents.length, 0);
+});
+
+test('scheduled refresh reports durable-write failures without reporting success', async () => {
+  const infoEvents = [];
+  const errorEvents = [];
+  await refreshAmfiSnapshots({
+    fetchCurrent: async () => ({
+      status: 'AVAILABLE',
+      persistence: {
+        status: 'PERSISTENCE_ERROR',
+        error: { code: 'MARKET_PERSISTENCE_FAILED', message: 'private storage diagnostic' },
+      },
+    }),
+    fetchHistorical: async () => ({ status: 'SOURCE_ERROR', persistence: { status: 'NOT_PERSISTED' } }),
+    log: {
+      info: (...args) => infoEvents.push(args),
+      error: (...args) => errorEvents.push(args),
+    },
+  });
+
+  assert.equal(infoEvents.length, 0);
+  assert.equal(errorEvents.length, 1);
+  assert.equal(errorEvents[0][0], 'AMFI refresh completed without durable persistence');
+  assert.equal(errorEvents[0][1].persistenceFailures[0].persistenceStatus, 'PERSISTENCE_ERROR');
+  assert.equal(errorEvents[0][1].persistenceFailures[0].code, 'MARKET_PERSISTENCE_FAILED');
+  assert.equal(JSON.stringify(errorEvents).includes('private storage diagnostic'), false);
+});
+
+test('manual refresh can distinguish durable AMFI failures from unavailable source snapshots', () => {
+  const failures = collectAmfiPersistenceFailures(
+    {
+      status: 'AVAILABLE',
+      persistence: {
+        status: 'PERSISTENCE_ERROR',
+        error: { code: 'MARKET_PERSISTENCE_FAILED', message: 'sensitive database detail' },
+      },
+    },
+    { status: 'SOURCE_ERROR', persistence: { status: 'NOT_PERSISTED' } },
+  );
+
+  assert.deepEqual(failures, [{
+    snapshotKind: 'current',
+    persistenceStatus: 'PERSISTENCE_ERROR',
+    code: 'MARKET_PERSISTENCE_FAILED',
+  }]);
+  assert.equal(JSON.stringify(failures).includes('sensitive database detail'), false);
+  assert.deepEqual(collectAmfiPersistenceFailures(
+    { status: 'SOURCE_ERROR', persistence: { status: 'NOT_PERSISTED' } },
+    { status: 'UNAVAILABLE', persistence: { status: 'NOT_PERSISTED' } },
+  ), []);
 });

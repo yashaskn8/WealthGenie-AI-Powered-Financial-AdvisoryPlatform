@@ -260,3 +260,32 @@ test('WTI integrates exact ETF facts after parent suitability and preserves unav
   assert.deepEqual(timingEvents.map(event => event.stage), ['exact_etf_qualification', 'tax_enrichment']);
   assert.ok(timingEvents.every(event => Number.isInteger(event.elapsedMs) && event.elapsedMs >= 0));
 });
+
+test('WTI can rank exact AMFI evidence without synchronously persisting current or historical universes', async () => {
+  const { current, historical } = snapshots();
+  const fetchOptions = [];
+  const result = await rankWhereToInvestBackend(
+    canonicalProfile(),
+    { parentInstrumentId: 'nifty_etf' },
+    {
+      persistAmfiSnapshots: false,
+      fetchAmfiProductSnapshot: async options => {
+        fetchOptions.push(['current', options]);
+        return current;
+      },
+      fetchAmfiHistoricalNavSnapshot: async options => {
+        fetchOptions.push(['historical', options]);
+        return historical;
+      },
+    },
+  );
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].canonicalProductId, 'etf:isin:INF204KB14I2');
+  assert.equal(result[0].postTaxAnalysis.status, 'TAX_CLASSIFICATION_UNAVAILABLE');
+  assert.deepEqual(fetchOptions.map(([kind, options]) => [kind, options.persist]), [
+    ['current', false],
+    ['historical', false],
+  ]);
+  assert.equal(typeof fetchOptions[1][1].targetDate, 'string');
+});

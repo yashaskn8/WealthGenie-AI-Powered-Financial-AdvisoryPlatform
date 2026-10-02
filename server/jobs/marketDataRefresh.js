@@ -71,18 +71,9 @@ export function startMarketDataRefreshJobs() {
   // Daily AMFI NAV refresh at 23:30 IST (18:00 UTC)
   // AMFI publishes updated NAVs around 23:00 IST
   cancellations.push(scheduleJob('0 18 * * *', 'AMFI NAV Refresh', async () => {
-    await withMarketRefreshLease('AMFI NAV Refresh', async () => {
-      const [current, historical] = await Promise.all([
-        fetchAmfiProductSnapshot({ forceRefresh: true }),
-        fetchAmfiHistoricalNavSnapshot({ forceRefresh: true }),
-      ]);
-      logger.info('AMFI refresh completed', {
-        currentProductCount: current.productCount,
-        currentStatus: current.status,
-        historicalProductCount: historical.productCount,
-        historicalStatus: historical.status,
-      });
-    }, { ttlSeconds: AMFI_REFRESH_LOCK_TTL_SECONDS });
+    await withMarketRefreshLease('AMFI NAV Refresh', refreshAmfiSnapshots, {
+      ttlSeconds: AMFI_REFRESH_LOCK_TTL_SECONDS,
+    });
   }));
 
   // During an NSE session, refresh the batched quote set frequently enough to
@@ -105,6 +96,58 @@ export function startMarketDataRefreshJobs() {
   logger.info('Market data refresh jobs scheduled');
   activeJobStopper = () => cancellations.forEach(cancel => cancel());
   return activeJobStopper;
+}
+
+/**
+ * Durable owner for complete AMFI current and historical snapshots. WTI reads
+ * remain read-only; persistence failures here are explicitly observable.
+ */
+export async function refreshAmfiSnapshots({
+  fetchCurrent = fetchAmfiProductSnapshot,
+  fetchHistorical = fetchAmfiHistoricalNavSnapshot,
+  log = logger,
+} = {}) {
+  const [current, historical] = await Promise.all([
+    fetchCurrent({ forceRefresh: true }),
+    fetchHistorical({ forceRefresh: true }),
+  ]);
+  const persistenceStatus = snapshot => snapshot?.persistence?.status || 'UNKNOWN';
+  const details = {
+    persistenceOwner: 'SCHEDULED_REFRESH',
+    currentProductCount: current?.productCount ?? 0,
+    currentStatus: current?.status || 'UNKNOWN',
+    currentPersistenceStatus: persistenceStatus(current),
+    historicalProductCount: historical?.productCount ?? 0,
+    historicalStatus: historical?.status || 'UNKNOWN',
+    historicalPersistenceStatus: persistenceStatus(historical),
+  };
+  const persistenceFailures = collectAmfiPersistenceFailures(current, historical);
+  if (persistenceFailures.length > 0) {
+    log.error('AMFI refresh completed without durable persistence', {
+      ...details,
+      persistenceFailures,
+    });
+  } else {
+    log.info('AMFI refresh completed', details);
+  }
+  return { current, historical };
+}
+
+/** Return bounded, secret-free failures for AMFI snapshots that were usable but not durable. */
+export function collectAmfiPersistenceFailures(current, historical) {
+  return [['current', current], ['historical', historical]]
+    .filter(([, snapshot]) => ['AVAILABLE', 'PARTIAL'].includes(snapshot?.status)
+      && snapshot?.persistence?.status !== 'PERSISTED')
+    .map(([snapshotKind, snapshot]) => ({
+      snapshotKind,
+      persistenceStatus: ['NOT_PERSISTED', 'NOT_REQUESTED', 'PERSISTENCE_ERROR', 'PERSISTENCE_UNAVAILABLE']
+        .includes(snapshot?.persistence?.status)
+        ? snapshot.persistence.status
+        : 'UNKNOWN',
+      ...(snapshot?.persistence?.error?.code === 'MARKET_PERSISTENCE_FAILED'
+        ? { code: 'MARKET_PERSISTENCE_FAILED' }
+        : {}),
+    }));
 }
 
 export function stopMarketDataRefreshJobs() {

@@ -16,7 +16,10 @@
  */
 
 import mongoose from 'mongoose';
-import { PHASE2_INDEX_MODELS } from '../../services/persistenceIndexReadiness.js';
+import {
+  MARKET_DATA_INDEX_MODELS,
+  PHASE2_INDEX_MODELS,
+} from '../../services/persistenceIndexReadiness.js';
 
 const MONGO_IMAGE = process.env.MONGO_TEST_IMAGE || 'mongo:7.0';
 const MONGO_VERSION = '7.0.5';
@@ -29,7 +32,7 @@ let activeMechanism = null;
 async function initializeTestIndexes() {
   // Test databases are disposable. Install their schema indexes explicitly so
   // tests exercise the same read-only readiness gate as a migrated deploy.
-  await Promise.all(PHASE2_INDEX_MODELS.map(model => model.createIndexes()));
+  await Promise.all([...PHASE2_INDEX_MODELS, ...MARKET_DATA_INDEX_MODELS].map(model => model.createIndexes()));
 }
 
 /**

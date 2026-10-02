@@ -2,7 +2,11 @@ import { Router } from 'express';
 import { verifyJWT, requireRole } from '../middleware/authMiddleware.js';
 import { asyncHandler, sendError } from '../middleware/errorHandler.js';
 import { createEndpointRateLimiter, ipKeyGenerator } from '../middleware/rateLimiter.js';
-import { AMFI_REFRESH_LOCK_TTL_SECONDS, withMarketRefreshLease } from '../jobs/marketDataRefresh.js';
+import {
+  AMFI_REFRESH_LOCK_TTL_SECONDS,
+  collectAmfiPersistenceFailures,
+  withMarketRefreshLease,
+} from '../jobs/marketDataRefresh.js';
 import { validateQuery, marketNavQuerySchema } from '../validation/schemas.js';
 import {
   fetchAmfiProductSnapshot,
@@ -26,6 +30,30 @@ const marketRefreshLimiter = createEndpointRateLimiter({
   prefix: 'rl:market-refresh:',
   keyGenerator: req => `user:${req.user?.userId || ipKeyGenerator(req.ip)}`,
 });
+
+export function respondToManualMarketRefresh(req, res, refreshResult) {
+  const amfiPersistenceFailures = collectAmfiPersistenceFailures(
+    refreshResult[0]?.status === 'fulfilled' ? refreshResult[0].value : null,
+    refreshResult[1]?.status === 'fulfilled' ? refreshResult[1].value : null,
+  );
+  if (amfiPersistenceFailures.length > 0) {
+    return sendError(
+      req,
+      res,
+      503,
+      'AMFI data was fetched but could not be durably persisted.',
+      'MARKET_PERSISTENCE_FAILED',
+      { persistenceFailures: amfiPersistenceFailures },
+    );
+  }
+
+  return res.status(202).json({
+    status: 'REFRESH_COMPLETED',
+    sources: ['AMFI_CURRENT_NAV', 'AMFI_HISTORICAL_NAV', 'GOVERNMENT_SMALL_SAVINGS', 'SBI_TERM_DEPOSITS', `${PRIMARY_MARKET_PROVIDER}_MARKET_CONTEXT`],
+    results: refreshResult.map(result => result.status),
+    message: 'A bounded administrative refresh completed. Provider failures remain explicitly unavailable.',
+  });
+}
 
 /** Public source-health and provenance summary. No assumption is labelled live. */
 router.get('/rates', asyncHandler(async (_req, res) => {
@@ -81,12 +109,7 @@ router.post('/refresh', verifyJWT, requireRole('admin'), marketRefreshLimiter, a
     });
   }
 
-  res.status(202).json({
-    status: 'REFRESH_COMPLETED',
-    sources: ['AMFI_CURRENT_NAV', 'AMFI_HISTORICAL_NAV', 'GOVERNMENT_SMALL_SAVINGS', 'SBI_TERM_DEPOSITS', `${PRIMARY_MARKET_PROVIDER}_MARKET_CONTEXT`],
-    results: refreshResult.map(result => result.status),
-    message: 'A bounded administrative refresh completed. Provider failures remain explicitly unavailable.',
-  });
+  return respondToManualMarketRefresh(req, res, refreshResult);
 }));
 
 export default router;

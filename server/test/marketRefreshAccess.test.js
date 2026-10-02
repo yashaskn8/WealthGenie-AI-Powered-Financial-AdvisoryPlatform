@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import marketRouter from '../routes/market.js';
+import marketRouter, { respondToManualMarketRefresh } from '../routes/market.js';
 import { errorHandler } from '../middleware/errorHandler.js';
 import { setRedisAvailable, setRedisClient } from '../config/redis.js';
 import { withServer, rawRequest } from '../test-utils/httpTestUtils.js';
@@ -50,4 +50,35 @@ test('market refresh requires admin role and fails safely when production lease 
     if (previousEnvironment === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previousEnvironment;
   }
+});
+
+test('manual market refresh returns canonical 503 when usable AMFI data was not persisted', () => {
+  const response = {
+    statusCode: null,
+    body: null,
+    status(code) { this.statusCode = code; return this; },
+    json(body) { this.body = body; return this; },
+  };
+  const request = { correlationId: 'safe-request-id' };
+  const result = respondToManualMarketRefresh(request, response, [
+    { status: 'fulfilled', value: {
+      status: 'AVAILABLE',
+      persistence: {
+        status: 'PERSISTENCE_ERROR',
+        error: { code: 'MARKET_PERSISTENCE_FAILED', message: 'must not leak' },
+      },
+    } },
+    { status: 'fulfilled', value: { status: 'SOURCE_ERROR', persistence: { status: 'NOT_PERSISTED' } } },
+  ]);
+
+  assert.equal(result, response);
+  assert.equal(response.statusCode, 503);
+  assert.equal(response.body.code, 'MARKET_PERSISTENCE_FAILED');
+  assert.equal(response.body.request_id, request.correlationId);
+  assert.deepEqual(response.body.details.persistenceFailures, [{
+    snapshotKind: 'current',
+    persistenceStatus: 'PERSISTENCE_ERROR',
+    code: 'MARKET_PERSISTENCE_FAILED',
+  }]);
+  assert.equal(JSON.stringify(response.body).includes('must not leak'), false);
 });

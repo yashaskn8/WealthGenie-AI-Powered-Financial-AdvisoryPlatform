@@ -514,7 +514,7 @@ paths:
       tags: [Market]
       security: [{ CookieAuth: [] }, { BearerAuth: [] }]
       x-csrf-protection: cookie-session
-      responses: { '202': { $ref: '#/components/responses/Object' }, '401': { $ref: '#/components/responses/Unauthorized' } }
+      responses: { '202': { $ref: '#/components/responses/Object' }, '401': { $ref: '#/components/responses/Unauthorized' }, '503': { $ref: '#/components/responses/Unavailable' } }
 
   /api/tax/compute:
     get:

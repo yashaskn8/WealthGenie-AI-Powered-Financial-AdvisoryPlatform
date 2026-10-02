@@ -43,6 +43,28 @@ test('WTI ranking rejects a forged parent that is absent from canonical current 
   assert.equal(rankingCalls, 0);
 });
 
+test('WTI reads do not request AMFI persistence from the ranking pipeline', async () => {
+  const current = state();
+  let rankingArguments;
+  const result = await rankWtiAgainstCurrentState({
+    userId: 'user-1',
+    profileId: '64b000000000000000000001',
+    parentInstrumentId: 'index_mf',
+    expectedBinding: currentWtiBinding(current),
+    dependencies: {
+      requireFreshRecommendationState: async () => current,
+      rankWhereToInvestBackend: async (...args) => {
+        rankingArguments = args;
+        return [{ id: 'verified-read-only-result' }];
+      },
+    },
+  });
+
+  assert.equal(result.ranked[0].id, 'verified-read-only-result');
+  assert.equal(rankingArguments[2].persistAmfiSnapshots, false);
+  assert.equal(result.financialStateBinding.recommendationId, current.recommendation._id);
+});
+
 test('WTI ranking discards results if canonical allocation changes while ranking is in flight', async () => {
   let reads = 0;
   let releaseRanking;

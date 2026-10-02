@@ -643,10 +643,18 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
 
   const fetchCurrent = dependencies.fetchAmfiProductSnapshot || fetchAmfiProductSnapshot;
   const fetchHistorical = dependencies.fetchAmfiHistoricalNavSnapshot || fetchAmfiHistoricalNavSnapshot;
-  const currentSnapshot = await fetchCurrent({ onStageTiming: dependencies.onStageTiming });
+  const persistAmfiSnapshots = dependencies.persistAmfiSnapshots !== false;
+  const currentSnapshot = await fetchCurrent({
+    onStageTiming: dependencies.onStageTiming,
+    persist: persistAmfiSnapshots,
+  });
   const targetDate = historicalTargetDate(currentSnapshot);
   const historicalSnapshot = targetDate
-    ? await fetchHistorical({ targetDate, onStageTiming: dependencies.onStageTiming })
+    ? await fetchHistorical({
+      targetDate,
+      onStageTiming: dependencies.onStageTiming,
+      persist: persistAmfiSnapshots,
+    })
     : null;
   const qualificationStage = hasQualifiedEtfPath ? 'exact_etf_qualification' : 'product_qualification';
   const qualificationStartedAt = performance.now();
