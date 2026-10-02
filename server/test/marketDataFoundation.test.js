@@ -82,9 +82,11 @@ test('WTI AMFI timing reports fetch and persistence stages without provider payl
     AmfiNavHistoryProvider.prototype.getSnapshot = async () => ({ ...sourceError, fetchedAt: FIXED_NOW.toISOString() });
     const current = await fetchAmfiProductSnapshot({ onStageTiming: event => events.push(event) });
     const historical = await fetchAmfiHistoricalNavSnapshot({ targetDate: '2025-09-07', onStageTiming: event => events.push(event) });
+    const callbackFailure = await fetchAmfiProductSnapshot({ persist: false, onStageTiming: () => { throw new Error('diagnostics must be non-authoritative'); } });
 
     assert.equal(current.persistence.status, 'NOT_PERSISTED');
     assert.equal(historical.persistence.status, 'NOT_PERSISTED');
+    assert.equal(callbackFailure.status, AVAILABILITY.SOURCE_ERROR);
     assert.deepEqual(events.map(event => event.stage), [
       'amfi_current_fetch', 'amfi_current_persistence',
       'amfi_historical_fetch', 'amfi_historical_persistence',

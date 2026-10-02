@@ -204,6 +204,31 @@ test('ambiguous duplicate product identities or current NAV facts fail closed', 
   }
 });
 
+test('exact ETF source facts reject missing, mismatched, duplicate, or wrong-provider current identity', () => {
+  const missingId = snapshots();
+  delete missingId.current.facts[0].canonicalProductId;
+
+  const mismatchedId = snapshots();
+  mismatchedId.current.facts[0].canonicalProductId = 'mf:amfi:140085';
+
+  const wrongScheme = snapshots();
+  wrongScheme.current.products[0].externalIds[0].value = '140085';
+
+  const duplicateFacts = snapshots();
+  duplicateFacts.current.facts.push({ ...duplicateFacts.current.facts[0] });
+
+  const wrongProvider = snapshots();
+  wrongProvider.current.provider = 'UPSTOX';
+
+  for (const { current, historical } of [missingId, mismatchedId, wrongScheme, duplicateFacts, wrongProvider]) {
+    const result = rankQualifiedNiftyEtfProducts({
+      parentInstrumentId: 'nifty_etf', currentSnapshot: current, historicalSnapshot: historical,
+    });
+    assert.deepEqual(result.products, []);
+    assert.equal(result.ranking.status, 'UNAVAILABLE');
+  }
+});
+
 test('provider failure or missing NAV never inserts catalog or market-price fallback values', () => {
   const sourceError = {
     provider: 'AMFI', status: 'SOURCE_ERROR', fetchedAt: NOW, products: [], facts: [],

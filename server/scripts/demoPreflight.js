@@ -17,7 +17,18 @@ const EXACT_NIFTY_ETF_EVIDENCE = Object.freeze({
   benchmark: 'https://mf.nipponindiaim.com/FundsAndPerformance/ProductNotes/NipponIndia-ETF-Nifty-50-BeES-Feb-2026.pdf',
   amfiNav: 'https://portal.amfiindia.com/spages/NAVAll.txt',
 });
-const PROVIDER_HOSTS = /(?:nseindia\.com|amfiindia\.com|sbi\.bank|sbi\.co\.in|indiapost\.gov\.in|dea\.gov\.in|rbi\.org\.in|incometax(?:india)?\.gov\.in|upstox\.com)/i;
+const FINANCIAL_PROVIDER_HOSTS = Object.freeze([
+  'nseindia.com',
+  'amfiindia.com',
+  'sbi.bank',
+  'sbi.co.in',
+  'indiapost.gov.in',
+  'dea.gov.in',
+  'rbi.org.in',
+  'incometax.gov.in',
+  'incometaxindia.gov.in',
+  'upstox.com',
+]);
 
 export function hasCurrentFinancialBinding(value) {
   return Boolean(value)
@@ -63,6 +74,7 @@ export function qualifiesExactNiftyEtf(product) {
   const hasExactIdentityEvidence = identityEvidenceUrls.has(EXACT_NIFTY_ETF_EVIDENCE.identity)
     && identityEvidenceUrls.has(EXACT_NIFTY_ETF_EVIDENCE.listing);
   return Boolean(product)
+    && product.parentInstrumentId === 'nifty_etf'
     && product.productType === 'ETF'
     && product.canonicalProductId === 'etf:isin:INF204KB14I2'
     && product.isin === 'INF204KB14I2'
@@ -170,29 +182,39 @@ export function makeReporter(write = line => process.stdout.write(`${line}\n`)) 
   const checks = EXPECTED_PREFLIGHT_CHECKS.map(name => ({
     name,
     passed: false,
+    state: 'NOT_EVALUATED',
     detail: 'NOT_EVALUATED because this check has not run',
   }));
   const evaluated = new Set();
   let finalized = false;
   return {
-    checks,
+    get checks() { return checks.map(check => ({ ...check })); },
     add(name, passed, detail) {
       if (finalized) throw new Error('Cannot add preflight checks after finalization.');
       const check = checks.find(candidate => candidate.name === name);
       if (!check) throw new Error(`Unexpected preflight check: ${name}`);
-      check.passed = Boolean(passed);
+      if (evaluated.has(name)) throw new Error(`Preflight check already evaluated: ${name}`);
+      if (typeof passed !== 'boolean') throw new TypeError(`Preflight check outcome must be boolean: ${name}`);
+      check.passed = passed;
+      check.state = passed ? 'PASS' : 'FAIL';
       check.detail = String(detail || (passed ? 'verified' : 'failed'));
       evaluated.add(name);
     },
     finish() {
       if (!finalized) {
+        finalized = true;
         for (const check of checks) {
           if (!evaluated.has(check.name)) {
+            check.passed = false;
+            check.state = 'NOT_EVALUATED';
             check.detail = 'NOT_EVALUATED because a prerequisite failed or the check was not reached';
           }
-          write(`${check.passed ? 'PASS' : 'FAIL'} ${check.name} — ${check.detail}`);
         }
-        finalized = true;
+        let writeFailure = null;
+        for (const check of checks) {
+          try { write(`${check.passed ? 'PASS' : 'FAIL'} ${check.name} — ${check.detail}`); } catch (error) { writeFailure ||= error; }
+        }
+        if (writeFailure) throw writeFailure;
       }
       const passed = checks.filter(check => check.passed).length;
       return {
@@ -235,6 +257,15 @@ function responseOk(response) {
   return typeof response?.ok === 'function' ? response.ok() : response?.ok === true;
 }
 
+function isFinancialProviderRequestUrl(value) {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return FINANCIAL_PROVIDER_HOSTS.some(domain => hostname === domain || hostname.endsWith(`.${domain}`));
+  } catch {
+    return null;
+  }
+}
+
 async function readSafeResponseBody(response) {
   try {
     const body = await response.json();
@@ -256,9 +287,9 @@ export async function reportWtiProductChecks(reporter, {
   taxContext,
   onTiming,
 } = {}) {
-  if (!parentInstrumentId) {
-    reporter.add('ETF product source', false, 'NOT_EVALUATED because no qualified current recommendation parent is configured');
-    reportWtiNotEvaluated(reporter, 'no WTI parent is configured');
+  if (parentInstrumentId !== 'nifty_etf') {
+    reporter.add('ETF product source', false, 'NOT_EVALUATED because the exact qualified Nifty ETF parent is not configured');
+    reportWtiNotEvaluated(reporter, 'the exact qualified Nifty ETF parent is not configured');
     return;
   }
 
@@ -288,25 +319,29 @@ export async function reportWtiProductChecks(reporter, {
     const products = Array.isArray(body.products) ? body.products : [];
     const bindingValid = matchesRecommendationBinding(body.financialStateBinding, recommendation);
     const qualifiedProducts = bindingValid ? products.filter(qualifiesExactNiftyEtf) : [];
+    const uniqueQualifiedProduct = qualifiedProducts.length === 1 ? qualifiedProducts[0] : null;
     const wtiElapsedMs = elapsedMilliseconds(startedAt);
-    reporter.add('ETF product source', qualifiedProducts.length > 0, qualifiedProducts.length
+    reporter.add('ETF product source', Boolean(uniqueQualifiedProduct), uniqueQualifiedProduct
       ? `exact identity, NIFTY 50 benchmark, official HTTPS source, fresh primary fact, and provenance verified; ${wtiElapsedMs}ms`
-      : `WTI HTTP ${status || 200}, mismatched financial binding, or no product passed exact identity/source/freshness checks; ${wtiElapsedMs}ms`);
-    reporter.add('Nifty ETF exact-product result', qualifiedProducts.length > 0, qualifiedProducts.length
-      ? `${qualifiedProducts.length} exact qualified product(s)`
-      : bindingValid ? 'no exact source-qualified Nifty 50 ETF result' : 'WTI response financial-state binding did not match the current recommendation');
+      : qualifiedProducts.length > 1
+        ? `ambiguous duplicate exact-product results (${qualifiedProducts.length}); ${wtiElapsedMs}ms`
+        : `WTI HTTP ${status || 200}, mismatched financial binding, or no product passed exact identity/source/freshness checks; ${wtiElapsedMs}ms`);
+    reporter.add('Nifty ETF exact-product result', Boolean(uniqueQualifiedProduct), uniqueQualifiedProduct
+      ? 'one exact qualified product'
+      : qualifiedProducts.length > 1 ? 'ambiguous duplicate exact-product results' : bindingValid
+        ? 'no exact source-qualified Nifty 50 ETF result'
+        : 'WTI response financial-state binding did not match the current recommendation');
 
     const taxStartedAt = performance.now();
-    const validTaxResult = Boolean(taxContext) && qualifiedProducts.some(product => (
-      product.postTaxAnalysis?.status === 'CALCULATED'
-      && product.postTaxAnalysis?.fiscalYear === taxContext.fiscalYear
-    ));
-    const taxStatus = qualifiedProducts[0]?.postTaxAnalysis?.status;
+    const validTaxResult = Boolean(taxContext && uniqueQualifiedProduct)
+      && uniqueQualifiedProduct.postTaxAnalysis?.status === 'CALCULATED'
+      && uniqueQualifiedProduct.postTaxAnalysis?.fiscalYear === taxContext.fiscalYear;
+    const taxStatus = uniqueQualifiedProduct?.postTaxAnalysis?.status;
     reporter.add('Product tax workflow', validTaxResult, validTaxResult
       ? `exact-product tax calculation is bound to the supplied fiscal year; ${elapsedMilliseconds(taxStartedAt)}ms`
       : !taxContext
         ? 'TAX_INPUTS_UNAVAILABLE; provide actual required tax facts; no tax values are inferred'
-        : !qualifiedProducts.length
+        : !uniqueQualifiedProduct
           ? 'NOT_EVALUATED because no exact current product passed identity and financial-state checks'
           : safeStableCode(taxStatus)
             ? `${safeStableCode(taxStatus)}; no tax values are inferred`
@@ -314,7 +349,7 @@ export async function reportWtiProductChecks(reporter, {
     timingStatus = 'COMPLETED';
   } catch (error) {
     const failure = safeFailureKind(error);
-    timingStatus = failure.kind.toUpperCase().replaceAll('/', '_');
+    timingStatus = failure.kind === 'timeout' ? 'TIMEOUT' : 'NETWORK_ERROR';
     timingCode = failure.code;
     const errorDetail = `WTI ${failure.kind}${failure.code ? ` (${failure.code})` : ''}; ${elapsedMilliseconds(startedAt)}ms`;
     reporter.add('ETF product source', false, errorDetail);
@@ -439,7 +474,16 @@ export async function checkBrowserAndFinancialFlow(reporter, {
   let browser;
   let context;
   let page;
-  const providerRequests = [];
+  let browserLaunched = false;
+  let loginPageRendered = false;
+  let authenticated = false;
+  let providerRequestObserved = false;
+  let providerRequestInspectionFailed = false;
+  let criticalPathRecorded = false;
+  const recordCriticalPath = (passed, detail) => {
+    reporter.add('Critical browser path', passed, detail);
+    criticalPathRecorded = true;
+  };
   try {
     try {
       const frontend = new URL(frontendUrl);
@@ -456,10 +500,20 @@ export async function checkBrowserAndFinancialFlow(reporter, {
         const { chromium } = requireFromReactapp('@playwright/test');
         browser = await chromium.launch({ headless: true });
       }
+      if (!browser || typeof browser.newContext !== 'function') {
+        throw Object.assign(new Error('Browser launch returned an invalid browser handle.'), { code: 'BROWSER_HANDLE_INVALID' });
+      }
+      browserLaunched = true;
       context = await browser.newContext();
       page = await context.newPage();
       page.on('request', request => {
-        if (PROVIDER_HOSTS.test(request.url())) providerRequests.push(request.url());
+        try {
+          const providerRequest = isFinancialProviderRequestUrl(request.url());
+          if (providerRequest === null) providerRequestInspectionFailed = true;
+          else if (providerRequest) providerRequestObserved = true;
+        } catch {
+          providerRequestInspectionFailed = true;
+        }
       });
 
       const frontendResponse = await page.goto(new URL('/login', frontendUrl).toString(), { waitUntil: 'domcontentloaded' });
@@ -476,11 +530,11 @@ export async function checkBrowserAndFinancialFlow(reporter, {
         page.locator('#login-email'),
         page.locator('#login-password'),
       ].map(locator => locator.waitFor({ state: 'visible', timeout: loginReadyTimeoutMs })));
-      reporter.add('Critical browser path', true, 'browser launched and login page rendered');
+      loginPageRendered = true;
     } catch (error) {
       const status = Number.isInteger(error?.status) ? ` HTTP ${error.status}` : '';
       const failure = safeFailureKind(error);
-      reporter.add('Critical browser path', false, `browser launch/navigation failed${status} (${failure.kind}${failure.code ? ` ${failure.code}` : ''})`);
+      recordCriticalPath(false, `browser launch/navigation failed${status} (${failure.kind}${failure.code ? ` ${failure.code}` : ''})`);
       reporter.add('Profile completion/auth', false, 'NOT_EVALUATED because browser launch/navigation failed');
       reporter.add('Recommendation current-state binding', false, 'NOT_EVALUATED because browser launch/navigation failed');
       reporter.add('ETF product source', false, 'NOT_EVALUATED because browser launch/navigation failed');
@@ -488,7 +542,6 @@ export async function checkBrowserAndFinancialFlow(reporter, {
       return;
     }
 
-    let authenticated = false;
     try {
       await page.locator('#login-email').fill(email);
       await page.locator('#login-password').fill(password);
@@ -611,23 +664,49 @@ export async function checkBrowserAndFinancialFlow(reporter, {
       }
 
       try {
-        await page.goto(new URL('/profile', frontendUrl).toString(), { waitUntil: 'domcontentloaded' });
+        const profileResponse = await page.goto(new URL('/profile', frontendUrl).toString(), { waitUntil: 'domcontentloaded' });
+        if (!profileResponse) throw Object.assign(new Error('Profile navigation returned no HTTP response.'), { code: 'NO_HTTP_RESPONSE' });
+        if (!responseOk(profileResponse)) {
+          throw Object.assign(new Error('Profile navigation returned a non-success HTTP status.'), {
+            code: 'HTTP_STATUS',
+            status: responseStatus(profileResponse),
+          });
+        }
         const dashboard = page.locator('aside.sidebar');
         await dashboard.waitFor({ state: 'visible', timeout: 45_000 });
+        const sidebarVisible = await dashboard.isVisible();
+        const profilePath = new URL(page.url()).pathname;
         const dashboardVisible = hasAuthenticatedDashboard({
-          pathname: new URL(page.url()).pathname,
-          sidebarVisible: await dashboard.isVisible(),
+          pathname: profilePath,
+          sidebarVisible,
         });
-        const noDirectProviderRequest = providerRequests.length === 0;
-        reporter.add('Critical browser path', dashboardVisible && noDirectProviderRequest, noDirectProviderRequest
-          ? dashboardVisible ? 'authenticated profile/dashboard shell rendered without direct provider calls' : 'dashboard rendering failed authenticated profile/path checks'
-          : 'browser attempted a direct provider request; frontend must use backend APIs only');
+        const noDirectProviderRequest = !providerRequestObserved && !providerRequestInspectionFailed;
+        const criticalPathPassed = browserLaunched
+          && loginPageRendered
+          && authenticated
+          && responseOk(profileResponse)
+          && dashboardVisible
+          && noDirectProviderRequest;
+        const detail = providerRequestObserved
+          ? 'browser attempted a direct provider request; frontend must use backend APIs only'
+          : providerRequestInspectionFailed
+            ? 'browser request inspection failed; provider isolation could not be verified'
+            : dashboardVisible
+              ? 'authenticated profile/dashboard shell rendered without direct provider calls'
+              : 'dashboard rendering failed authenticated profile/path checks';
+        recordCriticalPath(criticalPathPassed, detail);
       } catch (error) {
+        const status = Number.isInteger(error?.status) ? ` HTTP ${error.status}` : '';
         const failure = safeFailureKind(error);
-        reporter.add('Critical browser path', false, `authenticated dashboard rendering failed (${failure.kind}${failure.code ? ` ${failure.code}` : ''})`);
+        recordCriticalPath(false, `authenticated dashboard rendering failed${status} (${failure.kind}${failure.code ? ` ${failure.code}` : ''})`);
       }
     } else {
-      reporter.add('Critical browser path', false, 'NOT_EVALUATED because authentication failed before dashboard verification');
+      recordCriticalPath(false, 'NOT_EVALUATED because authentication failed before dashboard verification');
+    }
+  } catch (error) {
+    if (!criticalPathRecorded) {
+      const failure = safeFailureKind(error);
+      recordCriticalPath(false, `browser preflight stage failed (${failure.kind}${failure.code ? ` ${failure.code}` : ''})`);
     }
   } finally {
     await browser?.close().catch(() => {});

@@ -27,6 +27,7 @@ const currentBinding = () => ({
 
 const qualifiedNiftyEtf = () => ({
   canonicalProductId: 'etf:isin:INF204KB14I2',
+  parentInstrumentId: 'nifty_etf',
   productType: 'ETF',
   isin: 'INF204KB14I2',
   exchange: 'NSE',
@@ -95,19 +96,32 @@ function browserFlowFixture(scenario = {}) {
         return fakeHttpResponse(200, {});
       }
       currentUrl = url;
+      if (url.endsWith('/profile')) {
+        if (scenario.dashboardRedirectLogin) currentUrl = 'http://127.0.0.1:5173/login';
+        if (scenario.dashboardWrongPath) currentUrl = 'http://127.0.0.1:5173/';
+        const providerUrl = typeof scenario.directProviderRequest === 'string'
+          ? scenario.directProviderRequest
+          : scenario.directProviderRequest
+            ? 'https://portal.amfiindia.com/private?token=hidden'
+            : null;
+        if (providerUrl) requestListener?.({ url: () => providerUrl });
+        if (scenario.providerRequestInspectionError) requestListener?.({ url: () => { throw new Error('uninspectable request'); } });
+        if (scenario.profileNavigationStatus) return fakeHttpResponse(scenario.profileNavigationStatus, {});
+      }
       if (scenario.dashboardError) throw Object.assign(new Error('secret browser detail'), { code: 'DASHBOARD_FAILED' });
-      if (scenario.directProviderRequest) requestListener?.({ url: () => 'https://portal.amfiindia.com/private?token=hidden' });
       return fakeHttpResponse(200, {});
     },
     locator(selector) {
       return {
         async waitFor() {
           if (selector === 'aside.sidebar' && scenario.dashboardError) throw Object.assign(new Error('secret dashboard detail'), { code: 'DASHBOARD_FAILED' });
+          if (selector === 'aside.sidebar' && scenario.sidebarMissing) throw Object.assign(new Error('sidebar missing'), { name: 'TimeoutError' });
           if (selector === '#login-form' && scenario.loginFormError) throw Object.assign(new Error('secret login detail'), { code: 'LOGIN_FORM_TIMEOUT' });
+          if (selector !== '#login-form' && selector !== 'aside.sidebar' && scenario.loginControlError) throw Object.assign(new Error('secret login control detail'), { code: 'LOGIN_CONTROL_TIMEOUT' });
         },
         async fill() {},
         async click() {},
-        async isVisible() { return true; },
+        async isVisible() { return selector !== 'aside.sidebar' || !scenario.sidebarMissing; },
       };
     },
     async waitForResponse(predicate) {
@@ -130,7 +144,9 @@ function browserFlowFixture(scenario = {}) {
           if (scenario.wtiStatus) return fakeHttpResponse(scenario.wtiStatus, { code: scenario.wtiCode || 'UPSTREAM_UNAVAILABLE' });
           if (scenario.wtiMalformed) return fakeHttpResponse(200, null, { malformed: true });
           return fakeHttpResponse(200, {
-            financialStateBinding: scenario.wtiBindingMismatch ? { ...rankBinding, allocationRevision: 99 } : rankBinding,
+            ...(scenario.wtiMissingBinding ? {} : {
+              financialStateBinding: scenario.wtiBindingMismatch ? { ...rankBinding, allocationRevision: 99 } : rankBinding,
+            }),
             products: scenario.products ?? [{ ...qualifiedNiftyEtf(), postTaxAnalysis: { status: 'TAX_CLASSIFICATION_UNAVAILABLE' } }],
           });
         }
@@ -149,7 +165,10 @@ function browserFlowFixture(scenario = {}) {
   };
   const browser = {
     async newContext() {
-      return { newPage: async () => page, cookies: async () => [{ name: 'wg_csrf', value: 'fake-csrf-value' }] };
+      return {
+        newPage: async () => page,
+        cookies: async () => scenario.missingCsrfCookie ? [] : [{ name: 'wg_csrf', value: 'fake-csrf-value' }],
+      };
     },
     async close() {},
   };
@@ -168,7 +187,7 @@ async function runBrowserFlow(scenario = {}) {
     email: 'demo@example.invalid',
     password: 'fixture-password',
     idempotencyKey: 'fixture-idempotency-key',
-    parentInstrumentId: 'nifty_etf',
+    parentInstrumentId: scenario.parentInstrumentId ?? 'nifty_etf',
   }, fixture);
   return { ...reporter.finish(), lines };
 }
@@ -223,6 +242,7 @@ test('demo preflight requires exact NIFTY 50 identity and fresh primary-fact pro
   assert.equal(qualifiesExactNiftyEtf(qualifiedNiftyEtf()), true);
 
   const invalidProducts = [
+    product => { product.parentInstrumentId = 'liquid_etf'; },
     product => { product.benchmark.canonicalProductId = 'market:index:sensex'; },
     product => { product.identityEvidence[0].url = 'https://nsearchives.nseindia.com/trading_security/mf/pdf/unrelated.pdf'; },
     product => { product.identityEvidence.pop(); },
@@ -321,6 +341,44 @@ test('preflight reporter emits every required check once and leaves unevaluated 
   assert.ok(lines.some(line => line.includes('FAIL Product tax workflow')));
 });
 
+test('preflight reporter rejects duplicate and unknown writes and protects finalized check accounting', () => {
+  const attempts = [
+    { initial: true, duplicate: false, expectedPassed: true },
+    { initial: false, duplicate: true, expectedPassed: false },
+    { initial: true, duplicate: true, expectedPassed: true },
+    { initial: false, duplicate: false, expectedPassed: false },
+  ];
+  for (const { initial, duplicate, expectedPassed } of attempts) {
+    const lines = [];
+    const reporter = makeReporter(line => lines.push(line));
+    reporter.add('Critical browser path', initial, 'first terminal outcome');
+    assert.throws(
+      () => reporter.add('Critical browser path', duplicate, 'attempted overwrite'),
+      /already evaluated/i,
+    );
+    const result = reporter.finish();
+    const check = result.checks.find(item => item.name === 'Critical browser path');
+    assert.equal(check.passed, expectedPassed);
+    assert.equal(check.state, expectedPassed ? 'PASS' : 'FAIL');
+    assert.throws(() => reporter.add('Critical browser path', true, 'late write'), /finalization/i);
+    assert.equal(reporter.finish().passed, result.passed);
+    assert.equal(lines.length, EXPECTED_PREFLIGHT_CHECKS.length);
+    assert.deepEqual(lines.map(line => line.match(/^(?:PASS|FAIL) (.+?) —/)?.[1]), EXPECTED_PREFLIGHT_CHECKS);
+  }
+
+  const reporter = makeReporter(() => {});
+  assert.throws(() => reporter.add('Not a real check', true, 'bad name'), /Unexpected preflight check/);
+  reporter.add('Backend', true, 'safe terminal outcome');
+  reporter.checks.find(check => check.name === 'Backend').passed = false;
+  const result = reporter.finish();
+  assert.equal(result.checks.find(check => check.name === 'Backend').passed, true);
+  assert.equal(result.checks.length, EXPECTED_PREFLIGHT_CHECKS.length);
+  assert.equal(new Set(result.checks.map(check => check.name)).size, EXPECTED_PREFLIGHT_CHECKS.length);
+  assert.equal(result.passed + result.failed, EXPECTED_PREFLIGHT_CHECKS.length);
+  assert.ok(result.checks.every(check => ['PASS', 'FAIL', 'NOT_EVALUATED'].includes(check.state)));
+  assert.ok(result.checks.filter(check => check.state === 'NOT_EVALUATED').every(check => !check.passed));
+});
+
 test('WTI HTTP failures stay under WTI checks and never become browser failures', async () => {
   for (const status of [409, 500]) {
     const lines = [];
@@ -376,6 +434,25 @@ test('WTI timeout and network exceptions are attributed to WTI without exposing 
   }
 });
 
+test('untrusted WTI error codes are omitted from timing while exception class remains useful', async () => {
+  for (const code of ['lowercase-secret-token', { token: 'must-not-escape' }]) {
+    const timingEvents = [];
+    const reporter = makeReporter(() => {});
+    await reportWtiProductChecks(reporter, {
+      requestWti: async () => { throw Object.assign(new Error('private detail'), { code }); },
+      recommendation: currentBinding(),
+      parentInstrumentId: 'nifty_etf',
+      taxContext: { fiscalYear: 'FY2026-27' },
+      onTiming: event => timingEvents.push(event),
+    });
+    reporter.finish();
+
+    assert.equal(timingEvents.length, 1);
+    assert.equal(timingEvents[0].status, 'NETWORK_ERROR');
+    assert.equal(Object.hasOwn(timingEvents[0], 'code'), false);
+  }
+});
+
 test('malformed WTI JSON fails source qualification and leaves exact-product/tax checks explicit', async () => {
   const reporter = makeReporter(() => {});
   await reportWtiProductChecks(reporter, {
@@ -390,19 +467,68 @@ test('malformed WTI JSON fails source qualification and leaves exact-product/tax
   assert.match(result.checks.find(check => check.name === 'Product tax workflow').detail, /^NOT_EVALUATED/);
 });
 
-test('browser launch and authentication failures are attributed to their own stages', async () => {
+test('browser launch, login navigation, and login-control failures cannot pass the critical browser path', async () => {
   const launchFailure = await runBrowserFlow({ launchError: Object.assign(new Error('secret launch detail'), { code: 'BROWSER_MISSING' }) });
+  assert.equal(launchFailure.checks.find(check => check.name === 'Critical browser path').passed, false);
   assert.match(launchFailure.checks.find(check => check.name === 'Critical browser path').detail, /browser launch\/navigation failed/);
   assert.match(launchFailure.checks.find(check => check.name === 'ETF product source').detail, /^NOT_EVALUATED/);
   assert.doesNotMatch(launchFailure.lines.join('\n'), /secret launch detail/);
 
   const navigationFailure = await runBrowserFlow({ loginNavigationStatus: 503 });
+  assert.equal(navigationFailure.checks.find(check => check.name === 'Critical browser path').passed, false);
   assert.match(navigationFailure.checks.find(check => check.name === 'Critical browser path').detail, /browser launch\/navigation failed HTTP 503/);
 
-  const loginFailure = await runBrowserFlow({ loginStatus: 401 });
-  assert.match(loginFailure.checks.find(check => check.name === 'Profile completion/auth').detail, /authentication failed HTTP 401/);
-  assert.match(loginFailure.checks.find(check => check.name === 'Nifty ETF exact-product result').detail, /^NOT_EVALUATED/);
-  assert.doesNotMatch(loginFailure.checks.find(check => check.name === 'Critical browser path').detail, /HTTP 401/);
+  for (const scenario of [{ loginFormError: true }, { loginControlError: true }]) {
+    const result = await runBrowserFlow(scenario);
+    assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
+    assert.equal(result.checks.find(check => check.name === 'Profile completion/auth').passed, false);
+    assert.match(result.checks.find(check => check.name === 'Recommendation current-state binding').detail, /^NOT_EVALUATED/);
+    assert.match(result.checks.find(check => check.name === 'ETF product source').detail, /^NOT_EVALUATED/);
+  }
+});
+
+test('login 401/500 fail the critical path and leave downstream financial checks unevaluated', async () => {
+  for (const status of [401, 500]) {
+    const result = await runBrowserFlow({ loginStatus: status });
+    assert.equal(result.checks.find(check => check.name === 'Profile completion/auth').passed, false);
+    assert.match(result.checks.find(check => check.name === 'Profile completion/auth').detail, new RegExp(`HTTP ${status}`));
+    assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
+    assert.match(result.checks.find(check => check.name === 'Recommendation current-state binding').detail, /^NOT_EVALUATED/);
+    assert.match(result.checks.find(check => check.name === 'ETF product source').detail, /^NOT_EVALUATED/);
+    assert.match(result.checks.find(check => check.name === 'Nifty ETF exact-product result').detail, /^NOT_EVALUATED/);
+    assert.match(result.checks.find(check => check.name === 'Product tax workflow').detail, /^NOT_EVALUATED/);
+    assert.equal(result.lines.filter(line => line.startsWith('PASS Critical browser path')).length, 0);
+    assert.equal(result.lines.filter(line => line.includes('Critical browser path')).length, 1);
+  }
+});
+
+test('CSRF and profile-completion failures remain distinct from the authenticated browser path', async () => {
+  const missingCsrf = await runBrowserFlow({ missingCsrfCookie: true });
+  assert.equal(missingCsrf.checks.find(check => check.name === 'Profile completion/auth').passed, false);
+  assert.match(missingCsrf.checks.find(check => check.name === 'Profile completion/auth').detail, /CSRF_COOKIE_MISSING/);
+  assert.equal(missingCsrf.checks.find(check => check.name === 'Critical browser path').passed, true);
+  assert.match(missingCsrf.checks.find(check => check.name === 'Critical browser path').detail, /authenticated profile\/dashboard shell/);
+
+  const missingCsrfAndDashboard = await runBrowserFlow({ missingCsrfCookie: true, dashboardError: true });
+  assert.equal(missingCsrfAndDashboard.checks.find(check => check.name === 'Profile completion/auth').passed, false);
+  assert.equal(missingCsrfAndDashboard.checks.find(check => check.name === 'Critical browser path').passed, false);
+
+  const completionConflict = await runBrowserFlow({ completionStatus: 409 });
+  assert.equal(completionConflict.checks.find(check => check.name === 'Profile completion/auth').passed, false);
+  assert.equal(completionConflict.checks.find(check => check.name === 'Critical browser path').passed, true);
+  assert.match(completionConflict.checks.find(check => check.name === 'Critical browser path').detail, /authenticated profile\/dashboard shell/);
+});
+
+test('authenticated profile navigation must return successfully, remain on /profile, and render the sidebar', async () => {
+  for (const scenario of [
+    { profileNavigationStatus: 503 },
+    { dashboardRedirectLogin: true },
+    { dashboardWrongPath: true },
+    { sidebarMissing: true },
+  ]) {
+    const result = await runBrowserFlow(scenario);
+    assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
+  }
 });
 
 test('profile and recommendation failures retain all dependent checks as NOT_EVALUATED', async () => {
@@ -436,9 +562,16 @@ test('WTI exceptions, 409, 500, and malformed JSON never fail the browser stage'
 test('exact product and tax failures remain independently visible', async () => {
   const cases = [
     { products: [] },
+    { products: { unexpected: 'not-an-array' } },
+    { products: [qualifiedNiftyEtf(), qualifiedNiftyEtf()] },
     { products: [(() => { const product = qualifiedNiftyEtf(); product.externalIds[1].value = 'different'; return product; })()] },
+    { products: [(() => { const product = qualifiedNiftyEtf(); product.primaryFact.canonicalProductId = 'mf:amfi:140085'; return product; })()] },
+    { products: [(() => { const product = qualifiedNiftyEtf(); delete product.primaryFact.canonicalProductId; return product; })()] },
     { products: [(() => { const product = qualifiedNiftyEtf(); product.primaryFact.freshness.status = 'STALE'; return product; })()] },
+    { products: [(() => { const product = qualifiedNiftyEtf(); product.primaryFact.source.provider = 'OTHER_SOURCE'; return product; })()] },
     { wtiBindingMismatch: true },
+    { wtiMissingBinding: true },
+    { parentInstrumentId: 'liquid_etf' },
   ];
   for (const scenario of cases) {
     const result = await runBrowserFlow(scenario);
@@ -450,6 +583,18 @@ test('exact product and tax failures remain independently visible', async () => 
   assert.equal(taxUnavailable.checks.find(check => check.name === 'Nifty ETF exact-product result').passed, true);
   assert.equal(taxUnavailable.checks.find(check => check.name === 'Product tax workflow').passed, false);
   assert.match(taxUnavailable.checks.find(check => check.name === 'Product tax workflow').detail, /TAX_CLASSIFICATION_UNAVAILABLE/);
+
+  const wrongTaxYear = await runBrowserFlow({ products: [{
+    ...qualifiedNiftyEtf(), postTaxAnalysis: { status: 'CALCULATED', fiscalYear: 'FY2025-26' },
+  }] });
+  assert.equal(wrongTaxYear.checks.find(check => check.name === 'Nifty ETF exact-product result').passed, true);
+  assert.equal(wrongTaxYear.checks.find(check => check.name === 'Product tax workflow').passed, false);
+  const noExactButClaimedTax = await runBrowserFlow({ products: [{
+    ...qualifiedNiftyEtf(), canonicalProductId: 'etf:isin:OTHER',
+    postTaxAnalysis: { status: 'CALCULATED', fiscalYear: 'FY2026-27' },
+  }] });
+  assert.equal(noExactButClaimedTax.checks.find(check => check.name === 'Nifty ETF exact-product result').passed, false);
+  assert.equal(noExactButClaimedTax.checks.find(check => check.name === 'Product tax workflow').passed, false);
 });
 
 test('dashboard and direct-provider failures affect only the critical browser check', async () => {
@@ -461,4 +606,29 @@ test('dashboard and direct-provider failures affect only the critical browser ch
   const directProvider = await runBrowserFlow({ directProviderRequest: true });
   assert.equal(directProvider.checks.find(check => check.name === 'Critical browser path').passed, false);
   assert.match(directProvider.checks.find(check => check.name === 'Critical browser path').detail, /direct provider request/);
+
+  const providerHosts = [
+    'https://www.nseindia.com/market-data',
+    'https://portal.amfiindia.com/spages/NAVAll.txt',
+    'https://api.upstox.com/v2/market-quote',
+    'https://sbi.bank/rates',
+    'https://sbi.co.in/rates',
+    'https://www.rbi.org.in/rates',
+    'https://www.dea.gov.in/rates',
+    'https://www.indiapost.gov.in/rates',
+    'https://www.incometax.gov.in/iec/foportal',
+    'https://www.incometaxindia.gov.in/rates',
+  ];
+  for (const directProviderRequest of providerHosts) {
+    const result = await runBrowserFlow({ directProviderRequest });
+    assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false, directProviderRequest);
+    assert.doesNotMatch(result.lines.join('\n'), /token=hidden/);
+  }
+
+  const spoofedHost = await runBrowserFlow({ directProviderRequest: 'https://amfiindia.com.attacker.invalid/not-provider' });
+  assert.equal(spoofedHost.checks.find(check => check.name === 'Critical browser path').passed, true);
+
+  const uninspectableRequest = await runBrowserFlow({ providerRequestInspectionError: true });
+  assert.equal(uninspectableRequest.checks.find(check => check.name === 'Critical browser path').passed, false);
+  assert.match(uninspectableRequest.checks.find(check => check.name === 'Critical browser path').detail, /request inspection failed/);
 });

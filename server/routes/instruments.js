@@ -13,6 +13,53 @@ import logger from '../utils/logger.js';
 
 const router = Router();
 
+const SAFE_WTI_TIMING_STAGES = new Set([
+  'rank_wti_request',
+  'amfi_current_fetch',
+  'amfi_current_persistence',
+  'amfi_historical_fetch',
+  'amfi_historical_persistence',
+  'exact_etf_qualification',
+  'product_qualification',
+  'tax_enrichment',
+]);
+const SAFE_WTI_TIMING_STATUSES = new Set([
+  'COMPLETED', 'ERROR', 'TIMEOUT', 'NETWORK_ERROR', 'MALFORMED_JSON', 'HTTP_UNKNOWN',
+  'AVAILABLE', 'PARTIAL', 'UNAVAILABLE', 'PROVIDER_NOT_CONFIGURED', 'SOURCE_ERROR',
+  'NOT_PERSISTED', 'NOT_REQUESTED', 'PERSISTED', 'PERSISTENCE_ERROR',
+  'PERSISTENCE_UNAVAILABLE', 'VERIFIED_COMPARABLE_OPTIONS', 'EVIDENCE_RANKED',
+]);
+const SAFE_WTI_TIMING_CODES = new Set([
+  'ABORT_ERR', 'ECONNREFUSED', 'ECONNRESET', 'EAI_AGAIN', 'ENOTFOUND', 'ETIMEDOUT',
+  'ESOCKETTIMEDOUT', 'HTTP_STATUS', 'MARKET_PERSISTENCE_FAILED', 'NO_HTTP_RESPONSE',
+  'RECOMMENDATION_PARENT_MISMATCH', 'FINANCIAL_STATE_CHANGED', 'UND_ERR_CONNECT_TIMEOUT',
+  'UPSTREAM_UNAVAILABLE',
+]);
+
+export function sanitizeWtiTiming(event) {
+  if (!event || typeof event !== 'object' || Array.isArray(event)
+      || !SAFE_WTI_TIMING_STAGES.has(event.stage)
+      || !Number.isFinite(event.elapsedMs) || event.elapsedMs < 0) return null;
+
+  const status = typeof event.status === 'string' && SAFE_WTI_TIMING_STATUSES.has(event.status)
+    ? event.status
+    : typeof event.status === 'string' && /^HTTP_[1-5]\d{2}$/.test(event.status)
+      ? event.status
+      : 'UNKNOWN';
+  const sanitized = {
+    stage: event.stage,
+    elapsedMs: Math.min(600_000, Math.round(event.elapsedMs)),
+    status,
+  };
+  if (typeof event.code === 'string' && SAFE_WTI_TIMING_CODES.has(event.code)) sanitized.code = event.code;
+  if (event.provider === 'AMFI') sanitized.provider = 'AMFI';
+  return sanitized;
+}
+
+function safeWtiTimingCode(value) {
+  return typeof value === 'string' && SAFE_WTI_TIMING_CODES.has(value) ? value : undefined;
+}
+
 function recordRankWtiTiming(req, res, next) {
   const startedAt = performance.now();
   let recorded = false;
@@ -20,11 +67,14 @@ function recordRankWtiTiming(req, res, next) {
     if (recorded) return;
     recorded = true;
     try {
+      const status = Number.isInteger(res.statusCode) && res.statusCode >= 100 && res.statusCode <= 599
+        ? res.statusCode
+        : 500;
       logger.info('WTI request timing', {
         stage: 'rank_wti_request',
-        elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)),
-        httpStatus: res.statusCode || 500,
-        ...(req.wtiTimingCode ? { code: req.wtiTimingCode } : {}),
+        elapsedMs: Math.min(600_000, Math.max(0, Math.round(performance.now() - startedAt))),
+        httpStatus: status,
+        ...(safeWtiTimingCode(req.wtiTimingCode) ? { code: safeWtiTimingCode(req.wtiTimingCode) } : {}),
       });
     } catch { /* observability must not affect the response */ }
   };
@@ -117,12 +167,14 @@ router.post('/rank-wti', recordRankWtiTiming, verifyJWT, validateStrict(rankWtiP
       expectedBinding: requestedBinding,
       taxCalculationContext,
       dependencies: {
-        onStageTiming: timing => logger.info('WTI stage timing', timing),
+        onStageTiming: timing => {
+          const safeTiming = sanitizeWtiTiming(timing);
+          if (safeTiming) logger.info('WTI stage timing', safeTiming);
+        },
       },
     });
   } catch (error) {
-    req.wtiTimingCode = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
-      ? error.code : undefined;
+    req.wtiTimingCode = safeWtiTimingCode(error?.code);
     if (['FINANCIAL_STATE_CHANGED', 'RECOMMENDATION_PARENT_MISMATCH'].includes(error?.code)) {
       return sendError(req, res, error.status || 409, error.clientMessage || error.message, error.code);
     }
