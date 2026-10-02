@@ -31,6 +31,24 @@ import {
 import { enrichProductsWithPostTaxAndSuitability } from './productPostTaxCalculator.js';
 import { PROVIDERS } from './marketData/contracts.js';
 
+function reportPipelineTiming(onStageTiming, stage, startedAt, status = 'COMPLETED', error = null) {
+  if (typeof onStageTiming !== 'function') return;
+  const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
+    ? error.code
+    : null;
+  const safeStatus = typeof status === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(status)
+    ? status
+    : 'COMPLETED';
+  try {
+    onStageTiming({
+      stage,
+      elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      status: safeStatus,
+      ...(code ? { code } : {}),
+    });
+  } catch { /* diagnostics must not change recommendation behavior */ }
+}
+
 export const PIPELINE_CONFIG = Object.freeze({
   version: 'recommendation-pipeline-4.0.0',
   topN: 8,
@@ -551,12 +569,19 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
     }
     : null;
   const formatOutput = (resultProducts, metadata) => {
-    const enriched = enrichProductsWithPostTaxAndSuitability(resultProducts, {
-      profile: canonical,
-      parentCatalog: catalog,
-      taxCalculationContext,
-    });
-    return attachWtiMetadata(enriched, metadata);
+    const startedAt = performance.now();
+    try {
+      const enriched = enrichProductsWithPostTaxAndSuitability(resultProducts, {
+        profile: canonical,
+        parentCatalog: catalog,
+        taxCalculationContext,
+      });
+      reportPipelineTiming(dependencies.onStageTiming, 'tax_enrichment', startedAt);
+      return attachWtiMetadata(enriched, metadata);
+    } catch (error) {
+      reportPipelineTiming(dependencies.onStageTiming, 'tax_enrichment', startedAt, 'ERROR', error);
+      throw error;
+    }
   };
 
   if (supportsFixedIncomeParentCategory(catalog.id)) {
@@ -618,22 +643,32 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
 
   const fetchCurrent = dependencies.fetchAmfiProductSnapshot || fetchAmfiProductSnapshot;
   const fetchHistorical = dependencies.fetchAmfiHistoricalNavSnapshot || fetchAmfiHistoricalNavSnapshot;
-  const currentSnapshot = await fetchCurrent();
+  const currentSnapshot = await fetchCurrent({ onStageTiming: dependencies.onStageTiming });
   const targetDate = historicalTargetDate(currentSnapshot);
   const historicalSnapshot = targetDate
-    ? await fetchHistorical({ targetDate })
+    ? await fetchHistorical({ targetDate, onStageTiming: dependencies.onStageTiming })
     : null;
-  const result = hasQualifiedEtfPath
-    ? rankQualifiedNiftyEtfProducts({
-      parentInstrumentId: catalog.id,
-      currentSnapshot,
-      historicalSnapshot,
-    })
-    : rankVerifiedMutualFundProducts({
-      parentInstrumentId: catalog.id,
-      currentSnapshot,
-      historicalSnapshot,
-    });
+  const qualificationStage = hasQualifiedEtfPath ? 'exact_etf_qualification' : 'product_qualification';
+  const qualificationStartedAt = performance.now();
+  let result;
+  try {
+    result = hasQualifiedEtfPath
+      ? rankQualifiedNiftyEtfProducts({
+        parentInstrumentId: catalog.id,
+        currentSnapshot,
+        historicalSnapshot,
+      })
+      : rankVerifiedMutualFundProducts({
+        parentInstrumentId: catalog.id,
+        currentSnapshot,
+        historicalSnapshot,
+      });
+    reportPipelineTiming(dependencies.onStageTiming, qualificationStage, qualificationStartedAt,
+      result.ranking?.status || 'COMPLETED');
+  } catch (error) {
+    reportPipelineTiming(dependencies.onStageTiming, qualificationStage, qualificationStartedAt, 'ERROR', error);
+    throw error;
+  }
   return formatOutput(result.products, {
     excluded,
     riskReconciliation,

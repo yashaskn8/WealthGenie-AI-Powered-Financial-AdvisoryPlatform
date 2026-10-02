@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { performance } from 'node:perf_hooks';
 import { asyncHandler, sendError } from '../middleware/errorHandler.js';
 import { verifyJWT } from '../middleware/authMiddleware.js';
 import { rankWtiProfileSchema, validateStrict } from '../validation/financialSchemas.js';
@@ -8,8 +9,29 @@ import FinancialProfile from '../models/FinancialProfile.js';
 import { getCache, setCache } from '../config/redis.js';
 import { serializeCachedInstrumentPage, serializeInstrumentPage } from '../services/instrumentDto.js';
 import { rankWtiAgainstCurrentState } from '../services/currentWtiRanking.js';
+import logger from '../utils/logger.js';
 
 const router = Router();
+
+function recordRankWtiTiming(req, res, next) {
+  const startedAt = performance.now();
+  let recorded = false;
+  const record = () => {
+    if (recorded) return;
+    recorded = true;
+    try {
+      logger.info('WTI request timing', {
+        stage: 'rank_wti_request',
+        elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)),
+        httpStatus: res.statusCode || 500,
+        ...(req.wtiTimingCode ? { code: req.wtiTimingCode } : {}),
+      });
+    } catch { /* observability must not affect the response */ }
+  };
+  res.once('finish', record);
+  res.once('close', record);
+  next();
+}
 
 // Allowed sort fields to prevent injection via sort parameter
 const ALLOWED_SORT_FIELDS = new Set(['name', 'interestRate', 'returns1yr', 'returns3yr', 'returns5yr', 'riskLevel', 'aumCr', 'expenseRatio']);
@@ -60,7 +82,7 @@ router.get('/', validateQuery(instrumentListQuerySchema), asyncHandler(async (re
  * Returns a suitability-filtered, source-qualified product comparison. Phase 2
  * supports exact AMFI mutual-fund categories and fails closed for other classes.
  */
-router.post('/rank-wti', verifyJWT, validateStrict(rankWtiProfileSchema), asyncHandler(async (req, res) => {
+router.post('/rank-wti', recordRankWtiTiming, verifyJWT, validateStrict(rankWtiProfileSchema), asyncHandler(async (req, res) => {
   const {
     profileId,
     profileVersion,
@@ -94,15 +116,20 @@ router.post('/rank-wti', verifyJWT, validateStrict(rankWtiProfileSchema), asyncH
       parentInstrumentId,
       expectedBinding: requestedBinding,
       taxCalculationContext,
+      dependencies: {
+        onStageTiming: timing => logger.info('WTI stage timing', timing),
+      },
     });
   } catch (error) {
+    req.wtiTimingCode = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
+      ? error.code : undefined;
     if (['FINANCIAL_STATE_CHANGED', 'RECOMMENDATION_PARENT_MISMATCH'].includes(error?.code)) {
       return sendError(req, res, error.status || 409, error.clientMessage || error.message, error.code);
     }
     throw error;
   }
 
-  res.json({
+  return res.json({
     success: true,
     financialStateBinding: result.financialStateBinding,
     total: result.ranked.length,

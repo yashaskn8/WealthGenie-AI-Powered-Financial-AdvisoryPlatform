@@ -135,6 +135,7 @@ test('an exact scheme with fresh AMFI NAV is returned as one comparable option, 
   assert.equal(product.marketPrice.value, null);
   assert.equal(product.marketPrice.availabilityStatus, 'UNAVAILABLE');
   assert.equal(product.primaryFact.kind, 'MUTUAL_FUND_NAV');
+  assert.equal(product.primaryFact.canonicalProductId, 'mf:amfi:140084');
   assert.equal(product.primaryFact.value, product.nav.value);
   assert.equal(product.historicalReturn.isExpectedReturn, false);
   assert.equal(product.returnBasis, 'HISTORICAL_POINT_TO_POINT_NAV_RETURN_1Y');
@@ -216,12 +217,14 @@ test('provider failure or missing NAV never inserts catalog or market-price fall
 
 test('WTI integrates exact ETF facts after parent suitability and preserves unavailable tax classification', async () => {
   const { current, historical } = snapshots();
+  const timingEvents = [];
   const result = await rankWhereToInvestBackend(
     canonicalProfile(),
     { parentInstrumentId: 'nifty_etf' },
     {
       fetchAmfiProductSnapshot: async () => current,
       fetchAmfiHistoricalNavSnapshot: async () => historical,
+      onStageTiming: event => timingEvents.push(event),
     },
   );
   assert.equal(result.length, 1);
@@ -229,4 +232,6 @@ test('WTI integrates exact ETF facts after parent suitability and preserves unav
   assert.equal(result[0].postTaxAnalysis.status, 'TAX_CLASSIFICATION_UNAVAILABLE');
   assert.deepEqual(result.metadata.ranking.reasonCodes.includes('NIFTY_50_BENCHMARK_VERIFIED'), true);
   assert.equal(result.metadata.catalog.providerCoverage.status, 'QUALIFIED_PROVIDER_PATH');
+  assert.deepEqual(timingEvents.map(event => event.stage), ['exact_etf_qualification', 'tax_enrichment']);
+  assert.ok(timingEvents.every(event => Number.isInteger(event.elapsedMs) && event.elapsedMs >= 0));
 });

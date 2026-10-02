@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseAmfiNavReport } from '../services/marketData/AmfiNavProvider.js';
+import AmfiNavProvider, { parseAmfiNavReport } from '../services/marketData/AmfiNavProvider.js';
+import AmfiNavHistoryProvider from '../services/marketData/AmfiNavHistoryProvider.js';
+import { fetchAmfiHistoricalNavSnapshot, fetchAmfiProductSnapshot } from '../services/marketDataService.js';
 import UpstoxMarketDataProvider from '../services/marketData/UpstoxMarketDataProvider.js';
 import UpstoxHistoricalCandleProvider, {
   parseUpstoxDailyCandles,
@@ -68,6 +70,38 @@ test('missing financial values remain null and unavailable instead of becoming z
   assert.equal(nullableFiniteNumber(0), 0);
   assert.equal(snapshot.facts[1].value, null);
   assert.equal(snapshot.facts[1].availabilityStatus, AVAILABILITY.UNAVAILABLE);
+});
+
+test('WTI AMFI timing reports fetch and persistence stages without provider payloads', async () => {
+  const currentDescriptor = Object.getOwnPropertyDescriptor(AmfiNavProvider.prototype, 'getSnapshot');
+  const historyDescriptor = Object.getOwnPropertyDescriptor(AmfiNavHistoryProvider.prototype, 'getSnapshot');
+  const sourceError = { provider: 'AMFI', status: AVAILABILITY.SOURCE_ERROR, products: [], facts: [] };
+  const events = [];
+  try {
+    AmfiNavProvider.prototype.getSnapshot = async () => ({ ...sourceError, fetchedAt: FIXED_NOW.toISOString() });
+    AmfiNavHistoryProvider.prototype.getSnapshot = async () => ({ ...sourceError, fetchedAt: FIXED_NOW.toISOString() });
+    const current = await fetchAmfiProductSnapshot({ onStageTiming: event => events.push(event) });
+    const historical = await fetchAmfiHistoricalNavSnapshot({ targetDate: '2025-09-07', onStageTiming: event => events.push(event) });
+
+    assert.equal(current.persistence.status, 'NOT_PERSISTED');
+    assert.equal(historical.persistence.status, 'NOT_PERSISTED');
+    assert.deepEqual(events.map(event => event.stage), [
+      'amfi_current_fetch', 'amfi_current_persistence',
+      'amfi_historical_fetch', 'amfi_historical_persistence',
+    ]);
+    assert.deepEqual(events.map(event => event.status), [
+      AVAILABILITY.SOURCE_ERROR, 'NOT_PERSISTED',
+      AVAILABILITY.SOURCE_ERROR, 'NOT_PERSISTED',
+    ]);
+    for (const event of events) {
+      assert.equal(event.provider, 'AMFI');
+      assert.ok(Number.isInteger(event.elapsedMs) && event.elapsedMs >= 0);
+      assert.equal(Object.hasOwn(event, 'payload'), false);
+    }
+  } finally {
+    if (currentDescriptor) Object.defineProperty(AmfiNavProvider.prototype, 'getSnapshot', currentDescriptor);
+    if (historyDescriptor) Object.defineProperty(AmfiNavHistoryProvider.prototype, 'getSnapshot', historyDescriptor);
+  }
 });
 
 test('AMFI reports without separate Plan and Option columns leave classifications unestablished', () => {

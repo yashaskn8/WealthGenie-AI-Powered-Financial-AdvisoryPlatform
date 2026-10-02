@@ -239,6 +239,7 @@ export function rankQualifiedNiftyEtfProducts({
       },
       primaryFact: {
         kind: currentFact.kind,
+        canonicalProductId: currentFact.canonicalProductId,
         value: Number(currentFact.value),
         currency: currentFact.currency,
         unit: currentFact.unit,

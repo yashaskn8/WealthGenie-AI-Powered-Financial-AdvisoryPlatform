@@ -141,16 +141,192 @@ export function assessCurrentMarketContext(result) {
   };
 }
 
-function makeReporter() {
-  const checks = [];
+export const EXPECTED_PREFLIGHT_CHECKS = Object.freeze([
+  'Explicit live-demo mode',
+  'Backend URL configuration',
+  'Profile completion payload',
+  'Tax input payload',
+  'Backend',
+  'Backend readiness',
+  'Mongo/transaction support',
+  'Redis if required',
+  'Market provider configuration',
+  'NIFTY quote',
+  'VIX quote',
+  'Market history',
+  'Market context',
+  'Provider token presence',
+  'Tax-policy metadata',
+  'Profile completion/auth',
+  'Recommendation current-state binding',
+  'ETF product source',
+  'Nifty ETF exact-product result',
+  'Product tax workflow',
+  'Critical browser path',
+  'Production frontend build',
+]);
+
+export function makeReporter(write = line => process.stdout.write(`${line}\n`)) {
+  const checks = EXPECTED_PREFLIGHT_CHECKS.map(name => ({
+    name,
+    passed: false,
+    detail: 'NOT_EVALUATED because this check has not run',
+  }));
+  const evaluated = new Set();
+  let finalized = false;
   return {
     checks,
     add(name, passed, detail) {
-      checks.push({ name, passed: Boolean(passed), detail });
-      process.stdout.write(`${passed ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}\n`);
+      if (finalized) throw new Error('Cannot add preflight checks after finalization.');
+      const check = checks.find(candidate => candidate.name === name);
+      if (!check) throw new Error(`Unexpected preflight check: ${name}`);
+      check.passed = Boolean(passed);
+      check.detail = String(detail || (passed ? 'verified' : 'failed'));
+      evaluated.add(name);
+    },
+    finish() {
+      if (!finalized) {
+        for (const check of checks) {
+          if (!evaluated.has(check.name)) {
+            check.detail = 'NOT_EVALUATED because a prerequisite failed or the check was not reached';
+          }
+          write(`${check.passed ? 'PASS' : 'FAIL'} ${check.name} — ${check.detail}`);
+        }
+        finalized = true;
+      }
+      const passed = checks.filter(check => check.passed).length;
+      return {
+        checks: checks.map(check => ({ ...check })),
+        passed,
+        failed: checks.length - passed,
+        total: checks.length,
+      };
     },
     get failed() { return checks.some(check => !check.passed); },
   };
+}
+
+function safeStableCode(value) {
+  return typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value) ? value : null;
+}
+
+function safeFailureKind(error) {
+  const code = safeStableCode(error?.code) || safeStableCode(error?.cause?.code);
+  const timeout = error?.name === 'TimeoutError'
+    || error?.name === 'AbortError'
+    || ['ETIMEDOUT', 'ESOCKETTIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'ABORT_ERR'].includes(code);
+  return { kind: timeout ? 'timeout' : 'network/stage error', code };
+}
+
+function elapsedMilliseconds(startedAt) {
+  return Math.max(0, Math.round(performance.now() - startedAt));
+}
+
+function emitSafeTiming(onTiming, event) {
+  if (typeof onTiming !== 'function') return;
+  try { onTiming(event); } catch { /* diagnostic hooks must not change request behavior */ }
+}
+
+function responseStatus(response) {
+  return Number(typeof response?.status === 'function' ? response.status() : response?.status) || 0;
+}
+
+function responseOk(response) {
+  return typeof response?.ok === 'function' ? response.ok() : response?.ok === true;
+}
+
+async function readSafeResponseBody(response) {
+  try {
+    const body = await response.json();
+    return body && typeof body === 'object' && !Array.isArray(body) ? body : null;
+  } catch {
+    return null;
+  }
+}
+
+function reportWtiNotEvaluated(reporter, reason) {
+  reporter.add('Nifty ETF exact-product result', false, `NOT_EVALUATED because ${reason}`);
+  reporter.add('Product tax workflow', false, `NOT_EVALUATED because ${reason}`);
+}
+
+export async function reportWtiProductChecks(reporter, {
+  requestWti,
+  recommendation,
+  parentInstrumentId,
+  taxContext,
+  onTiming,
+} = {}) {
+  if (!parentInstrumentId) {
+    reporter.add('ETF product source', false, 'NOT_EVALUATED because no qualified current recommendation parent is configured');
+    reportWtiNotEvaluated(reporter, 'no WTI parent is configured');
+    return;
+  }
+
+  const startedAt = performance.now();
+  let timingStatus = 'NOT_STARTED';
+  let timingCode = null;
+  try {
+    const response = await requestWti();
+    const status = responseStatus(response);
+    timingStatus = `HTTP_${status || 'UNKNOWN'}`;
+    const body = await readSafeResponseBody(response);
+    if (!responseOk(response)) {
+      timingCode = safeStableCode(body?.code);
+      const detail = `WTI HTTP ${status || 'unknown'}${timingCode ? ` (${timingCode})` : ''}; ${elapsedMilliseconds(startedAt)}ms`;
+      reporter.add('ETF product source', false, detail);
+      reportWtiNotEvaluated(reporter, `WTI returned HTTP ${status || 'unknown'}`);
+      return;
+    }
+    if (!body) {
+      timingStatus = 'MALFORMED_JSON';
+      timingCode = 'MALFORMED_JSON';
+      reporter.add('ETF product source', false, `WTI response contained malformed JSON; ${elapsedMilliseconds(startedAt)}ms`);
+      reportWtiNotEvaluated(reporter, 'WTI response could not be parsed');
+      return;
+    }
+
+    const products = Array.isArray(body.products) ? body.products : [];
+    const bindingValid = matchesRecommendationBinding(body.financialStateBinding, recommendation);
+    const qualifiedProducts = bindingValid ? products.filter(qualifiesExactNiftyEtf) : [];
+    const wtiElapsedMs = elapsedMilliseconds(startedAt);
+    reporter.add('ETF product source', qualifiedProducts.length > 0, qualifiedProducts.length
+      ? `exact identity, NIFTY 50 benchmark, official HTTPS source, fresh primary fact, and provenance verified; ${wtiElapsedMs}ms`
+      : `WTI HTTP ${status || 200}, mismatched financial binding, or no product passed exact identity/source/freshness checks; ${wtiElapsedMs}ms`);
+    reporter.add('Nifty ETF exact-product result', qualifiedProducts.length > 0, qualifiedProducts.length
+      ? `${qualifiedProducts.length} exact qualified product(s)`
+      : bindingValid ? 'no exact source-qualified Nifty 50 ETF result' : 'WTI response financial-state binding did not match the current recommendation');
+
+    const taxStartedAt = performance.now();
+    const validTaxResult = Boolean(taxContext) && qualifiedProducts.some(product => (
+      product.postTaxAnalysis?.status === 'CALCULATED'
+      && product.postTaxAnalysis?.fiscalYear === taxContext.fiscalYear
+    ));
+    const taxStatus = qualifiedProducts[0]?.postTaxAnalysis?.status;
+    reporter.add('Product tax workflow', validTaxResult, validTaxResult
+      ? `exact-product tax calculation is bound to the supplied fiscal year; ${elapsedMilliseconds(taxStartedAt)}ms`
+      : !taxContext
+        ? 'TAX_INPUTS_UNAVAILABLE; provide actual required tax facts; no tax values are inferred'
+        : !qualifiedProducts.length
+          ? 'NOT_EVALUATED because no exact current product passed identity and financial-state checks'
+          : safeStableCode(taxStatus)
+            ? `${safeStableCode(taxStatus)}; no tax values are inferred`
+            : 'exact-product tax result is not calculated; no tax values are inferred');
+    timingStatus = 'COMPLETED';
+  } catch (error) {
+    const failure = safeFailureKind(error);
+    timingStatus = failure.kind.toUpperCase().replaceAll('/', '_');
+    timingCode = failure.code;
+    const errorDetail = `WTI ${failure.kind}${failure.code ? ` (${failure.code})` : ''}; ${elapsedMilliseconds(startedAt)}ms`;
+    reporter.add('ETF product source', false, errorDetail);
+    reportWtiNotEvaluated(reporter, 'WTI request failed');
+  } finally {
+    emitSafeTiming(onTiming, {
+      stage: 'rank_wti_request',
+      elapsedMs: elapsedMilliseconds(startedAt),
+      status: timingStatus,
+      ...(timingCode ? { code: timingCode } : {}),
+    });
+  }
 }
 
 export function isRedisRequired(environment = process.env) {
@@ -169,7 +345,10 @@ async function readJson(url, options = {}) {
 
 function safeHttpDetail(result) {
   if (!result) return 'request unavailable';
-  if (!result.response.ok) return `HTTP ${result.response.status}${result.body?.code ? ` (${result.body.code})` : ''}`;
+  if (!result.response.ok) {
+    const code = safeStableCode(result.body?.code);
+    return `HTTP ${result.response.status}${code ? ` (${code})` : ''}`;
+  }
   return 'verified';
 }
 
@@ -181,6 +360,7 @@ async function readConfiguredJson(filePath, label, reporter) {
   try {
     const parsed = JSON.parse(await readFile(path.resolve(filePath), 'utf8'));
     if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new TypeError('Expected a JSON object.');
+    reporter.add(label, true, 'valid JSON object loaded; contents are never printed');
     return parsed;
   } catch {
     reporter.add(label, false, 'file must contain one valid JSON object; contents are never printed');
@@ -191,7 +371,7 @@ async function readConfiguredJson(filePath, label, reporter) {
 async function checkMongoTransaction(reporter) {
   const uri = process.env.MONGODB_URI;
   if (!uri) {
-    reporter.add('Mongo transaction support', false, 'MONGODB_URI is not configured');
+    reporter.add('Mongo/transaction support', false, 'MONGODB_URI is not configured');
     return;
   }
   let session;
@@ -237,162 +417,218 @@ async function checkRedis(reporter) {
   }
 }
 
-async function checkBrowserAndFinancialFlow(reporter, { apiBase, frontendUrl, completionPayload, taxContext }) {
-  const email = process.env.DEMO_EMAIL;
-  const password = process.env.DEMO_PASSWORD;
-  const idempotencyKey = process.env.DEMO_COMPLETION_IDEMPOTENCY_KEY;
-  const parentInstrumentId = process.env.DEMO_NIFTY_ETF_PARENT_ID;
+export async function checkBrowserAndFinancialFlow(reporter, {
+  apiBase,
+  frontendUrl,
+  completionPayload,
+  taxContext,
+  email = process.env.DEMO_EMAIL,
+  password = process.env.DEMO_PASSWORD,
+  idempotencyKey = process.env.DEMO_COMPLETION_IDEMPOTENCY_KEY,
+  parentInstrumentId = process.env.DEMO_NIFTY_ETF_PARENT_ID,
+}, { launchBrowser, onTiming } = {}) {
   if (!frontendUrl || !email || !password) {
-    reporter.add('Critical browser path', false, 'set DEMO_FRONTEND_URL, DEMO_EMAIL, and DEMO_PASSWORD');
-    reporter.add('Profile completion/auth', false, 'set a dedicated demo identity and credentials');
-    reporter.add('Nifty ETF exact-product result', false, 'live demo identity is not configured');
-    reporter.add('Product tax workflow', false, 'live demo identity is not configured');
+    reporter.add('Critical browser path', false, 'browser launch/navigation NOT_EVALUATED because demo browser configuration is missing');
+    reporter.add('Profile completion/auth', false, 'NOT_EVALUATED because demo identity configuration is missing');
+    reporter.add('Recommendation current-state binding', false, 'NOT_EVALUATED because authentication was not run');
+    reporter.add('ETF product source', false, 'NOT_EVALUATED because authentication was not run');
+    reportWtiNotEvaluated(reporter, 'authentication was not run');
     return;
   }
 
   let browser;
+  let context;
+  let page;
+  const providerRequests = [];
   try {
-    const frontend = new URL(frontendUrl);
-    const localHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
-    if (!['http:', 'https:'].includes(frontend.protocol)
-        || (frontend.protocol !== 'https:' && !localHosts.has(frontend.hostname))
-        || frontend.username || frontend.password || frontend.search || frontend.hash) {
-      throw new Error('DEMO_FRONTEND_URL must be a safe HTTPS URL (or local HTTP URL).');
-    }
-    const requireFromReactapp = createRequire(path.join(REACTAPP_DIR, 'package.json'));
-    const { chromium } = requireFromReactapp('@playwright/test');
-    browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    const providerRequests = [];
-    page.on('request', request => {
-      if (PROVIDER_HOSTS.test(request.url())) providerRequests.push(request.url());
-    });
-
-    const frontendResponse = await page.goto(new URL('/login', frontendUrl).toString(), { waitUntil: 'domcontentloaded' });
-    const loginRendered = Boolean(frontendResponse?.ok()) && await page.locator('#login-form').count() === 1;
-    if (!loginRendered) throw new Error('Frontend login page was not reachable.');
-    await page.locator('#login-email').fill(email);
-    await page.locator('#login-password').fill(password);
-    const configuredApiOrigin = new URL(apiBase).origin;
-    const loginResponsePromise = page.waitForResponse(response => {
-      const responseUrl = new URL(response.url());
-      return response.request().method() === 'POST'
-        && responseUrl.origin === configuredApiOrigin
-        && responseUrl.pathname.endsWith('/api/auth/login');
-    }, { timeout: 20_000 });
-    await page.locator('#login-form button[type="submit"]').click();
-    const loginResponse = await loginResponsePromise;
-    if (!loginResponse.ok()) throw new Error(`Login returned HTTP ${loginResponse.status()}.`);
-
-    let profileId = null;
-    if (!completionPayload || !idempotencyKey || idempotencyKey.length > 200) {
-      reporter.add('Profile completion/auth', false, 'configure DEMO_PROFILE_COMPLETION_FILE and a stable DEMO_COMPLETION_IDEMPOTENCY_KEY');
-    } else {
-      const cookies = await context.cookies(apiBase);
-      const csrf = cookies.find(cookie => cookie.name === 'wg_csrf')?.value;
-      if (!csrf) throw new Error('The authenticated browser session has no CSRF cookie.');
-      const completion = await page.request.post(`${apiBase}/profile/complete`, {
-        data: completionPayload,
-        headers: {
-          'X-CSRF-Token': csrf,
-          'Idempotency-Key': idempotencyKey,
-          Origin: new URL(frontendUrl).origin,
-        },
-        timeout: 120_000,
-      });
-      const completionBody = completion.ok() ? await completion.json() : null;
-      const completedProfileId = completionBody?.profile?.profileId;
-      reporter.add('Profile completion/auth', completion.ok() && Boolean(completedProfileId), completion.ok()
-        ? 'profile completion committed or safely replayed'
-        : `HTTP ${completion.status()}${completionBody?.code ? ` (${completionBody.code})` : ''}`);
-      if (completion.ok() && completedProfileId) profileId = completedProfileId;
-    }
-
-    if (!profileId) {
-      const profileResult = await page.request.get(`${apiBase}/profile/current`);
-      const profile = profileResult.ok() ? await profileResult.json() : null;
-      profileId = profile?.profileId || null;
-      if (!profileId) {
-        reporter.add('Recommendation current-state binding', false,
-          `authenticated current profile unavailable (HTTP ${profileResult.status()})`);
-        reporter.add('ETF product source', false, 'current profile and recommendation state unavailable');
-        reporter.add('Nifty ETF exact-product result', false, 'current profile and recommendation state unavailable');
-        reporter.add('Product tax workflow', false, 'current profile and recommendation state unavailable');
-        reporter.add('Critical browser path', false, 'authenticated profile could not be resolved');
-        return;
+    try {
+      const frontend = new URL(frontendUrl);
+      const localHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
+      if (!['http:', 'https:'].includes(frontend.protocol)
+          || (frontend.protocol !== 'https:' && !localHosts.has(frontend.hostname))
+          || frontend.username || frontend.password || frontend.search || frontend.hash) {
+        throw new Error('Unsafe frontend URL configuration.');
       }
-    }
-
-    const finalProfileId = profileId;
-    const recommendationResult = await page.request.get(`${apiBase}/recommend/current?profileId=${encodeURIComponent(finalProfileId)}`);
-    const recommendation = recommendationResult.ok() ? await recommendationResult.json() : null;
-    const bindingValid = recommendationResult.ok()
-      && hasCurrentFinancialBinding(recommendation)
-      && recommendation.profileId === finalProfileId;
-    reporter.add('Recommendation current-state binding', bindingValid, bindingValid
-      ? 'CURRENT response contains profile/recommendation/allocation fingerprints and fresh provenance'
-      : `HTTP ${recommendationResult.status()} or incomplete/stale current-state binding`);
-
-    if (!parentInstrumentId) {
-      reporter.add('Nifty ETF exact-product result', false, 'set DEMO_NIFTY_ETF_PARENT_ID to the qualified current recommendation parent');
-      reporter.add('Product tax workflow', false, 'no designated Nifty 50 ETF parent is configured');
-    } else if (!bindingValid) {
-      reporter.add('Nifty ETF exact-product result', false, 'current recommendation state is missing or stale');
-      reporter.add('Product tax workflow', false, 'current recommendation state is missing or stale');
-    } else {
-      const csrf = (await context.cookies(apiBase)).find(cookie => cookie.name === 'wg_csrf')?.value;
-      const rankResult = await page.request.post(`${apiBase}/instruments/rank-wti`, {
-        data: {
-          profileId: finalProfileId,
-          profileVersion: recommendation.profile_version,
-          recommendationId: recommendation.recommendationId,
-          expectedAllocationRevision: recommendation.allocation_revision,
-          expectedAllocationRevisionId: recommendation.allocation_revision_id,
-          expectedPortfolioFingerprint: recommendation.portfolio_fingerprint,
-          expectedRecommendationFingerprint: recommendation.recommendation_fingerprint,
-          parentInstrumentId,
-          ...(taxContext ? { taxCalculationContext: taxContext } : {}),
-        },
-        headers: {
-          'X-CSRF-Token': csrf || '',
-          'Idempotency-Key': randomUUID(),
-          Origin: new URL(frontendUrl).origin,
-        },
-        timeout: 120_000,
+      if (launchBrowser) {
+        browser = await launchBrowser();
+      } else {
+        const requireFromReactapp = createRequire(path.join(REACTAPP_DIR, 'package.json'));
+        const { chromium } = requireFromReactapp('@playwright/test');
+        browser = await chromium.launch({ headless: true });
+      }
+      context = await browser.newContext();
+      page = await context.newPage();
+      page.on('request', request => {
+        if (PROVIDER_HOSTS.test(request.url())) providerRequests.push(request.url());
       });
-      const rankBody = rankResult.ok() ? await rankResult.json() : null;
-      const etfProducts = Array.isArray(rankBody?.products) ? rankBody.products : [];
-      const rankBindingValid = matchesRecommendationBinding(rankBody?.financialStateBinding, recommendation);
-      const qualifiedProducts = rankBindingValid ? etfProducts.filter(qualifiesExactNiftyEtf) : [];
-      reporter.add('ETF product source', qualifiedProducts.length > 0, qualifiedProducts.length
-        ? 'exact identity, NIFTY 50 benchmark, official HTTPS source, fresh primary fact, and provenance verified'
-        : `rank-wti returned HTTP ${rankResult.status()}, mismatched financial binding, or no product passed exact identity/source/freshness checks`);
-      reporter.add('Nifty ETF exact-product result', qualifiedProducts.length > 0, qualifiedProducts.length
-        ? `${qualifiedProducts.length} exact qualified product(s)`
-        : 'no exact source-qualified Nifty 50 ETF result');
-      const validTaxResult = Boolean(taxContext) && qualifiedProducts.some(product => (
-        product.postTaxAnalysis?.status === 'CALCULATED'
-        && product.postTaxAnalysis?.fiscalYear === taxContext.fiscalYear
-      ));
-      reporter.add('Product tax workflow', validTaxResult, validTaxResult
-        ? 'exact-product tax calculation is bound to the supplied fiscal year'
-        : 'provide real required tax facts and verify CALCULATED exact-product output; no tax values are inferred');
+
+      const frontendResponse = await page.goto(new URL('/login', frontendUrl).toString(), { waitUntil: 'domcontentloaded' });
+      if (!frontendResponse) throw Object.assign(new Error('No HTTP response.'), { code: 'NO_HTTP_RESPONSE' });
+      if (!responseOk(frontendResponse)) {
+        throw Object.assign(new Error('Navigation returned non-success HTTP status.'), {
+          code: 'HTTP_STATUS',
+          status: responseStatus(frontendResponse),
+        });
+      }
+      const loginReadyTimeoutMs = 15_000;
+      await Promise.all([
+        page.locator('#login-form'),
+        page.locator('#login-email'),
+        page.locator('#login-password'),
+      ].map(locator => locator.waitFor({ state: 'visible', timeout: loginReadyTimeoutMs })));
+      reporter.add('Critical browser path', true, 'browser launched and login page rendered');
+    } catch (error) {
+      const status = Number.isInteger(error?.status) ? ` HTTP ${error.status}` : '';
+      const failure = safeFailureKind(error);
+      reporter.add('Critical browser path', false, `browser launch/navigation failed${status} (${failure.kind}${failure.code ? ` ${failure.code}` : ''})`);
+      reporter.add('Profile completion/auth', false, 'NOT_EVALUATED because browser launch/navigation failed');
+      reporter.add('Recommendation current-state binding', false, 'NOT_EVALUATED because browser launch/navigation failed');
+      reporter.add('ETF product source', false, 'NOT_EVALUATED because browser launch/navigation failed');
+      reportWtiNotEvaluated(reporter, 'browser launch/navigation failed');
+      return;
     }
 
-    await page.goto(new URL('/profile', frontendUrl).toString(), { waitUntil: 'domcontentloaded' });
-    const dashboard = page.locator('aside.sidebar');
-    await dashboard.waitFor({ state: 'visible', timeout: 45_000 });
-    const dashboardVisible = hasAuthenticatedDashboard({
-      pathname: new URL(page.url()).pathname,
-      sidebarVisible: await dashboard.isVisible(),
-    });
-    reporter.add('Critical browser path', dashboardVisible && providerRequests.length === 0, providerRequests.length
-      ? 'browser attempted a direct provider request; frontend must use backend APIs only'
-      : dashboardVisible ? 'authenticated profile/dashboard shell rendered without direct provider calls' : 'authenticated dashboard shell is unavailable');
-  } catch (error) {
-    const message = /HTTP \d{3}/.test(error?.message || '') ? error.message : 'browser/authenticated critical path failed; verify URLs, credentials, and browser installation';
-    reporter.add('Critical browser path', false, message);
+    let authenticated = false;
+    try {
+      await page.locator('#login-email').fill(email);
+      await page.locator('#login-password').fill(password);
+      const configuredApiOrigin = new URL(apiBase).origin;
+      const loginResponsePromise = page.waitForResponse(response => {
+        const responseUrl = new URL(response.url());
+        return response.request().method() === 'POST'
+          && responseUrl.origin === configuredApiOrigin
+          && responseUrl.pathname.endsWith('/api/auth/login');
+      }, { timeout: 20_000 });
+      await page.locator('#login-form button[type="submit"]').click();
+      const loginResponse = await loginResponsePromise;
+      if (!responseOk(loginResponse)) {
+        throw Object.assign(new Error('Login returned non-success HTTP status.'), {
+          code: 'HTTP_STATUS', status: responseStatus(loginResponse),
+        });
+      }
+      authenticated = true;
+    } catch (error) {
+      const status = Number.isInteger(error?.status) ? ` HTTP ${error.status}` : '';
+      const failure = safeFailureKind(error);
+      reporter.add('Profile completion/auth', false, `authentication failed${status} (${failure.kind}${failure.code ? ` ${failure.code}` : ''})`);
+      reporter.add('Recommendation current-state binding', false, 'NOT_EVALUATED because authentication failed');
+      reporter.add('ETF product source', false, 'NOT_EVALUATED because authentication failed');
+      reportWtiNotEvaluated(reporter, 'authentication failed');
+    }
+
+    if (authenticated) {
+      let profileId = null;
+      if (!completionPayload || !idempotencyKey || idempotencyKey.length > 200) {
+        reporter.add('Profile completion/auth', false, 'profile completion NOT_EVALUATED because payload or stable idempotency key is missing');
+      } else {
+        try {
+          const csrf = (await context.cookies(apiBase)).find(cookie => cookie.name === 'wg_csrf')?.value;
+          if (!csrf) throw Object.assign(new Error('CSRF cookie unavailable.'), { code: 'CSRF_COOKIE_MISSING' });
+          const completion = await page.request.post(`${apiBase}/profile/complete`, {
+            data: completionPayload,
+            headers: {
+              'X-CSRF-Token': csrf,
+              'Idempotency-Key': idempotencyKey,
+              Origin: new URL(frontendUrl).origin,
+            },
+            timeout: 120_000,
+          });
+          const completionBody = await readSafeResponseBody(completion);
+          const completedProfileId = completionBody?.profile?.profileId;
+          const completed = responseOk(completion) && Boolean(completedProfileId);
+          const code = safeStableCode(completionBody?.code);
+          reporter.add('Profile completion/auth', completed, completed
+            ? 'profile completion committed or safely replayed'
+            : `profile completion HTTP ${responseStatus(completion)}${code ? ` (${code})` : ''}`);
+          if (completed) profileId = completedProfileId;
+        } catch (error) {
+          const failure = safeFailureKind(error);
+          reporter.add('Profile completion/auth', false, `profile completion failed (${failure.kind}${failure.code ? ` ${failure.code}` : ''})`);
+        }
+      }
+
+      if (!profileId) {
+        try {
+          const profileResult = await page.request.get(`${apiBase}/profile/current`);
+          const profile = responseOk(profileResult) ? await readSafeResponseBody(profileResult) : null;
+          profileId = profile?.profileId || null;
+        } catch { /* record the safe unavailable state below */ }
+      }
+
+      if (!profileId) {
+        reporter.add('Recommendation current-state binding', false, 'NOT_EVALUATED because an authenticated current profile could not be resolved');
+        reporter.add('ETF product source', false, 'NOT_EVALUATED because an authenticated current profile could not be resolved');
+        reportWtiNotEvaluated(reporter, 'an authenticated current profile could not be resolved');
+      } else {
+        let recommendation = null;
+        let bindingValid = false;
+        try {
+          const recommendationResult = await page.request.get(`${apiBase}/recommend/current?profileId=${encodeURIComponent(profileId)}`);
+          recommendation = responseOk(recommendationResult) ? await readSafeResponseBody(recommendationResult) : null;
+          bindingValid = responseOk(recommendationResult)
+            && hasCurrentFinancialBinding(recommendation)
+            && recommendation.profileId === profileId;
+          reporter.add('Recommendation current-state binding', bindingValid, bindingValid
+            ? 'CURRENT response contains profile/recommendation/allocation fingerprints and fresh provenance'
+            : `HTTP ${responseStatus(recommendationResult)} or incomplete/stale current-state binding`);
+        } catch (error) {
+          const failure = safeFailureKind(error);
+          reporter.add('Recommendation current-state binding', false, `current recommendation lookup failed (${failure.kind}${failure.code ? ` ${failure.code}` : ''})`);
+        }
+
+        if (!bindingValid) {
+          reporter.add('ETF product source', false, 'NOT_EVALUATED because current recommendation state is missing or stale');
+          reportWtiNotEvaluated(reporter, 'current recommendation state is missing or stale');
+        } else {
+          let csrf = '';
+          try { csrf = (await context.cookies(apiBase)).find(cookie => cookie.name === 'wg_csrf')?.value || ''; } catch { /* request fails closed */ }
+          await reportWtiProductChecks(reporter, {
+            recommendation,
+            parentInstrumentId,
+            taxContext,
+            onTiming,
+            requestWti: () => page.request.post(`${apiBase}/instruments/rank-wti`, {
+              data: {
+                profileId,
+                profileVersion: recommendation.profile_version,
+                recommendationId: recommendation.recommendationId,
+                expectedAllocationRevision: recommendation.allocation_revision,
+                expectedAllocationRevisionId: recommendation.allocation_revision_id,
+                expectedPortfolioFingerprint: recommendation.portfolio_fingerprint,
+                expectedRecommendationFingerprint: recommendation.recommendation_fingerprint,
+                parentInstrumentId,
+                ...(taxContext ? { taxCalculationContext: taxContext } : {}),
+              },
+              headers: {
+                'X-CSRF-Token': csrf,
+                'Idempotency-Key': randomUUID(),
+                Origin: new URL(frontendUrl).origin,
+              },
+              timeout: 120_000,
+            }),
+          });
+        }
+      }
+
+      try {
+        await page.goto(new URL('/profile', frontendUrl).toString(), { waitUntil: 'domcontentloaded' });
+        const dashboard = page.locator('aside.sidebar');
+        await dashboard.waitFor({ state: 'visible', timeout: 45_000 });
+        const dashboardVisible = hasAuthenticatedDashboard({
+          pathname: new URL(page.url()).pathname,
+          sidebarVisible: await dashboard.isVisible(),
+        });
+        const noDirectProviderRequest = providerRequests.length === 0;
+        reporter.add('Critical browser path', dashboardVisible && noDirectProviderRequest, noDirectProviderRequest
+          ? dashboardVisible ? 'authenticated profile/dashboard shell rendered without direct provider calls' : 'dashboard rendering failed authenticated profile/path checks'
+          : 'browser attempted a direct provider request; frontend must use backend APIs only');
+      } catch (error) {
+        const failure = safeFailureKind(error);
+        reporter.add('Critical browser path', false, `authenticated dashboard rendering failed (${failure.kind}${failure.code ? ` ${failure.code}` : ''})`);
+      }
+    } else {
+      reporter.add('Critical browser path', false, 'NOT_EVALUATED because authentication failed before dashboard verification');
+    }
   } finally {
     await browser?.close().catch(() => {});
   }
@@ -402,9 +638,9 @@ export async function runDemoPreflight() {
   const reporter = makeReporter();
   if (process.env.DEMO_LIVE_PREFLIGHT !== '1') {
     reporter.add('Explicit live-demo mode', false, 'set DEMO_LIVE_PREFLIGHT=1 to run external live checks intentionally');
-    process.stdout.write('\nLive-demo preflight: 0 PASS, 1 FAIL.\n');
-    return { exitCode: 1, checks: reporter.checks };
+    return finishPreflight(reporter);
   }
+  reporter.add('Explicit live-demo mode', true, 'live checks were explicitly enabled');
 
   const configuredApiBase = (process.env.DEMO_API_BASE_URL || 'http://127.0.0.1:5000/api').replace(/\/$/, '');
   let apiBase = configuredApiBase;
@@ -423,11 +659,9 @@ export async function runDemoPreflight() {
     backendOrigin = apiUrl.origin;
   } catch {
     reporter.add('Backend URL configuration', false, 'DEMO_API_BASE_URL must be a valid safe HTTP(S) URL ending in /api');
-    const passed = reporter.checks.filter(check => check.passed).length;
-    const failed = reporter.checks.length - passed;
-    process.stdout.write(`\nLive-demo preflight: ${passed} PASS, ${failed} FAIL.\n`);
-    return { exitCode: 1, checks: reporter.checks };
+    return finishPreflight(reporter);
   }
+  reporter.add('Backend URL configuration', true, 'safe local HTTP or remote HTTPS API URL verified');
   const frontendUrl = process.env.DEMO_FRONTEND_URL;
   const completionPayload = await readConfiguredJson(process.env.DEMO_PROFILE_COMPLETION_FILE, 'Profile completion payload', reporter);
   const taxContext = await readConfiguredJson(process.env.DEMO_TAX_CONTEXT_FILE, 'Tax input payload', reporter);
@@ -492,11 +726,16 @@ export async function runDemoPreflight() {
     ? 'Vite production build succeeded'
     : 'production build failed or frontend dependencies are unavailable');
 
-  const passed = reporter.checks.filter(check => check.passed).length;
-  const failed = reporter.checks.length - passed;
-  process.stdout.write(`\nLive-demo preflight: ${passed} PASS, ${failed} FAIL.\n`);
-  if (failed) process.stdout.write('FINAL LIVE DEMO ENVIRONMENT NOT READY. Resolve the failed checks above; this is separate from deterministic product-integrity certification.\n');
-  return { exitCode: failed ? 1 : 0, checks: reporter.checks };
+  return finishPreflight(reporter);
+}
+
+function finishPreflight(reporter) {
+  const summary = reporter.finish();
+  process.stdout.write(`\nLive-demo preflight: ${summary.passed} PASS, ${summary.failed} FAIL.\n`);
+  if (summary.failed) {
+    process.stdout.write('FINAL LIVE DEMO ENVIRONMENT NOT READY. Resolve the failed checks above; this is separate from deterministic product-integrity certification.\n');
+  }
+  return { exitCode: summary.failed ? 1 : 0, checks: summary.checks };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

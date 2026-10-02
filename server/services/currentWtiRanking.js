@@ -63,7 +63,11 @@ export async function rankWtiAgainstCurrentState({
     throw conflict('RECOMMENDATION_PARENT_MISMATCH', 'The selected category is not part of the current authoritative recommendation.');
   }
 
-  const ranked = await rankProducts(profileBuilder(state.profile), { parentInstrumentId, taxCalculationContext });
+  const ranked = await rankProducts(
+    profileBuilder(state.profile),
+    { parentInstrumentId, taxCalculationContext },
+    { onStageTiming: dependencies.onStageTiming },
+  );
   const finalState = await resolveState({ userId, profileId });
   const finalBinding = currentWtiBinding(finalState);
   if (!sameWtiBinding(initialBinding, finalBinding)) {
