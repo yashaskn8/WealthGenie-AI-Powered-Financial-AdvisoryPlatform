@@ -5,7 +5,10 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { matchesBuildSha } from '../../shared/buildIdentity.js';
-import { PRODUCT_TAX_CLASSES } from '../services/productTaxAuthority.js';
+import {
+  NIFTYBEES_PRODUCT_TAX_EVIDENCE,
+  PRODUCT_TAX_CLASSES,
+} from '../services/productTaxAuthority.js';
 import { getTaxPolicyMetadata } from '../services/taxEngine.js';
 import {
   BACKEND_HTTP_HARD_TIMEOUT_MS,
@@ -16,6 +19,18 @@ import {
   REDIS_PROBE_TIMEOUT_MS,
   WTI_USER_FLOW_TIMEOUT_MS,
 } from '../../shared/demoPreflightContracts.js';
+import {
+  NSE_ALL_INDICES_URL,
+  NSE_ENDPOINT_QUALIFICATION,
+  NSE_QUOTE_CACHE_TTL_SECONDS,
+} from '../services/marketData/NseMarketDataProvider.js';
+import { NSE_HISTORICAL_INDEX_URL } from '../services/marketData/NseHistoricalDataProvider.js';
+import {
+  NSE_MARKET_SESSION,
+  NSE_TRADING_HOLIDAY_CACHE_TTL_SECONDS,
+  NSE_TRADING_HOLIDAY_URL,
+} from '../services/marketData/nseTradingCalendar.js';
+import { indiaClockParts, isoDateInIndia } from '../services/marketData/indiaMarketTime.js';
 
 export {
   BACKEND_HTTP_HARD_TIMEOUT_MS,
@@ -32,6 +47,7 @@ const TRUSTED_TAX_SOURCE_HOSTS = Object.freeze([
   'incometax.gov.in',
   'incometaxindia.gov.in',
   'indiabudget.gov.in',
+  'mf.nipponindiaim.com',
   'rbi.org.in',
   'sbi.co.in',
 ]);
@@ -165,7 +181,7 @@ function hasQualifiedTaxReference(reference) {
   if (!reference || typeof reference !== 'object'
       || typeof reference.authority !== 'string' || !reference.authority.trim()
       || typeof reference.title !== 'string' || !reference.title.trim()
-      || !['PRODUCT_RULE', 'TAX_POLICY'].includes(reference.role)) return false;
+      || !['PRODUCT_RULE', 'TAX_POLICY', 'STATUTE_EFFECTIVE_DATE'].includes(reference.role)) return false;
   try {
     const url = new URL(reference.url);
     const hostname = url.hostname.toLowerCase();
@@ -180,11 +196,32 @@ export function qualifiesCalculatedNiftyEtfTax(product, taxContext, { financialB
   const metadata = product?.taxMetadata;
   const analysis = product?.postTaxAnalysis;
   const taxClass = metadata?.taxClass;
+  const expectedEvidence = NIFTYBEES_PRODUCT_TAX_EVIDENCE;
+  const matchesProductEvidence = value => {
+    const binding = value?.binding;
+    return value?.classification === expectedEvidence.classification
+      && value?.classificationBasis === expectedEvidence.classificationBasis
+      && value?.provider === expectedEvidence.provider
+      && value?.authority === expectedEvidence.authority
+      && value?.documentType === expectedEvidence.documentType
+      && value?.documentTitle === expectedEvidence.documentTitle
+      && value?.documentDate === expectedEvidence.documentDate
+      && value?.officialSourceUrl === expectedEvidence.officialSourceUrl
+      && binding?.canonicalProductId === expectedEvidence.binding.canonicalProductId
+      && binding?.isin === expectedEvidence.binding.isin
+      && binding?.amfiSchemeCode === expectedEvidence.binding.amfiSchemeCode
+      && binding?.exchange === expectedEvidence.binding.exchange
+      && binding?.ticker === expectedEvidence.binding.ticker
+      && Object.keys(binding || {}).length === Object.keys(expectedEvidence.binding).length;
+  };
   if (!financialBindingValid || !qualifiesExactNiftyEtf(product)
       || analysis?.status !== 'CALCULATED'
       || !taxContext?.fiscalYear || analysis.fiscalYear !== taxContext.fiscalYear
+      || taxContext.sttConditionAssumedSatisfied !== true
       || metadata?.sourceQualified !== true
-      || !Object.values(PRODUCT_TAX_CLASSES).includes(taxClass)
+      || taxClass !== PRODUCT_TAX_CLASSES.EQUITY_MF_112A
+      || !matchesProductEvidence(metadata?.productEvidence)
+      || !matchesProductEvidence(analysis?.taxClassificationMetadata?.productEvidence)
       || analysis.taxClass !== taxClass || analysis.taxClassification !== taxClass
       || !Array.isArray(metadata.sourceReferences) || metadata.sourceReferences.length === 0
       || !metadata.sourceReferences.every(hasQualifiedTaxReference)
@@ -195,6 +232,42 @@ export function qualifiesCalculatedNiftyEtfTax(product, taxContext, { financialB
         && candidate.title === reference.title
         && candidate.url === reference.url
         && candidate.role === reference.role))) return false;
+
+  const officialActUrl = 'https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf';
+  const productSourceMatches = analysis.sourceReferences.some(reference =>
+    reference.authority === expectedEvidence.authority
+    && reference.url === expectedEvidence.officialSourceUrl
+    && reference.role === 'PRODUCT_RULE');
+  const statutorySourceMatches = analysis.sourceReferences.some(reference =>
+    reference.authority === 'Income Tax Department — Government of India'
+    && reference.url === officialActUrl
+    && reference.role === 'TAX_POLICY');
+  const taxRuleMetadata = analysis.taxRuleMetadata;
+  const ruleReferences = Array.isArray(taxRuleMetadata?.currentRuleReferences)
+    ? taxRuleMetadata.currentRuleReferences
+    : [];
+  const currentRuleIds = Array.isArray(taxRuleMetadata?.currentRuleIds) ? taxRuleMetadata.currentRuleIds : [];
+  const appliedRules = Array.isArray(analysis.rulesApplied) ? analysis.rulesApplied : [];
+  const shortTermRuleId = 'INCOME_TAX_ACT_2025_EQUITY_STCG_SPECIAL_RATE_POLICY';
+  const longTermRuleId = 'INCOME_TAX_ACT_2025_EQUITY_LTCG_SPECIAL_RATE_POLICY';
+  const usesShortTermRule = appliedRules.includes(shortTermRuleId);
+  const usesLongTermRule = appliedRules.includes(longTermRuleId);
+  const applicableRuleId = usesShortTermRule === usesLongTermRule
+    ? null
+    : usesShortTermRule ? shortTermRuleId : longTermRuleId;
+  const applicableSection = usesShortTermRule ? 'Section 196' : 'Section 198';
+  const statutoryRuleMatches = applicableRuleId
+    && currentRuleIds.includes(applicableRuleId)
+    && ruleReferences.some(reference => reference?.ruleId === applicableRuleId
+      && reference?.reference === applicableSection
+      && reference?.statute === 'INCOME_TAX_ACT_2025'
+      && Array.isArray(reference?.sourceReferences)
+      && reference.sourceReferences.some(source => source?.url === officialActUrl));
+  if (!productSourceMatches || !statutorySourceMatches || !statutoryRuleMatches
+      || taxRuleMetadata?.statute !== 'INCOME_TAX_ACT_2025'
+      || taxRuleMetadata?.fiscalYear !== taxContext.fiscalYear
+      || taxRuleMetadata?.taxYear !== 'TY2026-27'
+      || !analysis.assumptions?.includes('STT_CONDITION_ASSUMED_SATISFIED_FOR_HYPOTHETICAL_TRANSFER')) return false;
 
   let activePolicyVersion;
   try {
@@ -223,7 +296,144 @@ export function qualifiesCalculatedNiftyEtfTax(product, taxContext, { financialB
     && analysis.exemptionApplied >= 0;
 }
 
-export function assessCurrentMarketContext(result) {
+function isTimestampWithin(timestamp, nowMs, maximumAgeSeconds) {
+  const value = Date.parse(timestamp);
+  return Number.isFinite(value)
+    && value <= nowMs
+    && nowMs - value <= maximumAgeSeconds * 1000;
+}
+
+function isQualifiedNseCalendar(calendar, nowMs) {
+  return calendar?.status === 'AVAILABLE'
+    && calendar.source?.provider === 'NSE'
+    && calendar.source?.url === NSE_TRADING_HOLIDAY_URL
+    && isTimestampWithin(calendar.fetchedAt, nowMs, NSE_TRADING_HOLIDAY_CACHE_TTL_SECONDS);
+}
+
+function sourceFor(snapshot, { url, instrumentId }) {
+  const matches = (Array.isArray(snapshot?.provenance?.sources) ? snapshot.provenance.sources : []).filter(source => (
+    source?.provider === 'NSE' && source.url === url && source.instrumentId === instrumentId
+  ));
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function assessSessionEvidence({ snapshot, nifty, vix, now }) {
+  const nowParts = indiaClockParts(now);
+  const nowMs = now.getTime();
+  const today = nowParts?.isoDate;
+  const session = snapshot?.marketSession;
+  const checkedAt = indiaClockParts(session?.checkedAt);
+  if (!today || !checkedAt || session?.tradingDate !== today || checkedAt.isoDate !== today
+      || snapshot?.recoveredFromLastKnownGood === true
+      || !isTimestampWithin(session.checkedAt, nowMs, NSE_QUOTE_CACHE_TTL_SECONDS)
+      || snapshot?.providerSelection?.selectedProvider !== 'NSE'
+      || snapshot?.providerStatus?.quotes?.provider !== 'NSE'
+      || snapshot?.providerStatus?.history?.provider !== 'NSE'
+      || snapshot?.providerStatus?.quotes?.status !== 'AVAILABLE'
+      || snapshot?.providerStatus?.history?.status !== 'AVAILABLE'
+      || snapshot?.providerStatus?.quotes?.qualification !== NSE_ENDPOINT_QUALIFICATION
+      || snapshot?.providerStatus?.history?.qualification !== NSE_ENDPOINT_QUALIFICATION
+      || snapshot?.provenance?.qualification !== NSE_ENDPOINT_QUALIFICATION
+      || !isQualifiedNseCalendar(snapshot?.providerStatus?.quotes?.calendar, nowMs)
+      || !isQualifiedNseCalendar(snapshot?.providerStatus?.history?.calendar, nowMs)) {
+    return { valid: false, detail: 'current NSE session/calendar provenance is missing, stale, or inconsistent with today in IST' };
+  }
+
+  const niftySource = sourceFor(snapshot, { url: NSE_ALL_INDICES_URL, instrumentId: 'NIFTY 50' });
+  const vixSource = sourceFor(snapshot, { url: NSE_ALL_INDICES_URL, instrumentId: 'INDIA VIX' });
+  const historySource = sourceFor(snapshot, { url: NSE_HISTORICAL_INDEX_URL, instrumentId: 'NIFTY 50' });
+  if (!niftySource || !vixSource || !historySource
+      || nifty?.source?.url !== NSE_ALL_INDICES_URL || nifty.source.instrumentId !== 'NIFTY 50'
+      || vix?.source?.url !== NSE_ALL_INDICES_URL || vix.source.instrumentId !== 'INDIA VIX'
+      || niftySource.observedAt !== nifty?.observedAt
+      || vixSource.observedAt !== vix?.observedAt
+      || niftySource.providerTimestamp !== nifty?.observedAt
+      || vixSource.providerTimestamp !== vix?.observedAt
+      || historySource.providerTimestamp !== historySource.observedAt
+      || niftySource.freshness?.status !== 'FRESH'
+      || vixSource.freshness?.status !== 'FRESH'
+      || historySource.freshness?.status !== 'FRESH'
+      || !/^\d{4}-\d{2}-\d{2}$/.test(niftySource.effectiveTradingDate || '')
+      || niftySource.effectiveTradingDate !== vixSource.effectiveTradingDate
+      || niftySource.effectiveTradingDate !== isoDateInIndia(nifty?.observedAt)
+      || vixSource.effectiveTradingDate !== isoDateInIndia(vix?.observedAt)
+      || historySource.effectiveTradingDate !== isoDateInIndia(historySource.observedAt)
+      || !snapshot?.derivedFacts?.some(fact => fact.availabilityStatus === 'AVAILABLE'
+        && Number.isFinite(fact.value) && fact.freshness?.status === 'FRESH')) {
+    return { valid: false, detail: 'NSE quote/history provenance does not prove a coherent fresh session' };
+  }
+
+  const todayDate = new Date(`${today}T00:00:00.000Z`);
+  const weekday = todayDate.getUTCDay();
+  const quoteDate = niftySource.effectiveTradingDate;
+  const historyDate = historySource.effectiveTradingDate;
+  const freshnessMatchesSession = [nifty, vix].every(fact => (
+    fact.freshness?.marketSession === session.status
+    && fact.freshness?.tradingDate === today
+  ));
+  const withinTradingHours = parts => {
+    const minute = parts.hour * 60 + parts.minute;
+    return minute >= (9 * 60 + 15) && minute <= (15 * 60 + 30);
+  };
+
+  if (session.status === NSE_MARKET_SESSION.OPEN) {
+    const currentMinute = nowParts.hour * 60 + nowParts.minute;
+    const checkedMinute = checkedAt.hour * 60 + checkedAt.minute;
+    const quoteIsIntraday = [nifty, vix].every(fact => fact.dataClass === 'LIVE'
+      && isoDateInIndia(fact.observedAt) === today);
+    return {
+      valid: snapshot.status === 'CURRENT'
+        && withinTradingHours(nowParts)
+        && withinTradingHours(checkedAt)
+        && checkedMinute <= currentMinute
+        && freshnessMatchesSession
+        && quoteDate === today
+        && isoDateInIndia(vix?.observedAt) === today
+        && quoteIsIntraday
+        && historyDate < today
+        && historyDate <= quoteDate,
+      detail: 'MARKET_OPEN requires today’s fresh source-qualified intraday quotes and completed daily history',
+    };
+  }
+
+  if (session.status === NSE_MARKET_SESSION.HOLIDAY) {
+    const coherentCompletedSession = quoteDate < today
+      && historyDate === quoteDate
+      && isoDateInIndia(nifty?.observedAt) === quoteDate
+      && isoDateInIndia(vix?.observedAt) === quoteDate;
+    return {
+      valid: snapshot.status === 'MARKET_CLOSED'
+        && freshnessMatchesSession
+        && coherentCompletedSession,
+      detail: 'MARKET_HOLIDAY requires today’s verified NSE holiday session and matching latest-completed-session NIFTY/VIX/history; it does not assert an intraday quote',
+    };
+  }
+
+  if (session.status === NSE_MARKET_SESSION.CLOSED) {
+    const afterRegularClose = nowParts.hour * 60 + nowParts.minute > (15 * 60 + 30)
+      && checkedAt.hour * 60 + checkedAt.minute > (15 * 60 + 30)
+      && checkedAt.hour * 60 + checkedAt.minute <= nowParts.hour * 60 + nowParts.minute;
+    const quoteIsTodayClose = [nifty, vix].every(fact => fact.dataClass === 'LIVE'
+      && isoDateInIndia(fact.observedAt) === today);
+    return {
+      valid: snapshot.status === 'MARKET_CLOSED'
+        && weekday >= 1 && weekday <= 5
+        && afterRegularClose
+        && freshnessMatchesSession
+        && quoteDate === today
+        && quoteIsTodayClose
+        && historyDate < today
+        && historyDate <= quoteDate,
+      detail: 'MARKET_CLOSED is accepted only after the regular weekday session with today’s completed close and prior completed daily history',
+    };
+  }
+
+  return { valid: false, detail: `unsupported or unknown NSE session status: ${String(session.status || 'missing')}` };
+}
+
+export function assessCurrentMarketContext(result, { now = new Date() } = {}) {
+  const clock = now instanceof Date ? new Date(now.getTime()) : new Date(now);
+  if (!Number.isFinite(clock.getTime())) throw new TypeError('now must be a valid date.');
   const body = result?.body;
   const snapshot = body?.marketSnapshot;
   const facts = Array.isArray(snapshot?.observedFacts) ? snapshot.observedFacts : [];
@@ -249,10 +459,14 @@ export function assessCurrentMarketContext(result) {
     && snapshot.derivedFacts.some(fact => fact.availabilityStatus === 'AVAILABLE'
       && typeof fact.value === 'number' && Number.isFinite(fact.value)
       && fact.freshness?.status === 'FRESH');
+  const sessionAssessment = assessSessionEvidence({ snapshot, nifty, vix, now: clock });
   const marketContextAvailable = result?.response?.ok === true
     && body?.status === 'MARKET_CONTEXT_AVAILABLE'
     && snapshot?.availability === 'AVAILABLE'
-    && snapshot?.status === 'CURRENT'
+    && snapshot?.policyAvailability === 'AVAILABLE'
+    && snapshot?.policyOutput?.status === 'MARKET_CONTEXT_AVAILABLE'
+    && body?.recommendationUsability?.status === 'USABLE'
+    && snapshot?.recommendationUsability?.status === 'USABLE'
     && coherentProviderPair
     && isFreshQuote(nifty) && isFreshQuote(vix)
     && hasHistory
@@ -260,13 +474,16 @@ export function assessCurrentMarketContext(result) {
     && Number.isFinite(Date.parse(snapshot.observedAt))
     && facts.every(fact => fact.availabilityStatus !== 'AVAILABLE'
       || (fact.source?.provider === selectedProvider
-        && fact.observedAt && fact.freshness?.status === 'FRESH'));
+        && fact.observedAt && fact.freshness?.status === 'FRESH'))
+    && sessionAssessment.valid;
   return {
     selectedProvider,
     niftyAvailable: result?.response?.ok === true && isFreshQuote(nifty),
     vixAvailable: result?.response?.ok === true && isFreshQuote(vix),
     hasHistory,
     marketContextAvailable,
+    sessionStatus: snapshot?.marketSession?.status || 'UNKNOWN',
+    sessionDetail: sessionAssessment.detail,
   };
 }
 
@@ -538,6 +755,20 @@ function safeHttpDetail(result) {
     return `HTTP ${result.response.status}${code ? ` (${code})` : ''}`;
   }
   return 'verified';
+}
+
+function marketQuoteDetail(result, assessment, quoteAvailable) {
+  if (!quoteAvailable) return safeHttpDetail(result);
+  if (assessment.sessionStatus === NSE_MARKET_SESSION.HOLIDAY) {
+    return 'fresh source-qualified latest completed-session observation; not an intraday quote';
+  }
+  if (assessment.sessionStatus === NSE_MARKET_SESSION.CLOSED) {
+    return 'fresh source-qualified same-day completed-session close; not an intraday quote';
+  }
+  if (assessment.sessionStatus === NSE_MARKET_SESSION.OPEN) {
+    return 'fresh source-qualified observation from the current NSE session';
+  }
+  return 'provider reports a fresh observation, but current NSE session status is not independently verified';
 }
 
 async function readConfiguredJson(filePath, label, reporter) {
@@ -919,8 +1150,9 @@ export async function checkBrowserAndFinancialFlow(reporter, {
 
           browserJourneyStage = 'render exact ETF and tax status';
           const product = body.products[0];
-          if (product.postTaxAnalysis?.status !== 'TAX_CLASSIFICATION_UNAVAILABLE') {
-            throw Object.assign(new Error('The exact ETF tax state is not the required unavailable state.'), {
+          if (product.postTaxAnalysis?.status !== 'CALCULATED'
+              || !qualifiesCalculatedNiftyEtfTax(product, taxContext, { financialBindingValid: requestMatchesCurrentState })) {
+            throw Object.assign(new Error('The exact ETF tax result is not fully source-qualified for the supplied tax scenario.'), {
               code: 'WTI_FRONTEND_TAX_STATE_INVALID',
             });
           }
@@ -931,12 +1163,14 @@ export async function checkBrowserAndFinancialFlow(reporter, {
               code: 'WTI_FRONTEND_PRODUCT_NOT_VISIBLE',
             });
           }
-          const unavailableTax = productCard.locator('.wti-post-tax-cta-box');
-          await unavailableTax.waitFor({ state: 'visible', timeout: DASHBOARD_BROWSER_TIMEOUT_MS });
-          const taxText = await unavailableTax.innerText();
           const calculatedTax = productCard.locator('.wti-post-tax-box');
-          if (!/tax classification unavailable/i.test(taxText) || await calculatedTax.isVisible()) {
-            throw Object.assign(new Error('The UI did not render the unavailable tax state exclusively.'), {
+          await calculatedTax.waitFor({ state: 'visible', timeout: DASHBOARD_BROWSER_TIMEOUT_MS });
+          const unavailableTax = productCard.locator('.wti-post-tax-cta-box');
+          const taxText = await calculatedTax.innerText();
+          if (!/Exact-product tax illustration/i.test(taxText)
+              || !/HISTORICAL\s*[—-]\s*NOT A FORECAST/i.test(taxText)
+              || await unavailableTax.isVisible()) {
+            throw Object.assign(new Error('The UI did not render the verified historical tax illustration exclusively.'), {
               code: 'WTI_FRONTEND_TAX_RENDER_INVALID',
             });
           }
@@ -1049,14 +1283,24 @@ export async function runDemoPreflight({
   const contextResult = await readHttp(`${apiBase}/regime/current`, {
     timeoutMs: MARKET_DEPENDENCY_PROBE_TIMEOUT_MS,
   }).catch(() => null);
-  const marketAssessment = assessCurrentMarketContext(contextResult);
+  const marketAssessment = assessCurrentMarketContext(contextResult, {
+    now: dependencies.marketNow instanceof Date ? dependencies.marketNow : new Date(),
+  });
   const selectedProvider = marketAssessment.selectedProvider;
-  reporter.add('NIFTY quote', marketAssessment.niftyAvailable, safeHttpDetail(contextResult));
-  reporter.add('VIX quote', marketAssessment.vixAvailable, safeHttpDetail(contextResult));
+  reporter.add(
+    'NIFTY quote',
+    marketAssessment.niftyAvailable,
+    marketQuoteDetail(contextResult, marketAssessment, marketAssessment.niftyAvailable),
+  );
+  reporter.add(
+    'VIX quote',
+    marketAssessment.vixAvailable,
+    marketQuoteDetail(contextResult, marketAssessment, marketAssessment.vixAvailable),
+  );
   reporter.add('Market history', marketAssessment.hasHistory, marketAssessment.hasHistory ? 'source-qualified history produced at least one derived fact' : 'verified history is missing');
   reporter.add('Market context', marketAssessment.marketContextAvailable, marketAssessment.marketContextAvailable
-    ? 'current context has fresh NIFTY/VIX facts and observed timestamps'
-    : 'current complete market context is unavailable or stale; a last-known-good snapshot is not counted as live');
+    ? `${marketAssessment.sessionStatus}: ${marketAssessment.sessionDetail}`
+    : `${marketAssessment.sessionStatus}: ${marketAssessment.sessionDetail}; complete current-session evidence is unavailable or stale, and last-known-good data is not counted as live`);
 
   const marketProvider = selectedProvider;
   const upstoxTokenPresent = Boolean(environment.UPSTOX_ANALYTICS_TOKEN || environment.UPSTOX_ACCESS_TOKEN);

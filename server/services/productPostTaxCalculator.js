@@ -123,11 +123,13 @@ function createAnalysis({
       statute: completeTaxRuleMetadata.statute,
       classificationId: completeTaxRuleMetadata.classificationId,
       legacyClassificationAlias: completeTaxRuleMetadata.legacyClassificationAlias,
+      productEvidence: taxMetadata?.productEvidence ? structuredClone(taxMetadata.productEvidence) : null,
     } : (taxMetadata?.taxClass ? {
       statute: null,
       classificationId: null,
       legacyClassificationAlias: taxMetadata.taxClass,
       status: 'STATUTE_POLICY_UNAVAILABLE',
+      productEvidence: taxMetadata?.productEvidence ? structuredClone(taxMetadata.productEvidence) : null,
     } : null),
     taxRuleMetadata: completeTaxRuleMetadata,
     fiscalYear,
@@ -185,6 +187,7 @@ function missingRequiredTaxInputs(taxCalculationContext, requiredTaxInputs) {
       ? false
       : !Number.isFinite(Number(context.holdingPeriodMonths));
     if (key === 'section112AExemptionUsed') return !Number.isFinite(Number(context.section112AExemptionUsed));
+    if (key === 'sttConditionAssumedSatisfied') return context.sttConditionAssumedSatisfied === undefined || context.sttConditionAssumedSatisfied === null;
     return context[key] === undefined || context[key] === null || context[key] === '';
   }).concat(hasPartialExactDates ? ['acquisitionDate', 'redemptionDate'] : []);
 }
@@ -433,6 +436,24 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
     });
   }
 
+  if (taxCalculationContext.sttConditionAssumedSatisfied !== true) {
+    return createAnalysis({
+      status: PRODUCT_TAX_STATUSES.UNAVAILABLE,
+      taxMetadata,
+      policy,
+      fiscalYear,
+      policyVersion: policy.policyVersion,
+      principal,
+      requiredTaxInputs: [],
+      dataClass: 'UNAVAILABLE',
+      assumptions,
+      unavailableReasons: ['EQUITY_FUND_STT_CONDITION_NOT_ESTABLISHED'],
+      metricLabel: 'Historical 1Y after-tax return',
+      disclosure: 'No tax amount is calculated because this scenario does not establish that the applicable securities transaction tax condition for the hypothetical transfer is satisfied. Product classification does not prove that a particular transaction meets that condition.',
+      isHistoricalEstimate: true,
+    });
+  }
+
   const capitalGains = computeEquityCapitalGainsTax({
     grossGain,
     holdingPeriodMonths,
@@ -486,9 +507,9 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
       ? holdingPeriodBasis
       : capitalGains.holdingPeriodBasis,
     dataClass: 'HISTORICAL_PROVIDER_FACT',
-    assumptions: [...assumptions, 'HISTORICAL_RETURN_IS_NOT_A_FORECAST'],
+    assumptions: [...assumptions, 'HISTORICAL_RETURN_IS_NOT_A_FORECAST', 'STT_CONDITION_ASSUMED_SATISFIED_FOR_HYPOTHETICAL_TRANSFER'],
     metricLabel: 'Historical 1Y after-tax return',
-    disclosure: `HISTORICAL — NOT A FORECAST. The provider return window is a verified 1-year observation; it is not the user's realized gain or a future return. ${capitalGains.taxClass === 'EQUITY_LTCG_SECTION_112A' ? 'Equity long-term capital-gains treatment uses the explicit holding period and remaining taxpayer-level annual exemption.' : 'Equity short-term capital-gains treatment uses the explicit holding period.'} Special-rate tax is separate from ordinary slab tax and applicable rebate rules.`,
+    disclosure: `HISTORICAL — NOT A FORECAST. The provider return window is a verified 1-year observation; it is not the user's realized gain or a future return. ${capitalGains.taxClass === 'EQUITY_LTCG_SECTION_112A' ? 'Equity long-term capital-gains treatment uses the explicit holding period and remaining taxpayer-level annual exemption.' : 'Equity short-term capital-gains treatment uses the explicit holding period.'} This hypothetical illustration assumes, but does not verify, that the applicable STT condition is met for the transfer. Special-rate tax is separate from ordinary slab tax and applicable rebate rules.`,
     isHistoricalEstimate: true,
     historicalObservationWindowMonths: 12,
     rulesApplied: capitalGains.rulesApplied,

@@ -90,6 +90,7 @@ export const taxCalculationContextSchema = Joi.object({
   illustrativePrincipal: Joi.number().greater(0).max(1000000000).optional(),
   holdingPeriodMonths: Joi.number().min(0).max(1200).optional(),
   section112AExemptionUsed: Joi.number().min(0).max(125000).optional(),
+  sttConditionAssumedSatisfied: Joi.boolean().strict().optional(),
   acquisitionDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
   redemptionDate: Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).optional(),
   redemptionChannel: Joi.string().valid('RBI_REDEMPTION', 'MATURITY_REDEMPTION', 'SECONDARY_MARKET_SALE').optional(),

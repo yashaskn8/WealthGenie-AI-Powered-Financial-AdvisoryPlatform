@@ -410,6 +410,44 @@ test('OpenAPI preserves major runtime-required request fields', () => {
   }
 });
 
+test('OpenAPI documents the explicit equity-fund STT scenario input and tax provenance output', () => {
+  const taxContextSchema = inlineLocalRefs(resolveLocalRef('#/components/schemas/TaxCalculationContextV2'));
+  const validateTaxContext = responseAjv.compile(taxContextSchema);
+  const requiredContext = {
+    annualGrossIncome: 500000,
+    incomeSource: 'salary',
+    regime: 'new',
+    fiscalYear: 'FY2026-27',
+  };
+  assert.equal(validateTaxContext(requiredContext), true, JSON.stringify(validateTaxContext.errors));
+  assert.equal(validateTaxContext({ ...requiredContext, sttConditionAssumedSatisfied: true }), true);
+  assert.equal(validateTaxContext({ ...requiredContext, sttConditionAssumedSatisfied: false }), true);
+  assert.equal(validateTaxContext({ ...requiredContext, sttConditionAssumedSatisfied: 'true' }), false);
+  assert.equal(validateTaxContext({ ...requiredContext, unknownTaxAssumption: true }), false);
+
+  const productTaxResult = {
+    status: 'CALCULATED',
+    calculationClass: 'HISTORICAL_RETURN_POST_TAX_ILLUSTRATION',
+    taxClass: 'EQUITY_MF_SECTION_112A',
+    taxClassification: 'EQUITY_MF_SECTION_112A',
+    taxClassificationMetadata: { productEvidence: { officialSourceUrl: 'https://mf.nipponindiaim.com/InvestorServices/SIDETF/NipponIndia-ETF-Nifty-50-BeES.pdf' } },
+    taxRuleMetadata: { currentRuleReferences: [{ statute: 'INCOME_TAX_ACT_2025', reference: 'Section 198' }] },
+    fiscalYear: 'FY2026-27',
+    policyVersion: 'tax-policy-FY2026-27-v2',
+    inputBasis: 'HISTORICAL_PROVIDER_FACT_PLUS_EXPLICIT_TAX_INPUTS',
+    dataClass: 'HISTORICAL_PROVIDER_FACT',
+  };
+  assertResponseMatchesSchemaRef(
+    '#/components/schemas/ProductPostTaxAnalysis',
+    productTaxResult,
+    'Product post-tax analysis with product and statutory provenance',
+  );
+  assert.equal(responseAjv.compile(inlineLocalRefs({ $ref: '#/components/schemas/ProductPostTaxAnalysis' }))({
+    ...productTaxResult,
+    uncontractedTaxFact: 'must not be silently accepted',
+  }), false);
+});
+
 test('advisory idempotency is required and profile/goal idempotency is documented', () => {
   const operations = new Map(contractOperations().map((entry) => [operationKey(entry), entry.operation]));
   assert.equal(operations.get('POST /api/recommend')['x-idempotency-key'], 'required');

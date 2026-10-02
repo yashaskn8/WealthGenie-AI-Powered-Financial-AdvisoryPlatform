@@ -6,6 +6,7 @@ import {
   generateBeginnerSuitability,
   enrichProductsWithPostTaxAndSuitability,
 } from '../services/productPostTaxCalculator.js';
+import { taxCalculationContextSchema } from '../validation/taxSchemas.js';
 
 test('classifyProductTaxType identifies correct tax categories', () => {
   assert.equal(classifyProductTaxType({}, 'ppf'), 'PPF_ACCOUNT_EXCLUSION_CONDITIONAL');
@@ -148,6 +149,7 @@ test('Mutual fund returns are labelled HISTORICAL and NOT A FORECAST', () => {
       userAge: 30,
       holdingPeriodMonths: 13,
       section112AExemptionUsed: 0,
+      sttConditionAssumedSatisfied: true,
       illustrativePrincipal: 10000,
     },
   });
@@ -182,6 +184,7 @@ test('exact-date WTI tax classification keeps the anniversary short-term without
       acquisitionDate: '2024-04-01',
       redemptionDate: '2025-04-01',
       section112AExemptionUsed: 125000,
+      sttConditionAssumedSatisfied: true,
       illustrativePrincipal: 10000,
     },
   });
@@ -244,6 +247,7 @@ test('enrichProductsWithPostTaxAndSuitability enriches product array without mut
       userAge: 30,
       holdingPeriodMonths: 12,
       section112AExemptionUsed: 0,
+      sttConditionAssumedSatisfied: true,
     },
   });
 
@@ -253,4 +257,59 @@ test('enrichProductsWithPostTaxAndSuitability enriches product array without mut
   assert.ok(enriched[0].postTaxAnalysis);
   assert.equal(enriched[0].postTaxReturn, null);
   assert.equal(enriched[0].postTaxAnalysis.calculationClass, 'HISTORICAL_RETURN_POST_TAX_ILLUSTRATION');
+});
+
+test('equity fund tax requires an explicit STT scenario assumption and never calculates when absent or false', () => {
+  const product = {
+    id: 'amfi:101',
+    name: 'Qualified equity fund',
+    parentInstrumentId: 'large_cap_mf',
+    historicalReturn: { valuePct: 15 },
+    taxMetadata: {
+      sourceQualified: true,
+      taxClass: 'EQUITY_MF_SECTION_112A',
+      sourceReferences: [{ authority: 'AMFI', title: 'Qualified product tax adapter', url: 'https://www.amfiindia.com/', role: 'PRODUCT_RULE' }],
+    },
+  };
+  const requiredContext = {
+    annualGrossIncome: 500000,
+    incomeSource: 'salary',
+    regime: 'new',
+    fiscalYear: 'FY2026-27',
+    userAge: 35,
+    holdingPeriodMonths: 18,
+    section112AExemptionUsed: 0,
+    illustrativePrincipal: 10000,
+  };
+  const missing = calculateProductPostTaxOutcome({ product, taxCalculationContext: requiredContext });
+  assert.equal(missing.status, 'REQUIRES_TAX_INPUTS');
+  assert.ok(missing.requiredTaxInputs.includes('sttConditionAssumedSatisfied'));
+  for (const field of ['grossGain', 'taxableGain', 'exemptionApplied', 'incrementalTax', 'cess', 'surcharge', 'netGain', 'postTaxRatePct']) {
+    assert.equal(missing[field], null, `${field} must remain absent without the STT scenario prerequisite`);
+  }
+
+  const notAssumed = calculateProductPostTaxOutcome({
+    product,
+    taxCalculationContext: { ...requiredContext, sttConditionAssumedSatisfied: false },
+  });
+  assert.equal(notAssumed.status, 'UNAVAILABLE');
+  assert.ok(notAssumed.unavailableReasons.includes('EQUITY_FUND_STT_CONDITION_NOT_ESTABLISHED'));
+  assert.deepEqual(notAssumed.requiredTaxInputs, []);
+  for (const field of ['grossGain', 'taxableGain', 'exemptionApplied', 'incrementalTax', 'cess', 'surcharge', 'netGain', 'postTaxRatePct']) {
+    assert.equal(notAssumed[field], null, `${field} must remain absent when the scenario does not satisfy the STT prerequisite`);
+  }
+  assert.match(notAssumed.disclosure, /does not establish.*securities transaction tax condition/i);
+});
+
+test('WTI tax context accepts only a boolean STT scenario assumption and remains strict', () => {
+  const context = {
+    annualGrossIncome: 500000,
+    incomeSource: 'salary',
+    regime: 'new',
+    fiscalYear: 'FY2026-27',
+  };
+  assert.equal(taxCalculationContextSchema.validate({ ...context, sttConditionAssumedSatisfied: true }).error, undefined);
+  assert.equal(taxCalculationContextSchema.validate({ ...context, sttConditionAssumedSatisfied: false }).error, undefined);
+  assert.ok(taxCalculationContextSchema.validate({ ...context, sttConditionAssumedSatisfied: 'true' }).error);
+  assert.ok(taxCalculationContextSchema.validate({ ...context, sttConditionAssumedSatisfied: true, assumedBypass: true }).error);
 });

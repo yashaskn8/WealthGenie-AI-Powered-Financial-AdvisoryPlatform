@@ -29,7 +29,12 @@ credentials or financial payloads in shell history, source control, or logs:
   authoritative recommendation and eligible for the exact NIFTY-50 ETF query.
 - `DEMO_TAX_CONTEXT_FILE` — path to explicit JSON tax facts, stored outside the
   repository. The server validates and calculates; the preflight does not
-  synthesize tax inputs.
+  synthesize tax inputs. For the exact NIFTYBEES historical illustration, the
+  scenario must explicitly include `sttConditionAssumedSatisfied: true` to
+  model the applicable transfer-level STT condition. This is an assumption for
+  a hypothetical transfer, not verification that an actual transaction meets
+  the statutory condition; omit it or set it false to keep the calculation
+  unavailable.
 - `MONGODB_URI` — isolated replica-set demo database URI. The transaction check
   itself is read-only, but profile completion is not.
 - `REDIS_URL` — required when production runtime policy or `DEMO_REQUIRE_REDIS`
@@ -48,11 +53,27 @@ catalog value, or inferred tax treatment. A successful preflight is evidence
 for that specific configured demo environment and observation window only; it
 does not establish universal provider uptime or production availability.
 
+Market readiness is session-aware and uses the backend's NSE trading-calendar
+contract. During `MARKET_OPEN`, only current-date fresh quotes and coherent
+source-qualified history pass. On `MARKET_HOLIDAY`, the official current-date
+session check, matching NIFTY/VIX observations, and history must identify the
+same latest completed trading session; the preflight labels these as completed
+session observations, not intraday quotes. `MARKET_CLOSED` passes only after a
+weekday's regular close when today's completed close is verified. Unknown,
+stale, pre-market, weekend-only, mixed-provider, and last-known-good evidence
+does not pass. If a selected provider does not expose the backend's qualified
+NSE session provenance, market-context readiness remains unverified.
+
 The current exact-product WTI path is intentionally limited to the Nippon India
 ETF Nifty 50 BeES identity (AMFI scheme code `140084`, ISIN `INF204KB14I2`, NSE
 symbol `NIFTYBEES`). Scheme identity and NIFTY 50 benchmark linkage are backed
 by official NSE/issuer disclosures; current NAV is sourced from AMFI and is
 shown separately from exchange price. No exchange price, ETF risk/access
-classification, or exact-product tax class is inferred. Accordingly, the live
-preflight will continue to fail its exact-product tax check until an
-independently qualified tax adapter and required product facts exist.
+classification, or generic ETF tax class is inferred. The exact product's
+equity-oriented classification is bound to Nippon India's Scheme Information
+Document dated 2025-11-28. The statutory calculation uses the existing
+FY2026-27 Income-tax Act, 2025 policy and requires the explicit scenario STT
+assumption above. The tax result remains a historical illustration, not the
+user's realized gain or a forecast. Preflight still fails closed if identity,
+product evidence, policy provenance, financial-state binding, or required tax
+scenario facts do not match.

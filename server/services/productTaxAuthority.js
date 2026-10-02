@@ -1,3 +1,5 @@
+import { isQualifiedNiftyEtfIdentity } from './niftyEtfProductRanking.js';
+
 /**
  * Source-qualified product tax authority for the WTI comparison path.
  *
@@ -16,6 +18,28 @@ export const PRODUCT_TAX_CLASSES = Object.freeze({
   EQUITY_MF_ELSS: 'EQUITY_MF_ELSS_SECTION_112A',
   DEBT_MF_50AA: 'DEBT_MF_SECTION_50AA',
   SGB: 'SGB_CONDITIONAL_MATURITY_TREATMENT',
+});
+
+const NIFTYBEES_SID_URL = 'https://mf.nipponindiaim.com/InvestorServices/SIDETF/NipponIndia-ETF-Nifty-50-BeES.pdf';
+const NIFTYBEES_CANONICAL_ID = 'etf:isin:INF204KB14I2';
+
+/** Product classification evidence; statutory rates remain owned by taxEngine. */
+export const NIFTYBEES_PRODUCT_TAX_EVIDENCE = Object.freeze({
+  classification: 'EQUITY_ORIENTED_FUND',
+  classificationBasis: 'Taxation for Equity Oriented Schemes',
+  binding: Object.freeze({
+    canonicalProductId: NIFTYBEES_CANONICAL_ID,
+    isin: 'INF204KB14I2',
+    amfiSchemeCode: '140084',
+    exchange: 'NSE',
+    ticker: 'NIFTYBEES',
+  }),
+  provider: 'NIPPON_INDIA_MUTUAL_FUND',
+  authority: 'Nippon India Mutual Fund',
+  documentType: 'SCHEME_INFORMATION_DOCUMENT',
+  documentTitle: 'Nippon India ETF Nifty 50 BeES',
+  documentDate: '2025-11-28',
+  officialSourceUrl: NIFTYBEES_SID_URL,
 });
 
 export const PRODUCT_TAX_STATUSES = Object.freeze({
@@ -63,6 +87,12 @@ const SGB_SOURCE = Object.freeze({
   authority: 'Income Tax Department — Government of India',
   title: 'Updated Budget 2026 FAQ — Sovereign Gold Bond maturity exemption conditions',
   url: 'https://www.incometaxindia.gov.in/documents/20117/15766092/FAQs-Budget-2026%2BUpdated.pdf/daf54d14-aca9-c4ea-b786-598fd2f8d4c4',
+  role: 'PRODUCT_RULE',
+});
+const NIFTYBEES_PRODUCT_TAX_SOURCE = Object.freeze({
+  authority: NIFTYBEES_PRODUCT_TAX_EVIDENCE.authority,
+  title: `${NIFTYBEES_PRODUCT_TAX_EVIDENCE.documentTitle} — Scheme Information Document dated ${NIFTYBEES_PRODUCT_TAX_EVIDENCE.documentDate}; ${NIFTYBEES_PRODUCT_TAX_EVIDENCE.classificationBasis}`,
+  url: NIFTYBEES_SID_URL,
   role: 'PRODUCT_RULE',
 });
 
@@ -117,6 +147,78 @@ const UNSUPPORTED_EXACT_PARENTS = new Set([
 
 const VALID_EXPLICIT_CLASSES = new Set(Object.values(PRODUCT_TAX_CLASSES));
 
+function exactExternalId(product, source, expectedValue) {
+  const matches = (Array.isArray(product?.externalIds) ? product.externalIds : [])
+    .filter(item => item?.source === source);
+  return matches.length === 1 && String(matches[0].value) === expectedValue;
+}
+
+function isExactNiftyBeesTaxProduct(product, parentInstrumentId) {
+  if (parentInstrumentId !== 'nifty_etf'
+      || product?.parentInstrumentId !== 'nifty_etf'
+      || product?.id !== NIFTYBEES_CANONICAL_ID
+      || product?.canonicalProductId !== NIFTYBEES_CANONICAL_ID
+      || product?.productType !== 'ETF'
+      || product?.isin !== NIFTYBEES_PRODUCT_TAX_EVIDENCE.binding.isin
+      || product?.exchange !== NIFTYBEES_PRODUCT_TAX_EVIDENCE.binding.exchange
+      || product?.ticker !== NIFTYBEES_PRODUCT_TAX_EVIDENCE.binding.ticker
+      || !exactExternalId(product, 'ISIN', NIFTYBEES_PRODUCT_TAX_EVIDENCE.binding.isin)
+      || !exactExternalId(product, 'AMFI_SCHEME_CODE', NIFTYBEES_PRODUCT_TAX_EVIDENCE.binding.amfiSchemeCode)
+      || !exactExternalId(product, 'NSE_TRADING_SYMBOL', NIFTYBEES_PRODUCT_TAX_EVIDENCE.binding.ticker)) return false;
+
+  const evidenceByUrl = new Map((Array.isArray(product.identityEvidence) ? product.identityEvidence : [])
+    .map(evidence => [evidence?.url, evidence]));
+  return isQualifiedNiftyEtfIdentity({
+    canonicalProductId: product.canonicalProductId,
+    amfiSchemeCode: NIFTYBEES_PRODUCT_TAX_EVIDENCE.binding.amfiSchemeCode,
+    isin: product.isin,
+    exchange: product.exchange,
+    ticker: product.ticker,
+    benchmark: product.benchmark,
+    identityEvidence: evidenceByUrl.get('https://nsearchives.nseindia.com/trading_security/mf/pdf/Nippon_20032026171200_NipponMutualFund.pdf'),
+    listingEvidence: evidenceByUrl.get('https://nsearchives.nseindia.com/content/circulars/CMPT74390.pdf'),
+    benchmarkEvidence: product.benchmark?.source,
+  });
+}
+
+function unavailableTaxMetadata(reason) {
+  return {
+    sourceQualified: false,
+    taxClass: null,
+    displayName: null,
+    sourceReferences: [],
+    rulesApplied: [],
+    effectiveDate: null,
+    facts: {},
+    unavailableReason: reason,
+  };
+}
+
+function claimsNiftyBeesTaxEvidence(product, parentInstrumentId, explicit) {
+  return parentInstrumentId === 'nifty_etf'
+    || product?.parentInstrumentId === 'nifty_etf'
+    || explicit?.productEvidence?.officialSourceUrl === NIFTYBEES_SID_URL
+    || (Array.isArray(explicit?.sourceReferences)
+      && explicit.sourceReferences.some(reference => reference?.url === NIFTYBEES_SID_URL));
+}
+
+function copyNiftyBeesTaxMetadata() {
+  return {
+    sourceQualified: true,
+    taxClass: PRODUCT_TAX_CLASSES.EQUITY_MF_112A,
+    displayName: NIFTYBEES_PRODUCT_TAX_EVIDENCE.documentTitle,
+    sourceReferences: [{ ...NIFTYBEES_PRODUCT_TAX_SOURCE }],
+    rulesApplied: [],
+    factsRequired: ['sttConditionAssumedSatisfied'],
+    effectiveDate: NIFTYBEES_PRODUCT_TAX_EVIDENCE.documentDate,
+    facts: { classification: NIFTYBEES_PRODUCT_TAX_EVIDENCE.classification },
+    productEvidence: {
+      ...NIFTYBEES_PRODUCT_TAX_EVIDENCE,
+      binding: { ...NIFTYBEES_PRODUCT_TAX_EVIDENCE.binding },
+    },
+  };
+}
+
 function copyMetadata(metadata) {
   return {
     ...metadata,
@@ -131,6 +233,13 @@ function copyMetadata(metadata) {
  */
 export function getProductTaxMetadata(product = {}, parentInstrumentId = product.parentInstrumentId) {
   const explicit = product?.taxMetadata;
+  if (claimsNiftyBeesTaxEvidence(product, parentInstrumentId, explicit)) {
+    if (!isExactNiftyBeesTaxProduct(product, parentInstrumentId)) {
+      return unavailableTaxMetadata('NIFTYBEES_TAX_EVIDENCE_BINDING_MISMATCH');
+    }
+    return copyNiftyBeesTaxMetadata();
+  }
+
   if (explicit?.sourceQualified === true && VALID_EXPLICIT_CLASSES.has(explicit.taxClass)) {
     return {
       sourceQualified: true,
@@ -143,6 +252,7 @@ export function getProductTaxMetadata(product = {}, parentInstrumentId = product
       factsRequired: Array.isArray(explicit.factsRequired) ? [...explicit.factsRequired] : [],
       effectiveDate: explicit.effectiveDate || null,
       facts: explicit.facts ? { ...explicit.facts } : {},
+      ...(explicit.productEvidence ? { productEvidence: structuredClone(explicit.productEvidence) } : {}),
     };
   }
 
@@ -189,7 +299,7 @@ export function getRequiredTaxInputs(taxClass) {
     return [
       'annualGrossIncome', 'incomeSource', 'regime', 'fiscalYear',
       'userAge',
-      'holdingPeriodMonths', 'section112AExemptionUsed',
+      'holdingPeriodMonths', 'section112AExemptionUsed', 'sttConditionAssumedSatisfied',
     ];
   }
   return [];

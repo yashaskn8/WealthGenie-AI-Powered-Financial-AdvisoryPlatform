@@ -24,6 +24,9 @@ import {
   runDemoPreflight,
   WTI_USER_FLOW_TIMEOUT_MS,
 } from '../scripts/demoPreflight.js';
+import { calculateProductPostTaxOutcome } from '../services/productPostTaxCalculator.js';
+import { getProductTaxMetadata } from '../services/productTaxAuthority.js';
+import { indiaClockParts, isoDateInIndia } from '../services/marketData/indiaMarketTime.js';
 
 const currentBinding = () => ({
   profileId: '64b000000000000000000001',
@@ -37,7 +40,23 @@ const currentBinding = () => ({
   calculation_freshness: { fresh: true },
 });
 
+function demoTaxContext(overrides = {}) {
+  return {
+    annualGrossIncome: 500000,
+    incomeSource: 'salary',
+    regime: 'new',
+    fiscalYear: 'FY2026-27',
+    userAge: 35,
+    holdingPeriodMonths: 18,
+    section112AExemptionUsed: 0,
+    sttConditionAssumedSatisfied: true,
+    illustrativePrincipal: 1000000,
+    ...overrides,
+  };
+}
+
 const qualifiedNiftyEtf = () => ({
+  id: 'etf:isin:INF204KB14I2',
   canonicalProductId: 'etf:isin:INF204KB14I2',
   parentInstrumentId: 'nifty_etf',
   productType: 'ETF',
@@ -51,6 +70,7 @@ const qualifiedNiftyEtf = () => ({
   ],
   benchmark: {
     id: 'NIFTY_50',
+    name: 'NIFTY 50',
     canonicalProductId: 'market:index:nifty-50',
     returnVariant: 'NIFTY 50 TRI',
     source: { url: 'https://mf.nipponindiaim.com/FundsAndPerformance/ProductNotes/NipponIndia-ETF-Nifty-50-BeES-Feb-2026.pdf' },
@@ -128,10 +148,9 @@ function browserFlowFixture(scenario = {}) {
     recommendationFingerprint: recommendation.recommendation_fingerprint,
   };
   const login = fakeHttpResponse(scenario.loginStatus ?? 200, {});
-  const uiProduct = {
-    ...qualifiedNiftyEtf(),
-    postTaxAnalysis: { status: scenario.frontendWtiTaxCalculated ? 'CALCULATED' : 'TAX_CLASSIFICATION_UNAVAILABLE' },
-  };
+  const uiProduct = scenario.frontendWtiTaxUnavailable
+    ? { ...qualifiedNiftyEtf(), postTaxAnalysis: { status: 'TAX_CLASSIFICATION_UNAVAILABLE' } }
+    : qualifiedNiftyTaxProductFixture();
   if (scenario.frontendWtiWrongProduct) uiProduct.canonicalProductId = 'etf:isin:OTHER';
   const uiWtiBody = qualifiedWtiResponse([uiProduct], recommendation);
   if (scenario.frontendWtiBindingMismatch) uiWtiBody.financialStateBinding.allocationRevision += 1;
@@ -184,6 +203,7 @@ function browserFlowFixture(scenario = {}) {
       const isWtiProduct = selector === '[data-testid="wti-product-etf:isin:INF204KB14I2"]'
         || selector === '[data-testid="nav-investments"] [data-testid="wti-product-etf:isin:INF204KB14I2"]';
       const isUnavailableTax = selector.includes('wti-post-tax-cta-box');
+      const isCalculatedTax = selector.includes('.wti-post-tax-box');
       return {
         async waitFor() {
           if (selector === 'aside.sidebar' && scenario.dashboardError) throw Object.assign(new Error('secret dashboard detail'), { code: 'DASHBOARD_FAILED' });
@@ -192,7 +212,8 @@ function browserFlowFixture(scenario = {}) {
           if (selector !== '#login-form' && selector !== 'aside.sidebar' && scenario.loginControlError) throw Object.assign(new Error('secret login control detail'), { code: 'LOGIN_CONTROL_TIMEOUT' });
           if (isWtiCategory && scenario.frontendWtiMissing) throw Object.assign(new Error('category missing'), { name: 'TimeoutError' });
           if (isWtiProduct && (scenario.frontendWtiWrongProduct || scenario.frontendWtiBindingMismatch)) throw Object.assign(new Error('product unavailable'), { name: 'TimeoutError' });
-          if (isUnavailableTax && (scenario.frontendWtiTaxHidden || scenario.frontendWtiTaxCalculated)) throw Object.assign(new Error('tax unavailable state missing'), { name: 'TimeoutError' });
+          if (isCalculatedTax && scenario.frontendWtiTaxHidden) throw Object.assign(new Error('calculated tax state missing'), { name: 'TimeoutError' });
+          if (isUnavailableTax && scenario.frontendWtiTaxUnavailable) throw Object.assign(new Error('unavailable tax state unexpectedly rendered'), { name: 'TimeoutError' });
         },
         async fill() {},
         async click() {
@@ -206,11 +227,15 @@ function browserFlowFixture(scenario = {}) {
           if (selector === 'aside.sidebar') return !scenario.sidebarMissing;
           if (isWtiCategory) return !scenario.frontendWtiMissing;
           if (isWtiProduct) return !scenario.frontendWtiWrongProduct && !scenario.frontendWtiBindingMismatch;
-          if (isUnavailableTax) return !scenario.frontendWtiTaxHidden && !scenario.frontendWtiTaxCalculated;
-          if (selector.includes('.wti-post-tax-box')) return false;
+          if (isUnavailableTax) return Boolean(scenario.frontendWtiTaxUnavailable);
+          if (isCalculatedTax) return !scenario.frontendWtiTaxHidden && !scenario.frontendWtiTaxUnavailable;
           return true;
         },
-        async innerText() { return 'Exact-product tax illustration: tax classification unavailable.'; },
+        async innerText() {
+          return isCalculatedTax
+            ? 'Exact-product tax illustration HISTORICAL — NOT A FORECAST.'
+            : 'Exact-product tax illustration: tax classification unavailable.';
+        },
         locator(childSelector) { return page.locator(`${selector} ${childSelector}`); },
       };
     },
@@ -247,7 +272,7 @@ function browserFlowFixture(scenario = {}) {
           if (scenario.wtiError) throw scenario.wtiError;
           if (scenario.wtiStatus) return fakeHttpResponse(scenario.wtiStatus, { code: scenario.wtiCode || 'UPSTREAM_UNAVAILABLE' });
           if (scenario.wtiMalformed) return fakeHttpResponse(200, null, { malformed: true });
-          const products = scenario.products ?? [{ ...qualifiedNiftyEtf(), postTaxAnalysis: { status: 'TAX_CLASSIFICATION_UNAVAILABLE' } }];
+          const products = scenario.products ?? [qualifiedNiftyTaxProductFixture(scenario.taxContext ?? demoTaxContext())];
           const body = qualifiedWtiResponse(products, recommendation);
           if (scenario.wtiMissingBinding) delete body.financialStateBinding;
           if (scenario.wtiBindingMismatch) body.financialStateBinding = { ...rankBinding, allocationRevision: 99 };
@@ -287,7 +312,7 @@ async function runBrowserFlow(scenario = {}) {
     apiBase: 'http://127.0.0.1:5000/api',
     frontendUrl: 'http://127.0.0.1:5173',
     completionPayload: { profile: 'fixture only' },
-    taxContext: { fiscalYear: 'FY2026-27' },
+    taxContext: scenario.taxContext ?? demoTaxContext(),
     email: 'demo@example.invalid',
     password: 'fixture-password',
     idempotencyKey: 'fixture-idempotency-key',
@@ -385,49 +410,207 @@ test('demo preflight requires exact NIFTY 50 identity and fresh primary-fact pro
   assert.equal(qualifiesExactNiftyEtf(differentExchangePrice), true, 'an exchange price is not substituted for the AMFI NAV fact');
 });
 
-test('demo preflight requires current fresh NIFTY/VIX and one selected quote/history provider', () => {
-  const result = {
-    response: { ok: true },
-    body: {
-      status: 'MARKET_CONTEXT_AVAILABLE',
-      marketSnapshot: {
-        status: 'CURRENT',
-        availability: 'AVAILABLE',
-        observedAt: '2026-10-01T09:30:00.000Z',
-        providerSelection: { selectedProvider: 'UPSTOX' },
-        providerStatus: {
-          quotes: { provider: 'UPSTOX' },
-          history: { provider: 'UPSTOX' },
-        },
-        observedFacts: ['nifty50Current', 'indiaVixCurrent'].map((key, index) => ({
-          key,
-          value: index === 0 ? 24000 : 14,
-          availabilityStatus: 'AVAILABLE',
-          observedAt: '2026-10-01T09:29:00.000Z',
-          freshness: { status: 'FRESH' },
-          source: { provider: 'UPSTOX' },
-        })),
-        derivedFacts: [{ value: 0.25, availabilityStatus: 'AVAILABLE', freshness: { status: 'FRESH' } }],
+const MARKET_FIXTURE_NOW = new Date('2026-10-05T04:30:00.000Z'); // 10:00 IST, weekday
+const MARKET_FIXTURE_PRIOR_SESSION = '2026-10-02';
+
+function marketFixtureTimestamp(isoDate, hour, minute, second = 0) {
+  const [year, month, day] = isoDate.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day, hour, minute, second) - (330 * 60 * 1000)).toISOString();
+}
+
+function qualifiedMarketContext({
+  session = 'MARKET_OPEN',
+  now = MARKET_FIXTURE_NOW,
+  quoteDate = null,
+  historyDate = MARKET_FIXTURE_PRIOR_SESSION,
+  quoteTimestamp = null,
+  sessionCheckedAt = null,
+  snapshotStatus = null,
+} = {}) {
+  const currentDate = isoDateInIndia(now);
+  const parts = indiaClockParts(now);
+  const completedQuoteDate = quoteDate || (session === 'MARKET_HOLIDAY' ? MARKET_FIXTURE_PRIOR_SESSION : currentDate);
+  const quoteTime = quoteTimestamp || (session === 'MARKET_HOLIDAY'
+    ? marketFixtureTimestamp(completedQuoteDate, 15, 30)
+    : session === 'MARKET_CLOSED'
+      ? marketFixtureTimestamp(completedQuoteDate, 15, 59)
+      : marketFixtureTimestamp(completedQuoteDate, parts.hour, Math.max(0, parts.minute - 1)));
+  const checkedAt = sessionCheckedAt || new Date(now.getTime() - 30_000).toISOString();
+  const fetchedAt = checkedAt;
+  const calendar = {
+    status: 'AVAILABLE',
+    source: { provider: 'NSE', url: 'https://www.nseindia.com/api/holiday-master' },
+    fetchedAt: new Date(now.getTime() - 60_000).toISOString(),
+  };
+  const quoteFreshness = { status: 'FRESH', marketSession: session, tradingDate: currentDate };
+  const sources = [
+    {
+      provider: 'NSE', instrumentId: 'NIFTY 50', url: 'https://www.nseindia.com/api/allIndices',
+      observedAt: quoteTime, providerTimestamp: quoteTime, fetchedAt, freshness: quoteFreshness,
+      effectiveTradingDate: completedQuoteDate, dataClass: 'LIVE',
+    },
+    {
+      provider: 'NSE', instrumentId: 'INDIA VIX', url: 'https://www.nseindia.com/api/allIndices',
+      observedAt: quoteTime, providerTimestamp: quoteTime, fetchedAt, freshness: quoteFreshness,
+      effectiveTradingDate: completedQuoteDate, dataClass: 'LIVE',
+    },
+    {
+      provider: 'NSE', instrumentId: 'NIFTY 50', url: 'https://www.nseindia.com/api/historicalOR/indicesHistory',
+      observedAt: marketFixtureTimestamp(historyDate, 15, 30),
+      providerTimestamp: marketFixtureTimestamp(historyDate, 15, 30), fetchedAt,
+      freshness: { status: 'FRESH' }, effectiveTradingDate: historyDate, dataClass: 'DAILY',
+    },
+  ];
+  const snapshot = {
+    status: snapshotStatus || (session === 'MARKET_OPEN' ? 'CURRENT' : 'MARKET_CLOSED'),
+    availability: 'AVAILABLE',
+    policyAvailability: 'AVAILABLE',
+    policyOutput: { status: 'MARKET_CONTEXT_AVAILABLE' },
+    recommendationUsability: { status: 'USABLE' },
+    observedAt: quoteTime,
+    evaluatedAt: now.toISOString(),
+    marketSession: { status: session, tradingDate: currentDate, checkedAt },
+    providerSelection: { selectedProvider: 'NSE' },
+    providerStatus: {
+      quotes: {
+        provider: 'NSE', status: 'AVAILABLE',
+        qualification: 'OFFICIAL_NSE_WEBSITE_ENDPOINT_UNDOCUMENTED_SCHEMA_VALIDATED',
+        calendar,
+      },
+      history: {
+        provider: 'NSE', status: 'AVAILABLE',
+        qualification: 'OFFICIAL_NSE_WEBSITE_ENDPOINT_UNDOCUMENTED_SCHEMA_VALIDATED',
+        calendar,
       },
     },
+    provenance: {
+      qualification: 'OFFICIAL_NSE_WEBSITE_ENDPOINT_UNDOCUMENTED_SCHEMA_VALIDATED',
+      sources,
+    },
+    observedFacts: ['nifty50Current', 'indiaVixCurrent'].map((key, index) => ({
+      key,
+      value: index === 0 ? 24000 : 14,
+      dataClass: 'LIVE',
+      availabilityStatus: 'AVAILABLE',
+      observedAt: quoteTime,
+      freshness: quoteFreshness,
+      source: {
+        provider: 'NSE', instrumentId: index === 0 ? 'NIFTY 50' : 'INDIA VIX',
+        url: 'https://www.nseindia.com/api/allIndices',
+      },
+    })),
+    derivedFacts: [{ value: 0.25, availabilityStatus: 'AVAILABLE', freshness: { status: 'FRESH' } }],
   };
+  return {
+    response: { ok: true, status: 200 },
+    body: {
+      status: 'MARKET_CONTEXT_AVAILABLE',
+      recommendationUsability: { status: 'USABLE' },
+      marketSnapshot: snapshot,
+    },
+  };
+}
 
-  const healthy = assessCurrentMarketContext(result);
-  assert.equal(healthy.marketContextAvailable, true);
-  assert.equal(healthy.selectedProvider, 'UPSTOX');
+test('preflight accepts source-qualified current MARKET_OPEN quotes only during the current IST session', () => {
+  const result = qualifiedMarketContext();
+  const assessment = assessCurrentMarketContext(result, { now: MARKET_FIXTURE_NOW });
+  assert.equal(assessment.marketContextAvailable, true);
+  assert.equal(assessment.sessionStatus, 'MARKET_OPEN');
+  assert.match(assessment.sessionDetail, /intraday quotes/);
+});
 
-  const mixed = structuredClone(result);
-  mixed.body.marketSnapshot.providerStatus.history.provider = 'NSE';
-  assert.equal(assessCurrentMarketContext(mixed).marketContextAvailable, false);
+test('preflight respects the backend’s inclusive 09:15–15:30 IST MARKET_OPEN boundaries', () => {
+  for (const [now, label] of [
+    [new Date('2026-10-05T03:45:00.000Z'), '09:15 IST'],
+    [new Date('2026-10-05T10:00:00.000Z'), '15:30 IST'],
+  ]) {
+    const result = qualifiedMarketContext({ now, quoteTimestamp: now.toISOString(), sessionCheckedAt: now.toISOString() });
+    assert.equal(assessCurrentMarketContext(result, { now }).marketContextAvailable, true, label);
+  }
+  const afterClose = new Date('2026-10-05T10:01:00.000Z'); // 15:31 IST
+  const staleOpenClassification = qualifiedMarketContext({ now: afterClose, quoteTimestamp: afterClose.toISOString() });
+  assert.equal(assessCurrentMarketContext(staleOpenClassification, { now: afterClose }).marketContextAvailable, false);
+});
 
-  const stale = structuredClone(result);
-  stale.body.marketSnapshot.observedFacts[1].freshness.status = 'STALE';
-  assert.equal(assessCurrentMarketContext(stale).vixAvailable, false);
-  assert.equal(assessCurrentMarketContext(stale).marketContextAvailable, false);
+test('preflight accepts a verified holiday only as the coherent latest completed session', () => {
+  const now = new Date('2026-10-05T04:30:00.000Z');
+  const result = qualifiedMarketContext({ session: 'MARKET_HOLIDAY', now });
+  const before = structuredClone(result.body.marketSnapshot);
+  const assessment = assessCurrentMarketContext(result, { now });
+  assert.equal(assessment.marketContextAvailable, true);
+  assert.equal(assessment.sessionStatus, 'MARKET_HOLIDAY');
+  assert.match(assessment.sessionDetail, /latest-completed-session/);
+  assert.match(assessment.sessionDetail, /does not assert an intraday quote/);
+  assert.deepEqual(result.body.marketSnapshot, before, 'assessment does not rewrite quote values, timestamps, or freshness');
 
-  const historical = structuredClone(result);
-  historical.body.marketSnapshot.status = 'LAST_AVAILABLE';
-  assert.equal(assessCurrentMarketContext(historical).marketContextAvailable, false);
+  const mismatchedHistory = qualifiedMarketContext({ session: 'MARKET_HOLIDAY', now });
+  mismatchedHistory.body.marketSnapshot.provenance.sources[2].effectiveTradingDate = '2026-10-01';
+  assert.equal(assessCurrentMarketContext(mismatchedHistory, { now }).marketContextAvailable, false);
+});
+
+test('preflight accepts weekday MARKET_CLOSED only after close with today’s close evidence', () => {
+  const now = new Date('2026-10-05T10:30:00.000Z'); // 16:00 IST
+  const result = qualifiedMarketContext({ session: 'MARKET_CLOSED', now });
+  const assessment = assessCurrentMarketContext(result, { now });
+  assert.equal(assessment.marketContextAvailable, true);
+  assert.match(assessment.sessionDetail, /completed close/);
+});
+
+test('preflight rejects stale, unknown, incoherent, unsupported, or incomplete market-session evidence', () => {
+  const cases = [
+    ['Upstox lacks the NSE session/calendar proof', result => { result.body.marketSnapshot.providerSelection.selectedProvider = 'UPSTOX'; }],
+    ['mixed providers', result => { result.body.marketSnapshot.providerStatus.history.provider = 'UPSTOX'; }],
+    ['unknown session', result => { result.body.marketSnapshot.marketSession.status = 'UNKNOWN'; }],
+    ['wrong session trading date', result => { result.body.marketSnapshot.marketSession.tradingDate = '2026-10-02'; }],
+    ['stale session check', result => { result.body.marketSnapshot.marketSession.checkedAt = '2026-10-05T03:00:00.000Z'; }],
+    ['future session check', result => { result.body.marketSnapshot.marketSession.checkedAt = '2026-10-05T04:31:00.000Z'; }],
+    ['unavailable official calendar', result => { result.body.marketSnapshot.providerStatus.quotes.calendar.status = 'UNAVAILABLE'; }],
+    ['calendar from an unqualified URL', result => { result.body.marketSnapshot.providerStatus.history.calendar.source.url = 'https://example.invalid/calendar'; }],
+    ['stale official calendar', result => { result.body.marketSnapshot.providerStatus.quotes.calendar.fetchedAt = '2026-10-03T00:00:00.000Z'; }],
+    ['missing history provenance', result => { result.body.marketSnapshot.provenance.sources.pop(); }],
+    ['duplicate quote provenance', result => { result.body.marketSnapshot.provenance.sources.push(structuredClone(result.body.marketSnapshot.provenance.sources[0])); }],
+    ['mismatched quote dates', result => { result.body.marketSnapshot.provenance.sources[1].effectiveTradingDate = '2026-10-01'; }],
+    ['provider timestamp mismatch', result => { result.body.marketSnapshot.provenance.sources[0].providerTimestamp = '2026-10-05T04:00:00.000Z'; }],
+    ['missing NIFTY', result => { result.body.marketSnapshot.observedFacts[0].availabilityStatus = 'UNAVAILABLE'; }],
+    ['stale NIFTY', result => { result.body.marketSnapshot.observedFacts[0].freshness.status = 'STALE'; }],
+    ['missing VIX', result => { result.body.marketSnapshot.observedFacts[1].availabilityStatus = 'UNAVAILABLE'; }],
+    ['stale VIX', result => { result.body.marketSnapshot.observedFacts[1].freshness.status = 'STALE'; }],
+    ['missing derived history', result => { result.body.marketSnapshot.derivedFacts = []; }],
+    ['not usable for recommendations', result => { result.body.marketSnapshot.recommendationUsability.status = 'NOT_USABLE'; }],
+    ['last-known-good display state', result => { result.body.marketSnapshot.status = 'LAST_AVAILABLE'; }],
+    ['recovered last-known-good snapshot', result => { result.body.marketSnapshot.recoveredFromLastKnownGood = true; }],
+  ];
+  for (const [name, mutate] of cases) {
+    const result = qualifiedMarketContext();
+    mutate(result);
+    assert.equal(assessCurrentMarketContext(result, { now: MARKET_FIXTURE_NOW }).marketContextAvailable, false, name);
+  }
+});
+
+test('preflight rejects holiday evidence cached across the IST date rollover', () => {
+  const cachedBeforeIstMidnight = new Date('2026-10-05T18:29:30.000Z'); // 23:59:30 IST
+  const afterIstMidnight = new Date('2026-10-05T18:35:00.000Z'); // 00:05 IST next day
+  const result = qualifiedMarketContext({ session: 'MARKET_HOLIDAY', now: cachedBeforeIstMidnight });
+  assert.equal(assessCurrentMarketContext(result, { now: afterIstMidnight }).marketContextAvailable, false);
+});
+
+test('preflight keeps MARKET_CLOSED pre-market, weekend, and stale-open classifications failed', () => {
+  const preMarketNow = new Date('2026-10-05T03:30:00.000Z'); // 09:00 IST
+  const preMarket = qualifiedMarketContext({
+    session: 'MARKET_CLOSED', now: preMarketNow, quoteDate: MARKET_FIXTURE_PRIOR_SESSION,
+    historyDate: '2026-10-01',
+  });
+  assert.equal(assessCurrentMarketContext(preMarket, { now: preMarketNow }).marketContextAvailable, false);
+
+  const weekendNow = new Date('2026-10-03T10:30:00.000Z'); // Saturday, 16:00 IST
+  const weekend = qualifiedMarketContext({
+    session: 'MARKET_CLOSED', now: weekendNow, quoteDate: MARKET_FIXTURE_PRIOR_SESSION,
+    historyDate: '2026-10-01',
+  });
+  assert.equal(assessCurrentMarketContext(weekend, { now: weekendNow }).marketContextAvailable, false);
+
+  const staleOpen = qualifiedMarketContext({ snapshotStatus: 'LAST_AVAILABLE' });
+  assert.equal(assessCurrentMarketContext(staleOpen, { now: MARKET_FIXTURE_NOW }).marketContextAvailable, false);
 });
 
 test('preflight reporter emits every required check once and leaves unevaluated checks failed', () => {
@@ -502,25 +685,7 @@ test('runDemoPreflight accepts injected environment and output while preserving 
 
 function injectedOrchestrationDependencies({ marketStatus = 'CURRENT', backendSha = 'e'.repeat(40), userPathPass = false } = {}) {
   const expectedSha = 'e'.repeat(40);
-  const marketBody = {
-    status: 'MARKET_CONTEXT_AVAILABLE',
-    marketSnapshot: {
-      status: marketStatus,
-      availability: 'AVAILABLE',
-      observedAt: '2026-10-01T09:30:00.000Z',
-      providerSelection: { selectedProvider: 'NSE' },
-      providerStatus: { quotes: { provider: 'NSE' }, history: { provider: 'NSE' } },
-      observedFacts: ['nifty50Current', 'indiaVixCurrent'].map((key, index) => ({
-        key,
-        value: index === 0 ? 24000 : 14,
-        availabilityStatus: 'AVAILABLE',
-        observedAt: '2026-10-01T09:29:00.000Z',
-        freshness: { status: 'FRESH' },
-        source: { provider: 'NSE' },
-      })),
-      derivedFacts: [{ value: 0.25, availabilityStatus: 'AVAILABLE', freshness: { status: 'FRESH' } }],
-    },
-  };
+  const marketBody = qualifiedMarketContext({ snapshotStatus: marketStatus }).body;
   const response = (status, body) => ({ response: { ok: status >= 200 && status < 300, status }, body });
   const environment = {
     DEMO_LIVE_PREFLIGHT: '1',
@@ -536,6 +701,7 @@ function injectedOrchestrationDependencies({ marketStatus = 'CURRENT', backendSh
     NODE_ENV: 'test',
   };
   const dependencies = {
+    marketNow: MARKET_FIXTURE_NOW,
     async loadJson(filePath, label, reporter) {
       reporter.add(label, true, 'fixture JSON validated');
       return label === 'Profile completion payload' ? { profile: true } : { fiscalYear: 'FY2026-27' };
@@ -723,55 +889,31 @@ test('WTI verifier requires a coherent exact single-product route response', () 
   assert.equal(qualifiesWtiResponse(valid, currentBinding(), 'liquid_etf'), false);
 });
 
-function syntheticQualifiedNiftyTaxProduct() {
+function qualifiedNiftyTaxProductFixture(taxCalculationContext = demoTaxContext()) {
   const product = qualifiedNiftyEtf();
-  const productRule = {
-    authority: 'Income Tax Department — Government of India',
-    title: 'Income-tax Act, 2025 as amended by Finance Act, 2026',
-    url: 'https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf',
-    role: 'PRODUCT_RULE',
-  };
   product.historicalReturn = {
     valuePct: 12.4,
     basis: 'HISTORICAL_POINT_TO_POINT_NAV_RETURN_1Y',
     annualized: true,
     isExpectedReturn: false,
   };
-  product.taxMetadata = {
-    sourceQualified: true,
-    taxClass: 'EQUITY_MF_SECTION_112A',
-    sourceReferences: [productRule],
-  };
-  product.postTaxAnalysis = {
-    status: 'CALCULATED',
-    fiscalYear: 'FY2026-27',
-    policyVersion: 'tax-policy-FY2026-27-v2',
-    taxClass: 'EQUITY_MF_SECTION_112A',
-    taxClassification: 'EQUITY_MF_SECTION_112A',
-    calculationClass: 'HISTORICAL_RETURN_POST_TAX_ILLUSTRATION',
-    inputBasis: 'HISTORICAL_PROVIDER_FACT_PLUS_EXPLICIT_TAX_INPUTS',
-    dataClass: 'HISTORICAL_PROVIDER_FACT',
-    isHistoricalEstimate: true,
-    historicalObservationWindowMonths: 12,
-    disclosure: 'HISTORICAL — NOT A FORECAST. Verified trailing observation only.',
-    principal: 10000,
-    grossGain: 1240,
-    taxableGain: 1240,
-    exemptionApplied: 0,
-    incrementalTax: 124,
-    cess: 4,
-    surcharge: 0,
-    netGain: 1116,
-    postTaxRatePct: 11.16,
-    sourceReferences: [productRule],
-  };
+  product.taxMetadata = getProductTaxMetadata(product, 'nifty_etf');
+  product.postTaxAnalysis = calculateProductPostTaxOutcome({
+    product,
+    taxCalculationContext,
+  });
   return product;
 }
 
 test('NIFTY ETF tax verifier fails closed unless a calculated result has matching source-qualified provenance', () => {
-  const taxContext = { fiscalYear: 'FY2026-27' };
-  const validProduct = syntheticQualifiedNiftyTaxProduct();
+  const taxContext = demoTaxContext();
+  const validProduct = qualifiedNiftyTaxProductFixture();
   assert.equal(qualifiesCalculatedNiftyEtfTax(validProduct, taxContext), true);
+  const shortTermContext = demoTaxContext({ holdingPeriodMonths: 12 });
+  assert.equal(qualifiesCalculatedNiftyEtfTax(
+    qualifiedNiftyTaxProductFixture(shortTermContext),
+    shortTermContext,
+  ), true);
 
   const mutations = [
     product => { delete product.taxMetadata; },
@@ -780,21 +922,37 @@ test('NIFTY ETF tax verifier fails closed unless a calculated result has matchin
     product => { product.taxMetadata.taxClass = 'UNSUPPORTED_CLASS'; },
     product => { product.taxMetadata.sourceReferences = []; },
     product => { product.taxMetadata.sourceReferences = [{}]; },
-    product => { product.taxMetadata.sourceReferences[0].url = 'http://www.incometaxindia.gov.in/rule'; },
+    product => { product.taxMetadata.sourceReferences[0].url = 'http://mf.nipponindiaim.com/tampered.pdf'; },
+    product => { product.taxMetadata.productEvidence.binding.isin = 'WRONG'; },
+    product => { product.postTaxAnalysis.taxClassificationMetadata.productEvidence.documentDate = '2026-01-01'; },
+    product => { product.postTaxAnalysis.taxRuleMetadata.currentRuleReferences = []; },
+    product => {
+      const reference = product.postTaxAnalysis.taxRuleMetadata.currentRuleReferences.find(item => item.reference === 'Section 198');
+      product.postTaxAnalysis.taxRuleMetadata.currentRuleReferences = [{
+        ...reference,
+        ruleId: 'INCOME_TAX_ACT_2025_EQUITY_STCG_SPECIAL_RATE_POLICY',
+        reference: 'Section 196',
+      }];
+    },
+    product => { product.postTaxAnalysis.rulesApplied = product.postTaxAnalysis.rulesApplied.filter(rule => rule !== 'INCOME_TAX_ACT_2025_EQUITY_LTCG_SPECIAL_RATE_POLICY'); },
+    product => { product.postTaxAnalysis.assumptions = product.postTaxAnalysis.assumptions.filter(item => !item.startsWith('STT_CONDITION_ASSUMED_SATISFIED')); },
+    product => { product.postTaxAnalysis.sourceReferences = product.postTaxAnalysis.sourceReferences.filter(reference => reference.role !== 'TAX_POLICY'); },
     product => { delete product.postTaxAnalysis.policyVersion; },
     product => { product.postTaxAnalysis.fiscalYear = 'FY2025-26'; },
     product => { delete product.postTaxAnalysis.calculationClass; },
     product => { product.postTaxAnalysis.calculationClass = 'CURRENT_RATE_POST_TAX_ILLUSTRATION'; },
     product => { product.postTaxAnalysis.taxClass = 'BANK_DEPOSIT_INTEREST'; },
-    product => { product.postTaxAnalysis.sourceReferences[0].url = 'https://incometaxindia.gov.in.evil.example/fake'; },
+    product => { product.postTaxAnalysis.sourceReferences[0].url = 'https://mf.nipponindiaim.com/unrelated.pdf'; },
     product => { product.canonicalProductId = 'etf:isin:OTHER'; },
   ];
   for (const mutate of mutations) {
-    const product = syntheticQualifiedNiftyTaxProduct();
+    const product = qualifiedNiftyTaxProductFixture();
     mutate(product);
     assert.equal(qualifiesCalculatedNiftyEtfTax(product, taxContext), false);
   }
   assert.equal(qualifiesCalculatedNiftyEtfTax(validProduct, taxContext, { financialBindingValid: false }), false);
+  assert.equal(qualifiesCalculatedNiftyEtfTax(validProduct, { ...taxContext, sttConditionAssumedSatisfied: false }), false);
+  assert.equal(qualifiesCalculatedNiftyEtfTax(validProduct, { fiscalYear: 'FY2026-27' }), false);
 });
 
 test('WTI HTTP failures stay under WTI checks and never become browser failures', async () => {
@@ -949,7 +1107,7 @@ test('authenticated profile navigation must return successfully, remain on /prof
   }
 });
 
-test('critical browser path requires the real frontend WTI request, exact ETF render, and unavailable-tax state', async () => {
+test('critical browser path requires the real frontend WTI request, exact ETF render, and calculated-tax state', async () => {
   const verified = await runBrowserFlow();
   assert.equal(verified.checks.find(check => check.name === 'Critical browser path').passed, true,
     verified.checks.find(check => check.name === 'Critical browser path').detail);
@@ -960,7 +1118,7 @@ test('critical browser path requires the real frontend WTI request, exact ETF re
     { frontendWtiBindingMismatch: true },
     { frontendWtiWrongProduct: true },
     { frontendWtiTaxHidden: true },
-    { frontendWtiTaxCalculated: true },
+    { frontendWtiTaxUnavailable: true },
     { frontendWtiRequestBindingMismatch: true },
     { frontendWtiDirectProviderRequest: true },
   ]) {
@@ -1022,11 +1180,20 @@ test('exact product and tax failures remain independently visible', async () => 
     assert.equal(result.checks.find(check => check.name === 'Nifty ETF exact-product result').passed, false);
   }
 
-  const taxUnavailable = await runBrowserFlow();
+  const taxUnavailable = await runBrowserFlow({
+    taxContext: demoTaxContext({ sttConditionAssumedSatisfied: undefined }),
+  });
   assert.equal(taxUnavailable.checks.find(check => check.name === 'ETF product source').passed, true);
   assert.equal(taxUnavailable.checks.find(check => check.name === 'Nifty ETF exact-product result').passed, true);
   assert.equal(taxUnavailable.checks.find(check => check.name === 'Product tax workflow').passed, false);
-  assert.match(taxUnavailable.checks.find(check => check.name === 'Product tax workflow').detail, /TAX_CLASSIFICATION_UNAVAILABLE/);
+  assert.match(taxUnavailable.checks.find(check => check.name === 'Product tax workflow').detail, /REQUIRES_TAX_INPUTS/);
+
+  const sttNotAssumed = await runBrowserFlow({
+    taxContext: demoTaxContext({ sttConditionAssumedSatisfied: false }),
+  });
+  assert.equal(sttNotAssumed.checks.find(check => check.name === 'Nifty ETF exact-product result').passed, true);
+  assert.equal(sttNotAssumed.checks.find(check => check.name === 'Product tax workflow').passed, false);
+  assert.match(sttNotAssumed.checks.find(check => check.name === 'Product tax workflow').detail, /UNAVAILABLE/);
 
   const wrongTaxYear = await runBrowserFlow({ products: [{
     ...qualifiedNiftyEtf(), postTaxAnalysis: { status: 'CALCULATED', fiscalYear: 'FY2025-26' },

@@ -240,7 +240,7 @@ test('provider failure or missing NAV never inserts catalog or market-price fall
   assert.equal(result.ranking.status, 'UNAVAILABLE');
 });
 
-test('WTI integrates exact ETF facts after parent suitability and preserves unavailable tax classification', async () => {
+test('WTI integrates exact ETF facts and exposes qualified tax classification while requiring explicit tax inputs', async () => {
   const { current, historical } = snapshots();
   const timingEvents = [];
   const result = await rankWhereToInvestBackend(
@@ -254,11 +254,79 @@ test('WTI integrates exact ETF facts after parent suitability and preserves unav
   );
   assert.equal(result.length, 1);
   assert.equal(result[0].canonicalProductId, 'etf:isin:INF204KB14I2');
-  assert.equal(result[0].postTaxAnalysis.status, 'TAX_CLASSIFICATION_UNAVAILABLE');
+  assert.equal(result[0].postTaxAnalysis.status, 'REQUIRES_TAX_INPUTS');
+  assert.equal(result[0].taxMetadata.taxClass, 'EQUITY_MF_SECTION_112A');
+  assert.equal(result[0].taxMetadata.productEvidence.officialSourceUrl, 'https://mf.nipponindiaim.com/InvestorServices/SIDETF/NipponIndia-ETF-Nifty-50-BeES.pdf');
+  assert.equal(result[0].postTaxAnalysis.incrementalTax, null);
   assert.deepEqual(result.metadata.ranking.reasonCodes.includes('NIFTY_50_BENCHMARK_VERIFIED'), true);
   assert.equal(result.metadata.catalog.providerCoverage.status, 'QUALIFIED_PROVIDER_PATH');
   assert.deepEqual(timingEvents.map(event => event.stage), ['exact_etf_qualification', 'tax_enrichment']);
   assert.ok(timingEvents.every(event => Number.isInteger(event.elapsedMs) && event.elapsedMs >= 0));
+});
+
+test('exact NIFTYBEES uses versioned tax policy, explicit STT scenario, holding boundary, and exemption inputs', async () => {
+  const { current, historical } = snapshots();
+  const baseContext = {
+    annualGrossIncome: 500000,
+    incomeSource: 'salary',
+    regime: 'new',
+    fiscalYear: 'FY2026-27',
+    userAge: 35,
+    holdingPeriodMonths: 18,
+    section112AExemptionUsed: 0,
+    sttConditionAssumedSatisfied: true,
+    illustrativePrincipal: 1000000,
+  };
+  const rank = taxCalculationContext => rankWhereToInvestBackend(
+    canonicalProfile(),
+    { parentInstrumentId: 'nifty_etf', taxCalculationContext },
+    {
+      fetchAmfiProductSnapshot: async () => current,
+      fetchAmfiHistoricalNavSnapshot: async () => historical,
+    },
+  );
+
+  const shortTerm = (await rank({ ...baseContext, holdingPeriodMonths: 12 }))[0];
+  assert.equal(shortTerm.postTaxAnalysis.status, 'CALCULATED');
+  assert.ok(shortTerm.postTaxAnalysis.rulesApplied.includes('INCOME_TAX_ACT_2025_EQUITY_STCG_SPECIAL_RATE_POLICY'));
+  assert.ok(shortTerm.postTaxAnalysis.taxRuleMetadata.currentRuleReferences.some(reference => reference.reference === 'Section 196'));
+
+  const firstLongTermMonth = (await rank({ ...baseContext, holdingPeriodMonths: 13 }))[0];
+  assert.equal(firstLongTermMonth.postTaxAnalysis.status, 'CALCULATED');
+  assert.ok(firstLongTermMonth.postTaxAnalysis.rulesApplied.includes('INCOME_TAX_ACT_2025_EQUITY_LTCG_SPECIAL_RATE_POLICY'));
+  assert.ok(firstLongTermMonth.postTaxAnalysis.taxRuleMetadata.currentRuleReferences.some(reference => reference.reference === 'Section 198'));
+
+  const longTerm = (await rank(baseContext))[0];
+  assert.equal(longTerm.postTaxAnalysis.status, 'CALCULATED');
+  assert.ok(longTerm.postTaxAnalysis.rulesApplied.includes('INCOME_TAX_ACT_2025_EQUITY_LTCG_SPECIAL_RATE_POLICY'));
+  assert.ok(longTerm.postTaxAnalysis.taxRuleMetadata.currentRuleReferences.some(reference => reference.reference === 'Section 198'));
+  assert.equal(longTerm.postTaxAnalysis.taxRuleMetadata.statute, 'INCOME_TAX_ACT_2025');
+  assert.equal(longTerm.postTaxAnalysis.taxRuleMetadata.fiscalYear, 'FY2026-27');
+  assert.equal(longTerm.postTaxAnalysis.taxRuleMetadata.taxYear, 'TY2026-27');
+  assert.equal(longTerm.postTaxAnalysis.taxClassificationMetadata.productEvidence.classification, 'EQUITY_ORIENTED_FUND');
+  assert.equal(longTerm.postTaxAnalysis.taxClassificationMetadata.productEvidence.binding.isin, 'INF204KB14I2');
+  assert.ok(longTerm.postTaxAnalysis.sourceReferences.some(reference => reference.role === 'PRODUCT_RULE'
+    && reference.url === 'https://mf.nipponindiaim.com/InvestorServices/SIDETF/NipponIndia-ETF-Nifty-50-BeES.pdf'));
+  assert.ok(longTerm.postTaxAnalysis.sourceReferences.some(reference => reference.role === 'TAX_POLICY'
+    && reference.url === 'https://www.incometaxindia.gov.in/documents/d/guest/income_tax_act_2025_as_amended_by_fa_act_2026-pdf'));
+  assert.ok(longTerm.postTaxAnalysis.assumptions.includes('STT_CONDITION_ASSUMED_SATISFIED_FOR_HYPOTHETICAL_TRANSFER'));
+  assert.equal(longTerm.historicalReturn.isExpectedReturn, false);
+  assert.equal(longTerm.marketPrice.availabilityStatus, 'UNAVAILABLE');
+  assert.equal(longTerm.expectedReturn, null);
+  assert.equal(longTerm.postTaxReturn, null);
+
+  const exhaustedExemption = (await rank({ ...baseContext, holdingPeriodMonths: 13, section112AExemptionUsed: 125000 }))[0];
+  assert.equal(longTerm.postTaxAnalysis.exemptionApplied, 125000);
+  assert.equal(exhaustedExemption.postTaxAnalysis.exemptionApplied, 0);
+  assert.ok(exhaustedExemption.postTaxAnalysis.incrementalTax > longTerm.postTaxAnalysis.incrementalTax);
+
+  const missingStt = (await rank({ ...baseContext, sttConditionAssumedSatisfied: undefined }))[0];
+  const failedStt = (await rank({ ...baseContext, sttConditionAssumedSatisfied: false }))[0];
+  assert.equal(missingStt.postTaxAnalysis.status, 'REQUIRES_TAX_INPUTS');
+  assert.ok(missingStt.postTaxAnalysis.requiredTaxInputs.includes('sttConditionAssumedSatisfied'));
+  assert.equal(missingStt.postTaxAnalysis.incrementalTax, null);
+  assert.equal(failedStt.postTaxAnalysis.status, 'UNAVAILABLE');
+  assert.equal(failedStt.postTaxAnalysis.incrementalTax, null);
 });
 
 test('WTI can rank exact AMFI evidence without synchronously persisting current or historical universes', async () => {
@@ -282,7 +350,8 @@ test('WTI can rank exact AMFI evidence without synchronously persisting current 
 
   assert.equal(result.length, 1);
   assert.equal(result[0].canonicalProductId, 'etf:isin:INF204KB14I2');
-  assert.equal(result[0].postTaxAnalysis.status, 'TAX_CLASSIFICATION_UNAVAILABLE');
+  assert.equal(result[0].postTaxAnalysis.status, 'REQUIRES_TAX_INPUTS');
+  assert.ok(result[0].postTaxAnalysis.requiredTaxInputs.includes('sttConditionAssumedSatisfied'));
   assert.deepEqual(fetchOptions.map(([kind, options]) => [kind, options.persist]), [
     ['current', false],
     ['historical', false],
