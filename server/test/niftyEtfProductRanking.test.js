@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { rankWhereToInvestBackend } from '../services/RecommendationPipeline.js';
+import { qualifiesCalculatedNiftyEtfTax } from '../scripts/demoPreflight.js';
 import {
   isQualifiedNiftyEtfIdentity,
   rankQualifiedNiftyEtfProducts,
@@ -327,6 +328,169 @@ test('exact NIFTYBEES uses versioned tax policy, explicit STT scenario, holding 
   assert.equal(missingStt.postTaxAnalysis.incrementalTax, null);
   assert.equal(failedStt.postTaxAnalysis.status, 'UNAVAILABLE');
   assert.equal(failedStt.postTaxAnalysis.incrementalTax, null);
+});
+
+test('negative NIFTYBEES historical return stays source-bound and does not enter the gain-only tax calculator', async () => {
+  const { current, historical } = snapshots({
+    currentFact: amfiNavFact({ value: 250 }),
+    historyFact: amfiNavFact({
+      value: 280,
+      observedAt: '2025-10-01T09:55:00.000Z',
+      sourceUrl: AMFI_HISTORY_URL,
+      freshness: 'STALE',
+    }),
+  });
+  const taxCalculationContext = {
+    annualGrossIncome: 1200000,
+    incomeSource: 'salary',
+    regime: 'new',
+    fiscalYear: 'FY2026-27',
+    userAge: 22,
+    holdingPeriodMonths: 18,
+    section112AExemptionUsed: 0,
+    sttConditionAssumedSatisfied: true,
+    illustrativePrincipal: 100000,
+  };
+  const rank = context => rankWhereToInvestBackend(
+    canonicalProfile(),
+    { parentInstrumentId: 'nifty_etf', taxCalculationContext: context },
+    {
+      fetchAmfiProductSnapshot: async () => current,
+      fetchAmfiHistoricalNavSnapshot: async () => historical,
+    },
+  );
+
+  let result;
+  await assert.doesNotReject(async () => { result = await rank(taxCalculationContext); });
+  const serializedResult = JSON.parse(JSON.stringify(result));
+  const [product] = serializedResult;
+  assert.equal(product.canonicalProductId, 'etf:isin:INF204KB14I2');
+  assert.ok(product.historicalReturn.valuePct < 0);
+  assert.equal(product.postTaxAnalysis.status, 'CALCULATED');
+  assert.ok(product.postTaxAnalysis.grossGain < 0);
+  assert.equal(product.postTaxAnalysis.taxableGain, 0);
+  assert.equal(product.postTaxAnalysis.exemptionApplied, 0);
+  assert.equal(product.postTaxAnalysis.incrementalTax, 0);
+  assert.equal(product.postTaxAnalysis.cess, 0);
+  assert.equal(product.postTaxAnalysis.surcharge, 0);
+  assert.equal(product.postTaxAnalysis.netGain, product.postTaxAnalysis.grossGain);
+  assert.ok(product.postTaxAnalysis.postTaxRatePct < 0);
+  assert.ok(product.postTaxAnalysis.rulesApplied.includes('INCOME_TAX_ACT_2025_EQUITY_LTCG_SPECIAL_RATE_POLICY'));
+  assert.equal(product.postTaxAnalysis.rulesApplied.includes('INCOME_TAX_ACT_2025_EQUITY_STCG_SPECIAL_RATE_POLICY'), false);
+  assert.ok(product.postTaxAnalysis.taxRuleMetadata.currentRuleReferences.some(reference => reference.reference === 'Section 198'));
+  assert.ok(product.postTaxAnalysis.assumptions.includes('CAPITAL_LOSS_TAX_BENEFIT_NOT_MODELED'));
+  assert.match(product.postTaxAnalysis.disclosure, /HISTORICAL\s*[—-]\s*NOT A FORECAST/i);
+  assert.match(product.postTaxAnalysis.disclosure, /no tax is charged on this negative result/i);
+  assert.match(product.postTaxAnalysis.disclosure, /loss set-off, carry-forward.*not modeled/i);
+  assert.match(product.postTaxAnalysis.disclosure, /no realized transaction is asserted/i);
+  assert.match(product.postTaxAnalysis.disclosure, /not verified for an actual transaction/i);
+  assert.equal(qualifiesCalculatedNiftyEtfTax(product, taxCalculationContext), true);
+
+  const shortTermContext = { ...taxCalculationContext, holdingPeriodMonths: 12 };
+  const [shortTermLoss] = await rankWhereToInvestBackend(
+    canonicalProfile(),
+    { parentInstrumentId: 'nifty_etf', taxCalculationContext: shortTermContext },
+    {
+      fetchAmfiProductSnapshot: async () => current,
+      fetchAmfiHistoricalNavSnapshot: async () => historical,
+    },
+  );
+  assert.ok(shortTermLoss.postTaxAnalysis.rulesApplied.includes('INCOME_TAX_ACT_2025_EQUITY_STCG_SPECIAL_RATE_POLICY'));
+  assert.ok(shortTermLoss.postTaxAnalysis.taxRuleMetadata.currentRuleReferences.some(reference => reference.reference === 'Section 196'));
+  assert.equal(shortTermLoss.postTaxAnalysis.rulesApplied.includes('INCOME_TAX_ACT_2025_EQUITY_LTCG_SPECIAL_RATE_POLICY'), false);
+  assert.equal(qualifiesCalculatedNiftyEtfTax(shortTermLoss, shortTermContext), true);
+
+  const exactDateContext = {
+    ...taxCalculationContext,
+    acquisitionDate: '2026-01-01',
+    redemptionDate: '2026-10-01',
+  };
+  const [exactDateLoss] = await rank(exactDateContext);
+  assert.equal(exactDateLoss.postTaxAnalysis.holdingPeriodBasis, 'EXACT_TRANSACTION_DATES');
+  assert.ok(exactDateLoss.postTaxAnalysis.rulesApplied.includes('INCOME_TAX_ACT_2025_EQUITY_STCG_SPECIAL_RATE_POLICY'));
+  assert.equal(exactDateLoss.postTaxAnalysis.rulesApplied.includes('INCOME_TAX_ACT_2025_EQUITY_LTCG_SPECIAL_RATE_POLICY'), false);
+  assert.equal(qualifiesCalculatedNiftyEtfTax(exactDateLoss, exactDateContext), true);
+});
+
+test('zero NIFTYBEES historical return retains the versioned holding-period rule and strict preflight evidence', async () => {
+  const { current, historical } = snapshots({
+    currentFact: amfiNavFact({ value: 250 }),
+    historyFact: amfiNavFact({
+      value: 250,
+      observedAt: '2025-10-01T09:55:00.000Z',
+      sourceUrl: AMFI_HISTORY_URL,
+      freshness: 'STALE',
+    }),
+  });
+  const taxCalculationContext = {
+    annualGrossIncome: 1200000,
+    incomeSource: 'salary',
+    regime: 'new',
+    fiscalYear: 'FY2026-27',
+    userAge: 22,
+    holdingPeriodMonths: 18,
+    section112AExemptionUsed: 0,
+    sttConditionAssumedSatisfied: true,
+    illustrativePrincipal: 100000,
+  };
+  const [product] = await rankWhereToInvestBackend(
+    canonicalProfile(),
+    { parentInstrumentId: 'nifty_etf', taxCalculationContext },
+    {
+      fetchAmfiProductSnapshot: async () => current,
+      fetchAmfiHistoricalNavSnapshot: async () => historical,
+    },
+  );
+
+  assert.equal(product.canonicalProductId, 'etf:isin:INF204KB14I2');
+  assert.equal(product.historicalReturn.valuePct, 0);
+  assert.equal(product.postTaxAnalysis.status, 'CALCULATED');
+  assert.equal(product.postTaxAnalysis.grossGain, 0);
+  assert.equal(product.postTaxAnalysis.taxableGain, 0);
+  assert.equal(product.postTaxAnalysis.exemptionApplied, 0);
+  assert.equal(product.postTaxAnalysis.incrementalTax, 0);
+  assert.equal(product.postTaxAnalysis.cess, 0);
+  assert.equal(product.postTaxAnalysis.surcharge, 0);
+  assert.equal(product.postTaxAnalysis.netGain, 0);
+  assert.equal(product.postTaxAnalysis.postTaxRatePct, 0);
+  assert.ok(product.postTaxAnalysis.rulesApplied.includes('INCOME_TAX_ACT_2025_EQUITY_LTCG_SPECIAL_RATE_POLICY'));
+  assert.equal(product.postTaxAnalysis.rulesApplied.includes('INCOME_TAX_ACT_2025_EQUITY_STCG_SPECIAL_RATE_POLICY'), false);
+  assert.ok(product.postTaxAnalysis.taxRuleMetadata.currentRuleReferences.some(reference => reference.reference === 'Section 198'));
+  assert.ok(product.postTaxAnalysis.assumptions.includes('NO_POSITIVE_CAPITAL_GAIN_TAX_NOT_APPLIED'));
+  assert.match(product.postTaxAnalysis.disclosure, /no positive capital gain/i);
+  assert.match(product.postTaxAnalysis.disclosure, /no tax is charged on this zero result/i);
+  assert.match(product.postTaxAnalysis.disclosure, /no realized transaction is asserted/i);
+  assert.equal(qualifiesCalculatedNiftyEtfTax(product, taxCalculationContext), true);
+});
+
+test('NIFTYBEES tax analysis fails closed for an unsupported fiscal year', async () => {
+  const { current, historical } = snapshots();
+  const [product] = await rankWhereToInvestBackend(
+    canonicalProfile(),
+    {
+      parentInstrumentId: 'nifty_etf',
+      taxCalculationContext: {
+        annualGrossIncome: 1200000,
+        incomeSource: 'salary',
+        regime: 'new',
+        fiscalYear: 'FY2027-28',
+        userAge: 22,
+        holdingPeriodMonths: 18,
+        section112AExemptionUsed: 0,
+        sttConditionAssumedSatisfied: true,
+        illustrativePrincipal: 100000,
+      },
+    },
+    {
+      fetchAmfiProductSnapshot: async () => current,
+      fetchAmfiHistoricalNavSnapshot: async () => historical,
+    },
+  );
+
+  assert.equal(product.canonicalProductId, 'etf:isin:INF204KB14I2');
+  assert.equal(product.postTaxAnalysis.status, 'FISCAL_YEAR_UNSUPPORTED');
+  assert.equal(product.postTaxAnalysis.incrementalTax, null);
+  assert.equal(product.postTaxAnalysis.taxRuleMetadata, null);
 });
 
 test('WTI can rank exact AMFI evidence without synchronously persisting current or historical universes', async () => {

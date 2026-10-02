@@ -312,4 +312,6 @@ test('WTI tax context accepts only a boolean STT scenario assumption and remains
   assert.equal(taxCalculationContextSchema.validate({ ...context, sttConditionAssumedSatisfied: false }).error, undefined);
   assert.ok(taxCalculationContextSchema.validate({ ...context, sttConditionAssumedSatisfied: 'true' }).error);
   assert.ok(taxCalculationContextSchema.validate({ ...context, sttConditionAssumedSatisfied: true, assumedBypass: true }).error);
+  assert.ok(taxCalculationContextSchema.validate({ ...context, holdingPeriodMonths: -1 }).error);
+  assert.ok(taxCalculationContextSchema.validate({ ...context, fiscalYear: 'not-a-fiscal-year' }).error);
 });
