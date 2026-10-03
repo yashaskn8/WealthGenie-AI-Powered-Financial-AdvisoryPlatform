@@ -113,6 +113,25 @@ test('Docker build contexts exclude local secrets, caches, and host dependencies
   assert.match(mlIgnore, /^__pycache__$/m);
 });
 
+test('Kind image builds use repository-root contexts for shared-module Dockerfiles', () => {
+  const rootDir = fs.existsSync(path.join(process.cwd(), 'docker-compose.yml'))
+    ? process.cwd()
+    : path.resolve(process.cwd(), '..');
+  const cdWorkflow = fs.readFileSync(path.join(rootDir, '.github', 'workflows', 'cd.yml'), 'utf8');
+  const buildStep = cdWorkflow.match(
+    /- name: Build Docker Container Images[\s\S]*?(?=\n\s{6}- name:|$)/,
+  )?.[0];
+
+  assert.ok(buildStep, 'CD Docker image build step is missing');
+  const commands = buildStep.replace(/\\\r?\n\s*/g, ' ');
+
+  assert.match(commands, /docker build\s+-f server\/Dockerfile\s+-t wealthgenie-server:latest\s+\./);
+  assert.match(commands, /docker build\s+-t wealthgenie-ml-service:latest\s+ml-service\//);
+  assert.match(commands, /docker build\s+--build-arg VITE_API_URL=\/api\s+-f reactapp\/Dockerfile\s+-t wealthgenie-frontend:latest\s+\./);
+  assert.doesNotMatch(commands, /docker build\s+-t wealthgenie-server:latest\s+server\//);
+  assert.doesNotMatch(commands, /docker build\s+--build-arg VITE_API_URL=\/api\s+-t wealthgenie-frontend:latest\s+reactapp\//);
+});
+
 test('Kubernetes supplies every production ML credential using the expected variable names', () => {
   const rootDir = fs.existsSync(path.join(process.cwd(), 'docker-compose.yml'))
     ? process.cwd()

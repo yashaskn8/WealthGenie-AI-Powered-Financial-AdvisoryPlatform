@@ -138,19 +138,25 @@ export function evaluateNseQuoteFreshness({
   const expectedDate = tradingToday && minutes >= (9 * 60 + 15)
     ? nowParts.isoDate
     : previousNseTradingDate(nowParts.isoDate, holidayDates);
-  const ageSeconds = Math.max(0, Math.floor((Date.parse(reference) - Date.parse(observed)) / 1000));
+  const referenceMs = Date.parse(reference);
+  const observedMs = Date.parse(observed);
+  const fetchedMs = Date.parse(fetched);
+  const hasFutureEvidence = observedMs > referenceMs || fetchedMs > referenceMs;
+  const ageSeconds = Math.max(0, Math.floor((referenceMs - observedMs) / 1000));
   let maxAgeSeconds = NSE_QUOTE_MAX_AGE_SECONDS;
-  if (!marketOpen && observedDate === expectedDate) {
+  if (!hasFutureEvidence && !marketOpen && observedDate === expectedDate) {
     const nextOpen = nextTradingSessionOpen(observed, holidayDates);
     if (nextOpen) {
       maxAgeSeconds = Math.max(
         NSE_QUOTE_MAX_AGE_SECONDS,
-        Math.floor((nextOpen.getTime() - Date.parse(observed)) / 1000) + NSE_QUOTE_MAX_AGE_SECONDS,
+        Math.floor((nextOpen.getTime() - observedMs) / 1000) + NSE_QUOTE_MAX_AGE_SECONDS,
       );
     }
   }
   return {
-    status: observedDate === expectedDate && ageSeconds <= maxAgeSeconds ? FRESHNESS.FRESH : FRESHNESS.STALE,
+    status: !hasFutureEvidence && observedDate === expectedDate && ageSeconds <= maxAgeSeconds
+      ? FRESHNESS.FRESH
+      : FRESHNESS.STALE,
     ageSeconds,
     maxAgeSeconds,
     marketSession: session.status,
@@ -173,11 +179,15 @@ export function evaluateNseDailyHistoryFreshness({
   if (!observed || !fetched || !reference || !expectedDate || !effectiveTradingDate) {
     return { status: FRESHNESS.UNKNOWN, ageSeconds: null, maxAgeSeconds: NSE_DAILY_HISTORY_MAX_AGE_SECONDS };
   }
-  const ageSeconds = Math.max(0, Math.floor((Date.parse(reference) - Date.parse(observed)) / 1000));
+  const referenceMs = Date.parse(reference);
+  const observedMs = Date.parse(observed);
+  const fetchedMs = Date.parse(fetched);
+  const hasFutureEvidence = observedMs > referenceMs || fetchedMs > referenceMs;
+  const ageSeconds = Math.max(0, Math.floor((referenceMs - observedMs) / 1000));
   return {
-    status: effectiveTradingDate === expectedDate ? FRESHNESS.FRESH : FRESHNESS.STALE,
+    status: !hasFutureEvidence && effectiveTradingDate === expectedDate ? FRESHNESS.FRESH : FRESHNESS.STALE,
     ageSeconds,
-    maxAgeSeconds: effectiveTradingDate === expectedDate
+    maxAgeSeconds: !hasFutureEvidence && effectiveTradingDate === expectedDate
       ? Math.max(NSE_DAILY_HISTORY_MAX_AGE_SECONDS, ageSeconds)
       : NSE_DAILY_HISTORY_MAX_AGE_SECONDS,
   };

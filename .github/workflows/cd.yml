@@ -57,13 +57,16 @@ jobs:
       - name: Build Docker Container Images
         run: |
           echo "Building wealthgenie-server image..."
-          docker build -t wealthgenie-server:latest server/
+          docker build -f server/Dockerfile -t wealthgenie-server:latest .
 
           echo "Building wealthgenie-ml-service image..."
           docker build -t wealthgenie-ml-service:latest ml-service/
 
           echo "Building wealthgenie-frontend image..."
-          docker build --build-arg VITE_API_URL=/api -t wealthgenie-frontend:latest reactapp/
+          docker build --build-arg VITE_API_URL=/api \
+            -f reactapp/Dockerfile \
+            -t wealthgenie-frontend:latest \
+            .
 
       - name: Load Images into Kind Cluster
         run: |
