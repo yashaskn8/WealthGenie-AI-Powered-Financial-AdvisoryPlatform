@@ -9,7 +9,7 @@ import {
   NIFTYBEES_PRODUCT_TAX_EVIDENCE,
   PRODUCT_TAX_CLASSES,
 } from '../services/productTaxAuthority.js';
-import { getTaxPolicyMetadata } from '../services/taxEngine.js';
+import { getCurrentFiscalYear, getTaxPolicyMetadata } from '../services/taxEngine.js';
 import {
   BACKEND_HTTP_HARD_TIMEOUT_MS,
   DASHBOARD_BROWSER_TIMEOUT_MS,
@@ -1234,6 +1234,18 @@ export async function checkBrowserAndFinancialFlow(reporter, {
   }
 }
 
+export function qualifiesTaxPolicyMetadata(policies, { now = new Date() } = {}) {
+  let expectedFiscalYear;
+  try {
+    expectedFiscalYear = getCurrentFiscalYear(now);
+  } catch {
+    return false;
+  }
+  return Boolean(policies?.response?.ok === true
+    && policies?.body?.currentFiscalYearVerified === true
+    && policies?.body?.currentFiscalYear === expectedFiscalYear);
+}
+
 export async function runDemoPreflight({
   environment = process.env,
   write = line => process.stdout.write(`${line}\n`),
@@ -1332,11 +1344,10 @@ export async function runDemoPreflight({
     : marketProvider === 'NSE' ? 'NSE source does not require a provider token' : 'no qualified market provider selected');
 
   const policies = await readHttp(`${apiBase}/tax/policies`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null);
-  const taxVerified = policies?.response.ok && policies.body?.currentFiscalYearVerified === true
-    && typeof policies.body?.currentFiscalYear === 'string';
+  const taxVerified = qualifiesTaxPolicyMetadata(policies);
   reporter.add('Tax-policy metadata', taxVerified, taxVerified
     ? `current policy ${policies.body.currentFiscalYear} is server-verified`
-    : 'current fiscal-year policy metadata is missing or unverified');
+    : 'current fiscal-year policy metadata is missing, stale, malformed, or unverified');
 
   const browserConfigPresent = Boolean(frontendUrl && environment.DEMO_EMAIL && environment.DEMO_PASSWORD);
   if (!browserConfigPresent) {
