@@ -8,6 +8,7 @@ import { verifyPersistenceIndexes } from '../services/persistenceIndexReadiness.
 import { verifyAgentRuntimePersistence } from '../services/planHealthPersistence.js';
 import { normalizeBuildSha } from '../../shared/buildIdentity.js';
 import { REDIS_PROBE_TIMEOUT_MS } from '../../shared/demoPreflightContracts.js';
+import { verifyDemoDatabaseIdentity } from '../services/demoDatabaseIdentity.js';
 
 function withTimeout(promise, timeoutMs, label) {
   let timer;
@@ -31,9 +32,14 @@ export function createHealthRouter({
   verificationTimeoutMs = REDIS_PROBE_TIMEOUT_MS,
   verifyAgentRuntime = verifyAgentRuntimePersistence,
   buildSha = process.env.APP_BUILD_SHA,
+  expectedDemoDatabase = process.env.DEMO_EXPECTED_MONGODB_DATABASE,
+  marketProvider = String(process.env.MARKET_DATA_PRIMARY_PROVIDER || 'NSE').trim().toUpperCase(),
+  marketProviderTokenPresent = String(process.env.MARKET_DATA_PRIMARY_PROVIDER || 'NSE').trim().toUpperCase() === 'NSE'
+    || Boolean(process.env.UPSTOX_ANALYTICS_TOKEN || process.env.UPSTOX_ACCESS_TOKEN),
   verifyMongoTransaction = verifyConnectedMongoTransaction,
   verifyRedisConnection = verifyConnectedRedis,
   isMongoConnected = () => mongoose.connection.readyState === 1,
+  getMongoDatabaseName = () => mongoose.connection.db?.databaseName || null,
 } = {}) {
   const router = Router();
 
@@ -193,18 +199,35 @@ export function createHealthRouter({
   });
   });
 
-  router.get('/verification', asyncHandler(async (_req, res) => {
+  router.get('/verification', asyncHandler(async (req, res) => {
+    const mongoConnected = isMongoConnected();
+    const requestedDatabase = req.get('x-demo-expected-mongodb-database');
+    const identityRequested = typeof requestedDatabase === 'string';
+    const databaseIdentityVerified = identityRequested && mongoConnected && verifyDemoDatabaseIdentity({
+      actual: getMongoDatabaseName(),
+      configuredExpected: expectedDemoDatabase,
+      requestedExpected: requestedDatabase,
+    });
     const [transactionCapable, redisConnected] = await Promise.all([
-      withTimeout(verifyMongoTransaction({ timeoutMs, connection: mongoose.connection }), timeoutMs, 'Mongo verification probe').catch(() => false),
+      identityRequested && !databaseIdentityVerified
+        ? Promise.resolve(false)
+        : withTimeout(verifyMongoTransaction({ timeoutMs, connection: mongoose.connection }), timeoutMs, 'Mongo verification probe').catch(() => false),
       withTimeout(verifyRedisConnection({ timeoutMs: verificationTimeoutMs, client: redisClient, available: redisAvailable }), verificationTimeoutMs, 'Redis verification probe').catch(() => false),
     ]);
-    const mongoConnected = isMongoConnected();
-    const verified = mongoConnected && transactionCapable && (!requireRedis || redisConnected);
+    const verified = mongoConnected && transactionCapable
+      && (!identityRequested || databaseIdentityVerified)
+      && (!requireRedis || redisConnected);
     const body = {
       status: verified ? 'VERIFIED' : 'NOT_VERIFIED',
       buildSha: normalizeBuildSha(buildSha),
-      mongo: { connected: mongoConnected, transactionCapable: Boolean(mongoConnected && transactionCapable) },
+      mongo: {
+        connected: mongoConnected,
+        transactionCapable: Boolean(mongoConnected && transactionCapable),
+        databaseIdentityVerified: Boolean(databaseIdentityVerified),
+      },
       redis: { required: requireRedis, connected: Boolean(redisConnected) },
+      marketProvider: ['NSE', 'UPSTOX'].includes(marketProvider) ? marketProvider : 'INVALID',
+      marketProviderTokenPresent: Boolean(marketProviderTokenPresent),
     };
     return res.status(verified ? 200 : 503).json(body);
   }));

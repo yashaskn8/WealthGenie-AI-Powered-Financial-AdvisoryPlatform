@@ -1169,9 +1169,13 @@ test('persisted deferred advisory is reconciled against a rebalance before its r
   const recommendationId = String(currentBody.recommendationId);
   const barrier = createBarrier();
   const originalPrimaryProvider = process.env.LLM_PRIMARY_PROVIDER;
+  const originalNvidiaApiKey = process.env.NVIDIA_API_KEY;
   const originalGenerate = ProviderManager.nvidia.generate;
   let providerCalls = 0;
   process.env.LLM_PRIMARY_PROVIDER = 'NVIDIA_NIM';
+  // Provider configuration is checked before the adapter's generate method;
+  // this local stub needs a non-secret sentinel so the test reaches the stub.
+  process.env.NVIDIA_API_KEY = 'test-key-not-a-real-secret';
   ProviderManager.nvidia.generate = async ({ recentHistory }) => {
     providerCalls += 1;
     const prompt = recentHistory?.[0]?.parts?.[0]?.text;
@@ -1249,6 +1253,8 @@ test('persisted deferred advisory is reconciled against a rebalance before its r
     ProviderManager.nvidia.generate = originalGenerate;
     if (originalPrimaryProvider === undefined) delete process.env.LLM_PRIMARY_PROVIDER;
     else process.env.LLM_PRIMARY_PROVIDER = originalPrimaryProvider;
+    if (originalNvidiaApiKey === undefined) delete process.env.NVIDIA_API_KEY;
+    else process.env.NVIDIA_API_KEY = originalNvidiaApiKey;
   }
 });
 

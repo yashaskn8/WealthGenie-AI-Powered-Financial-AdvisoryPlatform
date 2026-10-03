@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { matchesBuildSha } from '../../shared/buildIdentity.js';
@@ -31,6 +32,9 @@ import {
   NSE_TRADING_HOLIDAY_URL,
 } from '../services/marketData/nseTradingCalendar.js';
 import { indiaClockParts, isoDateInIndia } from '../services/marketData/indiaMarketTime.js';
+import { isSafeDemoDatabaseName } from '../services/demoDatabaseIdentity.js';
+import { financialProfileCompletionSchema } from '../validation/financialSchemas.js';
+import { taxCalculationContextSchema } from '../validation/taxSchemas.js';
 
 export {
   BACKEND_HTTP_HARD_TIMEOUT_MS,
@@ -551,6 +555,16 @@ export function makeReporter(write = line => process.stdout.write(`${line}\n`)) 
       check.detail = String(detail || (passed ? 'verified' : 'failed'));
       evaluated.add(name);
     },
+    notEvaluated(name, detail) {
+      if (finalized) throw new Error('Cannot add preflight checks after finalization.');
+      const check = checks.find(candidate => candidate.name === name);
+      if (!check) throw new Error(`Unexpected preflight check: ${name}`);
+      if (evaluated.has(name)) throw new Error(`Preflight check already evaluated: ${name}`);
+      check.passed = false;
+      check.state = 'NOT_EVALUATED';
+      check.detail = `NOT_EVALUATED: ${String(detail || 'a prerequisite was not verified')}`;
+      evaluated.add(name);
+    },
     finish() {
       if (!finalized) {
         finalized = true;
@@ -563,19 +577,22 @@ export function makeReporter(write = line => process.stdout.write(`${line}\n`)) 
         }
         let writeFailure = null;
         for (const check of checks) {
-          try { write(`${check.passed ? 'PASS' : 'FAIL'} ${check.name} — ${check.detail}`); } catch (error) { writeFailure ||= error; }
+          try { write(`${check.state} ${check.name} — ${check.detail}`); } catch (error) { writeFailure ||= error; }
         }
         if (writeFailure) throw writeFailure;
       }
-      const passed = checks.filter(check => check.passed).length;
+      const passed = checks.filter(check => check.state === 'PASS').length;
+      const failed = checks.filter(check => check.state === 'FAIL').length;
+      const notEvaluated = checks.filter(check => check.state === 'NOT_EVALUATED').length;
       return {
         checks: checks.map(check => ({ ...check })),
         passed,
-        failed: checks.length - passed,
+        failed,
+        notEvaluated,
         total: checks.length,
       };
     },
-    get failed() { return checks.some(check => !check.passed); },
+    get failed() { return checks.some(check => check.state === 'FAIL'); },
   };
 }
 
@@ -630,8 +647,8 @@ async function readSafeResponseBody(response) {
 }
 
 function reportWtiNotEvaluated(reporter, reason) {
-  reporter.add('Nifty ETF exact-product result', false, `NOT_EVALUATED because ${reason}`);
-  reporter.add('Product tax workflow', false, `NOT_EVALUATED because ${reason}`);
+  reporter.notEvaluated('Nifty ETF exact-product result', reason);
+  reporter.notEvaluated('Product tax workflow', reason);
 }
 
 export async function reportWtiProductChecks(reporter, {
@@ -644,7 +661,7 @@ export async function reportWtiProductChecks(reporter, {
   timerOptions,
 } = {}) {
   if (parentInstrumentId !== 'nifty_etf') {
-    reporter.add('ETF product source', false, 'NOT_EVALUATED because the exact qualified Nifty ETF parent is not configured');
+    reporter.notEvaluated('ETF product source', 'the exact qualified Nifty ETF parent is not configured');
     reportWtiNotEvaluated(reporter, 'the exact qualified Nifty ETF parent is not configured');
     return;
   }
@@ -699,15 +716,17 @@ export async function reportWtiProductChecks(reporter, {
         financialBindingValid: responseQualified,
       });
     const taxStatus = uniqueQualifiedProduct?.postTaxAnalysis?.status;
-    reporter.add('Product tax workflow', validTaxResult, validTaxResult
-      ? `exact-product tax calculation is bound to the supplied fiscal year; ${elapsedMilliseconds(taxStartedAt)}ms`
-      : !taxContext
-        ? 'TAX_INPUTS_UNAVAILABLE; provide actual required tax facts; no tax values are inferred'
-        : !uniqueQualifiedProduct
-          ? 'NOT_EVALUATED because no exact current product passed identity and financial-state checks'
+    if (taxContext && !uniqueQualifiedProduct) {
+      reporter.notEvaluated('Product tax workflow', 'no exact current product passed identity and financial-state checks');
+    } else {
+      reporter.add('Product tax workflow', validTaxResult, validTaxResult
+        ? `exact-product tax calculation is bound to the supplied fiscal year; ${elapsedMilliseconds(taxStartedAt)}ms`
+        : !taxContext
+          ? 'TAX_INPUTS_UNAVAILABLE; provide actual required tax facts; no tax values are inferred'
           : safeStableCode(taxStatus)
             ? `${safeStableCode(taxStatus)}; no tax values are inferred`
             : 'exact-product tax result is not calculated; no tax values are inferred');
+    }
     timingStatus = 'COMPLETED';
   } catch (error) {
     const failure = safeFailureKind(error);
@@ -793,7 +812,7 @@ function marketQuoteDetail(result, assessment, quoteAvailable) {
   return 'provider reports a fresh observation, but current NSE session status is not independently verified';
 }
 
-async function readConfiguredJson(filePath, label, reporter) {
+async function readConfiguredJson(filePath, label, reporter, schema) {
   if (!filePath) {
     reporter.add(label, false, 'configure the required JSON file path');
     return null;
@@ -801,6 +820,9 @@ async function readConfiguredJson(filePath, label, reporter) {
   try {
     const parsed = JSON.parse(await readFile(path.resolve(filePath), 'utf8'));
     if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new TypeError('Expected a JSON object.');
+    if (schema?.validate(parsed, { abortEarly: false, convert: false, stripUnknown: false }).error) {
+      throw new TypeError('Input does not match the strict runtime schema.');
+    }
     reporter.add(label, true, 'valid JSON object loaded; contents are never printed');
     return parsed;
   } catch {
@@ -809,12 +831,16 @@ async function readConfiguredJson(filePath, label, reporter) {
   }
 }
 
-async function checkMongoTransaction(reporter, { verification } = {}) {
+async function checkMongoTransaction(reporter, { environment = process.env, verification } = {}) {
   const mongo = verification?.mongo;
-  const passed = mongo?.connected === true && mongo?.transactionCapable === true;
+  const expectedDatabase = environment.DEMO_EXPECTED_MONGODB_DATABASE;
+  const passed = isSafeDemoDatabaseName(expectedDatabase)
+    && mongo?.connected === true
+    && mongo?.transactionCapable === true
+    && mongo?.databaseIdentityVerified === true;
   reporter.add('Mongo/transaction support', passed, passed
-    ? 'the running backend verified a read-only transaction on its connected MongoDB'
-    : 'the running backend did not verify transaction capability on its connected MongoDB');
+    ? 'the running backend verified a read-only transaction and exact isolated database identity'
+    : 'expected demo database is missing/unsafe or the running backend did not verify connection, transaction, and exact database identity');
 }
 
 async function checkRedis(reporter, { environment = process.env, verification } = {}) {
@@ -846,9 +872,9 @@ export async function checkBrowserAndFinancialFlow(reporter, {
 }, { launchBrowser, onTiming } = {}) {
   if (!frontendUrl || !email || !password) {
     reporter.add('Critical browser path', false, 'browser launch/navigation NOT_EVALUATED because demo browser configuration is missing');
-    reporter.add('Profile completion/auth', false, 'NOT_EVALUATED because demo identity configuration is missing');
-    reporter.add('Recommendation current-state binding', false, 'NOT_EVALUATED because authentication was not run');
-    reporter.add('ETF product source', false, 'NOT_EVALUATED because authentication was not run');
+    reporter.notEvaluated('Profile completion/auth', 'demo identity configuration is missing');
+    reporter.notEvaluated('Recommendation current-state binding', 'authentication was not run');
+    reporter.notEvaluated('ETF product source', 'authentication was not run');
     reportWtiNotEvaluated(reporter, 'authentication was not run');
     return;
   }
@@ -922,9 +948,9 @@ export async function checkBrowserAndFinancialFlow(reporter, {
       const status = Number.isInteger(error?.status) ? ` HTTP ${error.status}` : '';
       const failure = safeFailureKind(error);
       recordCriticalPath(false, `browser launch/navigation failed${status} (${failure.kind}${failure.code ? ` ${failure.code}` : ''})`);
-      reporter.add('Profile completion/auth', false, 'NOT_EVALUATED because browser launch/navigation failed');
-      reporter.add('Recommendation current-state binding', false, 'NOT_EVALUATED because browser launch/navigation failed');
-      reporter.add('ETF product source', false, 'NOT_EVALUATED because browser launch/navigation failed');
+      reporter.notEvaluated('Profile completion/auth', 'browser launch/navigation failed');
+      reporter.notEvaluated('Recommendation current-state binding', 'browser launch/navigation failed');
+      reporter.notEvaluated('ETF product source', 'browser launch/navigation failed');
       reportWtiNotEvaluated(reporter, 'browser launch/navigation failed');
       return;
     }
@@ -951,14 +977,14 @@ export async function checkBrowserAndFinancialFlow(reporter, {
       const status = Number.isInteger(error?.status) ? ` HTTP ${error.status}` : '';
       const failure = safeFailureKind(error);
       reporter.add('Profile completion/auth', false, `authentication failed${status} (${failure.kind}${failure.code ? ` ${failure.code}` : ''})`);
-      reporter.add('Recommendation current-state binding', false, 'NOT_EVALUATED because authentication failed');
-      reporter.add('ETF product source', false, 'NOT_EVALUATED because authentication failed');
+      reporter.notEvaluated('Recommendation current-state binding', 'authentication failed');
+      reporter.notEvaluated('ETF product source', 'authentication failed');
       reportWtiNotEvaluated(reporter, 'authentication failed');
     }
 
     if (authenticated) {
       let profileId = null;
-      if (!completionPayload || !idempotencyKey || idempotencyKey.length > 200) {
+      if (!completionPayload || !/^[A-Za-z0-9._:-]{8,128}$/.test(idempotencyKey || '')) {
         reporter.add('Profile completion/auth', false, 'profile completion NOT_EVALUATED because payload or stable idempotency key is missing');
       } else {
         try {
@@ -996,8 +1022,8 @@ export async function checkBrowserAndFinancialFlow(reporter, {
       }
 
       if (!profileId) {
-        reporter.add('Recommendation current-state binding', false, 'NOT_EVALUATED because an authenticated current profile could not be resolved');
-        reporter.add('ETF product source', false, 'NOT_EVALUATED because an authenticated current profile could not be resolved');
+        reporter.notEvaluated('Recommendation current-state binding', 'an authenticated current profile could not be resolved');
+        reporter.notEvaluated('ETF product source', 'an authenticated current profile could not be resolved');
         reportWtiNotEvaluated(reporter, 'an authenticated current profile could not be resolved');
       } else {
         let recommendation = null;
@@ -1017,7 +1043,7 @@ export async function checkBrowserAndFinancialFlow(reporter, {
         }
 
         if (!bindingValid) {
-          reporter.add('ETF product source', false, 'NOT_EVALUATED because current recommendation state is missing or stale');
+          reporter.notEvaluated('ETF product source', 'current recommendation state is missing or stale');
           reportWtiNotEvaluated(reporter, 'current recommendation state is missing or stale');
         } else {
           verifiedRecommendation = recommendation;
@@ -1214,7 +1240,7 @@ export async function checkBrowserAndFinancialFlow(reporter, {
             ? 'browser request inspection failed; provider isolation could not be verified'
             : !frontendBuildVerified
               ? 'frontend runtime build identity is missing, malformed, or differs from the expected build'
-              : 'frontend Where to Invest journey rendered the exact source-qualified ETF and unavailable-tax state with current binding';
+              : 'frontend Where to Invest journey rendered the exact source-qualified ETF and calculated historical tax illustration with current binding';
         recordCriticalPath(criticalPathPassed, detail);
       } catch (error) {
         const status = Number.isInteger(error?.status) ? ` HTTP ${error.status}` : '';
@@ -1288,12 +1314,22 @@ export async function runDemoPreflight({
   }
   reporter.add('Backend URL configuration', true, 'safe local HTTP or remote HTTPS API URL verified');
   const frontendUrl = environment.DEMO_FRONTEND_URL;
-  const completionPayload = await loadJson(environment.DEMO_PROFILE_COMPLETION_FILE, 'Profile completion payload', reporter);
-  const taxContext = await loadJson(environment.DEMO_TAX_CONTEXT_FILE, 'Tax input payload', reporter);
+  const completionPayload = await loadJson(environment.DEMO_PROFILE_COMPLETION_FILE, 'Profile completion payload', reporter, financialProfileCompletionSchema);
+  const taxContext = await loadJson(environment.DEMO_TAX_CONTEXT_FILE, 'Tax input payload', reporter, taxCalculationContextSchema);
 
   const health = await readHttp(`${backendOrigin}/health/live`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null);
   const readiness = await readHttp(`${backendOrigin}/health/ready`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null);
-  const runtimeVerification = await readHttp(`${backendOrigin}/health/verification`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null);
+  // Always signal that this caller requires exact DB identity. An empty/invalid
+  // value is rejected by health verification before its transaction probe.
+  const expectedDatabaseHeader = {
+    'X-Demo-Expected-Mongodb-Database': isSafeDemoDatabaseName(environment.DEMO_EXPECTED_MONGODB_DATABASE)
+      ? environment.DEMO_EXPECTED_MONGODB_DATABASE
+      : '',
+  };
+  const runtimeVerification = await readHttp(`${backendOrigin}/health/verification`, {
+    timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS,
+    headers: expectedDatabaseHeader,
+  }).catch(() => null);
   const runtimeBody = runtimeVerification?.body;
   const backendBuildMatches = matchesBuildSha(environment.DEMO_EXPECTED_BUILD_SHA, health?.body?.buildSha)
     && matchesBuildSha(environment.DEMO_EXPECTED_BUILD_SHA, runtimeBody?.buildSha);
@@ -1306,13 +1342,34 @@ export async function runDemoPreflight({
   await verifyMongo(reporter, { environment, verification: runtimeBody });
   await verifyRedis(reporter, { environment, verification: runtimeBody });
 
+  const prerequisiteChecks = reporter.checks.filter(check => [
+    'Profile completion payload', 'Tax input payload', 'Backend', 'Backend readiness',
+    'Mongo/transaction support', 'Redis if required',
+  ].includes(check.name));
+  if (prerequisiteChecks.some(check => check.state !== 'PASS')) {
+    reporter.notEvaluated('Market provider configuration', 'backend identity, readiness, isolated database, transaction, required Redis, or fixture prerequisite failed');
+    for (const name of [
+      'NIFTY quote', 'VIX quote', 'Market history', 'Market context', 'Provider token presence',
+      'Tax-policy metadata', 'Profile completion/auth', 'Recommendation current-state binding',
+      'ETF product source', 'Nifty ETF exact-product result', 'Product tax workflow', 'Critical browser path',
+    ]) {
+      reporter.notEvaluated(name, 'no provider or authenticated operation is allowed before backend, fixture, isolated database, transaction, and dependency checks pass');
+    }
+    await recordProductionBuildCheck(reporter, environment, verifyBuild, dependencies.spawnBuild);
+    return finish();
+  }
+
   const deep = await readHttp(`${backendOrigin}/health/deep`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null);
   const services = deep?.body?.services || {};
   const redisRequired = isRedisRequired(environment);
-  reporter.add('Market provider configuration', Boolean(services.database === 'UP')
+  const backendProvider = runtimeBody?.marketProvider;
+  const backendProviderValid = ['NSE', 'UPSTOX'].includes(backendProvider)
+    && runtimeBody?.marketProviderTokenPresent === true;
+  reporter.add('Market provider configuration', Boolean(services.database === 'UP' && backendProviderValid
     && runtimeBody?.mongo?.connected === true
-    && (!redisRequired || (services.redis === 'UP' && runtimeBody?.redis?.connected === true)),
-  'backend dependency health and connected runtime capabilities are evaluated without exposing configuration values');
+    && runtimeBody?.mongo?.databaseIdentityVerified === true
+    && (!redisRequired || (services.redis === 'UP' && runtimeBody?.redis?.connected === true))),
+  'backend dependency health, selected provider, isolated database identity, and connected runtime capabilities are evaluated without exposing configuration values');
 
   const contextResult = await readHttp(`${apiBase}/regime/current`, {
     timeoutMs: MARKET_DEPENDENCY_PROBE_TIMEOUT_MS,
@@ -1336,12 +1393,13 @@ export async function runDemoPreflight({
     ? `${marketAssessment.sessionStatus}: ${marketAssessment.sessionDetail}`
     : `${marketAssessment.sessionStatus}: ${marketAssessment.sessionDetail}; complete current-session evidence is unavailable or stale, and last-known-good data is not counted as live`);
 
-  const marketProvider = selectedProvider;
-  const upstoxTokenPresent = Boolean(environment.UPSTOX_ANALYTICS_TOKEN || environment.UPSTOX_ACCESS_TOKEN);
-  const tokenCheck = marketProvider === 'UPSTOX' ? upstoxTokenPresent : marketProvider === 'NSE';
-  reporter.add('Provider token presence', tokenCheck, marketProvider === 'UPSTOX'
-    ? (upstoxTokenPresent ? 'required Upstox token is present (value hidden)' : 'Upstox selected but token is absent')
-    : marketProvider === 'NSE' ? 'NSE source does not require a provider token' : 'no qualified market provider selected');
+  const marketProviderMatches = selectedProvider === backendProvider;
+  const backendTokenPresent = runtimeBody?.marketProviderTokenPresent === true;
+  const tokenCheck = marketProviderMatches && backendTokenPresent;
+  reporter.add('Provider token presence', tokenCheck, backendProvider === 'NSE'
+    ? (tokenCheck ? 'backend-selected NSE source matches live provider; no token is required' : 'backend provider does not match the live market source')
+    : backendProvider === 'UPSTOX' ? (tokenCheck ? 'backend-selected Upstox token is present and source matches (value hidden)' : 'selected Upstox token or live provider match is not verified')
+      : 'running backend did not report a supported market provider');
 
   const policies = await readHttp(`${apiBase}/tax/policies`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null);
   const taxVerified = qualifiesTaxPolicyMetadata(policies);
@@ -1349,14 +1407,17 @@ export async function runDemoPreflight({
     ? `current policy ${policies.body.currentFiscalYear} is server-verified`
     : 'current fiscal-year policy metadata is missing, stale, malformed, or unverified');
 
-  const browserConfigPresent = Boolean(frontendUrl && environment.DEMO_EMAIL && environment.DEMO_PASSWORD);
+  const browserConfigPresent = Boolean(frontendUrl && environment.DEMO_EMAIL && environment.DEMO_PASSWORD
+    && completionPayload && taxContext
+    && /^[A-Za-z0-9._:-]{8,128}$/.test(environment.DEMO_COMPLETION_IDEMPOTENCY_KEY || '')
+    && environment.DEMO_NIFTY_ETF_PARENT_ID === 'nifty_etf');
   if (!browserConfigPresent) {
     reporter.add('Critical browser path', false, 'set DEMO_FRONTEND_URL, DEMO_EMAIL, and DEMO_PASSWORD');
-    reporter.add('Profile completion/auth', false, 'set a dedicated demo identity and credentials');
-    reporter.add('Recommendation current-state binding', false, 'authenticated profile completion was not run');
-    reporter.add('ETF product source', false, 'authenticated rank-wti flow was not run');
-    reporter.add('Nifty ETF exact-product result', false, 'authenticated rank-wti flow was not run');
-    reporter.add('Product tax workflow', false, 'authenticated rank-wti flow was not run');
+    reporter.notEvaluated('Profile completion/auth', 'complete demo identity, valid fixtures, stable key, or exact ETF parent is missing');
+    reporter.notEvaluated('Recommendation current-state binding', 'authenticated profile completion was not run');
+    reporter.notEvaluated('ETF product source', 'authenticated rank-wti flow was not run');
+    reporter.notEvaluated('Nifty ETF exact-product result', 'authenticated rank-wti flow was not run');
+    reporter.notEvaluated('Product tax workflow', 'authenticated rank-wti flow was not run');
   } else {
     await verifyBrowser(reporter, {
       apiBase,
@@ -1371,40 +1432,96 @@ export async function runDemoPreflight({
     }, dependencies.browserOptions);
   }
 
-  if (verifyBuild) {
-    const build = await verifyBuild({ environment });
-    reporter.add('Production frontend build', build?.passed === true, build?.detail || 'production frontend build was not verified');
-  } else {
-    const build = spawnSync(process.execPath, [path.join(REACTAPP_DIR, 'node_modules', 'vite', 'bin', 'vite.js'), 'build'], {
-      cwd: REACTAPP_DIR,
-      encoding: 'utf8',
-      timeout: BACKEND_HTTP_HARD_TIMEOUT_MS * 6,
-      windowsHide: true,
-      env: { ...environment, VITE_BUILD_SHA: environment.DEMO_EXPECTED_BUILD_SHA || '' },
-    });
-    const expectedShaValid = matchesBuildSha(environment.DEMO_EXPECTED_BUILD_SHA, environment.DEMO_EXPECTED_BUILD_SHA);
-    reporter.add('Production frontend build', build.status === 0 && expectedShaValid, build.status !== 0
-      ? 'production build failed or frontend dependencies are unavailable'
-      : expectedShaValid ? 'Vite production build succeeded with the explicit expected build identity'
-        : 'expected build SHA is missing or malformed; build identity was not substituted from local Git');
-  }
+  await recordProductionBuildCheck(reporter, environment, verifyBuild, dependencies.spawnBuild);
 
   return finish();
 }
 
 function finishPreflight(reporter, write = line => process.stdout.write(`${line}\n`)) {
   const summary = reporter.finish();
-  write(`\nLive-demo preflight: ${summary.passed} PASS, ${summary.failed} FAIL.`);
-  if (summary.failed) {
+  write(`\nLive-demo preflight: ${summary.passed} PASS, ${summary.failed} FAIL, ${summary.notEvaluated} NOT_EVALUATED.`);
+  if (summary.failed || summary.notEvaluated || summary.passed !== EXPECTED_PREFLIGHT_CHECKS.length) {
     write('FINAL LIVE DEMO ENVIRONMENT NOT READY. Resolve the failed checks above; this is separate from deterministic product-integrity certification.');
   }
   return {
-    exitCode: summary.failed ? 1 : 0,
+    exitCode: summary.failed || summary.notEvaluated || summary.passed !== EXPECTED_PREFLIGHT_CHECKS.length ? 1 : 0,
     checks: summary.checks,
     passed: summary.passed,
     failed: summary.failed,
+    notEvaluated: summary.notEvaluated,
     total: summary.total,
   };
+}
+
+export function createFrontendBuildEnvironment(environment, expectedSha) {
+  const childEnvironment = {};
+  for (const name of ['PATH', 'Path', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR']) {
+    if (typeof environment[name] === 'string') childEnvironment[name] = environment[name];
+  }
+  childEnvironment.NODE_ENV = 'production';
+  childEnvironment.VITE_BUILD_SHA = matchesBuildSha(expectedSha, expectedSha) ? expectedSha : '';
+
+  if (typeof environment.VITE_API_URL === 'string') {
+    try {
+      const apiUrl = new URL(environment.VITE_API_URL);
+      const localHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
+      const transportSafe = apiUrl.protocol === 'https:'
+        || (apiUrl.protocol === 'http:' && localHosts.has(apiUrl.hostname));
+      if (transportSafe && !apiUrl.username && !apiUrl.password && !apiUrl.search && !apiUrl.hash) {
+        childEnvironment.VITE_API_URL = apiUrl.toString().replace(/\/$/, '');
+      }
+    } catch {
+      // An invalid optional API override is not forwarded to the build process.
+    }
+  }
+  if (['true', 'false'].includes(environment.VITE_ENABLE_BEARER_AUTH)) {
+    childEnvironment.VITE_ENABLE_BEARER_AUTH = environment.VITE_ENABLE_BEARER_AUTH;
+  }
+  if (typeof environment.VITE_API_TIMEOUT_MS === 'string'
+      && /^\d{1,6}$/.test(environment.VITE_API_TIMEOUT_MS)) {
+    childEnvironment.VITE_API_TIMEOUT_MS = environment.VITE_API_TIMEOUT_MS;
+  }
+  return childEnvironment;
+}
+
+async function recordProductionBuildCheck(reporter, environment, verifyBuild, spawnBuild = spawnSync) {
+  let passed = false;
+  let detail = 'production build could not be verified';
+  let outputDirectory;
+  try {
+    if (verifyBuild) {
+      const build = await verifyBuild({ environment });
+      passed = build?.passed === true;
+      detail = build?.detail || 'production frontend build was not verified';
+    } else {
+      const expectedShaValid = matchesBuildSha(environment.DEMO_EXPECTED_BUILD_SHA, environment.DEMO_EXPECTED_BUILD_SHA);
+      outputDirectory = await mkdtemp(path.join(os.tmpdir(), 'wealthgenie-demo-build-'));
+      const build = spawnBuild(process.execPath, [path.join(REACTAPP_DIR, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', '--outDir', outputDirectory], {
+        cwd: REACTAPP_DIR,
+        encoding: 'utf8',
+        timeout: BACKEND_HTTP_HARD_TIMEOUT_MS * 6,
+        windowsHide: true,
+        env: createFrontendBuildEnvironment(environment, environment.DEMO_EXPECTED_BUILD_SHA),
+      });
+      passed = build?.status === 0 && expectedShaValid;
+      detail = build?.status !== 0
+        ? 'production build failed or frontend dependencies are unavailable'
+        : expectedShaValid ? 'Vite production build succeeded with the explicit expected build identity in an isolated temporary output directory'
+          : 'expected build SHA is missing or malformed; build identity was not substituted from local Git';
+    }
+  } catch {
+    detail = 'production build could not be verified because the isolated build or verifier failed';
+  } finally {
+    if (outputDirectory) {
+      try {
+        await rm(outputDirectory, { recursive: true, force: true });
+      } catch {
+        passed = false;
+        detail = 'production build failed because its isolated temporary output could not be cleaned safely';
+      }
+    }
+  }
+  reporter.add('Production frontend build', passed, detail);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

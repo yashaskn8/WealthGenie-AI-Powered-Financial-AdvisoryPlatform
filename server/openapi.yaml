@@ -1505,16 +1505,17 @@ components:
     HealthStatus: { type: object, required: [status], properties: { status: { type: string }, timestamp: { type: string, format: date-time }, service: { type: string } }, additionalProperties: true }
     RuntimeDependencyVerification:
       type: object
-      required: [status, buildSha, mongo, redis]
+      required: [status, buildSha, mongo, redis, marketProvider, marketProviderTokenPresent]
       properties:
         status: { type: string, enum: [VERIFIED, NOT_VERIFIED] }
         buildSha: { type: [string, 'null'], pattern: '^[a-f0-9]{40}$' }
         mongo:
           type: object
-          required: [connected, transactionCapable]
+          required: [connected, transactionCapable, databaseIdentityVerified]
           properties:
             connected: { type: boolean }
             transactionCapable: { type: boolean }
+            databaseIdentityVerified: { type: boolean }
           additionalProperties: false
         redis:
           type: object
@@ -1523,4 +1524,6 @@ components:
             required: { type: boolean }
             connected: { type: boolean }
           additionalProperties: false
+        marketProvider: { type: string, enum: [NSE, UPSTOX, INVALID] }
+        marketProviderTokenPresent: { type: boolean }
       additionalProperties: false

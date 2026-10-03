@@ -150,6 +150,10 @@ export function createApp({ env = process.env, runtimeState = null, mcpRuntime =
     mcpCapacity,
     timeoutMs: config.deepHealthTimeoutMs,
     buildSha: env.APP_BUILD_SHA,
+    expectedDemoDatabase: env.DEMO_EXPECTED_MONGODB_DATABASE,
+    marketProvider: String(env.MARKET_DATA_PRIMARY_PROVIDER || 'NSE').trim().toUpperCase(),
+    marketProviderTokenPresent: String(env.MARKET_DATA_PRIMARY_PROVIDER || 'NSE').trim().toUpperCase() === 'NSE'
+      || Boolean(env.UPSTOX_ANALYTICS_TOKEN || env.UPSTOX_ACCESS_TOKEN),
   });
   app.use('/health', healthRoutes);
   app.get('/ready', (_req, res) => res.redirect(307, '/health/ready'));

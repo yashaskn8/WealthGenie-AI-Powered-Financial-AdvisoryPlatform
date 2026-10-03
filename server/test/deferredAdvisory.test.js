@@ -233,8 +233,10 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
 
     const originalGenerate = ProviderManager.nvidia.generate;
     const originalPrimaryProvider = process.env.LLM_PRIMARY_PROVIDER;
+    const originalNvidiaKey = process.env.NVIDIA_API_KEY;
     let receivedExplanation = null;
     process.env.LLM_PRIMARY_PROVIDER = 'NVIDIA_NIM';
+    process.env.NVIDIA_API_KEY = 'test-key-not-a-real-secret';
     ProviderManager.nvidia.generate = async ({ recentHistory }) => {
       const userPrompt = recentHistory?.[0]?.parts?.[0]?.text;
       const evidencePacket = JSON.parse(userPrompt).EVIDENCE_PACKET;
@@ -265,6 +267,8 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
       ProviderManager.nvidia.generate = originalGenerate;
       if (originalPrimaryProvider === undefined) delete process.env.LLM_PRIMARY_PROVIDER;
       else process.env.LLM_PRIMARY_PROVIDER = originalPrimaryProvider;
+      if (originalNvidiaKey === undefined) delete process.env.NVIDIA_API_KEY;
+      else process.env.NVIDIA_API_KEY = originalNvidiaKey;
     }
 
     assert.equal(res.status, 200);
@@ -305,8 +309,10 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
   await t.test('12. Deferred advisory short-circuits when status is already READY (idempotent)', async () => {
     const originalPrimaryProvider = process.env.LLM_PRIMARY_PROVIDER;
     const originalGenerate = ProviderManager.nvidia.generate;
+    const originalNvidiaKey = process.env.NVIDIA_API_KEY;
     let providerCalls = 0;
     process.env.LLM_PRIMARY_PROVIDER = 'NVIDIA_NIM';
+    process.env.NVIDIA_API_KEY = 'test-key-not-a-real-secret';
     ProviderManager.nvidia.generate = async () => {
       providerCalls += 1;
       throw new Error('READY advisory must return before provider generation');
@@ -330,6 +336,8 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
       ProviderManager.nvidia.generate = originalGenerate;
       if (originalPrimaryProvider === undefined) delete process.env.LLM_PRIMARY_PROVIDER;
       else process.env.LLM_PRIMARY_PROVIDER = originalPrimaryProvider;
+      if (originalNvidiaKey === undefined) delete process.env.NVIDIA_API_KEY;
+      else process.env.NVIDIA_API_KEY = originalNvidiaKey;
     }
   });
 
@@ -437,6 +445,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     const auditCountBefore = await AuditRecord.countDocuments({ userId: userAId });
     const originalPrimaryProvider = process.env.LLM_PRIMARY_PROVIDER;
     const originalGenerate = ProviderManager.nvidia.generate;
+    const originalNvidiaKey = process.env.NVIDIA_API_KEY;
     let providerCalls = 0;
     let signalBothAtClaim;
     const bothAtClaim = new Promise(resolve => { signalBothAtClaim = resolve; });
@@ -448,6 +457,7 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
     const providerGate = new Promise(resolve => { releaseProvider = resolve; });
     let claimArrivals = 0;
     process.env.LLM_PRIMARY_PROVIDER = 'NVIDIA_NIM';
+    process.env.NVIDIA_API_KEY = 'test-key-not-a-real-secret';
     ProviderManager.nvidia.generate = async ({ recentHistory }) => {
       providerCalls += 1;
       signalProviderEntered();
@@ -519,6 +529,8 @@ test('DEFERRED ADVISORY: Complete decoupled recommendation and deferred advisory
       ProviderManager.nvidia.generate = originalGenerate;
       if (originalPrimaryProvider === undefined) delete process.env.LLM_PRIMARY_PROVIDER;
       else process.env.LLM_PRIMARY_PROVIDER = originalPrimaryProvider;
+      if (originalNvidiaKey === undefined) delete process.env.NVIDIA_API_KEY;
+      else process.env.NVIDIA_API_KEY = originalNvidiaKey;
     }
   });
 });

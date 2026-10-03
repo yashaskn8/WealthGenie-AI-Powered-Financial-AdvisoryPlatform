@@ -14,6 +14,15 @@ profile/recommendation. Use a stable idempotency key for retries of the same
 completion payload; use a new key if the payload changes. Do not use customer
 credentials, customer profile facts, or a production database.
 
+Before enabling live mode, run `npm run demo:doctor --prefix server`. This is a
+read-only prerequisite check: it does not authenticate, call market providers,
+or invoke profile/recommendation/tax mutation endpoints. Configure
+`DEMO_EXPECTED_MONGODB_DATABASE` in both the backend and preflight process. The
+running backend must prove that its actual connected database name exactly
+matches this explicit isolated database. Reserved/default database names such
+as `test`, `admin`, `config`, and `local` are rejected. A missing or mismatched
+database identity blocks the live mutation path.
+
 Configure these values through a secret-aware environment mechanism; never put
 credentials or financial payloads in shell history, source control, or logs:
 
@@ -21,6 +30,8 @@ credentials or financial payloads in shell history, source control, or logs:
 - `DEMO_API_BASE_URL` — backend API URL ending in `/api`; remote URLs must use
   HTTPS. Defaults to local `http://127.0.0.1:5000/api`.
 - `DEMO_FRONTEND_URL` — the running frontend origin; remote URLs must use HTTPS.
+- `DEMO_EXPECTED_MONGODB_DATABASE` — exact isolated database name expected from
+  the live backend connection; configure the same value in both processes.
 - `DEMO_EMAIL` and `DEMO_PASSWORD` — disposable demo login credentials.
 - `DEMO_PROFILE_COMPLETION_FILE` — path to a JSON profile-completion request
   body, stored outside the repository.
@@ -45,6 +56,8 @@ credentials or financial payloads in shell history, source control, or logs:
 The running frontend must be built/configured to call the same API origin as
 `DEMO_API_BASE_URL`. The check fails if the browser calls a financial provider
 directly; provider access belongs to the backend.
+The production-build check writes to a unique temporary directory and removes
+it afterward; it does not overwrite the normal `reactapp/dist` output.
 
 The preflight intentionally fails closed if a current, exact, source-qualified
 NIFTY-50 ETF result and its requested-fiscal-year tax calculation are not

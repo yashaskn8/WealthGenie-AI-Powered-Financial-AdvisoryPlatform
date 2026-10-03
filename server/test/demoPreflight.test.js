@@ -1,10 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { stat } from 'node:fs/promises';
+import path from 'node:path';
 import {
   assessCurrentMarketContext,
   BACKEND_HTTP_HARD_TIMEOUT_MS,
   DASHBOARD_BROWSER_TIMEOUT_MS,
   checkBrowserAndFinancialFlow,
+  createFrontendBuildEnvironment,
   EXPECTED_PREFLIGHT_CHECKS,
   hasAuthenticatedDashboard,
   hasCurrentFinancialBinding,
@@ -705,7 +708,7 @@ test('preflight rejects stale, incoherent, recovered, or fabricated weekend quot
   }
 });
 
-test('preflight reporter emits every required check once and leaves unevaluated checks failed', () => {
+test('preflight reporter distinguishes failed from unevaluated checks and emits every required check once', () => {
   const lines = [];
   const reporter = makeReporter(line => lines.push(line));
   reporter.add('Backend', true, 'health verified');
@@ -717,8 +720,9 @@ test('preflight reporter emits every required check once and leaves unevaluated 
   const skipped = result.checks.find(check => check.name === 'Product tax workflow');
   assert.equal(skipped.passed, false);
   assert.match(skipped.detail, /^NOT_EVALUATED/);
-  assert.ok(result.failed > 0);
-  assert.ok(lines.some(line => line.includes('FAIL Product tax workflow')));
+  assert.equal(result.failed, 0);
+  assert.equal(result.notEvaluated, EXPECTED_PREFLIGHT_CHECKS.length - 1);
+  assert.ok(lines.some(line => line.includes('NOT_EVALUATED Product tax workflow')));
 });
 
 test('preflight reporter rejects duplicate and unknown writes and protects finalized check accounting', () => {
@@ -743,7 +747,7 @@ test('preflight reporter rejects duplicate and unknown writes and protects final
     assert.throws(() => reporter.add('Critical browser path', true, 'late write'), /finalization/i);
     assert.equal(reporter.finish().passed, result.passed);
     assert.equal(lines.length, EXPECTED_PREFLIGHT_CHECKS.length);
-    assert.deepEqual(lines.map(line => line.match(/^(?:PASS|FAIL) (.+?) —/)?.[1]), EXPECTED_PREFLIGHT_CHECKS);
+    assert.deepEqual(lines.map(line => line.match(/^(?:PASS|FAIL|NOT_EVALUATED) (.+?) —/)?.[1]), EXPECTED_PREFLIGHT_CHECKS);
   }
 
   const reporter = makeReporter(() => {});
@@ -754,7 +758,7 @@ test('preflight reporter rejects duplicate and unknown writes and protects final
   assert.equal(result.checks.find(check => check.name === 'Backend').passed, true);
   assert.equal(result.checks.length, EXPECTED_PREFLIGHT_CHECKS.length);
   assert.equal(new Set(result.checks.map(check => check.name)).size, EXPECTED_PREFLIGHT_CHECKS.length);
-  assert.equal(result.passed + result.failed, EXPECTED_PREFLIGHT_CHECKS.length);
+  assert.equal(result.passed + result.failed + result.notEvaluated, EXPECTED_PREFLIGHT_CHECKS.length);
   assert.ok(result.checks.every(check => ['PASS', 'FAIL', 'NOT_EVALUATED'].includes(check.state)));
   assert.ok(result.checks.filter(check => check.state === 'NOT_EVALUATED').every(check => !check.passed));
 });
@@ -772,7 +776,107 @@ test('runDemoPreflight accepts injected environment and output while preserving 
   assert.equal(result.checks.filter(check => check.state === 'NOT_EVALUATED').length, EXPECTED_PREFLIGHT_CHECKS.length - 1);
   assert.equal(result.checks.find(check => check.name === 'Explicit live-demo mode').state, 'FAIL');
   assert.equal(output.length, EXPECTED_PREFLIGHT_CHECKS.length + 2);
-  assert.match(output.at(-2), /Live-demo preflight: 0 PASS, 22 FAIL/);
+  assert.match(output.at(-2), /Live-demo preflight: 0 PASS, 1 FAIL, 21 NOT_EVALUATED/);
+});
+
+test('frontend build environment forwards only required non-secret runtime inputs', () => {
+  const environment = createFrontendBuildEnvironment({
+    PATH: 'safe-path',
+    SystemRoot: 'safe-system-root',
+    DEMO_PASSWORD: 'must-not-forward',
+    MONGODB_URI: 'must-not-forward',
+    JWT_SECRET: 'must-not-forward',
+    UPSTOX_ACCESS_TOKEN: 'must-not-forward',
+    VITE_API_URL: 'https://api.example.invalid/api',
+    VITE_ENABLE_BEARER_AUTH: 'false',
+    VITE_API_TIMEOUT_MS: '12000',
+    VITE_BUILD_SHA: 'attacker-value',
+  }, 'a'.repeat(40));
+
+  assert.deepEqual(environment, {
+    PATH: 'safe-path',
+    SystemRoot: 'safe-system-root',
+    NODE_ENV: 'production',
+    VITE_BUILD_SHA: 'a'.repeat(40),
+    VITE_API_URL: 'https://api.example.invalid/api',
+    VITE_ENABLE_BEARER_AUTH: 'false',
+    VITE_API_TIMEOUT_MS: '12000',
+  });
+  for (const name of ['DEMO_PASSWORD', 'MONGODB_URI', 'JWT_SECRET', 'UPSTOX_ACCESS_TOKEN']) {
+    assert.equal(Object.hasOwn(environment, name), false, `${name} must not enter the Vite process`);
+  }
+  const credentialedUrl = createFrontendBuildEnvironment({ VITE_API_URL: 'https://user:secret@example.invalid/api' }, 'a'.repeat(40));
+  assert.equal(Object.hasOwn(credentialedUrl, 'VITE_API_URL'), false);
+  const insecureRemoteUrl = createFrontendBuildEnvironment({ VITE_API_URL: 'http://api.example.invalid/api' }, 'a'.repeat(40));
+  assert.equal(Object.hasOwn(insecureRemoteUrl, 'VITE_API_URL'), false);
+});
+
+test('production frontend build uses and cleans an isolated output directory', async () => {
+  let outputDirectory;
+  let childEnvironment;
+  const result = await runDemoPreflight({
+    environment: {
+      DEMO_LIVE_PREFLIGHT: '1',
+      DEMO_API_BASE_URL: 'http://127.0.0.1:5000/api',
+      DEMO_PROFILE_COMPLETION_FILE: 'injected-profile.json',
+      DEMO_TAX_CONTEXT_FILE: 'injected-tax.json',
+      DEMO_EXPECTED_MONGODB_DATABASE: 'wealthgenie_demo',
+      DEMO_EXPECTED_BUILD_SHA: 'b'.repeat(40),
+      MONGODB_URI: 'must-not-forward',
+      DEMO_PASSWORD: 'must-not-forward',
+    },
+    write() {},
+    dependencies: {
+      async loadJson(_filePath, label, reporter) {
+        reporter.add(label, true, 'injected valid fixture');
+        return {};
+      },
+      async readHttp() { return { response: { ok: false, status: 503 }, body: {} }; },
+      spawnBuild(_command, args, options) {
+        outputDirectory = args[3];
+        childEnvironment = options.env;
+        return { status: 0 };
+      },
+    },
+  });
+
+  assert.equal(result.checks.find(check => check.name === 'Production frontend build').state, 'PASS');
+  assert.ok(path.isAbsolute(outputDirectory));
+  assert.notEqual(path.resolve(outputDirectory), path.resolve('../reactapp/dist'));
+  assert.equal(Object.hasOwn(childEnvironment, 'MONGODB_URI'), false);
+  assert.equal(Object.hasOwn(childEnvironment, 'DEMO_PASSWORD'), false);
+  await assert.rejects(stat(outputDirectory), { code: 'ENOENT' });
+});
+
+test('frontend build verifier exceptions are recorded as failures without exposing details', async () => {
+  let outputDirectory;
+  const output = [];
+  const result = await runDemoPreflight({
+    environment: {
+      DEMO_LIVE_PREFLIGHT: '1',
+      DEMO_API_BASE_URL: 'http://127.0.0.1:5000/api',
+      DEMO_PROFILE_COMPLETION_FILE: 'injected-profile.json',
+      DEMO_TAX_CONTEXT_FILE: 'injected-tax.json',
+      DEMO_EXPECTED_MONGODB_DATABASE: 'wealthgenie_demo',
+      DEMO_EXPECTED_BUILD_SHA: 'c'.repeat(40),
+    },
+    write: line => output.push(line),
+    dependencies: {
+      async loadJson(_filePath, label, reporter) {
+        reporter.add(label, true, 'injected valid fixture');
+        return {};
+      },
+      async readHttp() { return { response: { ok: false, status: 503 }, body: {} }; },
+      spawnBuild(_command, args) {
+        outputDirectory = args[3];
+        throw new Error('sensitive build configuration');
+      },
+    },
+  });
+
+  assert.equal(result.checks.find(check => check.name === 'Production frontend build').state, 'FAIL');
+  assert.doesNotMatch(output.join('\n'), /sensitive build configuration/);
+  await assert.rejects(stat(outputDirectory), { code: 'ENOENT' });
 });
 
 function injectedOrchestrationDependencies({
@@ -781,9 +885,22 @@ function injectedOrchestrationDependencies({
   marketBodyOverride = null,
   backendSha = 'e'.repeat(40),
   userPathPass = false,
+  qualifiedProductTax = false,
+  failGate = null,
 } = {}) {
   const expectedSha = 'e'.repeat(40);
-  const marketBody = marketBodyOverride || qualifiedMarketContext({ snapshotStatus: marketStatus }).body;
+  const marketBody = structuredClone(marketBodyOverride || qualifiedMarketContext({
+    snapshotStatus: failGate === 'Market context' ? 'LAST_AVAILABLE' : marketStatus,
+  }).body);
+  if (failGate === 'NIFTY quote') {
+    marketBody.marketSnapshot.observedFacts.find(fact => fact.key === 'nifty50Current').availabilityStatus = 'UNAVAILABLE';
+  } else if (failGate === 'VIX quote') {
+    marketBody.marketSnapshot.observedFacts.find(fact => fact.key === 'indiaVixCurrent').availabilityStatus = 'UNAVAILABLE';
+  } else if (failGate === 'Market history') {
+    marketBody.marketSnapshot.derivedFacts = [];
+  } else if (failGate === 'Provider token presence') {
+    marketBody.marketSnapshot.providerSelection.selectedProvider = 'UPSTOX';
+  }
   const response = (status, body) => ({ response: { ok: status >= 200 && status < 300, status }, body });
   const environment = {
     DEMO_LIVE_PREFLIGHT: '1',
@@ -796,49 +913,147 @@ function injectedOrchestrationDependencies({
     DEMO_COMPLETION_IDEMPOTENCY_KEY: 'fixture-idempotency-key',
     DEMO_NIFTY_ETF_PARENT_ID: 'nifty_etf',
     DEMO_EXPECTED_BUILD_SHA: expectedSha,
+    DEMO_EXPECTED_MONGODB_DATABASE: 'wealthgenie_demo',
     NODE_ENV: 'test',
   };
+  if (failGate === 'Explicit live-demo mode') environment.DEMO_LIVE_PREFLIGHT = '0';
+  if (failGate === 'Backend URL configuration') environment.DEMO_API_BASE_URL = 'not-a-url';
+  if (failGate === 'Redis if required') environment.REQUIRE_REDIS = '1';
   const dependencies = {
     marketNow,
     async loadJson(filePath, label, reporter) {
-      reporter.add(label, true, 'fixture JSON validated');
-      return label === 'Profile completion payload' ? { profile: true } : { fiscalYear: 'FY2026-27' };
+      const failed = (failGate === 'Profile completion payload' && label === 'Profile completion payload')
+        || (failGate === 'Tax input payload' && label === 'Tax input payload');
+      reporter.add(label, !failed, failed ? 'fixture rejected by deterministic offline scenario' : 'fixture JSON validated');
+      if (failed) return null;
+      return label === 'Profile completion payload' ? { profile: true } : demoTaxContext();
     },
-    async readHttp(url) {
-      if (url.endsWith('/health/live')) return response(200, { status: 'ALIVE', buildSha: backendSha });
-      if (url.endsWith('/health/ready')) return response(200, { status: 'READY' });
-      if (url.endsWith('/health/verification')) return response(200, {
-        status: 'VERIFIED',
+    async readHttp(url, options = {}) {
+      if (url.endsWith('/health/live')) return response(failGate === 'Backend' ? 503 : 200, { status: failGate === 'Backend' ? 'DOWN' : 'ALIVE', buildSha: backendSha });
+      if (url.endsWith('/health/ready')) return response(failGate === 'Backend readiness' ? 503 : 200, { status: failGate === 'Backend readiness' ? 'NOT_READY' : 'READY' });
+      if (url.endsWith('/health/verification')) {
+        assert.equal(Object.hasOwn(options.headers || {}, 'X-Demo-Expected-Mongodb-Database'), true);
+        assert.equal(options.headers['X-Demo-Expected-Mongodb-Database'], environment.DEMO_EXPECTED_MONGODB_DATABASE || '');
+        const databaseVerified = failGate !== 'Mongo/transaction support' && Boolean(environment.DEMO_EXPECTED_MONGODB_DATABASE);
+        return response(databaseVerified ? 200 : 503, {
+        status: databaseVerified ? 'VERIFIED' : 'NOT_VERIFIED',
         buildSha: expectedSha,
-        mongo: { connected: true, transactionCapable: true },
-        redis: { required: false, connected: false },
-      });
-      if (url.endsWith('/health/deep')) return response(200, { services: { database: 'UP', redis: 'DOWN' } });
+        mongo: { connected: true, transactionCapable: databaseVerified, databaseIdentityVerified: databaseVerified },
+        redis: { required: failGate === 'Redis if required', connected: failGate !== 'Redis if required' },
+        marketProvider: failGate === 'Market provider configuration' ? 'UNSUPPORTED' : 'NSE',
+        marketProviderTokenPresent: true,
+        });
+      }
+      if (url.endsWith('/health/deep')) return response(200, { services: {
+        database: failGate === 'Market provider configuration' ? 'DOWN' : 'UP',
+        redis: failGate === 'Redis if required' ? 'DOWN' : 'UP',
+      } });
       if (url.endsWith('/regime/current')) return response(200, marketBody);
       if (url.endsWith('/tax/policies')) return response(200, {
-        currentFiscalYearVerified: true,
-        currentFiscalYear: 'FY2026-27',
+        currentFiscalYearVerified: failGate !== 'Tax-policy metadata',
+        currentFiscalYear: failGate === 'Tax-policy metadata' ? 'FY2025-26' : 'FY2026-27',
       });
       throw new Error('Unexpected injected HTTP probe');
     },
     async verifyBrowser(reporter, { taxContext, parentInstrumentId }) {
-      reporter.add('Profile completion/auth', true, 'fixture success');
-      reporter.add('Recommendation current-state binding', true, 'fixture success');
+      reporter.add('Profile completion/auth', failGate !== 'Profile completion/auth', 'offline browser/auth scenario');
+      reporter.add('Recommendation current-state binding', failGate !== 'Recommendation current-state binding', 'offline financial-binding scenario');
+      if (failGate === 'Nifty ETF exact-product result') {
+        reporter.add('ETF product source', true, 'synthetic source endpoint response verified');
+        reporter.add('Nifty ETF exact-product result', false, 'synthetic exact-product identity did not qualify');
+        reporter.notEvaluated('Product tax workflow', 'exact product did not qualify');
+      } else {
       await reportWtiProductChecks(reporter, {
-        requestWti: async () => ({ ok: true, status: 200, json: async () => qualifiedWtiResponse([{
-          ...qualifiedNiftyEtf(),
-          postTaxAnalysis: { status: 'TAX_CLASSIFICATION_UNAVAILABLE' },
-        }]) }),
+        requestWti: async () => failGate === 'ETF product source'
+          ? fakeHttpResponse(503, { code: 'UPSTREAM_UNAVAILABLE' })
+          : fakeHttpResponse(200, qualifiedWtiResponse([failGate === 'Product tax workflow'
+            ? { ...qualifiedNiftyEtf(), postTaxAnalysis: { status: 'REQUIRES_TAX_INPUTS' } }
+            : qualifiedProductTax ? qualifiedNiftyTaxProductFixture() : {
+              ...qualifiedNiftyEtf(),
+              postTaxAnalysis: { status: 'TAX_CLASSIFICATION_UNAVAILABLE' },
+            }])),
         recommendation: currentBinding(),
         parentInstrumentId,
         taxContext,
       });
-      reporter.add('Critical browser path', userPathPass, userPathPass ? 'fixture user flow verified' : 'fixture browser journey did not verify');
+      }
+      const browserPathPassed = userPathPass && failGate !== 'Critical browser path';
+      reporter.add('Critical browser path', browserPathPassed, browserPathPassed ? 'fixture user flow verified' : 'fixture browser journey did not verify');
     },
-    async verifyBuild() { return { passed: true, detail: 'fixture build succeeded' }; },
+    async verifyBuild() {
+      return { passed: failGate !== 'Production frontend build', detail: 'offline isolated production-build verifier result' };
+    },
   };
   return { environment, dependencies };
 }
+
+test('OFFLINE PREFLIGHT CONTRACT VERIFIED: a fully-qualified injected scenario passes all 22 gates', async () => {
+  const fixture = injectedOrchestrationDependencies({ userPathPass: true, qualifiedProductTax: true });
+  const result = await runDemoPreflight({ ...fixture, write: () => {} });
+
+  assert.equal(result.checks.length, 22);
+  assert.deepEqual(result.checks.map(check => check.name), EXPECTED_PREFLIGHT_CHECKS);
+  assert.equal(result.passed, 22, JSON.stringify(result.checks.filter(check => !check.passed)));
+  assert.equal(result.failed, 0);
+  assert.equal(result.notEvaluated, 0);
+  assert.equal(result.exitCode, 0);
+});
+
+test('offline orchestration has a deterministic failure case for every named live gate', async () => {
+  for (const gate of EXPECTED_PREFLIGHT_CHECKS) {
+    const fixture = injectedOrchestrationDependencies({ failGate: gate, userPathPass: true });
+    const result = await runDemoPreflight({ ...fixture, write: () => {} });
+    const target = result.checks.find(check => check.name === gate);
+
+    assert.equal(result.checks.length, 22, `${gate}: gate count`);
+    assert.equal(target.state, 'FAIL', `${gate}: injected fault must fail its gate`);
+    assert.equal(result.exitCode, 1, `${gate}: failure must produce non-zero exit`);
+    assert.equal(result.passed + result.failed + result.notEvaluated, 22, `${gate}: terminal state accounting`);
+  }
+});
+
+test('preflight never enters the browser mutation boundary before live prerequisites pass', async () => {
+  for (const gate of [
+    'Explicit live-demo mode',
+    'Backend URL configuration',
+    'Profile completion payload',
+    'Tax input payload',
+    'Backend',
+    'Backend readiness',
+    'Mongo/transaction support',
+    'Redis if required',
+  ]) {
+    const fixture = injectedOrchestrationDependencies({ failGate: gate, userPathPass: true });
+    const visitedUrls = [];
+    const readHttp = fixture.dependencies.readHttp;
+    const verifyBrowser = fixture.dependencies.verifyBrowser;
+    let browserMutationBoundaryCalls = 0;
+    fixture.dependencies.readHttp = async (...args) => {
+      visitedUrls.push(args[0]);
+      return await readHttp(...args);
+    };
+    fixture.dependencies.verifyBrowser = async (...args) => {
+      browserMutationBoundaryCalls += 1;
+      return await verifyBrowser(...args);
+    };
+
+    await runDemoPreflight({ ...fixture, write: () => {} });
+    assert.equal(browserMutationBoundaryCalls, 0, `${gate}: browser/auth/profile mutation boundary must remain unopened`);
+    assert.equal(visitedUrls.some(url => url.endsWith('/regime/current')), false, `${gate}: provider probes must not run before prerequisites`);
+  }
+});
+
+test('missing isolated database configuration sends an explicit identity failure signal and stops before provider or browser work', async () => {
+  const fixture = injectedOrchestrationDependencies({ userPathPass: true, qualifiedProductTax: true });
+  delete fixture.environment.DEMO_EXPECTED_MONGODB_DATABASE;
+  const result = await runDemoPreflight({ ...fixture, write: () => {} });
+
+  assert.equal(result.checks.find(check => check.name === 'Mongo/transaction support').state, 'FAIL');
+  assert.equal(result.checks.find(check => check.name === 'NIFTY quote').state, 'NOT_EVALUATED');
+  assert.equal(result.checks.find(check => check.name === 'Profile completion/auth').state, 'NOT_EVALUATED');
+  assert.equal(result.checks.find(check => check.name === 'Critical browser path').state, 'NOT_EVALUATED');
+  assert.equal(result.exitCode, 1);
+});
 
 test('live orchestration retains all checks and successful probes cannot override market, tax, or user-flow failures', async () => {
   const output = [];
@@ -847,7 +1062,7 @@ test('live orchestration retains all checks and successful probes cannot overrid
 
   assert.equal(result.checks.length, 22);
   assert.deepEqual(result.checks.map(check => check.name), EXPECTED_PREFLIGHT_CHECKS);
-  assert.equal(result.checks.filter(check => check.passed).length + result.failed, 22);
+  assert.equal(result.checks.filter(check => check.passed).length + result.failed + result.notEvaluated, 22);
   assert.equal(result.exitCode, 1);
   assert.equal(result.checks.find(check => check.name === 'Mongo/transaction support').passed, true);
   assert.equal(result.checks.find(check => check.name === 'Redis if required').passed, true);
@@ -1239,6 +1454,7 @@ test('critical browser path requires the real frontend WTI request, exact ETF re
   assert.equal(verified.checks.find(check => check.name === 'Critical browser path').passed, true,
     verified.checks.find(check => check.name === 'Critical browser path').detail);
   assert.match(verified.checks.find(check => check.name === 'Critical browser path').detail, /frontend Where to Invest journey/i);
+  assert.match(verified.checks.find(check => check.name === 'Critical browser path').detail, /calculated historical tax illustration/i);
 
   for (const scenario of [
     { frontendWtiMissing: true },
@@ -1332,7 +1548,7 @@ test('exact product and tax failures remain independently visible', async () => 
     postTaxAnalysis: { status: 'CALCULATED', fiscalYear: 'FY2026-27' },
   }] });
   assert.equal(noExactButClaimedTax.checks.find(check => check.name === 'Nifty ETF exact-product result').passed, false);
-  assert.equal(noExactButClaimedTax.checks.find(check => check.name === 'Product tax workflow').passed, false);
+  assert.equal(noExactButClaimedTax.checks.find(check => check.name === 'Product tax workflow').state, 'NOT_EVALUATED');
 });
 
 test('dashboard and direct-provider failures affect only the critical browser check', async () => {
