@@ -149,6 +149,7 @@ export function createApp({ env = process.env, runtimeState = null, mcpRuntime =
     mcpRuntime: mcpLifecycle,
     mcpCapacity,
     timeoutMs: config.deepHealthTimeoutMs,
+    buildSha: env.APP_BUILD_SHA,
   });
   app.use('/health', healthRoutes);
   app.get('/ready', (_req, res) => res.redirect(307, '/health/ready'));

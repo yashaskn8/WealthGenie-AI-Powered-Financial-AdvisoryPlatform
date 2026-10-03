@@ -2,12 +2,32 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   assessCurrentMarketContext,
+  BACKEND_HTTP_HARD_TIMEOUT_MS,
+  DASHBOARD_BROWSER_TIMEOUT_MS,
+  checkBrowserAndFinancialFlow,
+  EXPECTED_PREFLIGHT_CHECKS,
   hasAuthenticatedDashboard,
   hasCurrentFinancialBinding,
   isRedisRequired,
+  LOGIN_BROWSER_TIMEOUT_MS,
+  MARKET_DEPENDENCY_PROBE_TIMEOUT_MS,
+  makeReporter,
+  matchesBuildSha,
   matchesRecommendationBinding,
+  PROFILE_USER_FLOW_TIMEOUT_MS,
+  readJson,
+  REDIS_PROBE_TIMEOUT_MS,
+  reportWtiProductChecks,
   qualifiesExactNiftyEtf,
+  qualifiesWtiResponse,
+  qualifiesCalculatedNiftyEtfTax,
+  runDemoPreflight,
+  WTI_USER_FLOW_TIMEOUT_MS,
 } from '../scripts/demoPreflight.js';
+import { calculateProductPostTaxOutcome } from '../services/productPostTaxCalculator.js';
+import { getProductTaxMetadata } from '../services/productTaxAuthority.js';
+import { indiaClockParts, isoDateInIndia } from '../services/marketData/indiaMarketTime.js';
+import { previousNseTradingDate } from '../services/marketData/nseTradingCalendar.js';
 
 const currentBinding = () => ({
   profileId: '64b000000000000000000001',
@@ -21,8 +41,25 @@ const currentBinding = () => ({
   calculation_freshness: { fresh: true },
 });
 
+function demoTaxContext(overrides = {}) {
+  return {
+    annualGrossIncome: 500000,
+    incomeSource: 'salary',
+    regime: 'new',
+    fiscalYear: 'FY2026-27',
+    userAge: 35,
+    holdingPeriodMonths: 18,
+    section112AExemptionUsed: 0,
+    sttConditionAssumedSatisfied: true,
+    illustrativePrincipal: 1000000,
+    ...overrides,
+  };
+}
+
 const qualifiedNiftyEtf = () => ({
+  id: 'etf:isin:INF204KB14I2',
   canonicalProductId: 'etf:isin:INF204KB14I2',
+  parentInstrumentId: 'nifty_etf',
   productType: 'ETF',
   isin: 'INF204KB14I2',
   exchange: 'NSE',
@@ -34,6 +71,7 @@ const qualifiedNiftyEtf = () => ({
   ],
   benchmark: {
     id: 'NIFTY_50',
+    name: 'NIFTY 50',
     canonicalProductId: 'market:index:nifty-50',
     returnVariant: 'NIFTY 50 TRI',
     source: { url: 'https://mf.nipponindiaim.com/FundsAndPerformance/ProductNotes/NipponIndia-ETF-Nifty-50-BeES-Feb-2026.pdf' },
@@ -56,6 +94,234 @@ const qualifiedNiftyEtf = () => ({
     freshness: { status: 'FRESH' },
   },
 });
+
+const qualifiedWtiResponse = (products = [qualifiedNiftyEtf()], recommendation = currentBinding()) => ({
+  success: true,
+  financialStateBinding: {
+    profileId: recommendation.profileId,
+    profileVersion: recommendation.profile_version,
+    recommendationId: recommendation.recommendationId,
+    allocationRevision: recommendation.allocation_revision,
+    allocationRevisionId: recommendation.allocation_revision_id,
+    portfolioFingerprint: recommendation.portfolio_fingerprint,
+    recommendationFingerprint: recommendation.recommendation_fingerprint,
+  },
+  total: products.length,
+  products,
+  ranking: {
+    version: 'nifty-etf-ranking-1.0.0',
+    status: 'VERIFIED_COMPARABLE_OPTIONS',
+    authority: 'OFFICIAL_SCHEME_IDENTITY_AND_AMFI_CURRENT_NAV',
+    method: null,
+    hasUniqueLeader: false,
+  },
+  comparisonUniverse: {
+    parentInstrumentId: 'nifty_etf',
+    sourceProvider: 'AMFI',
+    verifiedIdentityCount: products.length,
+    freshNavProductCount: products.length,
+    returnedProductCount: products.length,
+  },
+});
+
+function fakeHttpResponse(status, body, { malformed = false } = {}) {
+  return {
+    ok: () => status >= 200 && status < 300,
+    status: () => status,
+    json: async () => {
+      if (malformed) throw new SyntaxError('body omitted from diagnostics');
+      return body;
+    },
+  };
+}
+
+function browserFlowFixture(scenario = {}) {
+  let currentUrl = 'http://127.0.0.1:5173/login';
+  let requestListener = null;
+  const recommendation = currentBinding();
+  const rankBinding = {
+    profileId: recommendation.profileId,
+    profileVersion: recommendation.profile_version,
+    recommendationId: recommendation.recommendationId,
+    allocationRevision: recommendation.allocation_revision,
+    allocationRevisionId: recommendation.allocation_revision_id,
+    portfolioFingerprint: recommendation.portfolio_fingerprint,
+    recommendationFingerprint: recommendation.recommendation_fingerprint,
+  };
+  const login = fakeHttpResponse(scenario.loginStatus ?? 200, {});
+  const uiProduct = scenario.frontendWtiTaxUnavailable
+    ? { ...qualifiedNiftyEtf(), postTaxAnalysis: { status: 'TAX_CLASSIFICATION_UNAVAILABLE' } }
+    : qualifiedNiftyTaxProductFixture();
+  if (scenario.frontendWtiWrongProduct) uiProduct.canonicalProductId = 'etf:isin:OTHER';
+  const uiWtiBody = qualifiedWtiResponse([uiProduct], recommendation);
+  if (scenario.frontendWtiBindingMismatch) uiWtiBody.financialStateBinding.allocationRevision += 1;
+  if (scenario.frontendWtiResponseMutation) scenario.frontendWtiResponseMutation(uiWtiBody);
+  let wtiUiRequested = false;
+  let resolveWtiUiResponse;
+  const createWtiUiResponse = () => ({
+    ...fakeHttpResponse(200, uiWtiBody),
+    url: () => 'http://127.0.0.1:5000/api/instruments/rank-wti',
+    request: () => ({
+      method: () => 'POST',
+      postDataJSON: () => ({
+        profileId: recommendation.profileId,
+        profileVersion: recommendation.profile_version + (scenario.frontendWtiRequestBindingMismatch ? 1 : 0),
+        recommendationId: recommendation.recommendationId,
+        expectedAllocationRevision: recommendation.allocation_revision,
+        expectedAllocationRevisionId: recommendation.allocation_revision_id,
+        expectedPortfolioFingerprint: recommendation.portfolio_fingerprint,
+        expectedRecommendationFingerprint: recommendation.recommendation_fingerprint,
+        parentInstrumentId: 'nifty_etf',
+      }),
+    }),
+  });
+  const page = {
+    on(event, callback) { if (event === 'request') requestListener = callback; },
+    async goto(url) {
+      if (url.endsWith('/login')) {
+        currentUrl = url;
+        if (scenario.loginNavigationStatus) return fakeHttpResponse(scenario.loginNavigationStatus, {});
+        return fakeHttpResponse(200, {});
+      }
+      currentUrl = url;
+      if (url.endsWith('/profile')) {
+        if (scenario.dashboardRedirectLogin) currentUrl = 'http://127.0.0.1:5173/login';
+        if (scenario.dashboardWrongPath) currentUrl = 'http://127.0.0.1:5173/';
+        const providerUrl = typeof scenario.directProviderRequest === 'string'
+          ? scenario.directProviderRequest
+          : scenario.directProviderRequest
+            ? 'https://portal.amfiindia.com/private?token=hidden'
+            : null;
+        if (providerUrl) requestListener?.({ url: () => providerUrl });
+        if (scenario.providerRequestInspectionError) requestListener?.({ url: () => { throw new Error('uninspectable request'); } });
+        if (scenario.profileNavigationStatus) return fakeHttpResponse(scenario.profileNavigationStatus, {});
+      }
+      if (scenario.dashboardError) throw Object.assign(new Error('secret browser detail'), { code: 'DASHBOARD_FAILED' });
+      return fakeHttpResponse(200, {});
+    },
+    locator(selector) {
+      const isWtiCategory = selector === '[data-testid="wti-category-nifty_etf"]';
+      const isWtiProduct = selector === '[data-testid="wti-product-etf:isin:INF204KB14I2"]'
+        || selector === '[data-testid="nav-investments"] [data-testid="wti-product-etf:isin:INF204KB14I2"]';
+      const isUnavailableTax = selector.includes('wti-post-tax-cta-box');
+      const isCalculatedTax = selector.includes('.wti-post-tax-box');
+      return {
+        async waitFor() {
+          if (selector === 'aside.sidebar' && scenario.dashboardError) throw Object.assign(new Error('secret dashboard detail'), { code: 'DASHBOARD_FAILED' });
+          if (selector === 'aside.sidebar' && scenario.sidebarMissing) throw Object.assign(new Error('sidebar missing'), { name: 'TimeoutError' });
+          if (selector === '#login-form' && scenario.loginFormError) throw Object.assign(new Error('secret login detail'), { code: 'LOGIN_FORM_TIMEOUT' });
+          if (selector !== '#login-form' && selector !== 'aside.sidebar' && scenario.loginControlError) throw Object.assign(new Error('secret login control detail'), { code: 'LOGIN_CONTROL_TIMEOUT' });
+          if (isWtiCategory && scenario.frontendWtiMissing) throw Object.assign(new Error('category missing'), { name: 'TimeoutError' });
+          if (isWtiProduct && (scenario.frontendWtiWrongProduct || scenario.frontendWtiBindingMismatch)) throw Object.assign(new Error('product unavailable'), { name: 'TimeoutError' });
+          if (isCalculatedTax && scenario.frontendWtiTaxHidden) throw Object.assign(new Error('calculated tax state missing'), { name: 'TimeoutError' });
+          if (isUnavailableTax && scenario.frontendWtiTaxUnavailable) throw Object.assign(new Error('unavailable tax state unexpectedly rendered'), { name: 'TimeoutError' });
+        },
+        async fill() {},
+        async click() {
+          if (selector === '[data-testid="wti-category-nifty_etf"]') {
+            if (scenario.frontendWtiDirectProviderRequest) requestListener?.({ url: () => 'https://portal.amfiindia.com/spages/NAVAll.txt' });
+            wtiUiRequested = true;
+            resolveWtiUiResponse?.(createWtiUiResponse());
+          }
+        },
+        async isVisible() {
+          if (selector === 'aside.sidebar') return !scenario.sidebarMissing;
+          if (isWtiCategory) return !scenario.frontendWtiMissing;
+          if (isWtiProduct) return !scenario.frontendWtiWrongProduct && !scenario.frontendWtiBindingMismatch;
+          if (isUnavailableTax) return Boolean(scenario.frontendWtiTaxUnavailable);
+          if (isCalculatedTax) return !scenario.frontendWtiTaxHidden && !scenario.frontendWtiTaxUnavailable;
+          return true;
+        },
+        async innerText() {
+          return isCalculatedTax
+            ? 'Exact-product tax illustration HISTORICAL — NOT A FORECAST.'
+            : 'Exact-product tax illustration: tax classification unavailable.';
+        },
+        locator(childSelector) { return page.locator(`${selector} ${childSelector}`); },
+      };
+    },
+    async waitForResponse(predicate) {
+      const loginResponse = {
+        ...login,
+        url: () => 'http://127.0.0.1:5000/api/auth/login',
+        request: () => ({ method: () => 'POST' }),
+      };
+      if (predicate(loginResponse)) return loginResponse;
+      if (wtiUiRequested) {
+        const response = createWtiUiResponse();
+        if (predicate(response)) return response;
+      }
+      return new Promise((resolve, reject) => {
+        resolveWtiUiResponse = response => {
+          try {
+            if (predicate(response)) resolve(response);
+            else reject(new Error('unexpected frontend WTI response'));
+          } catch (error) {
+            reject(error);
+          }
+        };
+      });
+    },
+    async evaluate() { return scenario.frontendBuildSha ?? 'c'.repeat(40); },
+    url: () => currentUrl,
+    request: {
+      async post(url) {
+        if (url.endsWith('/profile/complete')) {
+          return fakeHttpResponse(scenario.completionStatus ?? 200, { profile: { profileId: recommendation.profileId } });
+        }
+        if (url.endsWith('/instruments/rank-wti')) {
+          if (scenario.wtiError) throw scenario.wtiError;
+          if (scenario.wtiStatus) return fakeHttpResponse(scenario.wtiStatus, { code: scenario.wtiCode || 'UPSTREAM_UNAVAILABLE' });
+          if (scenario.wtiMalformed) return fakeHttpResponse(200, null, { malformed: true });
+          const products = scenario.products ?? [qualifiedNiftyTaxProductFixture(scenario.taxContext ?? demoTaxContext())];
+          const body = qualifiedWtiResponse(products, recommendation);
+          if (scenario.wtiMissingBinding) delete body.financialStateBinding;
+          if (scenario.wtiBindingMismatch) body.financialStateBinding = { ...rankBinding, allocationRevision: 99 };
+          if (scenario.wtiMetadataMutation) scenario.wtiMetadataMutation(body);
+          return fakeHttpResponse(200, body);
+        }
+        throw new Error('unexpected fake POST endpoint');
+      },
+      async get(url) {
+        if (url.endsWith('/profile/current')) return fakeHttpResponse(200, { profileId: recommendation.profileId });
+        if (url.includes('/recommend/current?')) {
+          if (scenario.recommendationError) throw Object.assign(new Error('secret recommendation URL'), { code: 'ECONNRESET' });
+          if (scenario.recommendationStatus) return fakeHttpResponse(scenario.recommendationStatus, {});
+          return fakeHttpResponse(200, recommendation);
+        }
+        throw new Error('unexpected fake GET endpoint');
+      },
+    },
+  };
+  const browser = {
+    async newContext() {
+      return {
+        newPage: async () => page,
+        cookies: async () => scenario.missingCsrfCookie ? [] : [{ name: 'wg_csrf', value: 'fake-csrf-value' }],
+      };
+    },
+    async close() {},
+  };
+  return { browser, launchBrowser: scenario.launchError ? async () => { throw scenario.launchError; } : async () => browser };
+}
+
+async function runBrowserFlow(scenario = {}) {
+  const lines = [];
+  const reporter = makeReporter(line => lines.push(line));
+  const fixture = browserFlowFixture(scenario);
+  await checkBrowserAndFinancialFlow(reporter, {
+    apiBase: 'http://127.0.0.1:5000/api',
+    frontendUrl: 'http://127.0.0.1:5173',
+    completionPayload: { profile: 'fixture only' },
+    taxContext: scenario.taxContext ?? demoTaxContext(),
+    email: 'demo@example.invalid',
+    password: 'fixture-password',
+    idempotencyKey: 'fixture-idempotency-key',
+    parentInstrumentId: scenario.parentInstrumentId ?? 'nifty_etf',
+    expectedBuildSha: 'c'.repeat(40),
+  }, fixture);
+  return { ...reporter.finish(), lines };
+}
 
 test('demo preflight only accepts a complete current financial-state binding', () => {
   assert.equal(hasCurrentFinancialBinding(currentBinding()), true);
@@ -107,6 +373,7 @@ test('demo preflight requires exact NIFTY 50 identity and fresh primary-fact pro
   assert.equal(qualifiesExactNiftyEtf(qualifiedNiftyEtf()), true);
 
   const invalidProducts = [
+    product => { product.parentInstrumentId = 'liquid_etf'; },
     product => { product.benchmark.canonicalProductId = 'market:index:sensex'; },
     product => { product.identityEvidence[0].url = 'https://nsearchives.nseindia.com/trading_security/mf/pdf/unrelated.pdf'; },
     product => { product.identityEvidence.pop(); },
@@ -115,6 +382,7 @@ test('demo preflight requires exact NIFTY 50 identity and fresh primary-fact pro
     product => { product.source.url = 'https://portal.amfiindia.com.evil.example/fake'; },
     product => { product.source.url = 'https://portal.amfiindia.com/spages/unrelated.txt'; },
     product => { product.primaryFact.source.instrumentId = '999999'; },
+    product => { product.primaryFact.canonicalProductId = 'mf:amfi:140085'; },
     product => { product.primaryFact.freshness.status = 'STALE'; },
     product => { product.primaryFact.source.provider = 'OTHER_SOURCE'; },
     product => { product.primaryFact.source.url = 'http://unverified.example/nav'; },
@@ -124,6 +392,8 @@ test('demo preflight requires exact NIFTY 50 identity and fresh primary-fact pro
     product => { product.canonicalProductId = ''; },
     product => { product.isin = 'INF204KB15I9'; },
     product => { product.externalIds[1].value = 'INF204KB15I9'; },
+    product => { product.ticker = 'NIFTY50BEES'; },
+    product => { product.externalIds[2].value = 'NIFTY50BEES'; },
     product => { product.productType = 'MUTUAL_FUND'; },
   ];
 
@@ -141,47 +411,962 @@ test('demo preflight requires exact NIFTY 50 identity and fresh primary-fact pro
   assert.equal(qualifiesExactNiftyEtf(differentExchangePrice), true, 'an exchange price is not substituted for the AMFI NAV fact');
 });
 
-test('demo preflight requires current fresh NIFTY/VIX and one selected quote/history provider', () => {
-  const result = {
-    response: { ok: true },
-    body: {
-      status: 'MARKET_CONTEXT_AVAILABLE',
-      marketSnapshot: {
-        status: 'CURRENT',
-        availability: 'AVAILABLE',
-        observedAt: '2026-10-01T09:30:00.000Z',
-        providerSelection: { selectedProvider: 'UPSTOX' },
-        providerStatus: {
-          quotes: { provider: 'UPSTOX' },
-          history: { provider: 'UPSTOX' },
-        },
-        observedFacts: ['nifty50Current', 'indiaVixCurrent'].map((key, index) => ({
-          key,
-          value: index === 0 ? 24000 : 14,
-          availabilityStatus: 'AVAILABLE',
-          observedAt: '2026-10-01T09:29:00.000Z',
-          freshness: { status: 'FRESH' },
-          source: { provider: 'UPSTOX' },
-        })),
-        derivedFacts: [{ value: 0.25, availabilityStatus: 'AVAILABLE', freshness: { status: 'FRESH' } }],
+const MARKET_FIXTURE_NOW = new Date('2026-10-05T04:30:00.000Z'); // 10:00 IST, weekday
+const MARKET_FIXTURE_PRIOR_SESSION = '2026-10-02';
+
+function marketFixtureTimestamp(isoDate, hour, minute, second = 0) {
+  const [year, month, day] = isoDate.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day, hour, minute, second) - (330 * 60 * 1000)).toISOString();
+}
+
+function qualifiedMarketContext({
+  session = 'MARKET_OPEN',
+  now = MARKET_FIXTURE_NOW,
+  quoteDate = null,
+  historyDate = MARKET_FIXTURE_PRIOR_SESSION,
+  quoteTimestamp = null,
+  sessionCheckedAt = null,
+  snapshotStatus = null,
+} = {}) {
+  const currentDate = isoDateInIndia(now);
+  const parts = indiaClockParts(now);
+  const completedQuoteDate = quoteDate || (session === 'MARKET_HOLIDAY' ? MARKET_FIXTURE_PRIOR_SESSION : currentDate);
+  const quoteTime = quoteTimestamp || (session === 'MARKET_HOLIDAY'
+    ? marketFixtureTimestamp(completedQuoteDate, 15, 30)
+    : session === 'MARKET_CLOSED'
+      ? marketFixtureTimestamp(completedQuoteDate, 15, 59)
+      : marketFixtureTimestamp(completedQuoteDate, parts.hour, Math.max(0, parts.minute - 1)));
+  const checkedAt = sessionCheckedAt || new Date(now.getTime() - 30_000).toISOString();
+  const fetchedAt = checkedAt;
+  const calendar = {
+    status: 'AVAILABLE',
+    source: { provider: 'NSE', url: 'https://www.nseindia.com/api/holiday-master' },
+    fetchedAt: new Date(now.getTime() - 60_000).toISOString(),
+  };
+  const quoteFreshness = { status: 'FRESH', marketSession: session, tradingDate: currentDate };
+  const sources = [
+    {
+      provider: 'NSE', instrumentId: 'NIFTY 50', url: 'https://www.nseindia.com/api/allIndices',
+      observedAt: quoteTime, providerTimestamp: quoteTime, fetchedAt, freshness: quoteFreshness,
+      effectiveTradingDate: completedQuoteDate, dataClass: 'LIVE',
+    },
+    {
+      provider: 'NSE', instrumentId: 'INDIA VIX', url: 'https://www.nseindia.com/api/allIndices',
+      observedAt: quoteTime, providerTimestamp: quoteTime, fetchedAt, freshness: quoteFreshness,
+      effectiveTradingDate: completedQuoteDate, dataClass: 'LIVE',
+    },
+    {
+      provider: 'NSE', instrumentId: 'NIFTY 50', url: 'https://www.nseindia.com/api/historicalOR/indicesHistory',
+      observedAt: marketFixtureTimestamp(historyDate, 15, 30),
+      providerTimestamp: marketFixtureTimestamp(historyDate, 15, 30), fetchedAt,
+      freshness: { status: 'FRESH' }, effectiveTradingDate: historyDate, dataClass: 'DAILY',
+    },
+  ];
+  const snapshot = {
+    status: snapshotStatus || (session === 'MARKET_OPEN' ? 'CURRENT' : 'MARKET_CLOSED'),
+    availability: 'AVAILABLE',
+    policyAvailability: 'AVAILABLE',
+    policyOutput: { status: 'MARKET_CONTEXT_AVAILABLE' },
+    recommendationUsability: { status: 'USABLE' },
+    observedAt: quoteTime,
+    evaluatedAt: now.toISOString(),
+    marketSession: { status: session, tradingDate: currentDate, checkedAt },
+    providerSelection: { selectedProvider: 'NSE' },
+    providerStatus: {
+      quotes: {
+        provider: 'NSE', status: 'AVAILABLE',
+        qualification: 'OFFICIAL_NSE_WEBSITE_ENDPOINT_UNDOCUMENTED_SCHEMA_VALIDATED',
+        calendar,
+      },
+      history: {
+        provider: 'NSE', status: 'AVAILABLE',
+        qualification: 'OFFICIAL_NSE_WEBSITE_ENDPOINT_UNDOCUMENTED_SCHEMA_VALIDATED',
+        calendar,
       },
     },
+    provenance: {
+      qualification: 'OFFICIAL_NSE_WEBSITE_ENDPOINT_UNDOCUMENTED_SCHEMA_VALIDATED',
+      sources,
+    },
+    observedFacts: ['nifty50Current', 'indiaVixCurrent'].map((key, index) => ({
+      key,
+      value: index === 0 ? 24000 : 14,
+      dataClass: 'LIVE',
+      availabilityStatus: 'AVAILABLE',
+      observedAt: quoteTime,
+      freshness: quoteFreshness,
+      source: {
+        provider: 'NSE', instrumentId: index === 0 ? 'NIFTY 50' : 'INDIA VIX',
+        url: 'https://www.nseindia.com/api/allIndices',
+      },
+    })),
+    derivedFacts: [{ value: 0.25, availabilityStatus: 'AVAILABLE', freshness: { status: 'FRESH' } }],
   };
+  return {
+    response: { ok: true, status: 200 },
+    body: {
+      status: 'MARKET_CONTEXT_AVAILABLE',
+      recommendationUsability: { status: 'USABLE' },
+      marketSnapshot: snapshot,
+    },
+  };
+}
 
-  const healthy = assessCurrentMarketContext(result);
-  assert.equal(healthy.marketContextAvailable, true);
-  assert.equal(healthy.selectedProvider, 'UPSTOX');
+test('preflight accepts source-qualified current MARKET_OPEN quotes only during the current IST session', () => {
+  const result = qualifiedMarketContext();
+  const assessment = assessCurrentMarketContext(result, { now: MARKET_FIXTURE_NOW });
+  assert.equal(assessment.marketContextAvailable, true);
+  assert.equal(assessment.sessionStatus, 'MARKET_OPEN');
+  assert.match(assessment.sessionDetail, /intraday quotes/);
+});
 
-  const mixed = structuredClone(result);
-  mixed.body.marketSnapshot.providerStatus.history.provider = 'NSE';
-  assert.equal(assessCurrentMarketContext(mixed).marketContextAvailable, false);
+test('preflight respects the backend’s inclusive 09:15–15:30 IST MARKET_OPEN boundaries', () => {
+  for (const [now, label] of [
+    [new Date('2026-10-05T03:45:00.000Z'), '09:15 IST'],
+    [new Date('2026-10-05T10:00:00.000Z'), '15:30 IST'],
+  ]) {
+    const result = qualifiedMarketContext({ now, quoteTimestamp: now.toISOString(), sessionCheckedAt: now.toISOString() });
+    assert.equal(assessCurrentMarketContext(result, { now }).marketContextAvailable, true, label);
+  }
+  const afterClose = new Date('2026-10-05T10:01:00.000Z'); // 15:31 IST
+  const staleOpenClassification = qualifiedMarketContext({ now: afterClose, quoteTimestamp: afterClose.toISOString() });
+  assert.equal(assessCurrentMarketContext(staleOpenClassification, { now: afterClose }).marketContextAvailable, false);
+});
 
-  const stale = structuredClone(result);
-  stale.body.marketSnapshot.observedFacts[1].freshness.status = 'STALE';
-  assert.equal(assessCurrentMarketContext(stale).vixAvailable, false);
-  assert.equal(assessCurrentMarketContext(stale).marketContextAvailable, false);
+test('preflight accepts a verified holiday only as the coherent latest completed session', () => {
+  const now = new Date('2026-10-05T04:30:00.000Z');
+  const result = qualifiedMarketContext({ session: 'MARKET_HOLIDAY', now });
+  const before = structuredClone(result.body.marketSnapshot);
+  const assessment = assessCurrentMarketContext(result, { now });
+  assert.equal(assessment.marketContextAvailable, true);
+  assert.equal(assessment.sessionStatus, 'MARKET_HOLIDAY');
+  assert.match(assessment.sessionDetail, /latest-completed-session/);
+  assert.match(assessment.sessionDetail, /does not assert an intraday quote/);
+  assert.deepEqual(result.body.marketSnapshot, before, 'assessment does not rewrite quote values, timestamps, or freshness');
 
-  const historical = structuredClone(result);
-  historical.body.marketSnapshot.status = 'LAST_AVAILABLE';
-  assert.equal(assessCurrentMarketContext(historical).marketContextAvailable, false);
+  const mismatchedHistory = qualifiedMarketContext({ session: 'MARKET_HOLIDAY', now });
+  mismatchedHistory.body.marketSnapshot.provenance.sources[2].effectiveTradingDate = '2026-10-01';
+  assert.equal(assessCurrentMarketContext(mismatchedHistory, { now }).marketContextAvailable, false);
+});
+
+test('preflight accepts weekday MARKET_CLOSED only after close with today’s close evidence', () => {
+  const now = new Date('2026-10-05T10:30:00.000Z'); // 16:00 IST
+  const result = qualifiedMarketContext({ session: 'MARKET_CLOSED', now });
+  const assessment = assessCurrentMarketContext(result, { now });
+  assert.equal(assessment.marketContextAvailable, true);
+  assert.match(assessment.sessionDetail, /completed close/);
+});
+
+test('preflight accepts Saturday weekend evidence for the latest completed NSE session after a Friday holiday', () => {
+  const now = new Date('2026-10-03T10:30:00.000Z'); // Saturday, 16:00 IST; Friday 2026-10-02 is an NSE holiday
+  const result = qualifiedMarketContext({
+    session: 'MARKET_CLOSED',
+    now,
+    quoteDate: '2026-10-01',
+    historyDate: '2026-10-01',
+  });
+  const assessment = assessCurrentMarketContext(result, { now });
+
+  assert.equal(assessment.marketContextAvailable, true);
+  assert.equal(assessment.sessionStatus, 'MARKET_CLOSED');
+  assert.match(assessment.sessionDetail, /MARKET_WEEKEND/);
+  assert.match(assessment.sessionDetail, /latest-completed-session/);
+  assert.match(assessment.sessionDetail, /no intraday quote is asserted/);
+});
+
+test('preflight rejects stale, unknown, incoherent, unsupported, or incomplete market-session evidence', () => {
+  const cases = [
+    ['Upstox lacks the NSE session/calendar proof', result => { result.body.marketSnapshot.providerSelection.selectedProvider = 'UPSTOX'; }],
+    ['mixed providers', result => { result.body.marketSnapshot.providerStatus.history.provider = 'UPSTOX'; }],
+    ['unknown session', result => { result.body.marketSnapshot.marketSession.status = 'UNKNOWN'; }],
+    ['wrong session trading date', result => { result.body.marketSnapshot.marketSession.tradingDate = '2026-10-02'; }],
+    ['stale session check', result => { result.body.marketSnapshot.marketSession.checkedAt = '2026-10-05T03:00:00.000Z'; }],
+    ['future session check', result => { result.body.marketSnapshot.marketSession.checkedAt = '2026-10-05T04:31:00.000Z'; }],
+    ['unavailable official calendar', result => { result.body.marketSnapshot.providerStatus.quotes.calendar.status = 'UNAVAILABLE'; }],
+    ['calendar from an unqualified URL', result => { result.body.marketSnapshot.providerStatus.history.calendar.source.url = 'https://example.invalid/calendar'; }],
+    ['stale official calendar', result => { result.body.marketSnapshot.providerStatus.quotes.calendar.fetchedAt = '2026-10-03T00:00:00.000Z'; }],
+    ['missing history provenance', result => { result.body.marketSnapshot.provenance.sources.pop(); }],
+    ['duplicate quote provenance', result => { result.body.marketSnapshot.provenance.sources.push(structuredClone(result.body.marketSnapshot.provenance.sources[0])); }],
+    ['mismatched quote dates', result => { result.body.marketSnapshot.provenance.sources[1].effectiveTradingDate = '2026-10-01'; }],
+    ['provider timestamp mismatch', result => { result.body.marketSnapshot.provenance.sources[0].providerTimestamp = '2026-10-05T04:00:00.000Z'; }],
+    ['missing NIFTY', result => { result.body.marketSnapshot.observedFacts[0].availabilityStatus = 'UNAVAILABLE'; }],
+    ['stale NIFTY', result => { result.body.marketSnapshot.observedFacts[0].freshness.status = 'STALE'; }],
+    ['missing VIX', result => { result.body.marketSnapshot.observedFacts[1].availabilityStatus = 'UNAVAILABLE'; }],
+    ['stale VIX', result => { result.body.marketSnapshot.observedFacts[1].freshness.status = 'STALE'; }],
+    ['missing derived history', result => { result.body.marketSnapshot.derivedFacts = []; }],
+    ['not usable for recommendations', result => { result.body.marketSnapshot.recommendationUsability.status = 'NOT_USABLE'; }],
+    ['last-known-good display state', result => { result.body.marketSnapshot.status = 'LAST_AVAILABLE'; }],
+    ['recovered last-known-good snapshot', result => { result.body.marketSnapshot.recoveredFromLastKnownGood = true; }],
+  ];
+  for (const [name, mutate] of cases) {
+    const result = qualifiedMarketContext();
+    mutate(result);
+    assert.equal(assessCurrentMarketContext(result, { now: MARKET_FIXTURE_NOW }).marketContextAvailable, false, name);
+  }
+});
+
+test('preflight rejects holiday evidence cached across the IST date rollover', () => {
+  const cachedBeforeIstMidnight = new Date('2026-10-05T18:29:30.000Z'); // 23:59:30 IST
+  const afterIstMidnight = new Date('2026-10-05T18:35:00.000Z'); // 00:05 IST next day
+  const result = qualifiedMarketContext({ session: 'MARKET_HOLIDAY', now: cachedBeforeIstMidnight });
+  assert.equal(assessCurrentMarketContext(result, { now: afterIstMidnight }).marketContextAvailable, false);
+});
+
+test('preflight keeps weekday pre-market and stale-open classifications failed while accepting a coherent weekend', () => {
+  const preMarketNow = new Date('2026-10-05T03:30:00.000Z'); // 09:00 IST
+  const preMarket = qualifiedMarketContext({
+    session: 'MARKET_CLOSED', now: preMarketNow, quoteDate: MARKET_FIXTURE_PRIOR_SESSION,
+    historyDate: '2026-10-01',
+  });
+  assert.equal(assessCurrentMarketContext(preMarket, { now: preMarketNow }).marketContextAvailable, false);
+
+  const weekendNow = new Date('2026-10-03T10:30:00.000Z'); // Saturday, 16:00 IST
+  const latestCompletedTradingDate = previousNseTradingDate('2026-10-03', ['2026-10-02']);
+  assert.equal(latestCompletedTradingDate, '2026-10-01');
+  const weekend = qualifiedMarketContext({
+    session: 'MARKET_CLOSED', now: weekendNow, quoteDate: latestCompletedTradingDate,
+    historyDate: latestCompletedTradingDate,
+  });
+  const weekendAssessment = assessCurrentMarketContext(weekend, { now: weekendNow });
+  assert.equal(weekendAssessment.marketContextAvailable, true);
+  assert.match(weekendAssessment.sessionDetail, /MARKET_WEEKEND/);
+
+  const staleOpen = qualifiedMarketContext({ snapshotStatus: 'LAST_AVAILABLE' });
+  assert.equal(assessCurrentMarketContext(staleOpen, { now: MARKET_FIXTURE_NOW }).marketContextAvailable, false);
+});
+
+test('preflight accepts Sunday and an ordinary Saturday using the calendar-derived latest completed session', () => {
+  const cases = [
+    {
+      now: new Date('2026-10-04T10:30:00.000Z'),
+      holidayDates: ['2026-10-02'],
+      expectedLatest: '2026-10-01',
+      label: 'Sunday after Friday NSE holiday',
+    },
+    {
+      now: new Date('2026-10-10T10:30:00.000Z'),
+      holidayDates: [],
+      expectedLatest: '2026-10-09',
+      label: 'Saturday after normal Friday trading',
+    },
+  ];
+
+  for (const { now, holidayDates, expectedLatest, label } of cases) {
+    const today = isoDateInIndia(now);
+    const latestCompletedTradingDate = previousNseTradingDate(today, holidayDates);
+    assert.equal(latestCompletedTradingDate, expectedLatest, label);
+    const result = qualifiedMarketContext({
+      session: 'MARKET_CLOSED', now, quoteDate: latestCompletedTradingDate,
+      historyDate: latestCompletedTradingDate,
+    });
+    const assessment = assessCurrentMarketContext(result, { now });
+    assert.equal(assessment.marketContextAvailable, true, label);
+    assert.equal(assessment.sessionStatus, 'MARKET_CLOSED', 'weekend must not be relabeled as an exchange holiday');
+    assert.match(assessment.sessionDetail, /MARKET_WEEKEND/);
+    assert.match(assessment.sessionDetail, /no intraday quote is asserted/);
+  }
+});
+
+test('preflight rejects stale, incoherent, recovered, or fabricated weekend quotes', () => {
+  const now = new Date('2026-10-03T10:30:00.000Z');
+  const latestCompletedTradingDate = previousNseTradingDate('2026-10-03', ['2026-10-02']);
+  const cases = [
+    ['stale weekend quote', result => {
+      result.body.marketSnapshot.provenance.sources[0].freshness.status = 'STALE';
+    }],
+    ['NIFTY and VIX date mismatch', result => {
+      result.body.marketSnapshot.provenance.sources[1].effectiveTradingDate = '2026-09-30';
+    }],
+    ['history date mismatch', result => {
+      result.body.marketSnapshot.provenance.sources[2].effectiveTradingDate = '2026-09-30';
+    }],
+    ['last-known-good recovery', result => {
+      result.body.marketSnapshot.recoveredFromLastKnownGood = true;
+    }],
+    ['fabricated Saturday quote', result => {
+      const saturdayTimestamp = marketFixtureTimestamp('2026-10-03', 15, 30);
+      const snapshot = result.body.marketSnapshot;
+      snapshot.provenance.sources.slice(0, 2).forEach(source => {
+        source.observedAt = saturdayTimestamp;
+        source.providerTimestamp = saturdayTimestamp;
+        source.effectiveTradingDate = '2026-10-03';
+      });
+      snapshot.observedFacts.forEach(fact => { fact.observedAt = saturdayTimestamp; });
+    }],
+  ];
+
+  for (const [name, mutate] of cases) {
+    const result = qualifiedMarketContext({
+      session: 'MARKET_CLOSED', now, quoteDate: latestCompletedTradingDate,
+      historyDate: latestCompletedTradingDate,
+    });
+    mutate(result);
+    assert.equal(assessCurrentMarketContext(result, { now }).marketContextAvailable, false, name);
+  }
+});
+
+test('preflight reporter emits every required check once and leaves unevaluated checks failed', () => {
+  const lines = [];
+  const reporter = makeReporter(line => lines.push(line));
+  reporter.add('Backend', true, 'health verified');
+  const result = reporter.finish();
+
+  assert.deepEqual(result.checks.map(check => check.name), EXPECTED_PREFLIGHT_CHECKS);
+  assert.equal(new Set(result.checks.map(check => check.name)).size, EXPECTED_PREFLIGHT_CHECKS.length);
+  assert.equal(result.checks.find(check => check.name === 'Backend').passed, true);
+  const skipped = result.checks.find(check => check.name === 'Product tax workflow');
+  assert.equal(skipped.passed, false);
+  assert.match(skipped.detail, /^NOT_EVALUATED/);
+  assert.ok(result.failed > 0);
+  assert.ok(lines.some(line => line.includes('FAIL Product tax workflow')));
+});
+
+test('preflight reporter rejects duplicate and unknown writes and protects finalized check accounting', () => {
+  const attempts = [
+    { initial: true, duplicate: false, expectedPassed: true },
+    { initial: false, duplicate: true, expectedPassed: false },
+    { initial: true, duplicate: true, expectedPassed: true },
+    { initial: false, duplicate: false, expectedPassed: false },
+  ];
+  for (const { initial, duplicate, expectedPassed } of attempts) {
+    const lines = [];
+    const reporter = makeReporter(line => lines.push(line));
+    reporter.add('Critical browser path', initial, 'first terminal outcome');
+    assert.throws(
+      () => reporter.add('Critical browser path', duplicate, 'attempted overwrite'),
+      /already evaluated/i,
+    );
+    const result = reporter.finish();
+    const check = result.checks.find(item => item.name === 'Critical browser path');
+    assert.equal(check.passed, expectedPassed);
+    assert.equal(check.state, expectedPassed ? 'PASS' : 'FAIL');
+    assert.throws(() => reporter.add('Critical browser path', true, 'late write'), /finalization/i);
+    assert.equal(reporter.finish().passed, result.passed);
+    assert.equal(lines.length, EXPECTED_PREFLIGHT_CHECKS.length);
+    assert.deepEqual(lines.map(line => line.match(/^(?:PASS|FAIL) (.+?) —/)?.[1]), EXPECTED_PREFLIGHT_CHECKS);
+  }
+
+  const reporter = makeReporter(() => {});
+  assert.throws(() => reporter.add('Not a real check', true, 'bad name'), /Unexpected preflight check/);
+  reporter.add('Backend', true, 'safe terminal outcome');
+  reporter.checks.find(check => check.name === 'Backend').passed = false;
+  const result = reporter.finish();
+  assert.equal(result.checks.find(check => check.name === 'Backend').passed, true);
+  assert.equal(result.checks.length, EXPECTED_PREFLIGHT_CHECKS.length);
+  assert.equal(new Set(result.checks.map(check => check.name)).size, EXPECTED_PREFLIGHT_CHECKS.length);
+  assert.equal(result.passed + result.failed, EXPECTED_PREFLIGHT_CHECKS.length);
+  assert.ok(result.checks.every(check => ['PASS', 'FAIL', 'NOT_EVALUATED'].includes(check.state)));
+  assert.ok(result.checks.filter(check => check.state === 'NOT_EVALUATED').every(check => !check.passed));
+});
+
+test('runDemoPreflight accepts injected environment and output while preserving terminal check accounting', async () => {
+  const output = [];
+  const result = await runDemoPreflight({
+    environment: { DEMO_LIVE_PREFLIGHT: '0' },
+    write: line => output.push(line),
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.checks.length, EXPECTED_PREFLIGHT_CHECKS.length);
+  assert.equal(result.checks.filter(check => check.passed).length, 0);
+  assert.equal(result.checks.filter(check => check.state === 'NOT_EVALUATED').length, EXPECTED_PREFLIGHT_CHECKS.length - 1);
+  assert.equal(result.checks.find(check => check.name === 'Explicit live-demo mode').state, 'FAIL');
+  assert.equal(output.length, EXPECTED_PREFLIGHT_CHECKS.length + 2);
+  assert.match(output.at(-2), /Live-demo preflight: 0 PASS, 22 FAIL/);
+});
+
+function injectedOrchestrationDependencies({
+  marketStatus = 'CURRENT',
+  marketNow = MARKET_FIXTURE_NOW,
+  marketBodyOverride = null,
+  backendSha = 'e'.repeat(40),
+  userPathPass = false,
+} = {}) {
+  const expectedSha = 'e'.repeat(40);
+  const marketBody = marketBodyOverride || qualifiedMarketContext({ snapshotStatus: marketStatus }).body;
+  const response = (status, body) => ({ response: { ok: status >= 200 && status < 300, status }, body });
+  const environment = {
+    DEMO_LIVE_PREFLIGHT: '1',
+    DEMO_API_BASE_URL: 'http://127.0.0.1:5000/api',
+    DEMO_FRONTEND_URL: 'http://127.0.0.1:5173',
+    DEMO_PROFILE_COMPLETION_FILE: 'fixture-profile.json',
+    DEMO_TAX_CONTEXT_FILE: 'fixture-tax.json',
+    DEMO_EMAIL: 'demo@example.invalid',
+    DEMO_PASSWORD: 'fixture-only',
+    DEMO_COMPLETION_IDEMPOTENCY_KEY: 'fixture-idempotency-key',
+    DEMO_NIFTY_ETF_PARENT_ID: 'nifty_etf',
+    DEMO_EXPECTED_BUILD_SHA: expectedSha,
+    NODE_ENV: 'test',
+  };
+  const dependencies = {
+    marketNow,
+    async loadJson(filePath, label, reporter) {
+      reporter.add(label, true, 'fixture JSON validated');
+      return label === 'Profile completion payload' ? { profile: true } : { fiscalYear: 'FY2026-27' };
+    },
+    async readHttp(url) {
+      if (url.endsWith('/health/live')) return response(200, { status: 'ALIVE', buildSha: backendSha });
+      if (url.endsWith('/health/ready')) return response(200, { status: 'READY' });
+      if (url.endsWith('/health/verification')) return response(200, {
+        status: 'VERIFIED',
+        buildSha: expectedSha,
+        mongo: { connected: true, transactionCapable: true },
+        redis: { required: false, connected: false },
+      });
+      if (url.endsWith('/health/deep')) return response(200, { services: { database: 'UP', redis: 'DOWN' } });
+      if (url.endsWith('/regime/current')) return response(200, marketBody);
+      if (url.endsWith('/tax/policies')) return response(200, {
+        currentFiscalYearVerified: true,
+        currentFiscalYear: 'FY2026-27',
+      });
+      throw new Error('Unexpected injected HTTP probe');
+    },
+    async verifyBrowser(reporter, { taxContext, parentInstrumentId }) {
+      reporter.add('Profile completion/auth', true, 'fixture success');
+      reporter.add('Recommendation current-state binding', true, 'fixture success');
+      await reportWtiProductChecks(reporter, {
+        requestWti: async () => ({ ok: true, status: 200, json: async () => qualifiedWtiResponse([{
+          ...qualifiedNiftyEtf(),
+          postTaxAnalysis: { status: 'TAX_CLASSIFICATION_UNAVAILABLE' },
+        }]) }),
+        recommendation: currentBinding(),
+        parentInstrumentId,
+        taxContext,
+      });
+      reporter.add('Critical browser path', userPathPass, userPathPass ? 'fixture user flow verified' : 'fixture browser journey did not verify');
+    },
+    async verifyBuild() { return { passed: true, detail: 'fixture build succeeded' }; },
+  };
+  return { environment, dependencies };
+}
+
+test('live orchestration retains all checks and successful probes cannot override market, tax, or user-flow failures', async () => {
+  const output = [];
+  const fixture = injectedOrchestrationDependencies({ marketStatus: 'LAST_AVAILABLE', userPathPass: false });
+  const result = await runDemoPreflight({ ...fixture, write: line => output.push(line) });
+
+  assert.equal(result.checks.length, 22);
+  assert.deepEqual(result.checks.map(check => check.name), EXPECTED_PREFLIGHT_CHECKS);
+  assert.equal(result.checks.filter(check => check.passed).length + result.failed, 22);
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.checks.find(check => check.name === 'Mongo/transaction support').passed, true);
+  assert.equal(result.checks.find(check => check.name === 'Redis if required').passed, true);
+  assert.equal(result.checks.find(check => check.name === 'Market context').passed, false);
+  assert.equal(result.checks.find(check => check.name === 'Product tax workflow').passed, false);
+  assert.match(result.checks.find(check => check.name === 'Product tax workflow').detail, /TAX_CLASSIFICATION_UNAVAILABLE/);
+  assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
+  assert.equal(output.length, EXPECTED_PREFLIGHT_CHECKS.length + 2);
+  assert.match(output.at(-2), /19 PASS, 3 FAIL/);
+});
+
+test('live orchestration rejects a backend process whose explicit SHA differs from the expected build', async () => {
+  const fixture = injectedOrchestrationDependencies({ backendSha: 'f'.repeat(40), userPathPass: true });
+  const result = await runDemoPreflight({ ...fixture, write: () => {} });
+  assert.equal(result.checks.find(check => check.name === 'Backend').passed, false);
+  assert.equal(result.exitCode, 1);
+});
+
+test('weekend quote details identify the prior completed session without claiming a same-day close', async () => {
+  const now = new Date('2026-10-03T10:30:00.000Z');
+  const latestCompletedTradingDate = previousNseTradingDate('2026-10-03', ['2026-10-02']);
+  const marketBody = qualifiedMarketContext({
+    session: 'MARKET_CLOSED', now, quoteDate: latestCompletedTradingDate,
+    historyDate: latestCompletedTradingDate,
+  }).body;
+  const fixture = injectedOrchestrationDependencies({ marketNow: now, marketBodyOverride: marketBody });
+  const result = await runDemoPreflight({ ...fixture, write: () => {} });
+
+  for (const name of ['NIFTY quote', 'VIX quote']) {
+    const quoteCheck = result.checks.find(check => check.name === name);
+    assert.equal(quoteCheck.passed, true);
+    assert.match(quoteCheck.detail, /MARKET_WEEKEND/);
+    assert.match(quoteCheck.detail, /latest-completed-session/);
+    assert.match(quoteCheck.detail, /not an intraday quote/);
+    assert.doesNotMatch(quoteCheck.detail, /same-day/);
+  }
+
+  const recoveredMarketBody = structuredClone(marketBody);
+  recoveredMarketBody.marketSnapshot.recoveredFromLastKnownGood = true;
+  const recoveredFixture = injectedOrchestrationDependencies({ marketNow: now, marketBodyOverride: recoveredMarketBody });
+  const recoveredResult = await runDemoPreflight({ ...recoveredFixture, write: () => {} });
+  const unverifiedQuoteDetail = recoveredResult.checks.find(check => check.name === 'NIFTY quote').detail;
+  assert.equal(recoveredResult.checks.find(check => check.name === 'Market context').passed, false);
+  assert.doesNotMatch(unverifiedQuoteDetail, /same-day/);
+  assert.match(unverifiedQuoteDetail, /completed-session observation/);
+});
+
+test('market dependency probe tolerates a virtual 13-second response under its independent budget', async () => {
+  let now = 0;
+  const timers = new Map();
+  let nextTimerId = 0;
+  const timerOptions = {
+    setTimeout(callback, delay) {
+      const id = ++nextTimerId;
+      timers.set(id, { callback, at: now + delay });
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
+  };
+  const advanceBy = milliseconds => {
+    now += milliseconds;
+    for (const [id, timer] of timers) {
+      if (timer.at <= now) {
+        timers.delete(id);
+        timer.callback();
+      }
+    }
+  };
+  let resolveFetch;
+  const pendingFetch = new Promise(resolve => { resolveFetch = resolve; });
+  const resultPromise = readJson('http://127.0.0.1:5000/api/regime/current', {
+    timeoutMs: MARKET_DEPENDENCY_PROBE_TIMEOUT_MS,
+    fetchImpl: async () => pendingFetch,
+    createAbortSignal: () => undefined,
+    timerOptions,
+  });
+
+  advanceBy(13_001);
+  resolveFetch({ ok: true, status: 200, json: async () => ({ status: 'MARKET_CONTEXT_AVAILABLE' }) });
+  const result = await resultPromise;
+  assert.equal(result.body.status, 'MARKET_CONTEXT_AVAILABLE');
+  assert.ok(MARKET_DEPENDENCY_PROBE_TIMEOUT_MS > 12_000);
+  assert.ok(MARKET_DEPENDENCY_PROBE_TIMEOUT_MS < PROFILE_USER_FLOW_TIMEOUT_MS);
+  assert.ok(WTI_USER_FLOW_TIMEOUT_MS <= 90_000);
+  assert.ok(BACKEND_HTTP_HARD_TIMEOUT_MS < PROFILE_USER_FLOW_TIMEOUT_MS);
+  assert.ok(LOGIN_BROWSER_TIMEOUT_MS < DASHBOARD_BROWSER_TIMEOUT_MS);
+  assert.ok(REDIS_PROBE_TIMEOUT_MS > 0);
+});
+
+test('WTI verifier cannot certify a result after the shared frontend user-flow budget', async () => {
+  let now = 0;
+  const timers = new Map();
+  let nextTimerId = 0;
+  const timerOptions = {
+    setTimeout(callback, delay) {
+      const id = ++nextTimerId;
+      timers.set(id, { callback, at: now + delay });
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
+  };
+  const advanceBy = milliseconds => {
+    now += milliseconds;
+    for (const [id, timer] of timers) {
+      if (timer.at <= now) {
+        timers.delete(id);
+        timer.callback();
+      }
+    }
+  };
+  let settled = false;
+  const reporter = makeReporter(() => {});
+  const checking = reportWtiProductChecks(reporter, {
+    requestWti: () => new Promise(() => {}),
+    recommendation: currentBinding(),
+    parentInstrumentId: 'nifty_etf',
+    taxContext: { fiscalYear: 'FY2026-27' },
+    timerOptions,
+  }).then(() => { settled = true; });
+
+  advanceBy(WTI_USER_FLOW_TIMEOUT_MS + 1);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, true, 'the verifier must terminate at the user-flow deadline');
+  await checking;
+  const result = reporter.finish();
+  assert.equal(result.checks.find(check => check.name === 'ETF product source').passed, false);
+  assert.match(result.checks.find(check => check.name === 'ETF product source').detail, /timeout/i);
+  assert.equal(WTI_USER_FLOW_TIMEOUT_MS, 90_000);
+});
+
+test('build SHA attestation requires exact explicit backend and frontend runtime identity', () => {
+  const expected = 'a'.repeat(40);
+  assert.equal(matchesBuildSha(expected, expected), true);
+  assert.equal(matchesBuildSha(expected, 'A'.repeat(40)), true, 'hex SHA comparison is case-insensitive');
+  assert.equal(matchesBuildSha(expected, 'b'.repeat(40)), false);
+  assert.equal(matchesBuildSha(undefined, expected), false);
+  assert.equal(matchesBuildSha(expected, undefined), false);
+  assert.equal(matchesBuildSha('abc', 'abc'), false);
+  assert.equal(matchesBuildSha(`${expected}a`, expected), false);
+  assert.equal(matchesBuildSha(` ${expected}`, expected), false);
+  assert.equal(matchesBuildSha(expected, `${expected}?build=${expected}`), false);
+});
+
+test('WTI verifier requires a coherent exact single-product route response', () => {
+  const valid = qualifiedWtiResponse();
+  assert.equal(qualifiesWtiResponse(valid, currentBinding(), 'nifty_etf'), true);
+
+  const unrelated = { canonicalProductId: 'etf:isin:OTHER', parentInstrumentId: 'nifty_etf' };
+  const mutations = [
+    body => { body.products = [qualifiedNiftyEtf(), unrelated]; },
+    body => { body.total = 2; },
+    body => { body.comparisonUniverse.returnedProductCount = 0; },
+    body => { body.comparisonUniverse.verifiedIdentityCount = 0; },
+    body => { body.comparisonUniverse.freshNavProductCount = 0; },
+    body => { body.comparisonUniverse.parentInstrumentId = 'liquid_etf'; },
+    body => { body.comparisonUniverse.sourceProvider = 'OTHER'; },
+    body => { body.ranking.status = 'UNAVAILABLE'; },
+    body => { body.financialStateBinding.allocationRevision = 999; },
+    body => { body.success = false; },
+  ];
+  for (const mutate of mutations) {
+    const body = structuredClone(valid);
+    mutate(body);
+    assert.equal(qualifiesWtiResponse(body, currentBinding(), 'nifty_etf'), false);
+  }
+  assert.equal(qualifiesWtiResponse(valid, currentBinding(), 'liquid_etf'), false);
+});
+
+function qualifiedNiftyTaxProductFixture(taxCalculationContext = demoTaxContext()) {
+  const product = qualifiedNiftyEtf();
+  product.historicalReturn = {
+    valuePct: 12.4,
+    basis: 'HISTORICAL_POINT_TO_POINT_NAV_RETURN_1Y',
+    annualized: true,
+    isExpectedReturn: false,
+  };
+  product.taxMetadata = getProductTaxMetadata(product, 'nifty_etf');
+  product.postTaxAnalysis = calculateProductPostTaxOutcome({
+    product,
+    taxCalculationContext,
+  });
+  return product;
+}
+
+test('NIFTY ETF tax verifier fails closed unless a calculated result has matching source-qualified provenance', () => {
+  const taxContext = demoTaxContext();
+  const validProduct = qualifiedNiftyTaxProductFixture();
+  assert.equal(qualifiesCalculatedNiftyEtfTax(validProduct, taxContext), true);
+  const shortTermContext = demoTaxContext({ holdingPeriodMonths: 12 });
+  assert.equal(qualifiesCalculatedNiftyEtfTax(
+    qualifiedNiftyTaxProductFixture(shortTermContext),
+    shortTermContext,
+  ), true);
+
+  const mutations = [
+    product => { delete product.taxMetadata; },
+    product => { product.taxMetadata.sourceQualified = false; },
+    product => { delete product.taxMetadata.taxClass; },
+    product => { product.taxMetadata.taxClass = 'UNSUPPORTED_CLASS'; },
+    product => { product.taxMetadata.sourceReferences = []; },
+    product => { product.taxMetadata.sourceReferences = [{}]; },
+    product => { product.taxMetadata.sourceReferences[0].url = 'http://mf.nipponindiaim.com/tampered.pdf'; },
+    product => { product.taxMetadata.productEvidence.binding.isin = 'WRONG'; },
+    product => { product.postTaxAnalysis.taxClassificationMetadata.productEvidence.documentDate = '2026-01-01'; },
+    product => { product.postTaxAnalysis.taxRuleMetadata.currentRuleReferences = []; },
+    product => {
+      const reference = product.postTaxAnalysis.taxRuleMetadata.currentRuleReferences.find(item => item.reference === 'Section 198');
+      product.postTaxAnalysis.taxRuleMetadata.currentRuleReferences = [{
+        ...reference,
+        ruleId: 'INCOME_TAX_ACT_2025_EQUITY_STCG_SPECIAL_RATE_POLICY',
+        reference: 'Section 196',
+      }];
+    },
+    product => { product.postTaxAnalysis.rulesApplied = product.postTaxAnalysis.rulesApplied.filter(rule => rule !== 'INCOME_TAX_ACT_2025_EQUITY_LTCG_SPECIAL_RATE_POLICY'); },
+    product => { product.postTaxAnalysis.assumptions = product.postTaxAnalysis.assumptions.filter(item => !item.startsWith('STT_CONDITION_ASSUMED_SATISFIED')); },
+    product => { product.postTaxAnalysis.sourceReferences = product.postTaxAnalysis.sourceReferences.filter(reference => reference.role !== 'TAX_POLICY'); },
+    product => { delete product.postTaxAnalysis.policyVersion; },
+    product => { product.postTaxAnalysis.fiscalYear = 'FY2025-26'; },
+    product => { delete product.postTaxAnalysis.calculationClass; },
+    product => { product.postTaxAnalysis.calculationClass = 'CURRENT_RATE_POST_TAX_ILLUSTRATION'; },
+    product => { product.postTaxAnalysis.taxClass = 'BANK_DEPOSIT_INTEREST'; },
+    product => { product.postTaxAnalysis.sourceReferences[0].url = 'https://mf.nipponindiaim.com/unrelated.pdf'; },
+    product => { product.canonicalProductId = 'etf:isin:OTHER'; },
+  ];
+  for (const mutate of mutations) {
+    const product = qualifiedNiftyTaxProductFixture();
+    mutate(product);
+    assert.equal(qualifiesCalculatedNiftyEtfTax(product, taxContext), false);
+  }
+  assert.equal(qualifiesCalculatedNiftyEtfTax(validProduct, taxContext, { financialBindingValid: false }), false);
+  assert.equal(qualifiesCalculatedNiftyEtfTax(validProduct, { ...taxContext, sttConditionAssumedSatisfied: false }), false);
+  assert.equal(qualifiesCalculatedNiftyEtfTax(validProduct, { fiscalYear: 'FY2026-27' }), false);
+});
+
+test('WTI HTTP failures stay under WTI checks and never become browser failures', async () => {
+  for (const status of [409, 500]) {
+    const lines = [];
+    const timingEvents = [];
+    const reporter = makeReporter(line => lines.push(line));
+    await reportWtiProductChecks(reporter, {
+      requestWti: async () => ({
+        ok: false,
+        status,
+        json: async () => ({ code: status === 409 ? 'RECOMMENDATION_PARENT_MISMATCH' : 'UPSTREAM_UNAVAILABLE', message: 'must not print this response body' }),
+      }),
+      recommendation: currentBinding(),
+      parentInstrumentId: 'nifty_etf',
+      taxContext: { fiscalYear: 'FY2026-27' },
+      onTiming: event => timingEvents.push(event),
+    });
+    const result = reporter.finish();
+
+    assert.equal(result.checks.find(check => check.name === 'ETF product source').passed, false);
+    assert.match(result.checks.find(check => check.name === 'ETF product source').detail, new RegExp(`HTTP ${status}`));
+    assert.match(result.checks.find(check => check.name === 'ETF product source').detail, /RECOMMENDATION_PARENT_MISMATCH|UPSTREAM_UNAVAILABLE/);
+    assert.match(result.checks.find(check => check.name === 'Nifty ETF exact-product result').detail, /^NOT_EVALUATED/);
+    assert.match(result.checks.find(check => check.name === 'Product tax workflow').detail, /^NOT_EVALUATED/);
+    assert.doesNotMatch(lines.join('\n'), /must not print this response body/);
+    assert.doesNotMatch(lines.join('\n'), /Critical browser path.*HTTP/);
+    assert.equal(timingEvents[0].stage, 'rank_wti_request');
+    assert.equal(timingEvents[0].status, `HTTP_${status}`);
+    assert.ok(Number.isInteger(timingEvents[0].elapsedMs) && timingEvents[0].elapsedMs >= 0);
+  }
+});
+
+test('WTI timeout and network exceptions are attributed to WTI without exposing exception text', async () => {
+  for (const error of [
+    Object.assign(new Error('mongodb+srv://user:secret@host/db?token=hidden'), { name: 'TimeoutError', code: 'ETIMEDOUT' }),
+    Object.assign(new Error('https://api.example/path?access_token=hidden'), { code: 'ECONNRESET' }),
+  ]) {
+    const lines = [];
+    const reporter = makeReporter(line => lines.push(line));
+    await reportWtiProductChecks(reporter, {
+      requestWti: async () => { throw error; },
+      recommendation: currentBinding(),
+      parentInstrumentId: 'nifty_etf',
+      taxContext: { fiscalYear: 'FY2026-27' },
+    });
+    const result = reporter.finish();
+
+    assert.equal(result.checks.find(check => check.name === 'ETF product source').passed, false);
+    assert.match(result.checks.find(check => check.name === 'ETF product source').detail, /WTI.*(timeout|network)/i);
+    assert.match(result.checks.find(check => check.name === 'Nifty ETF exact-product result').detail, /^NOT_EVALUATED/);
+    assert.match(result.checks.find(check => check.name === 'Product tax workflow').detail, /^NOT_EVALUATED/);
+    assert.doesNotMatch(lines.join('\n'), /secret|access_token|mongodb\+srv|api\.example/);
+    assert.doesNotMatch(lines.join('\n'), /Critical browser path.*WTI/);
+  }
+});
+
+test('untrusted WTI error codes are omitted from timing while exception class remains useful', async () => {
+  for (const code of ['lowercase-secret-token', { token: 'must-not-escape' }]) {
+    const timingEvents = [];
+    const reporter = makeReporter(() => {});
+    await reportWtiProductChecks(reporter, {
+      requestWti: async () => { throw Object.assign(new Error('private detail'), { code }); },
+      recommendation: currentBinding(),
+      parentInstrumentId: 'nifty_etf',
+      taxContext: { fiscalYear: 'FY2026-27' },
+      onTiming: event => timingEvents.push(event),
+    });
+    reporter.finish();
+
+    assert.equal(timingEvents.length, 1);
+    assert.equal(timingEvents[0].status, 'NETWORK_ERROR');
+    assert.equal(Object.hasOwn(timingEvents[0], 'code'), false);
+  }
+});
+
+test('malformed WTI JSON fails source qualification and leaves exact-product/tax checks explicit', async () => {
+  const reporter = makeReporter(() => {});
+  await reportWtiProductChecks(reporter, {
+    requestWti: async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('sensitive payload'); } }),
+    recommendation: currentBinding(),
+    parentInstrumentId: 'nifty_etf',
+    taxContext: { fiscalYear: 'FY2026-27' },
+  });
+  const result = reporter.finish();
+  assert.match(result.checks.find(check => check.name === 'ETF product source').detail, /malformed JSON/i);
+  assert.match(result.checks.find(check => check.name === 'Nifty ETF exact-product result').detail, /^NOT_EVALUATED/);
+  assert.match(result.checks.find(check => check.name === 'Product tax workflow').detail, /^NOT_EVALUATED/);
+});
+
+test('browser launch, login navigation, and login-control failures cannot pass the critical browser path', async () => {
+  const launchFailure = await runBrowserFlow({ launchError: Object.assign(new Error('secret launch detail'), { code: 'BROWSER_MISSING' }) });
+  assert.equal(launchFailure.checks.find(check => check.name === 'Critical browser path').passed, false);
+  assert.match(launchFailure.checks.find(check => check.name === 'Critical browser path').detail, /browser launch\/navigation failed/);
+  assert.match(launchFailure.checks.find(check => check.name === 'ETF product source').detail, /^NOT_EVALUATED/);
+  assert.doesNotMatch(launchFailure.lines.join('\n'), /secret launch detail/);
+
+  const navigationFailure = await runBrowserFlow({ loginNavigationStatus: 503 });
+  assert.equal(navigationFailure.checks.find(check => check.name === 'Critical browser path').passed, false);
+  assert.match(navigationFailure.checks.find(check => check.name === 'Critical browser path').detail, /browser launch\/navigation failed HTTP 503/);
+
+  for (const scenario of [{ loginFormError: true }, { loginControlError: true }]) {
+    const result = await runBrowserFlow(scenario);
+    assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
+    assert.equal(result.checks.find(check => check.name === 'Profile completion/auth').passed, false);
+    assert.match(result.checks.find(check => check.name === 'Recommendation current-state binding').detail, /^NOT_EVALUATED/);
+    assert.match(result.checks.find(check => check.name === 'ETF product source').detail, /^NOT_EVALUATED/);
+  }
+});
+
+test('login 401/500 fail the critical path and leave downstream financial checks unevaluated', async () => {
+  for (const status of [401, 500]) {
+    const result = await runBrowserFlow({ loginStatus: status });
+    assert.equal(result.checks.find(check => check.name === 'Profile completion/auth').passed, false);
+    assert.match(result.checks.find(check => check.name === 'Profile completion/auth').detail, new RegExp(`HTTP ${status}`));
+    assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
+    assert.match(result.checks.find(check => check.name === 'Recommendation current-state binding').detail, /^NOT_EVALUATED/);
+    assert.match(result.checks.find(check => check.name === 'ETF product source').detail, /^NOT_EVALUATED/);
+    assert.match(result.checks.find(check => check.name === 'Nifty ETF exact-product result').detail, /^NOT_EVALUATED/);
+    assert.match(result.checks.find(check => check.name === 'Product tax workflow').detail, /^NOT_EVALUATED/);
+    assert.equal(result.lines.filter(line => line.startsWith('PASS Critical browser path')).length, 0);
+    assert.equal(result.lines.filter(line => line.includes('Critical browser path')).length, 1);
+  }
+});
+
+test('CSRF and profile-completion failures remain distinct from the authenticated browser path', async () => {
+  const missingCsrf = await runBrowserFlow({ missingCsrfCookie: true });
+  assert.equal(missingCsrf.checks.find(check => check.name === 'Profile completion/auth').passed, false);
+  assert.match(missingCsrf.checks.find(check => check.name === 'Profile completion/auth').detail, /CSRF_COOKIE_MISSING/);
+  assert.equal(missingCsrf.checks.find(check => check.name === 'Critical browser path').passed, true);
+  assert.match(missingCsrf.checks.find(check => check.name === 'Critical browser path').detail, /frontend Where to Invest journey/);
+
+  const missingCsrfAndDashboard = await runBrowserFlow({ missingCsrfCookie: true, dashboardError: true });
+  assert.equal(missingCsrfAndDashboard.checks.find(check => check.name === 'Profile completion/auth').passed, false);
+  assert.equal(missingCsrfAndDashboard.checks.find(check => check.name === 'Critical browser path').passed, false);
+
+  const completionConflict = await runBrowserFlow({ completionStatus: 409 });
+  assert.equal(completionConflict.checks.find(check => check.name === 'Profile completion/auth').passed, false);
+  assert.equal(completionConflict.checks.find(check => check.name === 'Critical browser path').passed, true);
+  assert.match(completionConflict.checks.find(check => check.name === 'Critical browser path').detail, /frontend Where to Invest journey/);
+});
+
+test('authenticated profile navigation must return successfully, remain on /profile, and render the sidebar', async () => {
+  for (const scenario of [
+    { profileNavigationStatus: 503 },
+    { dashboardRedirectLogin: true },
+    { dashboardWrongPath: true },
+    { sidebarMissing: true },
+  ]) {
+    const result = await runBrowserFlow(scenario);
+    assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
+  }
+});
+
+test('critical browser path requires the real frontend WTI request, exact ETF render, and calculated-tax state', async () => {
+  const verified = await runBrowserFlow();
+  assert.equal(verified.checks.find(check => check.name === 'Critical browser path').passed, true,
+    verified.checks.find(check => check.name === 'Critical browser path').detail);
+  assert.match(verified.checks.find(check => check.name === 'Critical browser path').detail, /frontend Where to Invest journey/i);
+
+  for (const scenario of [
+    { frontendWtiMissing: true },
+    { frontendWtiBindingMismatch: true },
+    { frontendWtiWrongProduct: true },
+    { frontendWtiTaxHidden: true },
+    { frontendWtiTaxUnavailable: true },
+    { frontendWtiRequestBindingMismatch: true },
+    { frontendWtiDirectProviderRequest: true },
+  ]) {
+    const result = await runBrowserFlow(scenario);
+    assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false, JSON.stringify(scenario));
+  }
+});
+
+test('critical browser path rejects a frontend runtime built from a different revision', async () => {
+  const result = await runBrowserFlow({ frontendBuildSha: 'd'.repeat(40) });
+  assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
+  assert.match(result.checks.find(check => check.name === 'Critical browser path').detail, /build identity/i);
+});
+
+test('profile and recommendation failures retain all dependent checks as NOT_EVALUATED', async () => {
+  const profileFailure = await runBrowserFlow({ completionStatus: 503 });
+  assert.match(profileFailure.checks.find(check => check.name === 'Profile completion/auth').detail, /profile completion HTTP 503/);
+
+  const recommendationFailure = await runBrowserFlow({ recommendationStatus: 409 });
+  assert.match(recommendationFailure.checks.find(check => check.name === 'Recommendation current-state binding').detail, /HTTP 409/);
+  assert.match(recommendationFailure.checks.find(check => check.name === 'ETF product source').detail, /^NOT_EVALUATED/);
+  assert.match(recommendationFailure.checks.find(check => check.name === 'Product tax workflow').detail, /^NOT_EVALUATED/);
+});
+
+test('WTI exceptions, 409, 500, and malformed JSON never fail the browser stage', async () => {
+  const scenarios = [
+    { wtiStatus: 409, wtiCode: 'RECOMMENDATION_PARENT_MISMATCH' },
+    { wtiStatus: 500, wtiCode: 'UPSTREAM_UNAVAILABLE' },
+    { wtiMalformed: true },
+    { wtiError: Object.assign(new Error('https://private.invalid/?token=hidden'), { name: 'TimeoutError', code: 'ETIMEDOUT' }) },
+    { wtiError: Object.assign(new Error('private provider details'), { code: 'ECONNRESET' }) },
+  ];
+  for (const scenario of scenarios) {
+    const result = await runBrowserFlow(scenario);
+    assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, true);
+    assert.equal(result.checks.find(check => check.name === 'ETF product source').passed, false);
+    assert.equal(result.checks.find(check => check.name === 'Nifty ETF exact-product result').passed, false);
+    assert.equal(result.checks.find(check => check.name === 'Product tax workflow').passed, false);
+    assert.doesNotMatch(result.lines.join('\n'), /private\.invalid|token=hidden|private provider details/);
+  }
+});
+
+test('exact product and tax failures remain independently visible', async () => {
+  const cases = [
+    { products: [] },
+    { products: { unexpected: 'not-an-array' } },
+    { products: [qualifiedNiftyEtf(), qualifiedNiftyEtf()] },
+    { products: [(() => { const product = qualifiedNiftyEtf(); product.externalIds[1].value = 'different'; return product; })()] },
+    { products: [(() => { const product = qualifiedNiftyEtf(); product.primaryFact.canonicalProductId = 'mf:amfi:140085'; return product; })()] },
+    { products: [(() => { const product = qualifiedNiftyEtf(); delete product.primaryFact.canonicalProductId; return product; })()] },
+    { products: [(() => { const product = qualifiedNiftyEtf(); product.primaryFact.freshness.status = 'STALE'; return product; })()] },
+    { products: [(() => { const product = qualifiedNiftyEtf(); product.primaryFact.source.provider = 'OTHER_SOURCE'; return product; })()] },
+    { wtiBindingMismatch: true },
+    { wtiMissingBinding: true },
+    { parentInstrumentId: 'liquid_etf' },
+  ];
+  for (const scenario of cases) {
+    const result = await runBrowserFlow(scenario);
+    assert.equal(result.checks.find(check => check.name === 'Nifty ETF exact-product result').passed, false);
+  }
+
+  const taxUnavailable = await runBrowserFlow({
+    taxContext: demoTaxContext({ sttConditionAssumedSatisfied: undefined }),
+  });
+  assert.equal(taxUnavailable.checks.find(check => check.name === 'ETF product source').passed, true);
+  assert.equal(taxUnavailable.checks.find(check => check.name === 'Nifty ETF exact-product result').passed, true);
+  assert.equal(taxUnavailable.checks.find(check => check.name === 'Product tax workflow').passed, false);
+  assert.match(taxUnavailable.checks.find(check => check.name === 'Product tax workflow').detail, /REQUIRES_TAX_INPUTS/);
+
+  const sttNotAssumed = await runBrowserFlow({
+    taxContext: demoTaxContext({ sttConditionAssumedSatisfied: false }),
+  });
+  assert.equal(sttNotAssumed.checks.find(check => check.name === 'Nifty ETF exact-product result').passed, true);
+  assert.equal(sttNotAssumed.checks.find(check => check.name === 'Product tax workflow').passed, false);
+  assert.match(sttNotAssumed.checks.find(check => check.name === 'Product tax workflow').detail, /UNAVAILABLE/);
+
+  const wrongTaxYear = await runBrowserFlow({ products: [{
+    ...qualifiedNiftyEtf(), postTaxAnalysis: { status: 'CALCULATED', fiscalYear: 'FY2025-26' },
+  }] });
+  assert.equal(wrongTaxYear.checks.find(check => check.name === 'Nifty ETF exact-product result').passed, true);
+  assert.equal(wrongTaxYear.checks.find(check => check.name === 'Product tax workflow').passed, false);
+  const noExactButClaimedTax = await runBrowserFlow({ products: [{
+    ...qualifiedNiftyEtf(), canonicalProductId: 'etf:isin:OTHER',
+    postTaxAnalysis: { status: 'CALCULATED', fiscalYear: 'FY2026-27' },
+  }] });
+  assert.equal(noExactButClaimedTax.checks.find(check => check.name === 'Nifty ETF exact-product result').passed, false);
+  assert.equal(noExactButClaimedTax.checks.find(check => check.name === 'Product tax workflow').passed, false);
+});
+
+test('dashboard and direct-provider failures affect only the critical browser check', async () => {
+  const dashboardFailure = await runBrowserFlow({ dashboardError: true });
+  assert.equal(dashboardFailure.checks.find(check => check.name === 'Critical browser path').passed, false);
+  assert.equal(dashboardFailure.checks.find(check => check.name === 'ETF product source').passed, true);
+  assert.equal(dashboardFailure.checks.find(check => check.name === 'Nifty ETF exact-product result').passed, true);
+
+  const directProvider = await runBrowserFlow({ directProviderRequest: true });
+  assert.equal(directProvider.checks.find(check => check.name === 'Critical browser path').passed, false);
+  assert.match(directProvider.checks.find(check => check.name === 'Critical browser path').detail, /direct provider request/);
+
+  const providerHosts = [
+    'https://www.nseindia.com/market-data',
+    'https://portal.amfiindia.com/spages/NAVAll.txt',
+    'https://api.upstox.com/v2/market-quote',
+    'https://sbi.bank/rates',
+    'https://sbi.co.in/rates',
+    'https://www.rbi.org.in/rates',
+    'https://www.dea.gov.in/rates',
+    'https://www.indiapost.gov.in/rates',
+    'https://www.incometax.gov.in/iec/foportal',
+    'https://www.incometaxindia.gov.in/rates',
+  ];
+  for (const directProviderRequest of providerHosts) {
+    const result = await runBrowserFlow({ directProviderRequest });
+    assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false, directProviderRequest);
+    assert.doesNotMatch(result.lines.join('\n'), /token=hidden/);
+  }
+
+  const spoofedHost = await runBrowserFlow({ directProviderRequest: 'https://amfiindia.com.attacker.invalid/not-provider' });
+  assert.equal(spoofedHost.checks.find(check => check.name === 'Critical browser path').passed, true);
+
+  const uninspectableRequest = await runBrowserFlow({ providerRequestInspectionError: true });
+  assert.equal(uninspectableRequest.checks.find(check => check.name === 'Critical browser path').passed, false);
+  assert.match(uninspectableRequest.checks.find(check => check.name === 'Critical browser path').detail, /request inspection failed/);
 });

@@ -245,6 +245,7 @@ const LIVE_CONTRACT_EXCLUSIONS = Object.freeze([
   { operation: 'GET /health/deep', category: 'health', owner: 'platform-health', reason: 'Deep readiness reports live database, Redis, worker, and provider state.', justification: 'Its status is environment-dependent and is separately exercised by observability integration tests.' },
   { operation: 'GET /health/live', category: 'health', owner: 'platform-health', reason: 'Liveness output is an infrastructure protocol, not the canonical user API envelope.', justification: 'The timestamp and process uptime are runtime-derived; endpoint behavior is covered by app architecture tests.' },
   { operation: 'GET /health/ready', category: 'health', owner: 'platform-health', reason: 'Readiness output is an infrastructure protocol, not the canonical user API envelope.', justification: 'Readiness depends on live dependency/index/lifecycle state and is covered by readiness tests.' },
+  { operation: 'GET /health/verification', category: 'health', owner: 'platform-health', reason: 'Runtime dependency capability verification is an infrastructure protocol, not a user financial API.', justification: 'Its strict safe response is covered by healthVerification tests for the running process and dependency probes.' },
   { operation: 'GET /healthz', category: 'health', owner: 'platform-health', reason: 'Legacy liveness alias is an infrastructure protocol, not the canonical user API envelope.', justification: 'Its output is process-derived and is explicitly exercised in app architecture tests.' },
   { operation: 'GET /ready', category: 'health', owner: 'platform-health', reason: 'Redirect alias for readiness is an infrastructure protocol, not the canonical user API envelope.', justification: 'The target readiness status is environment-dependent and is covered by readiness tests.' },
   { operation: 'GET /live', category: 'health', owner: 'platform-health', reason: 'Redirect alias for liveness is an infrastructure protocol, not the canonical user API envelope.', justification: 'The target liveness output is process-derived and is covered by app architecture tests.' },
@@ -407,6 +408,44 @@ test('OpenAPI preserves major runtime-required request fields', () => {
     assert.ok(schema, `${key} has no JSON request schema`);
     assert.deepEqual(new Set(schema.required ?? []), new Set(requiredFields), `${key} required fields drifted`);
   }
+});
+
+test('OpenAPI documents the explicit equity-fund STT scenario input and tax provenance output', () => {
+  const taxContextSchema = inlineLocalRefs(resolveLocalRef('#/components/schemas/TaxCalculationContextV2'));
+  const validateTaxContext = responseAjv.compile(taxContextSchema);
+  const requiredContext = {
+    annualGrossIncome: 500000,
+    incomeSource: 'salary',
+    regime: 'new',
+    fiscalYear: 'FY2026-27',
+  };
+  assert.equal(validateTaxContext(requiredContext), true, JSON.stringify(validateTaxContext.errors));
+  assert.equal(validateTaxContext({ ...requiredContext, sttConditionAssumedSatisfied: true }), true);
+  assert.equal(validateTaxContext({ ...requiredContext, sttConditionAssumedSatisfied: false }), true);
+  assert.equal(validateTaxContext({ ...requiredContext, sttConditionAssumedSatisfied: 'true' }), false);
+  assert.equal(validateTaxContext({ ...requiredContext, unknownTaxAssumption: true }), false);
+
+  const productTaxResult = {
+    status: 'CALCULATED',
+    calculationClass: 'HISTORICAL_RETURN_POST_TAX_ILLUSTRATION',
+    taxClass: 'EQUITY_MF_SECTION_112A',
+    taxClassification: 'EQUITY_MF_SECTION_112A',
+    taxClassificationMetadata: { productEvidence: { officialSourceUrl: 'https://mf.nipponindiaim.com/InvestorServices/SIDETF/NipponIndia-ETF-Nifty-50-BeES.pdf' } },
+    taxRuleMetadata: { currentRuleReferences: [{ statute: 'INCOME_TAX_ACT_2025', reference: 'Section 198' }] },
+    fiscalYear: 'FY2026-27',
+    policyVersion: 'tax-policy-FY2026-27-v2',
+    inputBasis: 'HISTORICAL_PROVIDER_FACT_PLUS_EXPLICIT_TAX_INPUTS',
+    dataClass: 'HISTORICAL_PROVIDER_FACT',
+  };
+  assertResponseMatchesSchemaRef(
+    '#/components/schemas/ProductPostTaxAnalysis',
+    productTaxResult,
+    'Product post-tax analysis with product and statutory provenance',
+  );
+  assert.equal(responseAjv.compile(inlineLocalRefs({ $ref: '#/components/schemas/ProductPostTaxAnalysis' }))({
+    ...productTaxResult,
+    uncontractedTaxFact: 'must not be silently accepted',
+  }), false);
 });
 
 test('advisory idempotency is required and profile/goal idempotency is documented', () => {

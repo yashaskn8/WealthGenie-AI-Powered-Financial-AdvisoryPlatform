@@ -220,7 +220,7 @@ test('mlClient posts to enriched endpoint and falls back on service failure', as
     /recommendation-features-4\.0\.0/,
   );
 
-  axios.post = async () => { throw new Error('offline'); };
+  axios.post = async () => { throw Object.assign(new Error('offline'), { code: 'ECONNRESET' }); };
   const fallback = await getMLPrediction(mlInput({
     age: 60, monthlyTakeHome: 200000, monthlySavings: 50000,
     liquidSavings: 100000, riskTolerance: 'Conservative', investmentGoals: ['Retirement'],

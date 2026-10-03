@@ -169,17 +169,29 @@ export async function processChat({ userId, user: _user, message, sessionId }, {
     const canReserveProvider = providerBudgetUpperBound <= remainingBudget
       && await sessionStore.reserveBudget(claim, providerBudgetUpperBound);
     const startedAt = Date.now();
-    providerAttempted = canReserveProvider;
+    let initialProviderReservationAvailable = canReserveProvider;
     const explanation = await generateGroundedExplanation(
       { question: securityContext.sanitizedMessage, evidencePacket },
-      canReserveProvider ? {} : { providers: [] },
+      canReserveProvider ? {
+        beforeProviderAttempt: async () => {
+          if (initialProviderReservationAvailable) {
+            initialProviderReservationAvailable = false;
+            providerAttempted = true;
+            return true;
+          }
+          const reserved = await sessionStore.reserveBudget(claim, providerBudgetUpperBound);
+          if (reserved) providerAttempted = true;
+          return reserved;
+        },
+      } : { providers: [] },
     );
     if (leaseFailure) throw leaseFailure;
     const latencyMs = Date.now() - startedAt;
     PrometheusMetrics.recordLatency(explanation.provider, latencyMs);
 
-    const attemptedProviderFailure = explanation.fallback
-      && (explanation.reasonCodes || []).some(reason => /REQUEST_FAILED|EMPTY_COMPLETION|GROUNDING_VALIDATION_FAILED/.test(reason));
+    const attemptedProviderFailure = Number(explanation.providerAttemptFailureCount || 0) > 0
+      || (explanation.fallback
+        && (explanation.reasonCodes || []).some(reason => /REQUEST_FAILED|EMPTY_COMPLETION|GROUNDING_VALIDATION_FAILED/.test(reason)));
     const auditMetadata = {
       provider: explanation.provider,
       model: explanation.model,

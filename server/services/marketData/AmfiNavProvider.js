@@ -5,6 +5,7 @@ import {
   MARKET_DATA_SCHEMA_VERSION,
   PROVIDERS,
   createMarketFact,
+  evaluateFreshness,
   nullableFiniteNumber,
 } from './contracts.js';
 import { buildAmfiProductIdentity } from './productIdentity.js';
@@ -14,6 +15,18 @@ export const AMFI_NAV_URL = 'https://portal.amfiindia.com/spages/NAVAll.txt';
 export const AMFI_CACHE_KEY = `market:amfi:nav:${MARKET_DATA_SCHEMA_VERSION}`;
 export const AMFI_CACHE_TTL_SECONDS = 24 * 60 * 60;
 export const AMFI_FRESHNESS_SECONDS = 4 * 24 * 60 * 60;
+
+function refreshFactFreshness(snapshot, now) {
+  for (const fact of snapshot?.facts || []) {
+    fact.freshness = evaluateFreshness({
+      observedAt: fact.observedAt,
+      fetchedAt: fact.fetchedAt,
+      maxAgeSeconds: fact.freshness?.maxAgeSeconds,
+      now,
+    });
+  }
+  return snapshot;
+}
 
 const MONTHS = Object.freeze({
   jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
@@ -153,7 +166,7 @@ export default class AmfiNavProvider extends MarketDataProvider {
   }
 
   async getSnapshot({ forceRefresh = false } = {}) {
-    return readThroughMarketCache({
+    const snapshot = await readThroughMarketCache({
       cacheKey: AMFI_CACHE_KEY,
       ttlSeconds: AMFI_CACHE_TTL_SECONDS,
       forceRefresh,
@@ -181,5 +194,9 @@ export default class AmfiNavProvider extends MarketDataProvider {
         }
       },
     });
+    // The provider cache is intentionally longer-lived than AMFI's freshness
+    // boundary. Recompute age at consumption time, retaining the same snapshot
+    // object so concurrent consumers still share one persistence operation.
+    return refreshFactFreshness(snapshot, this.clock());
   }
 }

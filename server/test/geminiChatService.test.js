@@ -91,8 +91,8 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
     process.env.LLM_PRIMARY_PROVIDER = 'GEMINI';
 
     // Reset circuit breakers
-    ProviderManager.gemini.recordSuccess();
-    ProviderManager.groq.recordSuccess();
+    ProviderManager.gemini.reset();
+    ProviderManager.groq.reset();
 
     // Mock DB queries
     FinancialProfile.findOne = () => {
@@ -245,7 +245,7 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
 
   it('Phase 9 & 14: Provider Circuit Breaker opens after 3 consecutive failures', async () => {
     axios.post = async () => {
-      throw new Error('500 Internal Server Error');
+      throw Object.assign(new Error('provider unavailable'), { response: { status: 503 } });
     };
 
     // 3 failures
@@ -309,7 +309,7 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
 
   it('Phase 6: provider failure returns a deterministic evidence-backed fallback', async () => {
     axios.post = async () => {
-      throw new Error('All LLM endpoints down');
+      throw Object.assign(new Error('provider unavailable'), { code: 'ECONNRESET' });
     };
 
     const result = await processChat({

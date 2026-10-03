@@ -4,6 +4,8 @@ import ConversationHistory from '../models/ConversationHistory.js';
 import FinancialProfile from '../models/FinancialProfile.js';
 import Goal from '../models/Goal.js';
 import IdempotencyKey from '../models/IdempotencyKey.js';
+import InvestmentProduct from '../models/InvestmentProduct.js';
+import MarketObservation from '../models/MarketObservation.js';
 import Recommendation from '../models/Recommendation.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import RecommendationState from '../models/RecommendationState.js';
@@ -21,6 +23,14 @@ export const PHASE2_INDEX_MODELS = Object.freeze([
   AuditChainHead,
   Goal,
   ConversationHistory,
+]);
+
+// These schema-declared unique indexes fence every durable market-data upsert.
+// They are provisioned by the already-ordered one-shot Phase 2 migration Job;
+// application startup only verifies them.
+export const MARKET_DATA_INDEX_MODELS = Object.freeze([
+  InvestmentProduct,
+  MarketObservation,
 ]);
 
 const indexCache = new WeakMap();
@@ -62,19 +72,20 @@ function indexMatches(actual, required) {
   return true;
 }
 
-function indexReadinessError(missing) {
+function indexReadinessError(missing, scope = 'financial') {
+  const subject = scope === 'market-data' ? 'market-data' : 'financial';
   return createError(
     503,
-    'Required financial persistence indexes are unavailable.',
-    'Financial data services are temporarily unavailable.',
+    `Required ${subject} persistence indexes are unavailable.`,
+    `${subject === 'market-data' ? 'Market data' : 'Financial data'} services are temporarily unavailable.`,
     { code: 'PERSISTENCE_INDEXES_UNAVAILABLE', details: { missing } },
   );
 }
 
 /** Read-only verification. This function must never create, drop, or alter indexes. */
-export async function verifyPersistenceIndexes({ models = PHASE2_INDEX_MODELS, force = false } = {}) {
+export async function verifyPersistenceIndexes({ models = PHASE2_INDEX_MODELS, force = false, scope = 'financial' } = {}) {
   const connectionDb = models[0]?.db?.db;
-  const modelSetKey = models.map(model => model.modelName).sort().join('|');
+  const modelSetKey = `${scope}:${models.map(model => model.modelName).sort().join('|')}`;
   if (connectionDb && !force) {
     const cached = indexCache.get(connectionDb)?.get(modelSetKey);
     if (cached && cached.expiresAt > Date.now()) return cached.promise;
@@ -105,7 +116,7 @@ export async function verifyPersistenceIndexes({ models = PHASE2_INDEX_MODELS, f
       }
     }
 
-    if (missing.length) throw indexReadinessError(missing);
+    if (missing.length) throw indexReadinessError(missing, scope);
     return { ready: true, verifiedAt: new Date().toISOString() };
   })();
 
@@ -119,6 +130,11 @@ export async function verifyPersistenceIndexes({ models = PHASE2_INDEX_MODELS, f
     verification.catch(() => cachedByModelSet.delete(modelSetKey));
   }
   return verification;
+}
+
+/** Read-only startup gate for the two unique market-data upsert identities. */
+export async function verifyMarketDataPersistenceIndexes({ models = MARKET_DATA_INDEX_MODELS, force = true } = {}) {
+  return verifyPersistenceIndexes({ models, force, scope: 'market-data' });
 }
 
 /** Explicit migration entry point. Never call from an HTTP request or app startup. */
@@ -144,4 +160,62 @@ export async function migratePersistenceIndexes({ models = PHASE2_INDEX_MODELS }
     await model.createIndexes();
   }
   return verifyPersistenceIndexes({ models, force: true });
+}
+
+function migrationIndexOptions(required) {
+  return Object.fromEntries(Object.entries({
+    unique: true,
+    name: required.name,
+    partialFilterExpression: required.partialFilterExpression,
+    collation: required.collation,
+  }).filter(([, value]) => value !== undefined));
+}
+
+function marketIndexMigrationError(error, model, required) {
+  const duplicate = error?.code === 11000
+    || error?.codeName === 'DuplicateKey'
+    || /duplicate key|E11000/i.test(error?.message || '');
+  const wrapped = new Error(
+    duplicate
+      ? `Existing duplicate market-data identities block index creation for ${model.collection.collectionName}.`
+      : `Required market-data index creation failed for ${model.collection.collectionName}.`,
+    { cause: error },
+  );
+  wrapped.code = duplicate ? 'MARKET_DATA_INDEX_DUPLICATES' : 'MARKET_DATA_INDEX_CREATION_FAILED';
+  wrapped.report = {
+    collection: model.collection.collectionName,
+    index: required.name || required.key,
+    mongoCode: Number.isInteger(error?.code) ? error.code : null,
+    ...(duplicate ? {
+      duplicateKey: error?.keyValue || null,
+      ...(error?.keyValue ? {} : { duplicateDetails: error?.message || 'MongoDB reported a duplicate-key conflict.' }),
+    } : {}),
+  };
+  return wrapped;
+}
+
+/**
+ * Explicit, repeatable DDL migration for market-data upsert identities.
+ * It creates only the unique indexes declared by these two schemas and never
+ * removes or rewrites existing data/indexes. MongoDB duplicate-key failures
+ * are surfaced with the collection/index and duplicate-key details.
+ */
+export async function migrateMarketDataPersistenceIndexes({ models = MARKET_DATA_INDEX_MODELS } = {}) {
+  for (const model of models) {
+    try {
+      await model.createCollection();
+    } catch (error) {
+      if (error.code !== 48 && error.codeName !== 'NamespaceExists') throw error;
+    }
+
+    for (const required of requiredUniqueIndexes(model)) {
+      try {
+        await model.collection.createIndex(required.key, migrationIndexOptions(required));
+      } catch (error) {
+        throw marketIndexMigrationError(error, model, required);
+      }
+    }
+  }
+
+  return verifyMarketDataPersistenceIndexes({ models, force: true });
 }

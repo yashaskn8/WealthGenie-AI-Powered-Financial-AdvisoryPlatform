@@ -7,6 +7,10 @@ export const MARKET_HISTORY_CANDLE_KIND = 'MARKET_HISTORY_CANDLE';
 export const MARKET_CONTEXT_SNAPSHOT_KIND = 'MARKET_CONTEXT_SNAPSHOT';
 export const MARKET_CONTEXT_CANONICAL_ID = 'market:context:primary';
 
+// Several waiters may receive the same immutable snapshot object from the
+// provider's in-flight request coalescer. Share its durable write as well.
+const inFlightSnapshotPersistence = new WeakMap();
+
 export function buildProductOperations(snapshot) {
   return (snapshot?.products || []).map(product => ({
     updateOne: {
@@ -182,7 +186,7 @@ export async function persistMarketContextSnapshot(
   return { status: 'PERSISTED', observationWrites: 1 };
 }
 
-export async function persistVerifiedMarketSnapshot(
+async function persistVerifiedMarketSnapshotOnce(
   snapshot,
   { ProductModel = InvestmentProduct, ObservationModel = MarketObservation } = {},
 ) {
@@ -214,4 +218,43 @@ export async function persistVerifiedMarketSnapshot(
     productWrites: productOperations.length,
     observationWrites: observationOperations.length,
   };
+}
+
+export async function persistVerifiedMarketSnapshot(snapshot, options = {}) {
+  if (!snapshot || typeof snapshot !== 'object') {
+    throw new TypeError('A verified market snapshot object is required.');
+  }
+
+  const {
+    ProductModel = InvestmentProduct,
+    ObservationModel = MarketObservation,
+  } = options;
+  let productModelWrites = inFlightSnapshotPersistence.get(snapshot);
+  if (!productModelWrites) {
+    productModelWrites = new Map();
+    inFlightSnapshotPersistence.set(snapshot, productModelWrites);
+  }
+  let observationModelWrites = productModelWrites.get(ProductModel);
+  if (!observationModelWrites) {
+    observationModelWrites = new Map();
+    productModelWrites.set(ProductModel, observationModelWrites);
+  }
+
+  const pending = observationModelWrites.get(ObservationModel);
+  if (pending) {
+    const result = await pending;
+    return { ...result, coalesced: true };
+  }
+
+  const persistence = persistVerifiedMarketSnapshotOnce(snapshot, { ProductModel, ObservationModel });
+  observationModelWrites.set(ObservationModel, persistence);
+  try {
+    return await persistence;
+  } finally {
+    if (observationModelWrites.get(ObservationModel) === persistence) {
+      observationModelWrites.delete(ObservationModel);
+      if (observationModelWrites.size === 0) productModelWrites.delete(ProductModel);
+      if (productModelWrites.size === 0) inFlightSnapshotPersistence.delete(snapshot);
+    }
+  }
 }

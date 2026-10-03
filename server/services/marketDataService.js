@@ -68,6 +68,44 @@ const LEGACY_SYMBOL_TO_BENCHMARK_ID = Object.freeze({
   '^INDIAVIX': MARKET_BENCHMARKS.INDIA_VIX.canonicalProductId,
 });
 
+function safeTimingCode(error) {
+  return typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
+    ? error.code
+    : null;
+}
+
+async function measuredAmfiStage(onStageTiming, stage, operation) {
+  const startedAt = performance.now();
+  let status = 'ERROR';
+  let code = null;
+  let provider = 'AMFI';
+  try {
+    const result = await operation();
+    status = typeof result?.status === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(result.status)
+      ? result.status
+      : 'COMPLETED';
+    code = safeTimingCode({ code: result?.code || result?.error?.code })
+      || (result?.coalesced ? 'MARKET_PERSISTENCE_COALESCED' : null);
+    if (result?.provider === 'AMFI') provider = 'AMFI';
+    return result;
+  } catch (error) {
+    code = safeTimingCode(error);
+    throw error;
+  } finally {
+    if (typeof onStageTiming === 'function') {
+      try {
+        onStageTiming({
+          stage,
+          elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)),
+          provider,
+          status,
+          ...(code ? { code } : {}),
+        });
+      } catch { /* instrumentation must not alter market-data behavior */ }
+    }
+  }
+}
+
 async function persistFreshSnapshot(snapshot) {
   if (snapshot?.cache?.hit || ![AVAILABILITY.AVAILABLE, AVAILABILITY.PARTIAL].includes(snapshot?.status)) {
     return { status: 'NOT_PERSISTED', productWrites: 0, observationWrites: 0 };
@@ -84,9 +122,12 @@ async function persistFreshSnapshot(snapshot) {
   }
 }
 
-export async function fetchAmfiProductSnapshot({ forceRefresh = false, persist = true } = {}) {
-  const snapshot = await amfiProvider.getSnapshot({ forceRefresh });
-  const persistence = persist ? await persistFreshSnapshot(snapshot) : { status: 'NOT_REQUESTED' };
+export async function fetchAmfiProductSnapshot({ forceRefresh = false, persist = true, onStageTiming } = {}) {
+  const snapshot = await measuredAmfiStage(onStageTiming, 'amfi_current_fetch',
+    () => amfiProvider.getSnapshot({ forceRefresh }));
+  const persistence = await measuredAmfiStage(onStageTiming, 'amfi_current_persistence', () => persist
+    ? persistFreshSnapshot(snapshot)
+    : { status: 'NOT_REQUESTED', code: 'PERSISTENCE_NOT_REQUESTED' });
   return { ...snapshot, persistence };
 }
 
@@ -94,15 +135,18 @@ export async function fetchAmfiHistoricalNavSnapshot({
   targetDate,
   forceRefresh = false,
   persist = true,
+  onStageTiming,
 } = {}) {
   const target = targetDate ? new Date(targetDate) : new Date();
   if (Number.isNaN(target.getTime())) throw new TypeError('targetDate must be a valid date.');
   if (!targetDate) target.setUTCFullYear(target.getUTCFullYear() - 1);
-  const snapshot = await amfiHistoryProvider.getSnapshot({
+  const snapshot = await measuredAmfiStage(onStageTiming, 'amfi_historical_fetch', () => amfiHistoryProvider.getSnapshot({
     targetDate: target.toISOString().slice(0, 10),
     forceRefresh,
-  });
-  const persistence = persist ? await persistFreshSnapshot(snapshot) : { status: 'NOT_REQUESTED' };
+  }));
+  const persistence = await measuredAmfiStage(onStageTiming, 'amfi_historical_persistence', () => persist
+    ? persistFreshSnapshot(snapshot)
+    : { status: 'NOT_REQUESTED', code: 'PERSISTENCE_NOT_REQUESTED' });
   return { ...snapshot, persistence };
 }
 

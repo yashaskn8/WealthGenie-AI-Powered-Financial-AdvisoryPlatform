@@ -12,6 +12,18 @@ class MetricsCollector {
       groq_failure_total: 0,
       nvidia_nim_success_total: 0,
       nvidia_nim_failure_total: 0,
+      provider_success_total: 0,
+      provider_request_failure_total: 0,
+      provider_health_failure_total: 0,
+      provider_safety_rejection_total: 0,
+      provider_rate_limit_total: 0,
+      provider_auth_failure_total: 0,
+      provider_timeout_total: 0,
+      circuit_open_total: 0,
+      circuit_half_open_probe_total: 0,
+      circuit_recovery_success_total: 0,
+      circuit_recovery_failure_total: 0,
+      deterministic_fallback_total: 0,
       grounded_validation_success_total: 0,
       grounded_validation_failure_total: 0,
       grounded_fallback_total: 0,
@@ -265,6 +277,15 @@ class MetricsCollector {
     lines.push(`wealthgenie_chat_requests_total{provider="nvidia_nim",status="success"} ${this.counters.nvidia_nim_success_total}`);
     lines.push(`wealthgenie_chat_requests_total{provider="nvidia_nim",status="failure"} ${this.counters.nvidia_nim_failure_total}`);
     lines.push(`wealthgenie_chat_requests_total{provider="deterministic_template",status="fallback"} ${this.counters.grounded_fallback_total}`);
+    for (const name of [
+      'provider_success_total', 'provider_request_failure_total', 'provider_health_failure_total',
+      'provider_safety_rejection_total', 'provider_rate_limit_total', 'provider_auth_failure_total',
+      'provider_timeout_total', 'circuit_open_total', 'circuit_half_open_probe_total',
+      'circuit_recovery_success_total', 'circuit_recovery_failure_total', 'deterministic_fallback_total',
+    ]) {
+      lines.push(`# TYPE wealthgenie_${name} counter`);
+      lines.push(`wealthgenie_${name} ${this.counters[name]}`);
+    }
 
     lines.push('\n# HELP wealthgenie_grounding_validation_total Grounding validator outcomes');
     lines.push('# TYPE wealthgenie_grounding_validation_total counter');

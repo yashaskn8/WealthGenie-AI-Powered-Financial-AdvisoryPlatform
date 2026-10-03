@@ -6,11 +6,15 @@ WORKDIR /app
 ARG VITE_API_URL=/api
 ENV VITE_API_URL=$VITE_API_URL
 
-COPY package*.json ./
+COPY reactapp/package*.json ./
 RUN npm ci
 
-COPY . .
-RUN chown -R node:node /app
+COPY reactapp/. .
+# The frontend intentionally imports two shared root-level contracts. Keep the
+# Docker build context at the project root and place shared/ where the existing
+# relative imports resolve (/app/src/... -> /shared/...).
+COPY shared /shared
+RUN chown -R node:node /app /shared
 USER node
 RUN npm run build
 
@@ -18,7 +22,7 @@ RUN npm run build
 FROM nginx:alpine
 
 COPY --from=build /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY reactapp/nginx.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
 

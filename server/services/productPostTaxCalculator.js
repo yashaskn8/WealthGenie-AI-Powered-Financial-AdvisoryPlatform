@@ -123,11 +123,13 @@ function createAnalysis({
       statute: completeTaxRuleMetadata.statute,
       classificationId: completeTaxRuleMetadata.classificationId,
       legacyClassificationAlias: completeTaxRuleMetadata.legacyClassificationAlias,
+      productEvidence: taxMetadata?.productEvidence ? structuredClone(taxMetadata.productEvidence) : null,
     } : (taxMetadata?.taxClass ? {
       statute: null,
       classificationId: null,
       legacyClassificationAlias: taxMetadata.taxClass,
       status: 'STATUTE_POLICY_UNAVAILABLE',
+      productEvidence: taxMetadata?.productEvidence ? structuredClone(taxMetadata.productEvidence) : null,
     } : null),
     taxRuleMetadata: completeTaxRuleMetadata,
     fiscalYear,
@@ -185,6 +187,7 @@ function missingRequiredTaxInputs(taxCalculationContext, requiredTaxInputs) {
       ? false
       : !Number.isFinite(Number(context.holdingPeriodMonths));
     if (key === 'section112AExemptionUsed') return !Number.isFinite(Number(context.section112AExemptionUsed));
+    if (key === 'sttConditionAssumedSatisfied') return context.sttConditionAssumedSatisfied === undefined || context.sttConditionAssumedSatisfied === null;
     return context[key] === undefined || context[key] === null || context[key] === '';
   }).concat(hasPartialExactDates ? ['acquisitionDate', 'redemptionDate'] : []);
 }
@@ -433,6 +436,79 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
     });
   }
 
+  if (taxCalculationContext.sttConditionAssumedSatisfied !== true) {
+    return createAnalysis({
+      status: PRODUCT_TAX_STATUSES.UNAVAILABLE,
+      taxMetadata,
+      policy,
+      fiscalYear,
+      policyVersion: policy.policyVersion,
+      principal,
+      requiredTaxInputs: [],
+      dataClass: 'UNAVAILABLE',
+      assumptions,
+      unavailableReasons: ['EQUITY_FUND_STT_CONDITION_NOT_ESTABLISHED'],
+      metricLabel: 'Historical 1Y after-tax return',
+      disclosure: 'No tax amount is calculated because this scenario does not establish that the applicable securities transaction tax condition for the hypothetical transfer is satisfied. Product classification does not prove that a particular transaction meets that condition.',
+      isHistoricalEstimate: true,
+    });
+  }
+
+  // A standalone historical NAV loss (or exactly flat return) is not a
+  // positive capital gain and must never be passed to the gain-only tax
+  // calculator. Preserve the source-derived result and the applicable
+  // holding-period rule as classification evidence, while explicitly leaving
+  // loss set-off/carry-forward and taxpayer-level benefits unmodeled.
+  if (grossGain <= 0) {
+    if (!holdingPeriodClassification
+        && (!Number.isFinite(holdingPeriodMonths) || holdingPeriodMonths < 0)) {
+      throw new TypeError('holdingPeriodMonths must be an explicit non-negative finite number');
+    }
+    const section112AExemptionUsed = Number(taxCalculationContext.section112AExemptionUsed);
+    if (!Number.isFinite(section112AExemptionUsed) || section112AExemptionUsed < 0) {
+      throw new TypeError('section112AExemptionUsed must be an explicit non-negative finite number');
+    }
+    const isLongTerm = holdingPeriodClassification?.isLongTerm
+      ?? (holdingPeriodMonths > getCapitalGainsHoldingPeriodMonths(fiscalYear, 'listed'));
+    const applicableRule = isLongTerm
+      ? 'SECTION_112A_LTCG_SPECIAL_RATE'
+      : 'SECTION_111A_STCG_SPECIAL_RATE';
+    const isLoss = grossGain < 0;
+    return createAnalysis({
+      status: PRODUCT_TAX_STATUSES.CALCULATED,
+      taxMetadata,
+      policy,
+      fiscalYear,
+      policyVersion: policy.policyVersion,
+      principal,
+      grossGain,
+      taxableGain: 0,
+      exemptionApplied: 0,
+      incrementalTax: 0,
+      cess: 0,
+      surcharge: 0,
+      netGain: grossGain,
+      postTaxRatePct: Number(((grossGain / principal) * 100).toFixed(2)),
+      calculationClass: POST_TAX_CALCULATION_CLASSES.HISTORICAL_RETURN_POST_TAX_ILLUSTRATION,
+      inputBasis: 'HISTORICAL_PROVIDER_FACT_PLUS_EXPLICIT_TAX_INPUTS',
+      holdingPeriodBasis,
+      dataClass: 'HISTORICAL_PROVIDER_FACT',
+      assumptions: [
+        ...assumptions,
+        'HISTORICAL_RETURN_IS_NOT_A_FORECAST',
+        'STT_CONDITION_ASSUMED_SATISFIED_FOR_HYPOTHETICAL_TRANSFER',
+        isLoss ? 'CAPITAL_LOSS_TAX_BENEFIT_NOT_MODELED' : 'NO_POSITIVE_CAPITAL_GAIN_TAX_NOT_APPLIED',
+      ],
+      metricLabel: 'Historical 1Y after-tax return',
+      disclosure: isLoss
+        ? 'HISTORICAL — NOT A FORECAST. The qualified one-year provider NAV comparison is not a realized gain or a future return. This standalone illustration shows a historical capital loss; no tax is charged on this negative result. Loss set-off, carry-forward, or any taxpayer-level tax benefit is not modeled, and no realized transaction is asserted. The applicable STT condition is assumed for the hypothetical transfer and is not verified for an actual transaction.'
+        : 'HISTORICAL — NOT A FORECAST. The qualified one-year provider NAV comparison is not a realized gain or a future return. This standalone illustration has no positive capital gain, so no tax is charged on this zero result; tax on other income is not determined and no realized transaction is asserted. The applicable STT condition is assumed for the hypothetical transfer and is not verified for an actual transaction.',
+      isHistoricalEstimate: true,
+      historicalObservationWindowMonths: 12,
+      rulesApplied: [applicableRule],
+    });
+  }
+
   const capitalGains = computeEquityCapitalGainsTax({
     grossGain,
     holdingPeriodMonths,
@@ -486,9 +562,9 @@ export function calculateProductPostTaxOutcome({ product, profile: _profile = {}
       ? holdingPeriodBasis
       : capitalGains.holdingPeriodBasis,
     dataClass: 'HISTORICAL_PROVIDER_FACT',
-    assumptions: [...assumptions, 'HISTORICAL_RETURN_IS_NOT_A_FORECAST'],
+    assumptions: [...assumptions, 'HISTORICAL_RETURN_IS_NOT_A_FORECAST', 'STT_CONDITION_ASSUMED_SATISFIED_FOR_HYPOTHETICAL_TRANSFER'],
     metricLabel: 'Historical 1Y after-tax return',
-    disclosure: `HISTORICAL — NOT A FORECAST. The provider return window is a verified 1-year observation; it is not the user's realized gain or a future return. ${capitalGains.taxClass === 'EQUITY_LTCG_SECTION_112A' ? 'Equity long-term capital-gains treatment uses the explicit holding period and remaining taxpayer-level annual exemption.' : 'Equity short-term capital-gains treatment uses the explicit holding period.'} Special-rate tax is separate from ordinary slab tax and applicable rebate rules.`,
+    disclosure: `HISTORICAL — NOT A FORECAST. The provider return window is a verified 1-year observation; it is not the user's realized gain or a future return. ${capitalGains.taxClass === 'EQUITY_LTCG_SECTION_112A' ? 'Equity long-term capital-gains treatment uses the explicit holding period and remaining taxpayer-level annual exemption.' : 'Equity short-term capital-gains treatment uses the explicit holding period.'} This hypothetical illustration assumes, but does not verify, that the applicable STT condition is met for the transfer. Special-rate tax is separate from ordinary slab tax and applicable rebate rules.`,
     isHistoricalEstimate: true,
     historicalObservationWindowMonths: 12,
     rulesApplied: capitalGains.rulesApplied,

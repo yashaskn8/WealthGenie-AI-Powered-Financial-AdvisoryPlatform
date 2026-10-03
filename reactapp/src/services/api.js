@@ -6,6 +6,10 @@
  */
 
 import { toFinancialProfilePayload } from '../utils/financialProfile';
+import {
+  PROFILE_USER_FLOW_TIMEOUT_MS,
+  WTI_USER_FLOW_TIMEOUT_MS,
+} from '../../../shared/demoPreflightContracts.js';
 
 const API_BASE = (import.meta.env.VITE_API_URL || '/api').replace(/\/+$/, '');
 const configuredTimeout = Number(import.meta.env.VITE_API_TIMEOUT_MS);
@@ -330,7 +334,7 @@ export async function buildProfile(profile, requestOptions = {}) {
 
 export async function precomputeProfile(profile, requestOptions = {}) {
   return request('POST', '/profile/precompute', toFinancialProfilePayload(profile), {
-    timeoutMs: 90000,
+    timeoutMs: PROFILE_USER_FLOW_TIMEOUT_MS,
     ...requestOptions,
   });
 }
@@ -340,7 +344,7 @@ export async function completeFinancialProfile(profile, candidateId = null, requ
     ...toFinancialProfilePayload(profile),
     ...(candidateId ? { candidateId } : {}),
   }, {
-    timeoutMs: 90000,
+    timeoutMs: PROFILE_USER_FLOW_TIMEOUT_MS,
     ...requestOptions,
   });
 }
@@ -521,7 +525,11 @@ export async function rankInvestmentCandidates(profileId, parentInstrumentId, ta
     payload.taxCalculationContext = actualTaxContext;
   }
 
-  return request('POST', '/instruments/rank-wti', payload, { timeoutMs: 90000, ...actualOptions });
+  const requestedTimeout = Number(actualOptions.timeoutMs);
+  const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
+    ? Math.min(requestedTimeout, WTI_USER_FLOW_TIMEOUT_MS)
+    : WTI_USER_FLOW_TIMEOUT_MS;
+  return request('POST', '/instruments/rank-wti', payload, { ...actualOptions, timeoutMs });
 }
 
 // ─── PROJECTIONS ─────────────────────────────────────────

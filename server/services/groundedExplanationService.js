@@ -20,6 +20,9 @@ import { PrometheusMetrics } from './metricsCollector.js';
 
 export const GROUNDED_EXPLANATION_PROMPT_VERSION = 'grounded-financial-explanation-prompt-1.0.0';
 export const GROUNDED_LLM_TOOL_ALLOWLIST = Object.freeze([]);
+// Matches the existing default PlanReview execution timeout; provider failover
+// is not allowed to stack three independent 20–30s adapter timeouts.
+export const GROUNDED_PROVIDER_CHAIN_DEADLINE_MS = 30000;
 const EXPLANATION_CACHE_TTL_SECONDS = 900;
 
 const PROVIDER_LABELS = Object.freeze({
@@ -133,7 +136,10 @@ function outputResult({ candidate, packet, provider, model, latencyMs, tokensUse
     throw Object.assign(new Error('LLM_GROUNDING_VALIDATION_FAILED'), { validation });
   }
   PrometheusMetrics.inc('grounded_validation_success_total');
-  if (fallback) PrometheusMetrics.inc('grounded_fallback_total');
+  if (fallback) {
+    PrometheusMetrics.inc('grounded_fallback_total');
+    PrometheusMetrics.inc('deterministic_fallback_total');
+  }
   const evidenceById = new Map(packet.entries.map(item => [item.id, item]));
   return {
     status: fallback ? 'GROUNDED_EXPLANATION_FALLBACK' : 'GROUNDED_EXPLANATION_AVAILABLE',
@@ -160,8 +166,170 @@ export async function generateGroundedExplanation({ question, evidencePacket }, 
   const getCached = dependencies.getCache || getCache;
   const setCached = dependencies.setCache || setCache;
   const failures = [];
-  if (isGroundingBoundaryAttack(question)) {
-    return outputResult({
+  let providerAttemptCount = 0;
+  let providerAttemptFailureCount = 0;
+  const parentSignal = dependencies.signal;
+  if (parentSignal?.aborted) {
+    throw parentSignal.reason || Object.assign(new Error('Grounded explanation was cancelled.'), { name: 'AbortError' });
+  }
+  const timeoutMs = Math.max(1, Math.min(60000, Number(dependencies.providerDeadlineMs) || GROUNDED_PROVIDER_CHAIN_DEADLINE_MS));
+  const setTimer = dependencies.setTimeoutImpl || setTimeout;
+  const clearTimer = dependencies.clearTimeoutImpl || clearTimeout;
+  const providerController = new AbortController();
+  let deadlineExpired = false;
+  const abortForDeadline = () => {
+    deadlineExpired = true;
+    const error = new Error('The overall provider-attempt deadline expired.');
+    error.code = 'PROVIDER_CHAIN_DEADLINE_EXCEEDED';
+    providerController.abort(error);
+  };
+  const abortForParent = () => providerController.abort(parentSignal.reason || Object.assign(new Error('Grounded explanation was cancelled.'), { name: 'AbortError' }));
+  parentSignal?.addEventListener('abort', abortForParent, { once: true });
+  const deadlineTimer = setTimer(abortForDeadline, timeoutMs);
+  deadlineTimer?.unref?.();
+
+  const awaitWithSignal = async operation => {
+    if (providerController.signal.aborted) throw providerController.signal.reason;
+    let abortListener;
+    const aborted = new Promise((_, reject) => {
+      abortListener = () => reject(providerController.signal.reason || Object.assign(new Error('Provider attempt aborted.'), { name: 'AbortError' }));
+      providerController.signal.addEventListener('abort', abortListener, { once: true });
+    });
+    try {
+      return await Promise.race([Promise.resolve(operation), aborted]);
+    } finally {
+      providerController.signal.removeEventListener('abort', abortListener);
+    }
+  };
+
+  const runProviderChain = async () => {
+    if (isGroundingBoundaryAttack(question)) {
+      const result = outputResult({
+        candidate: deterministicCandidate(evidencePacket),
+        packet: evidencePacket,
+        provider: 'deterministic_template',
+        model: null,
+        latencyMs: 0,
+        tokensUsed: 0,
+        fallback: true,
+        reasonCodes: ['PROMPT_INJECTION_BLOCKED'],
+      });
+      result.providerAttemptCount = 0;
+      result.providerAttemptFailureCount = 0;
+      return result;
+    }
+    for (const provider of providerOrder(dependencies)) {
+      if (providerController.signal.aborted) {
+        if (parentSignal?.aborted) throw parentSignal.reason || Object.assign(new Error('Grounded explanation was cancelled.'), { name: 'AbortError' });
+        failures.push('PROVIDER_CHAIN_DEADLINE_EXCEEDED');
+        break;
+      }
+      const providerName = provider?.name || 'unknown';
+      const model = provider?.configuredModel?.() || null;
+      const cacheKey = `grounded-explanation:${evidencePacket.evidenceHash}:${GROUNDED_EXPLANATION_PROMPT_VERSION}:${GROUNDED_EVIDENCE_VERSION}:${providerName}:${model || 'unconfigured'}`;
+      let cached = null;
+      try {
+        cached = await getCached(cacheKey);
+      } catch {
+        failures.push('EXPLANATION_CACHE_READ_FAILED');
+      }
+      if (cached?.validation?.status === 'PASS'
+          && cached.evidenceHash === evidencePacket.evidenceHash
+          && cached.promptVersion === GROUNDED_EXPLANATION_PROMPT_VERSION
+          && cached.groundingVersion === GROUNDED_EVIDENCE_VERSION
+          && cached.provider === (PROVIDER_LABELS[providerName] || providerName.toUpperCase())
+          && cached.model === model) {
+        const cachedValidation = validateGroundedExplanation(cached, evidencePacket);
+        if (cachedValidation.valid) {
+          const evidenceById = new Map(evidencePacket.entries.map(item => [item.id, item]));
+          return {
+            ...cached,
+            evidenceIdsUsed: cachedValidation.evidenceIdsUsed,
+            citations: cachedValidation.evidenceIdsUsed
+              .map(id => evidenceById.get(id)).filter(Boolean).map(citationFor),
+            cached: true,
+            providerAttemptCount: 0,
+            providerAttemptFailureCount: 0,
+          };
+        }
+        failures.push('EXPLANATION_CACHE_VALIDATION_FAILED');
+      }
+      if (typeof provider.isConfigured === 'function' && !provider.isConfigured()) {
+        failures.push('PROVIDER_NOT_CONFIGURED');
+        continue;
+      }
+      if (typeof dependencies.beforeProviderAttempt === 'function') {
+        const admitted = await dependencies.beforeProviderAttempt({ provider, providerAttemptCount });
+        if (!admitted) {
+          failures.push('PROVIDER_BUDGET_EXHAUSTED');
+          break;
+        }
+      }
+      const startedAt = Date.now();
+      let response = null;
+      try {
+        providerAttemptCount += 1;
+        response = await awaitWithSignal(provider.generate({
+          systemPrompt: buildSystemPrompt(),
+          recentHistory: [{ role: 'user', parts: [{ text: userPrompt(question, evidencePacket) }] }],
+          maxTokens: 1200,
+          jsonMode: true,
+          tools: GROUNDED_LLM_TOOL_ALLOWLIST.length > 0 ? GROUNDED_LLM_TOOL_ALLOWLIST : null,
+          signal: providerController.signal,
+        }));
+      } catch (error) {
+        if (parentSignal?.aborted || (!deadlineExpired && (error?.name === 'AbortError' || error?.code === 'ERR_CANCELED'))
+            || error?.code === 'AGENT_BUDGET_EXCEEDED' || error?.code === 'AGENT_BUDGET_PERSISTENCE_UNAVAILABLE') throw error;
+        if (deadlineExpired || error?.code === 'PROVIDER_CHAIN_DEADLINE_EXCEEDED') {
+          failures.push('PROVIDER_CHAIN_DEADLINE_EXCEEDED');
+          providerAttemptFailureCount += 1;
+          break;
+        }
+        const code = String(error?.code || '');
+        // Provider adapters normally normalize transport failures. A custom or
+        // unexpectedly throwing adapter still degrades to the deterministic,
+        // evidence-only answer without leaking its exception text.
+        failures.push(code.startsWith('PROVIDER_') ? code : 'PROVIDER_INTERNAL_ERROR');
+        providerAttemptFailureCount += 1;
+        continue;
+      }
+      if (!response) {
+        const reason = provider.lastFailureReason || `${providerName.toUpperCase()}_UNAVAILABLE`;
+        failures.push(reason);
+        providerAttemptFailureCount += 1;
+        // A provider safety refusal is request-specific and must not be routed
+        // around by trying a different external model.
+        if (reason === 'PROVIDER_SAFETY_REJECTION') break;
+        continue;
+      }
+      try {
+        const candidate = parseGroundedModelJson(response.text);
+        const result = outputResult({
+          candidate,
+          packet: evidencePacket,
+          provider: response.provider,
+          model: response.model || model,
+          latencyMs: Date.now() - startedAt,
+          tokensUsed: response.tokensUsed,
+          fallback: false,
+          reasonCodes: [],
+        });
+        result.providerAttemptCount = providerAttemptCount;
+        result.providerAttemptFailureCount = providerAttemptFailureCount;
+        try {
+          await setCached(cacheKey, result, EXPLANATION_CACHE_TTL_SECONDS);
+        } catch {
+          // Explanation caching is an optimisation; never fail the grounded result.
+        }
+        return result;
+      } catch (error) {
+        providerAttemptFailureCount += 1;
+        failures.push(error.message === 'LLM_GROUNDING_VALIDATION_FAILED'
+          ? 'LLM_GROUNDING_VALIDATION_FAILED'
+          : error.message);
+      }
+    }
+    const result = outputResult({
       candidate: deterministicCandidate(evidencePacket),
       packet: evidencePacket,
       provider: 'deterministic_template',
@@ -169,94 +337,19 @@ export async function generateGroundedExplanation({ question, evidencePacket }, 
       latencyMs: 0,
       tokensUsed: 0,
       fallback: true,
-      reasonCodes: ['PROMPT_INJECTION_BLOCKED'],
+      reasonCodes: [...new Set(failures.length ? failures : ['NO_LLM_PROVIDER_CONFIGURED'])],
     });
+    result.providerAttemptCount = providerAttemptCount;
+    result.providerAttemptFailureCount = providerAttemptFailureCount;
+    return result;
+  };
+
+  try {
+    return await runProviderChain();
+  } finally {
+    clearTimer(deadlineTimer);
+    parentSignal?.removeEventListener('abort', abortForParent);
   }
-  for (const provider of providerOrder(dependencies)) {
-    const providerName = provider?.name || 'unknown';
-    const model = provider?.configuredModel?.() || null;
-    const cacheKey = `grounded-explanation:${evidencePacket.evidenceHash}:${GROUNDED_EXPLANATION_PROMPT_VERSION}:${GROUNDED_EVIDENCE_VERSION}:${providerName}:${model || 'unconfigured'}`;
-    let cached = null;
-    try {
-      cached = await getCached(cacheKey);
-    } catch {
-      failures.push('EXPLANATION_CACHE_READ_FAILED');
-    }
-    if (cached?.validation?.status === 'PASS'
-        && cached.evidenceHash === evidencePacket.evidenceHash
-        && cached.promptVersion === GROUNDED_EXPLANATION_PROMPT_VERSION
-        && cached.groundingVersion === GROUNDED_EVIDENCE_VERSION
-        && cached.provider === (PROVIDER_LABELS[providerName] || providerName.toUpperCase())
-        && cached.model === model) {
-      const cachedValidation = validateGroundedExplanation(cached, evidencePacket);
-      if (cachedValidation.valid) {
-        const evidenceById = new Map(evidencePacket.entries.map(item => [item.id, item]));
-        return {
-          ...cached,
-          evidenceIdsUsed: cachedValidation.evidenceIdsUsed,
-          citations: cachedValidation.evidenceIdsUsed
-            .map(id => evidenceById.get(id)).filter(Boolean).map(citationFor),
-          cached: true,
-        };
-      }
-      failures.push('EXPLANATION_CACHE_VALIDATION_FAILED');
-    }
-    const startedAt = Date.now();
-    let response = null;
-    try {
-      response = await provider.generate({
-        systemPrompt: buildSystemPrompt(),
-        recentHistory: [{ role: 'user', parts: [{ text: userPrompt(question, evidencePacket) }] }],
-        maxTokens: 1200,
-        jsonMode: true,
-        tools: GROUNDED_LLM_TOOL_ALLOWLIST.length > 0 ? GROUNDED_LLM_TOOL_ALLOWLIST : null,
-        signal: dependencies.signal,
-      });
-    } catch (error) {
-      if (dependencies.signal?.aborted || error?.name === 'AbortError' || error?.code === 'ERR_CANCELED'
-          || error?.code === 'AGENT_BUDGET_EXCEEDED' || error?.code === 'AGENT_BUDGET_PERSISTENCE_UNAVAILABLE') throw error;
-      failures.push(`${providerName.toUpperCase()}_REQUEST_FAILED`);
-      continue;
-    }
-    if (!response) {
-      failures.push(provider.lastFailureReason || `${providerName.toUpperCase()}_UNAVAILABLE`);
-      continue;
-    }
-    try {
-      const candidate = parseGroundedModelJson(response.text);
-      const result = outputResult({
-        candidate,
-        packet: evidencePacket,
-        provider: response.provider,
-        model: response.model || model,
-        latencyMs: Date.now() - startedAt,
-        tokensUsed: response.tokensUsed,
-        fallback: false,
-        reasonCodes: [],
-      });
-      try {
-        await setCached(cacheKey, result, EXPLANATION_CACHE_TTL_SECONDS);
-      } catch {
-        // Explanation caching is an optimisation; never fail the grounded result.
-      }
-      return result;
-    } catch (error) {
-      failures.push(error.message === 'LLM_GROUNDING_VALIDATION_FAILED'
-        ? 'LLM_GROUNDING_VALIDATION_FAILED'
-        : error.message);
-    }
-  }
-  const candidate = deterministicCandidate(evidencePacket);
-  return outputResult({
-    candidate,
-    packet: evidencePacket,
-    provider: 'deterministic_template',
-    model: null,
-    latencyMs: 0,
-    tokensUsed: 0,
-    fallback: true,
-    reasonCodes: [...new Set(failures.length ? failures : ['NO_LLM_PROVIDER_CONFIGURED'])],
-  });
 }
 
 const GOVERNMENT_QUERY_TO_PARENT = Object.freeze([

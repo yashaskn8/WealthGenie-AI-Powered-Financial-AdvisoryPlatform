@@ -11,6 +11,7 @@ test('WG-009: Dockerfiles for server, reactapp, ml-service and root docker-compo
   const dockerFiles = [
     path.join(rootDir, 'server', 'Dockerfile'),
     path.join(rootDir, 'server', '.dockerignore'),
+    path.join(rootDir, '.dockerignore'),
     path.join(rootDir, 'reactapp', 'Dockerfile'),
     path.join(rootDir, 'reactapp', '.dockerignore'),
     path.join(rootDir, 'ml-service', 'Dockerfile'),
@@ -35,9 +36,12 @@ test('Docker full-stack wiring proxies frontend API calls and supplies ML operat
   const composeConfig = fs.readFileSync(path.join(rootDir, 'docker-compose.yml'), 'utf8');
   const mongoService = fs.readFileSync(path.join(rootDir, 'k8s', 'mongodb', 'service.yaml'), 'utf8');
 
-  assert.match(frontendDockerfile, /COPY\s+nginx\.conf\s+\/etc\/nginx\/conf\.d\/default\.conf/);
+  assert.match(frontendDockerfile, /COPY\s+reactapp\/nginx\.conf\s+\/etc\/nginx\/conf\.d\/default\.conf/);
   assert.match(nginxConfig, /location\s+\/api\//);
   assert.match(nginxConfig, /proxy_pass\s+http:\/\/wealthgenie-server:5000;/);
+  assert.match(composeConfig, /server:\s*\n\s+build:\s*\n\s+context:\s*\.\s*\n\s+dockerfile:\s*server\/Dockerfile/);
+  assert.match(composeConfig, /agent-worker:\s*\n\s+build:\s*\n\s+context:\s*\.\s*\n\s+dockerfile:\s*server\/Dockerfile/);
+  assert.match(composeConfig, /reactapp:\s*\n\s+build:\s*\n\s+context:\s*\.\s*\n\s+dockerfile:\s*reactapp\/Dockerfile/);
   assert.match(composeConfig, /aliases:[\s\S]*- wealthgenie-server/);
   assert.match(composeConfig, /ML_OPERATOR_KEY=\$\{ML_OPERATOR_KEY:-\}/);
   assert.match(composeConfig, /METRICS_TOKEN=\$\{METRICS_TOKEN:-\}/);
@@ -46,6 +50,36 @@ test('Docker full-stack wiring proxies frontend API calls and supplies ML operat
   assert.match(composeConfig, /CORS_ORIGINS=\$\{CORS_ORIGINS:-http:\/\/localhost,http:\/\/127\.0\.0\.1\}/);
   assert.match(composeConfig, /MONGODB_URI=mongodb:\/\/mongodb:27017\/wealthgenie\?replicaSet=rs0/);
   assert.match(mongoService, /publishNotReadyAddresses:\s*true/);
+});
+
+test('root-context application images include authoritative shared modules without host dependencies or env files', () => {
+  const rootDir = fs.existsSync(path.join(process.cwd(), 'docker-compose.yml'))
+    ? process.cwd()
+    : path.resolve(process.cwd(), '..');
+  const rootDockerignore = fs.readFileSync(path.join(rootDir, '.dockerignore'), 'utf8');
+  const serverDockerfile = fs.readFileSync(path.join(rootDir, 'server', 'Dockerfile'), 'utf8');
+  const frontendDockerfile = fs.readFileSync(path.join(rootDir, 'reactapp', 'Dockerfile'), 'utf8');
+
+  for (const sharedFile of ['buildIdentity.js', 'demoPreflightContracts.js']) {
+    assert.ok(fs.existsSync(path.join(rootDir, 'shared', sharedFile)), `Missing shared contract: ${sharedFile}`);
+  }
+  assert.match(rootDockerignore, /^!server\/\*\*$/m);
+  assert.match(rootDockerignore, /^!reactapp\/\*\*$/m);
+  assert.match(rootDockerignore, /^!shared\/buildIdentity\.js$/m);
+  assert.match(rootDockerignore, /^!shared\/demoPreflightContracts\.js$/m);
+  assert.match(rootDockerignore, /^server\/node_modules$/m);
+  assert.match(rootDockerignore, /^reactapp\/node_modules$/m);
+  assert.match(rootDockerignore, /^server\/\.env$/m);
+  assert.match(rootDockerignore, /^server\/\.env\.\*$/m);
+  assert.match(rootDockerignore, /^server\/\*\*\/\.env\*$/m);
+  assert.match(rootDockerignore, /^reactapp\/\.env\*$/m);
+  assert.match(rootDockerignore, /^reactapp\/\*\*\/\.env\*$/m);
+  assert.match(serverDockerfile, /COPY\s+server\/package\*\.json\s+\.\//);
+  assert.match(serverDockerfile, /COPY\s+server\/\.\s+\./);
+  assert.match(serverDockerfile, /COPY\s+shared\s+\/shared/);
+  assert.match(frontendDockerfile, /COPY\s+reactapp\/package\*\.json\s+\.\//);
+  assert.match(frontendDockerfile, /COPY\s+reactapp\/\.\s+\./);
+  assert.match(frontendDockerfile, /COPY\s+shared\s+\/shared/);
 });
 
 test('production edge timeout hierarchy is explicit and above the 90-second client deadline', () => {

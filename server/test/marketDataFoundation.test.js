@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseAmfiNavReport } from '../services/marketData/AmfiNavProvider.js';
+import AmfiNavProvider, { parseAmfiNavReport } from '../services/marketData/AmfiNavProvider.js';
+import AmfiNavHistoryProvider from '../services/marketData/AmfiNavHistoryProvider.js';
+import { fetchAmfiHistoricalNavSnapshot, fetchAmfiProductSnapshot } from '../services/marketDataService.js';
 import UpstoxMarketDataProvider from '../services/marketData/UpstoxMarketDataProvider.js';
 import UpstoxHistoricalCandleProvider, {
   parseUpstoxDailyCandles,
@@ -14,6 +16,7 @@ import { buildAmfiProductIdentity } from '../services/marketData/productIdentity
 import {
   clearInFlightMarketRequestsForTest,
   coalesceMarketRequest,
+  readThroughMarketCache,
 } from '../services/marketData/requestCache.js';
 import {
   buildObservationOperations,
@@ -68,6 +71,45 @@ test('missing financial values remain null and unavailable instead of becoming z
   assert.equal(nullableFiniteNumber(0), 0);
   assert.equal(snapshot.facts[1].value, null);
   assert.equal(snapshot.facts[1].availabilityStatus, AVAILABILITY.UNAVAILABLE);
+});
+
+test('WTI AMFI timing reports fetch and persistence stages without provider payloads', async () => {
+  const currentDescriptor = Object.getOwnPropertyDescriptor(AmfiNavProvider.prototype, 'getSnapshot');
+  const historyDescriptor = Object.getOwnPropertyDescriptor(AmfiNavHistoryProvider.prototype, 'getSnapshot');
+  const sourceError = { provider: 'AMFI', status: AVAILABILITY.SOURCE_ERROR, products: [], facts: [] };
+  const events = [];
+  try {
+    AmfiNavProvider.prototype.getSnapshot = async () => ({ ...sourceError, fetchedAt: FIXED_NOW.toISOString() });
+    AmfiNavHistoryProvider.prototype.getSnapshot = async () => ({ ...sourceError, fetchedAt: FIXED_NOW.toISOString() });
+    const current = await fetchAmfiProductSnapshot({ onStageTiming: event => events.push(event) });
+    const historical = await fetchAmfiHistoricalNavSnapshot({ targetDate: '2025-09-07', onStageTiming: event => events.push(event) });
+    const callbackFailure = await fetchAmfiProductSnapshot({ persist: false, onStageTiming: () => { throw new Error('diagnostics must be non-authoritative'); } });
+    const readOnly = await fetchAmfiProductSnapshot({ persist: false, onStageTiming: event => events.push(event) });
+
+    assert.equal(current.persistence.status, 'NOT_PERSISTED');
+    assert.equal(historical.persistence.status, 'NOT_PERSISTED');
+    assert.equal(callbackFailure.status, AVAILABILITY.SOURCE_ERROR);
+    assert.deepEqual(readOnly.persistence, { status: 'NOT_REQUESTED', code: 'PERSISTENCE_NOT_REQUESTED' });
+    assert.deepEqual(events.map(event => event.stage), [
+      'amfi_current_fetch', 'amfi_current_persistence',
+      'amfi_historical_fetch', 'amfi_historical_persistence',
+      'amfi_current_fetch', 'amfi_current_persistence',
+    ]);
+    assert.deepEqual(events.map(event => event.status), [
+      AVAILABILITY.SOURCE_ERROR, 'NOT_PERSISTED',
+      AVAILABILITY.SOURCE_ERROR, 'NOT_PERSISTED',
+      AVAILABILITY.SOURCE_ERROR, 'NOT_REQUESTED',
+    ]);
+    assert.equal(events.at(-1).code, 'PERSISTENCE_NOT_REQUESTED');
+    for (const event of events) {
+      assert.equal(event.provider, 'AMFI');
+      assert.ok(Number.isInteger(event.elapsedMs) && event.elapsedMs >= 0);
+      assert.equal(Object.hasOwn(event, 'payload'), false);
+    }
+  } finally {
+    if (currentDescriptor) Object.defineProperty(AmfiNavProvider.prototype, 'getSnapshot', currentDescriptor);
+    if (historyDescriptor) Object.defineProperty(AmfiNavHistoryProvider.prototype, 'getSnapshot', historyDescriptor);
+  }
 });
 
 test('AMFI reports without separate Plan and Option columns leave classifications unestablished', () => {
@@ -242,6 +284,295 @@ test('request coalescing executes one loader for concurrent identical requests',
     { status: 'AVAILABLE' },
   ]);
   assert.equal(calls, 1);
+});
+
+test('Redis-unavailable AMFI read-through remains usable and coalesces concurrent provider loads', async () => {
+  setRedisAvailable(false);
+  setRedisClient(null);
+  clearInFlightMarketRequestsForTest();
+  let calls = 0;
+  let signalLoader;
+  const loaderStarted = new Promise(resolve => { signalLoader = resolve; });
+  let releaseLoader;
+  const gate = new Promise(resolve => { releaseLoader = resolve; });
+  const snapshot = parseAmfiNavReport(AMFI_REPORT, {
+    fetchedAt: FIXED_NOW.toISOString(),
+    now: FIXED_NOW,
+  });
+  const read = () => readThroughMarketCache({
+    cacheKey: 'test:amfi:redis-unavailable',
+    ttlSeconds: 60,
+    loader: async () => {
+      calls += 1;
+      signalLoader();
+      await gate;
+      return snapshot;
+    },
+  });
+
+  try {
+    const first = read();
+    await loaderStarted;
+    const second = read();
+    releaseLoader();
+    const results = await Promise.all([first, second]);
+    assert.equal(calls, 1);
+    assert.equal(results[0].status, AVAILABILITY.PARTIAL);
+    assert.equal(results[1].status, AVAILABILITY.PARTIAL);
+    assert.deepEqual(results[0].facts, results[1].facts);
+    assert.equal(results[0].fetchedAt, FIXED_NOW.toISOString());
+  } finally {
+    setRedisAvailable(false);
+    setRedisClient(null);
+    clearInFlightMarketRequestsForTest();
+  }
+});
+
+test('Redis cache hits preserve AMFI source, observation, fetched-time, and freshness provenance', async () => {
+  const snapshot = parseAmfiNavReport(AMFI_REPORT, {
+    fetchedAt: FIXED_NOW.toISOString(),
+    now: FIXED_NOW,
+  });
+  snapshot.cacheMetadata = { cachedAt: '2026-09-08T12:01:00.000Z' };
+  let loaderCalls = 0;
+  let writes = 0;
+  setRedisClient({
+    get: async () => JSON.stringify(snapshot),
+    setEx: async () => { writes += 1; },
+  });
+  setRedisAvailable(true);
+
+  try {
+    const result = await readThroughMarketCache({
+      cacheKey: 'test:amfi:provenance-hit',
+      ttlSeconds: 60,
+      loader: async () => { loaderCalls += 1; return null; },
+    });
+    assert.equal(loaderCalls, 0);
+    assert.equal(writes, 0);
+    assert.equal(result.cache.hit, true);
+    assert.equal(result.fetchedAt, snapshot.fetchedAt);
+    assert.deepEqual(result.products, snapshot.products);
+    assert.deepEqual(result.facts, snapshot.facts);
+    assert.deepEqual(result.cacheMetadata, snapshot.cacheMetadata);
+  } finally {
+    setRedisAvailable(false);
+    setRedisClient(null);
+  }
+});
+
+test('AMFI cache hits recompute freshness at read time without rewriting source provenance', async () => {
+  const cachedAt = new Date('2026-09-08T12:00:00.000Z');
+  const consumedAt = new Date('2026-09-12T12:00:01.000Z');
+  const cachedSnapshot = parseAmfiNavReport(AMFI_REPORT, {
+    fetchedAt: cachedAt.toISOString(),
+    now: cachedAt,
+  });
+  const originalFact = cachedSnapshot.facts[0];
+  let sourceCalls = 0;
+  setRedisClient({
+    get: async () => JSON.stringify(cachedSnapshot),
+    setEx: async () => assert.fail('A Redis cache hit must not rewrite the cache.'),
+  });
+  setRedisAvailable(true);
+
+  try {
+    const provider = new AmfiNavProvider({
+      clock: () => consumedAt,
+      httpClient: { get: async () => { sourceCalls += 1; throw new Error('unexpected source request'); } },
+    });
+    const result = await provider.getSnapshot();
+    const fact = result.facts[0];
+
+    assert.equal(result.cache.hit, true);
+    assert.equal(sourceCalls, 0);
+    assert.equal(fact.freshness.status, FRESHNESS.STALE);
+    assert.ok(fact.freshness.ageSeconds > fact.freshness.maxAgeSeconds);
+    assert.equal(fact.observedAt, originalFact.observedAt);
+    assert.equal(fact.fetchedAt, originalFact.fetchedAt);
+    assert.deepEqual(fact.source, originalFact.source);
+    assert.equal(fact.value, originalFact.value);
+  } finally {
+    setRedisAvailable(false);
+    setRedisClient(null);
+  }
+});
+
+test('AMFI SOURCE_ERROR results are neither cached nor reused as valid data', async () => {
+  let loaderCalls = 0;
+  let cacheWrites = 0;
+  setRedisClient({
+    get: async () => null,
+    setEx: async () => { cacheWrites += 1; },
+  });
+  setRedisAvailable(true);
+
+  try {
+    const load = () => readThroughMarketCache({
+      cacheKey: 'test:amfi:source-error',
+      ttlSeconds: 60,
+      loader: async () => {
+        loaderCalls += 1;
+        return {
+          provider: 'AMFI',
+          status: AVAILABILITY.SOURCE_ERROR,
+          products: [],
+          facts: [],
+        };
+      },
+    });
+    const first = await load();
+    const second = await load();
+    assert.equal(first.status, AVAILABILITY.SOURCE_ERROR);
+    assert.equal(second.status, AVAILABILITY.SOURCE_ERROR);
+    assert.equal(loaderCalls, 2);
+    assert.equal(cacheWrites, 0);
+  } finally {
+    setRedisAvailable(false);
+    setRedisClient(null);
+  }
+});
+
+test('concurrent persistence of one AMFI snapshot performs one complete product/observation pass', async () => {
+  const snapshot = parseAmfiNavReport(AMFI_REPORT, {
+    fetchedAt: FIXED_NOW.toISOString(),
+    now: FIXED_NOW,
+  });
+  let productPasses = 0;
+  let observationPasses = 0;
+  let signalBulkWrite;
+  const bulkWriteStarted = new Promise(resolve => { signalBulkWrite = resolve; });
+  let releaseBulkWrite;
+  const gate = new Promise(resolve => { releaseBulkWrite = resolve; });
+  const ProductModel = {
+    bulkWrite: async operations => {
+      productPasses += 1;
+      assert.equal(operations.length, snapshot.products.length);
+      signalBulkWrite();
+      await gate;
+    },
+  };
+  const ObservationModel = {
+    bulkWrite: async operations => {
+      observationPasses += 1;
+      assert.equal(operations.length, snapshot.facts.filter(fact => fact.availabilityStatus === AVAILABILITY.AVAILABLE).length);
+    },
+  };
+
+  const first = persistVerifiedMarketSnapshot(snapshot, { ProductModel, ObservationModel });
+  await bulkWriteStarted;
+  const second = persistVerifiedMarketSnapshot(snapshot, { ProductModel, ObservationModel });
+  releaseBulkWrite();
+  const results = await Promise.all([first, second]);
+
+  assert.equal(productPasses, 1);
+  assert.equal(observationPasses, 1);
+  assert.equal(results[0].status, 'PERSISTED');
+  assert.equal(results[1].status, 'PERSISTED');
+  assert.equal(results[1].coalesced, true);
+});
+
+test('snapshot persistence coalescing is isolated by injected model pair', async () => {
+  const snapshot = parseAmfiNavReport(AMFI_REPORT, {
+    fetchedAt: FIXED_NOW.toISOString(),
+    now: FIXED_NOW,
+  });
+  let productWritesStarted = 0;
+  let signalBothProductWrites;
+  const bothProductWritesStarted = new Promise(resolve => { signalBothProductWrites = resolve; });
+  let releaseProductWrites;
+  const productWriteGate = new Promise(resolve => { releaseProductWrites = resolve; });
+  const observationWrites = [0, 0];
+  const makeModels = index => ({
+    ProductModel: {
+      bulkWrite: async () => {
+        productWritesStarted += 1;
+        if (productWritesStarted === 2) signalBothProductWrites();
+        await productWriteGate;
+      },
+    },
+    ObservationModel: {
+      bulkWrite: async () => { observationWrites[index] += 1; },
+    },
+  });
+
+  const first = persistVerifiedMarketSnapshot(snapshot, makeModels(0));
+  const second = persistVerifiedMarketSnapshot(snapshot, makeModels(1));
+  await bothProductWritesStarted;
+  releaseProductWrites();
+  const results = await Promise.all([first, second]);
+
+  assert.equal(productWritesStarted, 2);
+  assert.deepEqual(observationWrites, [1, 1]);
+  assert.equal(results[0].status, 'PERSISTED');
+  assert.equal(results[1].status, 'PERSISTED');
+  assert.equal(results.some(result => result.coalesced), false);
+});
+
+test('concurrent Redis-off AMFI consumers share one fetch and one full durable persistence pass', async () => {
+  setRedisAvailable(false);
+  setRedisClient(null);
+  clearInFlightMarketRequestsForTest();
+  const snapshot = parseAmfiNavReport(AMFI_REPORT, {
+    fetchedAt: FIXED_NOW.toISOString(),
+    now: FIXED_NOW,
+  });
+  let providerCalls = 0;
+  let signalProvider;
+  const providerStarted = new Promise(resolve => { signalProvider = resolve; });
+  let releaseProvider;
+  const providerGate = new Promise(resolve => { releaseProvider = resolve; });
+  const fetch = () => readThroughMarketCache({
+    cacheKey: 'test:amfi:concurrent-durable-snapshot',
+    ttlSeconds: 60,
+    loader: async () => {
+      providerCalls += 1;
+      signalProvider();
+      await providerGate;
+      return snapshot;
+    },
+  });
+  let productWrites = 0;
+  let observationWrites = 0;
+  let signalWrite;
+  const writeStarted = new Promise(resolve => { signalWrite = resolve; });
+  let releaseWrite;
+  const writeGate = new Promise(resolve => { releaseWrite = resolve; });
+  const ProductModel = {
+    bulkWrite: async () => {
+      productWrites += 1;
+      signalWrite();
+      await writeGate;
+    },
+  };
+  const ObservationModel = {
+    bulkWrite: async () => { observationWrites += 1; },
+  };
+
+  try {
+    const firstRead = fetch();
+    await providerStarted;
+    const secondRead = fetch();
+    releaseProvider();
+    const snapshotsForConsumers = await Promise.all([firstRead, secondRead]);
+    assert.equal(providerCalls, 1);
+    assert.strictEqual(snapshotsForConsumers[0], snapshotsForConsumers[1]);
+
+    const firstPersist = persistVerifiedMarketSnapshot(snapshotsForConsumers[0], { ProductModel, ObservationModel });
+    await writeStarted;
+    const secondPersist = persistVerifiedMarketSnapshot(snapshotsForConsumers[1], { ProductModel, ObservationModel });
+    releaseWrite();
+    const outcomes = await Promise.all([firstPersist, secondPersist]);
+    assert.equal(productWrites, 1);
+    assert.equal(observationWrites, 1);
+    assert.equal(outcomes[0].status, 'PERSISTED');
+    assert.equal(outcomes[1].status, 'PERSISTED');
+    assert.equal(outcomes[1].coalesced, true);
+  } finally {
+    setRedisAvailable(false);
+    setRedisClient(null);
+    clearInFlightMarketRequestsForTest();
+  }
 });
 
 test('persistence operations include only verified numeric observations', async () => {

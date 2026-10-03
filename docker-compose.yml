@@ -30,8 +30,8 @@ services:
 
   server:
     build:
-      context: ./server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: server/Dockerfile
     container_name: wealthgenie-server
     restart: unless-stopped
     ports:
@@ -63,13 +63,12 @@ services:
     networks:
       default:
         aliases:
-          # Match the Kubernetes Service name used by the shared nginx image.
           - wealthgenie-server
 
   agent-worker:
     build:
-      context: ./server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: server/Dockerfile
     container_name: wealthgenie-agent-worker
     restart: unless-stopped
     command: ["node", "worker.js"]
@@ -101,8 +100,8 @@ services:
 
   reactapp:
     build:
-      context: ./reactapp
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: reactapp/Dockerfile
     container_name: wealthgenie-reactapp
     restart: unless-stopped
     ports:
