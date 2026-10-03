@@ -410,6 +410,23 @@ function assessSessionEvidence({ snapshot, nifty, vix, now }) {
   }
 
   if (session.status === NSE_MARKET_SESSION.CLOSED) {
+    if (weekday === 0 || weekday === 6) {
+      // Freshness is computed by the NSE adapter against its qualified
+      // trading-calendar snapshot. On weekends it therefore identifies the
+      // latest completed session without reclassifying the weekend as an
+      // exchange holiday or claiming an intraday quote.
+      const coherentCompletedSession = quoteDate < today
+        && historyDate === quoteDate
+        && isoDateInIndia(nifty?.observedAt) === quoteDate
+        && isoDateInIndia(vix?.observedAt) === quoteDate;
+      return {
+        valid: snapshot.status === 'MARKET_CLOSED'
+          && freshnessMatchesSession
+          && coherentCompletedSession,
+        detail: 'MARKET_WEEKEND: weekend non-trading session verified against matching latest-completed-session NIFTY/VIX/history; no intraday quote is asserted',
+      };
+    }
+
     const afterRegularClose = nowParts.hour * 60 + nowParts.minute > (15 * 60 + 30)
       && checkedAt.hour * 60 + checkedAt.minute > (15 * 60 + 30)
       && checkedAt.hour * 60 + checkedAt.minute <= nowParts.hour * 60 + nowParts.minute;
@@ -763,7 +780,12 @@ function marketQuoteDetail(result, assessment, quoteAvailable) {
     return 'fresh source-qualified latest completed-session observation; not an intraday quote';
   }
   if (assessment.sessionStatus === NSE_MARKET_SESSION.CLOSED) {
-    return 'fresh source-qualified same-day completed-session close; not an intraday quote';
+    if (assessment.sessionDetail.startsWith('MARKET_WEEKEND:')) {
+      return 'MARKET_WEEKEND: fresh source-qualified latest-completed-session observation; not an intraday quote';
+    }
+    return assessment.marketContextAvailable
+      ? 'fresh source-qualified same-day completed-session close; not an intraday quote'
+      : 'fresh source-qualified completed-session observation; not an intraday quote';
   }
   if (assessment.sessionStatus === NSE_MARKET_SESSION.OPEN) {
     return 'fresh source-qualified observation from the current NSE session';

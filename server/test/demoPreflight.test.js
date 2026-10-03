@@ -27,6 +27,7 @@ import {
 import { calculateProductPostTaxOutcome } from '../services/productPostTaxCalculator.js';
 import { getProductTaxMetadata } from '../services/productTaxAuthority.js';
 import { indiaClockParts, isoDateInIndia } from '../services/marketData/indiaMarketTime.js';
+import { previousNseTradingDate } from '../services/marketData/nseTradingCalendar.js';
 
 const currentBinding = () => ({
   profileId: '64b000000000000000000001',
@@ -556,6 +557,23 @@ test('preflight accepts weekday MARKET_CLOSED only after close with today’s cl
   assert.match(assessment.sessionDetail, /completed close/);
 });
 
+test('preflight accepts Saturday weekend evidence for the latest completed NSE session after a Friday holiday', () => {
+  const now = new Date('2026-10-03T10:30:00.000Z'); // Saturday, 16:00 IST; Friday 2026-10-02 is an NSE holiday
+  const result = qualifiedMarketContext({
+    session: 'MARKET_CLOSED',
+    now,
+    quoteDate: '2026-10-01',
+    historyDate: '2026-10-01',
+  });
+  const assessment = assessCurrentMarketContext(result, { now });
+
+  assert.equal(assessment.marketContextAvailable, true);
+  assert.equal(assessment.sessionStatus, 'MARKET_CLOSED');
+  assert.match(assessment.sessionDetail, /MARKET_WEEKEND/);
+  assert.match(assessment.sessionDetail, /latest-completed-session/);
+  assert.match(assessment.sessionDetail, /no intraday quote is asserted/);
+});
+
 test('preflight rejects stale, unknown, incoherent, unsupported, or incomplete market-session evidence', () => {
   const cases = [
     ['Upstox lacks the NSE session/calendar proof', result => { result.body.marketSnapshot.providerSelection.selectedProvider = 'UPSTOX'; }],
@@ -594,7 +612,7 @@ test('preflight rejects holiday evidence cached across the IST date rollover', (
   assert.equal(assessCurrentMarketContext(result, { now: afterIstMidnight }).marketContextAvailable, false);
 });
 
-test('preflight keeps MARKET_CLOSED pre-market, weekend, and stale-open classifications failed', () => {
+test('preflight keeps weekday pre-market and stale-open classifications failed while accepting a coherent weekend', () => {
   const preMarketNow = new Date('2026-10-05T03:30:00.000Z'); // 09:00 IST
   const preMarket = qualifiedMarketContext({
     session: 'MARKET_CLOSED', now: preMarketNow, quoteDate: MARKET_FIXTURE_PRIOR_SESSION,
@@ -603,14 +621,88 @@ test('preflight keeps MARKET_CLOSED pre-market, weekend, and stale-open classifi
   assert.equal(assessCurrentMarketContext(preMarket, { now: preMarketNow }).marketContextAvailable, false);
 
   const weekendNow = new Date('2026-10-03T10:30:00.000Z'); // Saturday, 16:00 IST
+  const latestCompletedTradingDate = previousNseTradingDate('2026-10-03', ['2026-10-02']);
+  assert.equal(latestCompletedTradingDate, '2026-10-01');
   const weekend = qualifiedMarketContext({
-    session: 'MARKET_CLOSED', now: weekendNow, quoteDate: MARKET_FIXTURE_PRIOR_SESSION,
-    historyDate: '2026-10-01',
+    session: 'MARKET_CLOSED', now: weekendNow, quoteDate: latestCompletedTradingDate,
+    historyDate: latestCompletedTradingDate,
   });
-  assert.equal(assessCurrentMarketContext(weekend, { now: weekendNow }).marketContextAvailable, false);
+  const weekendAssessment = assessCurrentMarketContext(weekend, { now: weekendNow });
+  assert.equal(weekendAssessment.marketContextAvailable, true);
+  assert.match(weekendAssessment.sessionDetail, /MARKET_WEEKEND/);
 
   const staleOpen = qualifiedMarketContext({ snapshotStatus: 'LAST_AVAILABLE' });
   assert.equal(assessCurrentMarketContext(staleOpen, { now: MARKET_FIXTURE_NOW }).marketContextAvailable, false);
+});
+
+test('preflight accepts Sunday and an ordinary Saturday using the calendar-derived latest completed session', () => {
+  const cases = [
+    {
+      now: new Date('2026-10-04T10:30:00.000Z'),
+      holidayDates: ['2026-10-02'],
+      expectedLatest: '2026-10-01',
+      label: 'Sunday after Friday NSE holiday',
+    },
+    {
+      now: new Date('2026-10-10T10:30:00.000Z'),
+      holidayDates: [],
+      expectedLatest: '2026-10-09',
+      label: 'Saturday after normal Friday trading',
+    },
+  ];
+
+  for (const { now, holidayDates, expectedLatest, label } of cases) {
+    const today = isoDateInIndia(now);
+    const latestCompletedTradingDate = previousNseTradingDate(today, holidayDates);
+    assert.equal(latestCompletedTradingDate, expectedLatest, label);
+    const result = qualifiedMarketContext({
+      session: 'MARKET_CLOSED', now, quoteDate: latestCompletedTradingDate,
+      historyDate: latestCompletedTradingDate,
+    });
+    const assessment = assessCurrentMarketContext(result, { now });
+    assert.equal(assessment.marketContextAvailable, true, label);
+    assert.equal(assessment.sessionStatus, 'MARKET_CLOSED', 'weekend must not be relabeled as an exchange holiday');
+    assert.match(assessment.sessionDetail, /MARKET_WEEKEND/);
+    assert.match(assessment.sessionDetail, /no intraday quote is asserted/);
+  }
+});
+
+test('preflight rejects stale, incoherent, recovered, or fabricated weekend quotes', () => {
+  const now = new Date('2026-10-03T10:30:00.000Z');
+  const latestCompletedTradingDate = previousNseTradingDate('2026-10-03', ['2026-10-02']);
+  const cases = [
+    ['stale weekend quote', result => {
+      result.body.marketSnapshot.provenance.sources[0].freshness.status = 'STALE';
+    }],
+    ['NIFTY and VIX date mismatch', result => {
+      result.body.marketSnapshot.provenance.sources[1].effectiveTradingDate = '2026-09-30';
+    }],
+    ['history date mismatch', result => {
+      result.body.marketSnapshot.provenance.sources[2].effectiveTradingDate = '2026-09-30';
+    }],
+    ['last-known-good recovery', result => {
+      result.body.marketSnapshot.recoveredFromLastKnownGood = true;
+    }],
+    ['fabricated Saturday quote', result => {
+      const saturdayTimestamp = marketFixtureTimestamp('2026-10-03', 15, 30);
+      const snapshot = result.body.marketSnapshot;
+      snapshot.provenance.sources.slice(0, 2).forEach(source => {
+        source.observedAt = saturdayTimestamp;
+        source.providerTimestamp = saturdayTimestamp;
+        source.effectiveTradingDate = '2026-10-03';
+      });
+      snapshot.observedFacts.forEach(fact => { fact.observedAt = saturdayTimestamp; });
+    }],
+  ];
+
+  for (const [name, mutate] of cases) {
+    const result = qualifiedMarketContext({
+      session: 'MARKET_CLOSED', now, quoteDate: latestCompletedTradingDate,
+      historyDate: latestCompletedTradingDate,
+    });
+    mutate(result);
+    assert.equal(assessCurrentMarketContext(result, { now }).marketContextAvailable, false, name);
+  }
 });
 
 test('preflight reporter emits every required check once and leaves unevaluated checks failed', () => {
@@ -683,9 +775,15 @@ test('runDemoPreflight accepts injected environment and output while preserving 
   assert.match(output.at(-2), /Live-demo preflight: 0 PASS, 22 FAIL/);
 });
 
-function injectedOrchestrationDependencies({ marketStatus = 'CURRENT', backendSha = 'e'.repeat(40), userPathPass = false } = {}) {
+function injectedOrchestrationDependencies({
+  marketStatus = 'CURRENT',
+  marketNow = MARKET_FIXTURE_NOW,
+  marketBodyOverride = null,
+  backendSha = 'e'.repeat(40),
+  userPathPass = false,
+} = {}) {
   const expectedSha = 'e'.repeat(40);
-  const marketBody = qualifiedMarketContext({ snapshotStatus: marketStatus }).body;
+  const marketBody = marketBodyOverride || qualifiedMarketContext({ snapshotStatus: marketStatus }).body;
   const response = (status, body) => ({ response: { ok: status >= 200 && status < 300, status }, body });
   const environment = {
     DEMO_LIVE_PREFLIGHT: '1',
@@ -701,7 +799,7 @@ function injectedOrchestrationDependencies({ marketStatus = 'CURRENT', backendSh
     NODE_ENV: 'test',
   };
   const dependencies = {
-    marketNow: MARKET_FIXTURE_NOW,
+    marketNow,
     async loadJson(filePath, label, reporter) {
       reporter.add(label, true, 'fixture JSON validated');
       return label === 'Profile completion payload' ? { profile: true } : { fiscalYear: 'FY2026-27' };
@@ -766,6 +864,35 @@ test('live orchestration rejects a backend process whose explicit SHA differs fr
   const result = await runDemoPreflight({ ...fixture, write: () => {} });
   assert.equal(result.checks.find(check => check.name === 'Backend').passed, false);
   assert.equal(result.exitCode, 1);
+});
+
+test('weekend quote details identify the prior completed session without claiming a same-day close', async () => {
+  const now = new Date('2026-10-03T10:30:00.000Z');
+  const latestCompletedTradingDate = previousNseTradingDate('2026-10-03', ['2026-10-02']);
+  const marketBody = qualifiedMarketContext({
+    session: 'MARKET_CLOSED', now, quoteDate: latestCompletedTradingDate,
+    historyDate: latestCompletedTradingDate,
+  }).body;
+  const fixture = injectedOrchestrationDependencies({ marketNow: now, marketBodyOverride: marketBody });
+  const result = await runDemoPreflight({ ...fixture, write: () => {} });
+
+  for (const name of ['NIFTY quote', 'VIX quote']) {
+    const quoteCheck = result.checks.find(check => check.name === name);
+    assert.equal(quoteCheck.passed, true);
+    assert.match(quoteCheck.detail, /MARKET_WEEKEND/);
+    assert.match(quoteCheck.detail, /latest-completed-session/);
+    assert.match(quoteCheck.detail, /not an intraday quote/);
+    assert.doesNotMatch(quoteCheck.detail, /same-day/);
+  }
+
+  const recoveredMarketBody = structuredClone(marketBody);
+  recoveredMarketBody.marketSnapshot.recoveredFromLastKnownGood = true;
+  const recoveredFixture = injectedOrchestrationDependencies({ marketNow: now, marketBodyOverride: recoveredMarketBody });
+  const recoveredResult = await runDemoPreflight({ ...recoveredFixture, write: () => {} });
+  const unverifiedQuoteDetail = recoveredResult.checks.find(check => check.name === 'NIFTY quote').detail;
+  assert.equal(recoveredResult.checks.find(check => check.name === 'Market context').passed, false);
+  assert.doesNotMatch(unverifiedQuoteDetail, /same-day/);
+  assert.match(unverifiedQuoteDetail, /completed-session observation/);
 });
 
 test('market dependency probe tolerates a virtual 13-second response under its independent budget', async () => {
