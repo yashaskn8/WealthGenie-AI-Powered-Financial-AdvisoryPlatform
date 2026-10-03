@@ -7,6 +7,62 @@ const GROQ_DEFAULT_MODEL = 'openai/gpt-oss-120b';
 export const NVIDIA_NIM_DEFAULT_BASE_URL = 'https://integrate.api.nvidia.com/v1';
 export const NVIDIA_NIM_DEFAULT_MODEL = 'nvidia/nemotron-3.5-lightning-30b-a3b';
 
+const ABORT_CODES = new Set(['ERR_CANCELED', 'ABORT_ERR']);
+const TIMEOUT_CODES = new Set(['ECONNABORTED', 'ETIMEDOUT', 'ERR_SOCKET_TIMEOUT']);
+const NETWORK_CODES = new Set([
+  'ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH',
+  'ENETUNREACH', 'EPIPE', 'ERR_NETWORK',
+]);
+
+/**
+ * Provider errors are classified before they can affect shared provider health.
+ * Request/configuration/quality failures never count as infrastructure outages.
+ */
+export function classifyProviderError(error, { signal } = {}) {
+  if (signal?.aborted || error?.name === 'AbortError' || ABORT_CODES.has(error?.code)) {
+    return { code: 'CALLER_ABORTED', retryable: false, breakerRelevant: false, fallbackEligible: false };
+  }
+
+  const status = Number(error?.response?.status);
+  if (status === 408 || TIMEOUT_CODES.has(error?.code)) {
+    return { code: 'PROVIDER_TIMEOUT', retryable: false, breakerRelevant: true, providerResponded: status === 408, fallbackEligible: true };
+  }
+  if (status === 429) {
+    return { code: 'PROVIDER_RATE_LIMITED', retryable: false, breakerRelevant: false, providerResponded: true, fallbackEligible: true };
+  }
+  if (status === 401 || status === 403) {
+    return { code: 'PROVIDER_AUTHENTICATION_FAILED', retryable: false, breakerRelevant: false, providerResponded: true, fallbackEligible: true };
+  }
+  if (status >= 500 && status <= 599) {
+    return { code: 'PROVIDER_SERVER_ERROR', retryable: false, breakerRelevant: true, providerResponded: true, fallbackEligible: true };
+  }
+  if (status >= 400 && status <= 499) {
+    return { code: 'PROVIDER_BAD_REQUEST', retryable: false, breakerRelevant: false, providerResponded: true, fallbackEligible: true };
+  }
+  if (NETWORK_CODES.has(error?.code) || (error?.isAxiosError && error?.request && !error?.response)) {
+    return { code: 'PROVIDER_NETWORK_ERROR', retryable: false, breakerRelevant: true, providerResponded: false, fallbackEligible: true };
+  }
+  return { code: 'PROVIDER_INTERNAL_ERROR', retryable: false, breakerRelevant: false, providerResponded: false, fallbackEligible: true };
+}
+
+function recordProviderError(adapter, permit, error, signal) {
+  const classification = classifyProviderError(error, { signal });
+  adapter.lastFailureReason = classification.code;
+  if (classification.code === 'CALLER_ABORTED') {
+    adapter.recordCancellation(permit);
+    throw error;
+  }
+  if (classification.breakerRelevant) adapter.recordFailure(permit);
+  else if (classification.providerResponded) adapter.recordRequestFailure(permit, classification.code);
+  else adapter.releasePermit(permit);
+  if (classification.code === 'PROVIDER_TIMEOUT') PrometheusMetrics.inc('provider_timeout_total');
+  if (classification.code === 'PROVIDER_RATE_LIMITED') PrometheusMetrics.inc('provider_rate_limit_total');
+  if (classification.code === 'PROVIDER_AUTHENTICATION_FAILED') PrometheusMetrics.inc('provider_auth_failure_total');
+  if (classification.code !== 'CALLER_ABORTED') PrometheusMetrics.inc(`${adapter.name}_failure_total`);
+  if (!classification.fallbackEligible) throw error;
+  return null;
+}
+
 /**
  * Strips JSON schema fields unsupported by Google Gemini FunctionDeclarations API (e.g. additionalProperties, patternProperties).
  */
@@ -25,31 +81,120 @@ function sanitizeGeminiSchema(schema) {
  * Abstract Base Provider Adapter (Phase 9)
  */
 export class BaseProviderAdapter {
-  constructor(name, costPer1kTokens = 0.0005) {
+  constructor(name, costPer1kTokens = 0.0005, {
+    failureThreshold = 3,
+    recoveryTimeoutMs = 60000,
+    now = () => Date.now(),
+  } = {}) {
     this.name = name;
     this.costPer1kTokens = costPer1kTokens;
     this.failureCount = 0;
+    this.failureThreshold = failureThreshold;
+    this.recoveryTimeoutMs = recoveryTimeoutMs;
+    this.now = now;
+    this.circuitState = 'CLOSED';
     this.circuitOpenUntil = 0;
+    this.halfOpenProbeInFlight = false;
+    this.generation = 0;
+    this.permits = new WeakMap();
   }
 
   isHealthy() {
-    if (Date.now() < this.circuitOpenUntil) {
-      return false;
+    this.#refreshState();
+    return this.circuitState === 'CLOSED';
+  }
+
+  #refreshState() {
+    if (this.circuitState === 'OPEN' && this.now() >= this.circuitOpenUntil) {
+      this.circuitState = 'HALF_OPEN';
+      this.halfOpenProbeInFlight = false;
+    }
+  }
+
+  acquirePermit() {
+    this.#refreshState();
+    if (this.circuitState === 'OPEN') return null;
+    const halfOpenProbe = this.circuitState === 'HALF_OPEN';
+    if (halfOpenProbe && this.halfOpenProbeInFlight) return null;
+    if (halfOpenProbe) {
+      this.halfOpenProbeInFlight = true;
+      PrometheusMetrics.inc('circuit_half_open_probe_total');
+    }
+    const permit = Object.freeze({});
+    this.permits.set(permit, { generation: this.generation, halfOpenProbe });
+    return permit;
+  }
+
+  #consumePermit(permit) {
+    if (!permit || !this.permits.has(permit)) return null;
+    const details = this.permits.get(permit);
+    this.permits.delete(permit);
+    return details.generation === this.generation ? details : null;
+  }
+
+  #closeRecoveredCircuit() {
+    this.circuitState = 'CLOSED';
+    this.circuitOpenUntil = 0;
+    this.failureCount = 0;
+    this.halfOpenProbeInFlight = false;
+    this.generation += 1;
+    PrometheusMetrics.inc('circuit_recovery_success_total');
+  }
+
+  recordSuccess(permit) {
+    const details = this.#consumePermit(permit);
+    if (!details) return false;
+    if (details.halfOpenProbe) this.#closeRecoveredCircuit();
+    else if (this.circuitState === 'CLOSED') this.failureCount = 0;
+    PrometheusMetrics.inc('provider_success_total');
+    return true;
+  }
+
+  recordRequestFailure(permit, reasonCode) {
+    const details = this.#consumePermit(permit);
+    if (!details) return false;
+    PrometheusMetrics.inc('provider_request_failure_total');
+    if (reasonCode === 'PROVIDER_SAFETY_REJECTION') PrometheusMetrics.inc('provider_safety_rejection_total');
+    // Any completed HTTP response proves transport recovery; neutral outcomes
+    // also release a half-open probe without poisoning provider-wide health.
+    if (details.halfOpenProbe) this.#closeRecoveredCircuit();
+    else if (this.circuitState === 'CLOSED') this.failureCount = 0;
+    return true;
+  }
+
+  recordCancellation(permit) {
+    this.releasePermit(permit);
+  }
+
+  releasePermit(permit) {
+    const details = this.#consumePermit(permit);
+    if (details?.halfOpenProbe && this.circuitState === 'HALF_OPEN') {
+      this.halfOpenProbeInFlight = false;
+    }
+  }
+
+  recordFailure(permit) {
+    const details = this.#consumePermit(permit);
+    if (!details) return false;
+    PrometheusMetrics.inc('provider_health_failure_total');
+    this.failureCount += 1;
+    if (details.halfOpenProbe || (this.circuitState === 'CLOSED' && this.failureCount >= this.failureThreshold)) {
+      this.circuitState = 'OPEN';
+      this.circuitOpenUntil = this.now() + this.recoveryTimeoutMs;
+      this.halfOpenProbeInFlight = false;
+      this.generation += 1;
+      PrometheusMetrics.inc('circuit_open_total');
+      if (details.halfOpenProbe) PrometheusMetrics.inc('circuit_recovery_failure_total');
     }
     return true;
   }
 
-  recordSuccess() {
-    this.failureCount = 0;
+  reset() {
+    this.circuitState = 'CLOSED';
     this.circuitOpenUntil = 0;
-  }
-
-  recordFailure() {
-    this.failureCount++;
-    if (this.failureCount >= 3) {
-      this.circuitOpenUntil = Date.now() + 60000; // Open circuit for 60 seconds
-      console.warn(`[ProviderAdapter:${this.name}] Circuit breaker OPENED due to ${this.failureCount} consecutive failures.`);
-    }
+    this.failureCount = 0;
+    this.halfOpenProbeInFlight = false;
+    this.generation += 1;
   }
 
   supportsTools() { return true; }
@@ -74,8 +219,8 @@ function toOpenAiMessages(systemPrompt, recentHistory = []) {
 }
 
 export class NvidiaNimProviderAdapter extends BaseProviderAdapter {
-  constructor() {
-    super('nvidia_nim', 0);
+  constructor(breakerOptions = {}) {
+    super('nvidia_nim', 0, breakerOptions);
     this.lastFailureReason = null;
   }
 
@@ -93,10 +238,7 @@ export class NvidiaNimProviderAdapter extends BaseProviderAdapter {
 
   async generate({ systemPrompt, recentHistory, maxTokens = 1200, jsonMode = false, signal }) {
     this.lastFailureReason = null;
-    if (!this.isHealthy()) {
-      this.lastFailureReason = 'PROVIDER_CIRCUIT_OPEN';
-      return null;
-    }
+    if (signal?.aborted) throw signal.reason || Object.assign(new Error('Provider request aborted.'), { name: 'AbortError' });
     const apiKey = process.env.NVIDIA_API_KEY;
     if (!apiKey) {
       this.lastFailureReason = 'PROVIDER_NOT_CONFIGURED';
@@ -115,60 +257,52 @@ export class NvidiaNimProviderAdapter extends BaseProviderAdapter {
     };
     if (jsonMode) body.response_format = { type: 'json_object' };
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        const response = await axios.post(endpoint, body, {
-          timeout: 20000,
-          signal,
-          headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        });
-        const choice = response.data?.choices?.[0];
-        const text = choice?.message?.content;
-        const responseModel = response.data?.model;
-        if (!text || typeof text !== 'string') {
-          this.lastFailureReason = 'EMPTY_COMPLETION';
-          break;
-        }
-        if (responseModel !== model) {
-          this.lastFailureReason = 'PROVIDER_MODEL_METADATA_MISMATCH';
-          break;
-        }
-        this.recordSuccess();
-        PrometheusMetrics.inc('nvidia_nim_success_total');
-        return {
-          text,
-          tool_calls: [],
-          tokensUsed: Number(response.data?.usage?.total_tokens) || 0,
-          provider: this.name,
-          model: responseModel,
-          wasCompleted: choice.finish_reason === 'stop',
-          estimatedCostUSD: null,
-        };
-      } catch (error) {
-        if (signal?.aborted || error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') throw error;
-        const status = Number(error?.response?.status);
-        this.lastFailureReason = error?.code === 'ECONNABORTED'
-          ? 'PROVIDER_TIMEOUT'
-          : status === 401 || status === 403
-            ? 'PROVIDER_AUTHENTICATION_FAILED'
-            : status === 429
-              ? 'PROVIDER_RATE_LIMITED'
-              : status >= 500
-                ? 'PROVIDER_SERVER_ERROR'
-                : 'PROVIDER_REQUEST_FAILED';
-        if (attempt === 0 && (status === 429 || status >= 500)) continue;
-        break;
-      }
+    const permit = this.acquirePermit();
+    if (!permit) {
+      this.lastFailureReason = 'PROVIDER_CIRCUIT_OPEN';
+      return null;
     }
-    this.recordFailure();
-    PrometheusMetrics.inc('nvidia_nim_failure_total');
-    return null;
+    try {
+      const response = await axios.post(endpoint, body, {
+        timeout: 20000,
+        signal,
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      });
+      const choice = response.data?.choices?.[0];
+      const text = choice?.message?.content;
+      const responseModel = response.data?.model;
+      if (!text || typeof text !== 'string') {
+        this.lastFailureReason = 'EMPTY_COMPLETION';
+        this.recordRequestFailure(permit, this.lastFailureReason);
+        PrometheusMetrics.inc('nvidia_nim_failure_total');
+        return null;
+      }
+      if (responseModel !== model) {
+        this.lastFailureReason = 'PROVIDER_MODEL_METADATA_MISMATCH';
+        this.recordRequestFailure(permit, this.lastFailureReason);
+        PrometheusMetrics.inc('nvidia_nim_failure_total');
+        return null;
+      }
+      this.recordSuccess(permit);
+      PrometheusMetrics.inc('nvidia_nim_success_total');
+      return {
+        text,
+        tool_calls: [],
+        tokensUsed: Number(response.data?.usage?.total_tokens) || 0,
+        provider: this.name,
+        model: responseModel,
+        wasCompleted: choice.finish_reason === 'stop',
+        estimatedCostUSD: null,
+      };
+    } catch (error) {
+      return recordProviderError(this, permit, error, signal);
+    }
   }
 }
 
 export class GeminiProviderAdapter extends BaseProviderAdapter {
-  constructor() {
-    super('gemini', 0.0004);
+  constructor(breakerOptions = {}) {
+    super('gemini', 0.0004, breakerOptions);
     this.lastFailureReason = null;
   }
 
@@ -178,10 +312,7 @@ export class GeminiProviderAdapter extends BaseProviderAdapter {
 
   async generate({ systemPrompt, recentHistory, maxTokens = 4096, tools = null, jsonMode = false, signal }) {
     this.lastFailureReason = null;
-    if (!this.isHealthy()) {
-      this.lastFailureReason = 'PROVIDER_CIRCUIT_OPEN';
-      return null;
-    }
+    if (signal?.aborted) throw signal.reason || Object.assign(new Error('Provider request aborted.'), { name: 'AbortError' });
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       this.lastFailureReason = 'PROVIDER_NOT_CONFIGURED';
@@ -207,6 +338,11 @@ export class GeminiProviderAdapter extends BaseProviderAdapter {
       ];
     }
 
+    const permit = this.acquirePermit();
+    if (!permit) {
+      this.lastFailureReason = 'PROVIDER_CIRCUIT_OPEN';
+      return null;
+    }
     try {
       const res = await axios.post(GEMINI_API_URL, payload, {
         timeout: 30000,
@@ -217,7 +353,7 @@ export class GeminiProviderAdapter extends BaseProviderAdapter {
       const candidate = res.data?.candidates?.[0];
       if (!candidate || candidate.finishReason === 'SAFETY') {
         this.lastFailureReason = candidate?.finishReason === 'SAFETY' ? 'PROVIDER_SAFETY_REJECTION' : 'EMPTY_COMPLETION';
-        this.recordFailure();
+        this.recordRequestFailure(permit, this.lastFailureReason);
         PrometheusMetrics.inc('gemini_failure_total');
         return null;
       }
@@ -237,8 +373,15 @@ export class GeminiProviderAdapter extends BaseProviderAdapter {
         }
       }
 
+      if (text.trim().length === 0 && toolCalls.length === 0) {
+        this.lastFailureReason = 'EMPTY_COMPLETION';
+        this.recordRequestFailure(permit, this.lastFailureReason);
+        PrometheusMetrics.inc('gemini_failure_total');
+        return null;
+      }
+
       const tokensUsed = res.data?.usageMetadata?.totalTokenCount || 0;
-      this.recordSuccess();
+      this.recordSuccess(permit);
       PrometheusMetrics.inc('gemini_success_total');
       return {
         text,
@@ -250,18 +393,14 @@ export class GeminiProviderAdapter extends BaseProviderAdapter {
         estimatedCostUSD: (tokensUsed / 1000) * this.costPer1kTokens,
       };
     } catch (error) {
-      if (signal?.aborted || error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') throw error;
-      this.lastFailureReason = 'PROVIDER_REQUEST_FAILED';
-      this.recordFailure();
-      PrometheusMetrics.inc('gemini_failure_total');
-      return null;
+      return recordProviderError(this, permit, error, signal);
     }
   }
 }
 
 export class GroqProviderAdapter extends BaseProviderAdapter {
-  constructor() {
-    super('groq', 0.0006);
+  constructor(breakerOptions = {}) {
+    super('groq', 0.0006, breakerOptions);
     this.lastFailureReason = null;
   }
 
@@ -271,10 +410,7 @@ export class GroqProviderAdapter extends BaseProviderAdapter {
 
   async generate({ systemPrompt, recentHistory, maxTokens = 4096, tools = null, jsonMode = false, signal }) {
     this.lastFailureReason = null;
-    if (!this.isHealthy()) {
-      this.lastFailureReason = 'PROVIDER_CIRCUIT_OPEN';
-      return null;
-    }
+    if (signal?.aborted) throw signal.reason || Object.assign(new Error('Provider request aborted.'), { name: 'AbortError' });
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) {
       this.lastFailureReason = 'PROVIDER_NOT_CONFIGURED';
@@ -352,6 +488,11 @@ export class GroqProviderAdapter extends BaseProviderAdapter {
       }));
     }
 
+    const permit = this.acquirePermit();
+    if (!permit) {
+      this.lastFailureReason = 'PROVIDER_CIRCUIT_OPEN';
+      return null;
+    }
     try {
       const res = await axios.post(GROQ_API_URL, body, {
         timeout: 30000,
@@ -364,9 +505,9 @@ export class GroqProviderAdapter extends BaseProviderAdapter {
 
       const choice = res.data?.choices?.[0];
       const message = choice?.message;
-      if (!message && !choice) {
+      if (!message || (!message.content && !message.tool_calls?.length)) {
         this.lastFailureReason = 'EMPTY_COMPLETION';
-        this.recordFailure();
+        this.recordRequestFailure(permit, this.lastFailureReason);
         PrometheusMetrics.inc('groq_failure_total');
         return null;
       }
@@ -391,7 +532,7 @@ export class GroqProviderAdapter extends BaseProviderAdapter {
       }
 
       const tokensUsed = res.data?.usage?.total_tokens || 0;
-      this.recordSuccess();
+      this.recordSuccess(permit);
       PrometheusMetrics.inc('groq_success_total');
       return {
         text,
@@ -403,11 +544,7 @@ export class GroqProviderAdapter extends BaseProviderAdapter {
         estimatedCostUSD: (tokensUsed / 1000) * this.costPer1kTokens,
       };
     } catch (error) {
-      if (signal?.aborted || error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') throw error;
-      this.lastFailureReason = 'PROVIDER_REQUEST_FAILED';
-      this.recordFailure();
-      PrometheusMetrics.inc('groq_failure_total');
-      return null;
+      return recordProviderError(this, permit, error, signal);
     }
   }
 }

@@ -238,8 +238,8 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
     process.env.NVIDIA_API_KEY = '';
     process.env.LLM_PRIMARY_PROVIDER = 'GEMINI';
 
-    ProviderManager.gemini.recordSuccess();
-    ProviderManager.groq.recordSuccess();
+    ProviderManager.gemini.reset();
+    ProviderManager.groq.reset();
 
     FinancialProfile.findOne = () => ({ sort() { return this; }, lean: async () => mockProfile });
     FinancialProfileState.findOne = () => ({ lean: async () => ({
@@ -424,7 +424,7 @@ describe('Tool Execution Error & Parameter Validation Fallback Tests', () => {
 
   it('processChat: tax stays unavailable without explicit tax-tool inputs', async () => {
     axios.post = async () => {
-      throw new Error('Network completely down');
+      throw Object.assign(new Error('provider unavailable'), { code: 'ECONNRESET' });
     };
 
     const result = await processChat({
