@@ -30,8 +30,8 @@ services:
 
   server:
     build:
-      context: ./server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: server/Dockerfile
     container_name: wealthgenie-server
     restart: unless-stopped
     ports:
@@ -67,8 +67,8 @@ services:
 
   agent-worker:
     build:
-      context: ./server
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: server/Dockerfile
     container_name: wealthgenie-agent-worker
     restart: unless-stopped
     command: ["node", "worker.js"]
