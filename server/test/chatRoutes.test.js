@@ -54,8 +54,8 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
   beforeEach(() => {
     process.env.GEMINI_API_KEY = 'mock-gemini-key';
     process.env.GROQ_API_KEY = 'mock-groq-key';
-    ProviderManager.gemini.recordSuccess();
-    ProviderManager.groq.recordSuccess();
+    ProviderManager.gemini.reset();
+    ProviderManager.groq.reset();
 
     originalProfileFindOne = FinancialProfile.findOne;
     originalProfileStateFindOne = FinancialProfileState.findOne;

@@ -71,8 +71,8 @@ async function runFalsifiableMetricMeasurement() {
   PrometheusMetrics.counters.tool_execution_failure_total = 0;
   PrometheusMetrics.toolUsage = {};
 
-  ProviderManager.gemini.recordSuccess();
-  ProviderManager.groq.recordSuccess();
+  ProviderManager.gemini.reset();
+  ProviderManager.groq.reset();
 
   const originalPost = (await import('axios')).default.post;
 

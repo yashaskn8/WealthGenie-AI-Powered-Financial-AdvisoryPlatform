@@ -82,7 +82,7 @@ test('NVIDIA NIM adapter uses the official hosted chat-completions contract and 
   assert.equal(result.model, NVIDIA_NIM_DEFAULT_MODEL);
 });
 
-test('NIM fails closed for missing key, auth, rate limit, server error, timeout, empty completion, and model mismatch', async t => {
+test('NIM classifies configuration, request, health, timeout, empty completion, and metadata failures', async t => {
   const originalPost = axios.post;
   const originalKey = process.env.NVIDIA_API_KEY;
   t.after(() => { axios.post = originalPost; if (originalKey === undefined) delete process.env.NVIDIA_API_KEY; else process.env.NVIDIA_API_KEY = originalKey; });
@@ -92,7 +92,7 @@ test('NIM fails closed for missing key, auth, rate limit, server error, timeout,
   assert.equal(missing.lastFailureReason, 'PROVIDER_NOT_CONFIGURED');
 
   process.env.NVIDIA_API_KEY = 'test-key-not-a-real-secret';
-  for (const [status, reason, expectedCalls] of [[401, 'PROVIDER_AUTHENTICATION_FAILED', 1], [403, 'PROVIDER_AUTHENTICATION_FAILED', 1], [429, 'PROVIDER_RATE_LIMITED', 2], [503, 'PROVIDER_SERVER_ERROR', 2]]) {
+  for (const [status, reason, expectedCalls] of [[401, 'PROVIDER_AUTHENTICATION_FAILED', 1], [403, 'PROVIDER_AUTHENTICATION_FAILED', 1], [429, 'PROVIDER_RATE_LIMITED', 1], [503, 'PROVIDER_SERVER_ERROR', 1]]) {
     let calls = 0;
     axios.post = async () => {
       calls += 1;
@@ -177,7 +177,7 @@ test('provider and cache exceptions cannot break deterministic grounded fallback
   assert.equal(result.provider, 'DETERMINISTIC_TEMPLATE');
   assert.equal(result.fallback, true);
   assert.ok(result.validation.reasonCodes.includes('EXPLANATION_CACHE_READ_FAILED'));
-  assert.ok(result.validation.reasonCodes.includes('NVIDIA_NIM_REQUEST_FAILED'));
+  assert.ok(result.validation.reasonCodes.includes('PROVIDER_INTERNAL_ERROR'));
 });
 
 test('cache keys are evidence/version/provider scoped and contain no credentials', async () => {

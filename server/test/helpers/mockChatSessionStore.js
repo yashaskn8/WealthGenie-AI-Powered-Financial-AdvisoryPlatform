@@ -31,7 +31,7 @@ export function createMockChatSessionStore(getSession) {
         + Number(claim.conversation.reserved_tokens || 0)
         + reservation;
       if (total > CHAT_SESSION_TOKEN_CAP) return false;
-      claim.tokenReservation = reservation;
+      claim.tokenReservation = Number(claim.tokenReservation || 0) + reservation;
       claim.conversation.reserved_tokens = Number(claim.conversation.reserved_tokens || 0) + reservation;
       return true;
     },

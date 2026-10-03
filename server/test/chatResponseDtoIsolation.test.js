@@ -73,7 +73,7 @@ describe('grounded chat DTO and persistence isolation', () => {
     process.env.GROQ_API_KEY = '';
     process.env.LLM_PRIMARY_PROVIDER = 'GEMINI';
     profileStateStatus = 'CURRENT';
-    ProviderManager.gemini.recordSuccess();
+    ProviderManager.gemini.reset();
     FinancialProfile.findOne = () => {
       const query = { sort: () => query, lean: async () => profile };
       return query;

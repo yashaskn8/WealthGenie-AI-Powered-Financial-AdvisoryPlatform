@@ -4,6 +4,7 @@ Tests circuit breaker, audit logger, rate limiter, and health monitor.
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from llm.ops.circuit_breaker import CircuitBreaker, CircuitState
 from llm.ops.audit_logger import AuditLogger, AuditEntry
@@ -14,6 +15,12 @@ from llm.ops.health_monitor import LLMHealthMonitor
 # ── Circuit Breaker Tests ──────────────────────────────────────────────
 
 
+def _record_health_failure(cb):
+    permit = cb.acquire_permit()
+    assert permit is not None
+    cb.record_failure(permit)
+
+
 def test_circuit_breaker_starts_closed():
     cb = CircuitBreaker(failure_threshold=3, recovery_timeout_seconds=0.5)
     assert cb.state == CircuitState.CLOSED
@@ -22,42 +29,113 @@ def test_circuit_breaker_starts_closed():
 
 def test_circuit_breaker_trips_to_open_after_failures():
     cb = CircuitBreaker(failure_threshold=3, recovery_timeout_seconds=60.0)
-    cb.record_failure()
-    cb.record_failure()
+    _record_health_failure(cb)
+    _record_health_failure(cb)
     assert cb.state == CircuitState.CLOSED
-    cb.record_failure()
+    _record_health_failure(cb)
     assert cb.state == CircuitState.OPEN
     assert not cb.allow_request()
 
 
 def test_circuit_breaker_recovers_to_half_open():
-    cb = CircuitBreaker(failure_threshold=2, recovery_timeout_seconds=0.1)
-    cb.record_failure()
-    cb.record_failure()
+    now = [0.0]
+    cb = CircuitBreaker(failure_threshold=2, recovery_timeout_seconds=0.1, clock=lambda: now[0])
+    cb.record_failure(cb.acquire_permit())
+    cb.record_failure(cb.acquire_permit())
     assert cb.state == CircuitState.OPEN
 
-    time.sleep(0.15)
+    now[0] = 0.1
     assert cb.state == CircuitState.HALF_OPEN
-    assert cb.allow_request()
+    permit = cb.acquire_permit()
+    assert permit is not None
+    assert cb.acquire_permit() is None
+    cb.cancel_permit(permit)
+    assert cb.acquire_permit() is not None
 
 
 def test_circuit_breaker_resets_on_success():
-    cb = CircuitBreaker(failure_threshold=2, recovery_timeout_seconds=0.1)
-    cb.record_failure()
-    cb.record_failure()
-    time.sleep(0.15)
-    assert cb.state == CircuitState.HALF_OPEN
-
-    cb.record_success()
+    now = [10.0]
+    cb = CircuitBreaker(failure_threshold=2, recovery_timeout_seconds=0.1, clock=lambda: now[0])
+    cb.record_failure(cb.acquire_permit())
+    cb.record_failure(cb.acquire_permit())
+    now[0] = 10.2
+    permit = cb.acquire_permit()
+    assert permit is not None
+    cb.record_success(permit)
     assert cb.state == CircuitState.CLOSED
     assert cb.allow_request()
 
 
 def test_circuit_breaker_manual_reset():
     cb = CircuitBreaker(failure_threshold=1)
-    cb.record_failure()
+    _record_health_failure(cb)
     assert cb.state == CircuitState.OPEN
     cb.reset()
+    assert cb.state == CircuitState.CLOSED
+
+
+def test_half_open_admits_exactly_one_of_twenty_concurrent_probes():
+    now = [100.0]
+    cb = CircuitBreaker(failure_threshold=1, recovery_timeout_seconds=1.0, clock=lambda: now[0])
+    cb.record_failure(cb.acquire_permit())
+    now[0] += 1.0
+
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        permits = list(executor.map(lambda _: cb.acquire_permit(), range(20)))
+
+    admitted = [permit for permit in permits if permit is not None]
+    assert len(admitted) == 1
+    assert cb.get_status()["half_open_probe_in_flight"] is True
+    cb.record_success(admitted[0])
+    assert cb.state == CircuitState.CLOSED
+
+
+def test_failed_half_open_probe_reopens_with_a_fresh_recovery_window():
+    now = [0.0]
+    cb = CircuitBreaker(failure_threshold=1, recovery_timeout_seconds=5.0, clock=lambda: now[0])
+    cb.record_failure(cb.acquire_permit())
+    now[0] = 5.0
+    probe = cb.acquire_permit()
+    assert probe is not None
+    cb.record_failure(probe)
+    assert cb.state == CircuitState.OPEN
+    now[0] = 9.9
+    assert cb.state == CircuitState.OPEN
+    now[0] = 10.0
+    assert cb.state == CircuitState.HALF_OPEN
+
+
+def test_stale_closed_call_completion_cannot_close_a_reopened_half_open_generation():
+    now = [0.0]
+    cb = CircuitBreaker(failure_threshold=2, recovery_timeout_seconds=5.0, clock=lambda: now[0])
+    stale = cb.acquire_permit()
+    cb.record_failure(cb.acquire_permit())
+    cb.record_failure(cb.acquire_permit())
+    assert cb.state == CircuitState.OPEN
+    now[0] = 5.0
+    probe = cb.acquire_permit()
+    assert probe is not None
+
+    cb.record_success(stale)
+    cb.record_failure(stale)
+    assert cb.get_status()["half_open_probe_in_flight"] is True
+    assert cb.state == CircuitState.HALF_OPEN
+
+    cb.record_success(probe)
+    assert cb.state == CircuitState.CLOSED
+
+
+def test_legacy_boolean_admission_cannot_claim_a_half_open_probe():
+    now = [0.0]
+    cb = CircuitBreaker(failure_threshold=1, recovery_timeout_seconds=1.0, clock=lambda: now[0])
+    cb.record_failure(cb.acquire_permit())
+    now[0] = 1.0
+    assert cb.state == CircuitState.HALF_OPEN
+    assert not cb.allow_request()
+    assert cb.get_status()["half_open_probe_in_flight"] is False
+    permit = cb.acquire_permit()
+    assert permit is not None
+    cb.record_success(permit)
     assert cb.state == CircuitState.CLOSED
 
 
@@ -167,6 +245,6 @@ def test_health_monitor_is_healthy():
     monitor = LLMHealthMonitor(circuit_breaker=cb)
     assert monitor.is_healthy()
 
-    cb.record_failure()
-    cb.record_failure()
+    _record_health_failure(cb)
+    _record_health_failure(cb)
     assert not monitor.is_healthy()

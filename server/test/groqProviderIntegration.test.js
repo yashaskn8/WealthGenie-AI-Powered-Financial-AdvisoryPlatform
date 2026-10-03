@@ -65,8 +65,8 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
     process.env.NVIDIA_API_KEY = '';
     process.env.LLM_PRIMARY_PROVIDER = 'GEMINI';
 
-    ProviderManager.gemini.recordSuccess();
-    ProviderManager.groq.recordSuccess();
+    ProviderManager.gemini.reset();
+    ProviderManager.groq.reset();
 
     FinancialProfile.findOne = () => {
       const query = { sort: () => query, lean: async () => mockProfile };
@@ -242,9 +242,11 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
   });
 
   it('GroqProviderAdapter returns null when circuit breaker is open', async () => {
-    // Manually open the circuit breaker
-    ProviderManager.groq.failureCount = 3;
-    ProviderManager.groq.circuitOpenUntil = Date.now() + 60000;
+    ProviderManager.groq.reset();
+    for (let failure = 0; failure < ProviderManager.groq.failureThreshold; failure += 1) {
+      ProviderManager.groq.recordFailure(ProviderManager.groq.acquirePermit());
+    }
+    assert.equal(ProviderManager.groq.circuitState, 'OPEN');
 
     const result = await ProviderManager.groq.generate({
       systemPrompt: 'Test',
@@ -252,14 +254,13 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
     });
 
     assert.equal(result, null, 'Must return null when circuit is open');
-    // Reset for other tests
-    ProviderManager.groq.recordSuccess();
+    ProviderManager.groq.reset();
   });
 
   it('GroqProviderAdapter records failure and opens circuit after 3 consecutive HTTP errors', async () => {
-    ProviderManager.groq.recordSuccess(); // reset
+    ProviderManager.groq.reset(); // reset
 
-    axios.post = async () => { throw new Error('Groq 503 Service Unavailable'); };
+    axios.post = async () => { throw Object.assign(new Error('provider unavailable'), { response: { status: 503 } }); };
 
     await ProviderManager.groq.generate({ systemPrompt: 'test', recentHistory: [] });
     assert.equal(ProviderManager.groq.failureCount, 1);
@@ -274,7 +275,7 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
     assert.equal(ProviderManager.groq.isHealthy(), false, 'Circuit must open after 3 failures');
 
     // Reset for other tests
-    ProviderManager.groq.recordSuccess();
+    ProviderManager.groq.reset();
   });
 
   // ── Groq grounded explanation integration via processChat ──
@@ -286,7 +287,7 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
     axios.post = async (url, body) => {
       // Gemini fails
       if (url.includes('generativelanguage.googleapis.com')) {
-        throw new Error('Gemini down');
+        throw Object.assign(new Error('provider unavailable'), { response: { status: 503 } });
       }
 
       if (url.includes('api.groq.com')) {
@@ -327,7 +328,7 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
 
     axios.post = async (url) => {
       if (url.includes('generativelanguage.googleapis.com')) {
-        throw new Error('Gemini offline');
+        throw Object.assign(new Error('provider unavailable'), { code: 'ECONNRESET' });
       }
 
       if (url.includes('api.groq.com')) {
@@ -363,7 +364,7 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
 
     axios.post = async (url) => {
       if (url.includes('generativelanguage.googleapis.com')) {
-        throw new Error('Gemini unreachable');
+        throw Object.assign(new Error('provider unavailable'), { code: 'ECONNRESET' });
       }
 
       if (url.includes('api.groq.com')) {

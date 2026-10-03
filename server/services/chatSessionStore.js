@@ -164,6 +164,10 @@ export async function reserveChatProviderBudget(claim, upperBoundTokens) {
   if (!Number.isSafeInteger(upperBoundTokens) || upperBoundTokens < 1) {
     throw new TypeError('Chat provider budget reservation must be a positive safe integer');
   }
+  const nextReservation = Number(claim.tokenReservation || 0) + upperBoundTokens;
+  if (!Number.isSafeInteger(nextReservation)) {
+    throw new TypeError('Chat provider budget reservation exceeds the safe integer range');
+  }
   let reserved;
   try {
     reserved = await ConversationHistory.findOneAndUpdate({
@@ -186,7 +190,7 @@ export async function reserveChatProviderBudget(claim, upperBoundTokens) {
     throw persistenceError();
   }
   if (!reserved) return false;
-  claim.tokenReservation = upperBoundTokens;
+  claim.tokenReservation = nextReservation;
   claim.reservationCharged = true;
   claim.conversation = reserved;
   return true;
