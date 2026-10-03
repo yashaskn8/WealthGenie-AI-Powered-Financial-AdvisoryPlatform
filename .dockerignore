@@ -1,0 +1,9 @@
+**
+!reactapp/
+!reactapp/**
+!shared/
+!shared/buildIdentity.js
+!shared/demoPreflightContracts.js
+reactapp/node_modules
+reactapp/dist
+reactapp/.env*
