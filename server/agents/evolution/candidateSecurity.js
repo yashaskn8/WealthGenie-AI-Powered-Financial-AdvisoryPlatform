@@ -29,9 +29,28 @@ export function scanPromptBundleSecurity(bundle) {
   return Object.freeze({ passed: true, findings: [] });
 }
 
-export function validateCandidateSurfaces({ mutationSurface = [], scaffoldSpec = {} } = {}) {
+function sameValue(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function validateCandidateSurfaces({ mutationSurface = [], scaffoldSpec = {}, parentScaffoldSpec = null } = {}) {
   const surfaces = Array.isArray(mutationSurface) ? mutationSurface : [mutationSurface];
   surfaces.forEach(assertEvolutionSurfaceAllowed);
+  if (parentScaffoldSpec) {
+    const checks = [
+      ['promptBundle.plannerInstruction', scaffoldSpec.promptBundle?.plannerInstruction, parentScaffoldSpec.promptBundle?.plannerInstruction],
+      ['promptBundle.synthesisInstruction', scaffoldSpec.promptBundle?.synthesisInstruction, parentScaffoldSpec.promptBundle?.synthesisInstruction],
+      ['evidenceOrderingPolicy', scaffoldSpec.evidenceOrderingPolicy, parentScaffoldSpec.evidenceOrderingPolicy],
+      ['contextCompressionPolicy', scaffoldSpec.contextCompressionPolicy, parentScaffoldSpec.contextCompressionPolicy],
+      ['safeModelRoleRouting', scaffoldSpec.safeModelRoleRouting, parentScaffoldSpec.safeModelRoleRouting],
+    ];
+    const actualChanges = checks.filter(([, candidate, parent]) => !sameValue(candidate, parent)).map(([surface]) => surface);
+    if (actualChanges.some(surface => !surfaces.includes(surface)) || surfaces.some(surface => !actualChanges.includes(surface))) {
+      const error = new Error('Candidate mutationSurface must exactly match the scaffold fields changed from its parent.');
+      error.code = 'EVOLUTION_SURFACE_DELTA_MISMATCH';
+      throw error;
+    }
+  }
   const forbiddenKeys = ['code', 'script', 'executable', 'financialAuthority', 'taxRules', 'allocationWeights', 'authorizationPolicy', 'holdoutLoader', 'promotionPolicy'];
   const serialized = JSON.stringify(scaffoldSpec);
   if (forbiddenKeys.some(key => serialized.includes(`"${key}"`))) {

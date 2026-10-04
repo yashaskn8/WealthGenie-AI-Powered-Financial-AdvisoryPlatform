@@ -157,6 +157,22 @@ function verifyMandateRecord(mandate, keyProvider) {
   return true;
 }
 
+async function withAuthorizationTransaction(models, dependencies, operation) {
+  if (typeof dependencies.authorizationTransaction === 'function') {
+    return dependencies.authorizationTransaction(operation);
+  }
+  const connection = models.mandateModel.db;
+  if (typeof connection?.startSession !== 'function') {
+    throw mandateError('AUTHORIZATION_TRANSACTION_UNAVAILABLE', 'Passkey approval requires transaction-capable persistence.', 503);
+  }
+  const session = await connection.startSession();
+  try {
+    return await session.withTransaction(() => operation(session));
+  } finally {
+    await session.endSession();
+  }
+}
+
 export async function createMandateForPlanReview({ runId, userId, correlationId = null, ttlSeconds, dependencies = {}, runtimeConfig = {} }) {
   const models = { agentRunModel: AgentRun, profileModel: FinancialProfile, recommendationModel: Recommendation, mandateModel: UserIntentMandate, ...dependencies };
   const run = await models.agentRunModel.findOne({ runId, userId }).lean();
@@ -304,51 +320,64 @@ export async function verifyMandateApproval({ mandateId, userId, assertion, depe
     if (!['singleDevice', 'multiDevice'].includes(approval.deviceType) || typeof approval.backedUp !== 'boolean') {
       throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey backup eligibility/state is unavailable.');
     }
-    const counterUpdate = await models.credentialModel.findOneAndUpdate(
-      { userId, credentialId: credential.id, counter: credential.counter },
-      { $set: {
-        counter: approval.newCounter,
-        deviceType: approval.deviceType,
-        backedUp: approval.backedUp,
-        lastUsedAt: new Date(),
-      } },
-      { new: true },
-    );
-    if (!counterUpdate) throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey authenticator counter changed unexpectedly.');
-    const challengeConsumed = await models.challengeModel.findOneAndUpdate(
-      {
-        mandateId,
-        userId,
-        mandateHash: mandate.mandateHash,
-        consumedAt: null,
-        $expr: { $gt: ['$expiresAt', '$$NOW'] },
-      },
-      { $set: { consumedAt: new Date() } },
-      { new: true },
-    );
-    if (!challengeConsumed) throw mandateError('MANDATE_ALREADY_CONSUMED', 'The passkey challenge was already consumed.');
   }
   const keyProvider = dependencies.keyProvider || createAuthorizationKeyProvider({ env: runtimeConfig.env || process.env, required: (runtimeConfig.env || process.env).NODE_ENV === 'production' });
   const signature = keyProvider.sign(canonicalizeMandate(mandate));
-  const update = await models.mandateModel.findOneAndUpdate(
-    {
-      mandateId,
-      userId,
-      status: 'PENDING_USER_VERIFICATION',
-      mandateHash: mandate.mandateHash,
-      $expr: { $gt: ['$expiresAt', '$$NOW'] },
-    },
-    { $set: { status: 'AUTHORIZED', approval: {
-      method: provider.name,
-      verifiedAt: approval.verifiedAt,
-      credentialId: approval.credentialId,
-      authenticatorCounter: approval.newCounter || null,
-      credentialDeviceType: approval.deviceType || null,
-      credentialBackedUp: typeof approval.backedUp === 'boolean' ? approval.backedUp : null,
-    }, signatureMetadata: { ...keyProvider.metadata(), signature } } },
-    { new: true },
-  ).lean();
-  if (!update) {
+  let update;
+  try {
+    const persistAuthorization = async session => {
+      if (provider.name === 'WEBAUTHN') {
+        const counterUpdate = await models.credentialModel.findOneAndUpdate(
+          { userId, credentialId: credential.id, counter: credential.counter },
+          { $set: {
+            counter: approval.newCounter,
+            deviceType: approval.deviceType,
+            backedUp: approval.backedUp,
+            lastUsedAt: new Date(),
+          } },
+          { new: true, session },
+        );
+        if (!counterUpdate) throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey authenticator counter changed unexpectedly.');
+        const challengeConsumed = await models.challengeModel.findOneAndUpdate(
+          {
+            mandateId,
+            userId,
+            mandateHash: mandate.mandateHash,
+            consumedAt: null,
+            $expr: { $gt: ['$expiresAt', '$$NOW'] },
+          },
+          { $set: { consumedAt: new Date() } },
+          { new: true, session },
+        );
+        if (!challengeConsumed) throw mandateError('MANDATE_ALREADY_CONSUMED', 'The passkey challenge was already consumed.');
+      }
+
+      const authorized = await models.mandateModel.findOneAndUpdate(
+        {
+          mandateId,
+          userId,
+          status: 'PENDING_USER_VERIFICATION',
+          mandateHash: mandate.mandateHash,
+          $expr: { $gt: ['$expiresAt', '$$NOW'] },
+        },
+        { $set: { status: 'AUTHORIZED', approval: {
+          method: provider.name,
+          verifiedAt: approval.verifiedAt,
+          credentialId: approval.credentialId,
+          authenticatorCounter: approval.newCounter || null,
+          credentialDeviceType: approval.deviceType || null,
+          credentialBackedUp: typeof approval.backedUp === 'boolean' ? approval.backedUp : null,
+        }, signatureMetadata: { ...keyProvider.metadata(), signature } } },
+        { new: true, session },
+      ).lean();
+      if (!authorized) throw mandateError('MANDATE_APPROVAL_STATE_CHANGED', 'Mandate state changed during passkey verification.', 409);
+      return authorized;
+    };
+    update = provider.name === 'WEBAUTHN'
+      ? await withAuthorizationTransaction(models, dependencies, persistAuthorization)
+      : await persistAuthorization(undefined);
+  } catch (error) {
+    if (error.code !== 'MANDATE_APPROVAL_STATE_CHANGED') throw error;
     const expired = await models.mandateModel.findOne({
       mandateId,
       userId,

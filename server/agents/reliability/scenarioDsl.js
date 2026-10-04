@@ -12,8 +12,9 @@ const expectedSchema = Joi.object({
   taskState: Joi.string().valid('SUBMITTED', 'WORKING', 'WAITING_FOR_APPROVAL', 'COMPLETED', 'FAILED', 'CANCELED').allow(null),
   authorityDelta: Joi.number().valid(0).required(),
   noDuplicateCommit: Joi.boolean().default(true),
-  safetyContained: Joi.boolean().default(true),
+  safetyContained: Joi.boolean().default(false),
   maxReactionHours: Joi.number().min(0).max(HARD_LIMITS.maxScenarioHours).allow(null),
+  requiredEventKinds: Joi.array().items(Joi.string().pattern(/^[A-Z][A-Z0-9_]{1,79}$/)).unique().max(12).default([]),
 }).unknown(false);
 
 const scenarioSchema = Joi.object({

@@ -663,6 +663,11 @@ paths:
       operationId: getRuntimeDependencyVerification
       tags: [Health]
       security: []
+      parameters:
+        - { name: X-Demo-Expected-Mongodb-Database, in: header, required: false, schema: { type: string, maxLength: 63 } }
+        - { name: X-Demo-Expected-Mongodb-Host, in: header, required: false, schema: { type: string, maxLength: 253 } }
+        - { name: X-Demo-Expected-Mongodb-Port, in: header, required: false, schema: { type: integer, minimum: 1, maximum: 65535 } }
+        - { name: X-Demo-Expected-Mongodb-Environment-Id, in: header, required: false, schema: { type: string, format: uuid, pattern: '^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-4[a-fA-F0-9]{3}-[89aAbB][a-fA-F0-9]{3}-[a-fA-F0-9]{12}$' } }
       responses:
         '200': { description: Runtime build and connected dependency capabilities verified, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeDependencyVerification' } } } }
         '503': { description: Runtime build or required dependency capability could not be verified, content: { application/json: { schema: { $ref: '#/components/schemas/RuntimeDependencyVerification' } } } }
@@ -1507,15 +1512,16 @@ components:
       type: object
       required: [status, buildSha, mongo, redis, marketProvider, marketProviderTokenPresent]
       properties:
-        status: { type: string, enum: [VERIFIED, NOT_VERIFIED] }
+        status: { type: string, enum: [RUNTIME_VERIFIED, DEMO_DATABASE_VERIFIED, NOT_VERIFIED] }
         buildSha: { type: [string, 'null'], pattern: '^[a-f0-9]{40}$' }
         mongo:
           type: object
-          required: [connected, transactionCapable, databaseIdentityVerified]
+          required: [connected, transactionCapable, databaseIdentityVerified, environmentSentinelVerified]
           properties:
             connected: { type: boolean }
             transactionCapable: { type: boolean }
             databaseIdentityVerified: { type: boolean }
+            environmentSentinelVerified: { type: boolean }
           additionalProperties: false
         redis:
           type: object

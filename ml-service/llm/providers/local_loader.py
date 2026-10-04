@@ -39,11 +39,10 @@ class LocalLLMLoader:
                 load_weights=True,
             )
         if provider_type == "api":
-            from llm.providers.api_provider import APILLMProvider
-            return APILLMProvider(model_name=model_id)
+            raise ValueError("API LLM provider is unavailable until an authenticated transport is configured.")
         if provider_type == "mock":
             return MockLLMProvider(model_name=model_id)
         raise ValueError(
             f"Unknown LLM provider type '{provider_type}'. "
-            "Valid providers are: mock, huggingface, local, api."
+            "Valid providers are: mock, huggingface, local."
         )

@@ -637,7 +637,7 @@ export function generateBeginnerSuitability({ product, profile = {}, parentCatal
   } else if (parentId === 'rbi_bonds') {
     whyThisFitsYou = `Shown because you selected ${goals} with a ${horizon} horizon. Issued directly by the RBI with sovereign safety, paying a floating coupon that automatically resets every 6 months.`;
   } else if (parentId === 'fd' || parentId === 'sbi_fd') {
-    whyThisFitsYou = `Shown because you selected ${goals}. SBI term deposits provide predictable, guaranteed returns backed by India's largest bank with DICGC insurance up to ₹5 lakh.`;
+    whyThisFitsYou = `Shown because you selected ${goals}. SBI publishes rates for selected term-deposit tenures; the applicable rate and early-withdrawal terms depend on the deposit you choose.`;
   } else if (parentId === 'scss') {
     whyThisFitsYou = `Shown because you selected ${goals}. Designed for senior citizens seeking high quarterly income with sovereign backing from the Government of India.`;
   } else if (['nsc', 'kvp', 'pomis'].includes(parentId)) {

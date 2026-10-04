@@ -171,6 +171,7 @@ function wait(milliseconds, signal) {
 }
 
 async function request(method, path, data = null, options = {}) {
+  const requestAuthRevision = authRevision;
   const url = `${API_BASE}${path}`;
   const upperMethod = method.toUpperCase();
   const isMutating = ['POST', 'PUT', 'DELETE', 'PATCH'].includes(upperMethod);
@@ -238,7 +239,7 @@ async function request(method, path, data = null, options = {}) {
 
       const requestId = res.headers?.get?.('x-correlation-id') || json?.request_id || headers['X-Correlation-ID'];
       if (!res.ok) {
-        if (res.status === 401) {
+        if (res.status === 401 && authRevision === requestAuthRevision) {
           clearUserSession();
           if (typeof window !== 'undefined' && window.location.pathname !== '/' && window.location.pathname !== '/login') {
             window.location.href = '/login';
@@ -321,7 +322,9 @@ export async function logout() {
 }
 
 export async function restoreSession(options = {}) {
+  const requestAuthRevision = authRevision;
   const data = await request('GET', '/auth/session', null, { retries: 0, ...options });
+  if (authRevision !== requestAuthRevision) return data;
   csrfToken = data?.csrfToken || readCookie('wg_csrf');
   if (data?.user) setUserInfo(data.user);
   return data;

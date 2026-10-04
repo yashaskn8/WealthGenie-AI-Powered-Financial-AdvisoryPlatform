@@ -670,3 +670,60 @@ test('production ResearchMesh client never falls back to the development token',
     AGENT_A2A_CARD_SIGNING_PUBLIC_JWK: JSON.stringify({ kty: 'RSA', n: 'test', e: 'AQAB' }),
   } }), error => error.code === 'A2A_CLIENT_TOKEN_CONFIGURATION_INVALID');
 });
+
+test('production ResearchMesh transport pins each DNS resolution and rejects rebinding before connecting', async () => {
+  const env = {
+    NODE_ENV: 'production',
+    AGENT_A2A_RESEARCH_URL: 'https://research.example.test',
+    AGENT_A2A_CLIENT_TOKEN: 'production-client-token',
+    AGENT_A2A_CARD_SIGNING_PUBLIC_JWK: JSON.stringify({ kty: 'RSA', n: 'test', e: 'AQAB' }),
+  };
+  let dnsCalls = 0;
+  let requestCalls = 0;
+  let injectedFetchCalls = 0;
+  let observedOptions;
+  const productionClient = createResearchMeshClient({
+    env,
+    fetchImpl: async () => { injectedFetchCalls += 1; throw new Error('production must not use fetchImpl'); },
+    dnsLookup: async () => {
+      dnsCalls += 1;
+      return dnsCalls === 1
+        ? [{ address: '93.184.216.34', family: 4 }]
+        : [{ address: '10.0.0.12', family: 4 }];
+    },
+    httpsRequest: (_options, onResponse) => {
+      requestCalls += 1;
+      observedOptions = _options;
+      const request = new EventEmitter();
+      request.end = () => {
+        const response = Readable.from([Buffer.from('{"ok":true}')]);
+        response.statusCode = 200;
+        response.headers = { 'content-type': 'application/json' };
+        onResponse(response);
+      };
+      request.destroy = error => request.emit('error', error);
+      return request;
+    },
+  });
+
+  const firstResponse = await productionClient.fetchImpl('https://research.example.test/.well-known/agent-card.json', {
+    headers: { accept: 'application/json' },
+  });
+  assert.equal(firstResponse.status, 200);
+  assert.deepEqual(await firstResponse.json(), { ok: true });
+  let pinnedRecords;
+  observedOptions.lookup('research.example.test', { all: true }, (_error, records) => { pinnedRecords = records; });
+  assert.deepEqual(pinnedRecords, [{ address: '93.184.216.34', family: 4 }]);
+
+  await assert.rejects(
+    () => productionClient.fetchImpl('https://research.example.test/a2a/message:send', { method: 'POST', body: '{}' }),
+    error => error.code === 'RESEARCH_SSRF_BLOCKED',
+  );
+  assert.equal(dnsCalls, 2, 'each request performs a fresh vetted lookup');
+  assert.equal(requestCalls, 1, 'a private rebinding answer never reaches the HTTPS transport');
+  assert.equal(injectedFetchCalls, 0, 'production ignores an injected fetch implementation');
+  assert.throws(() => createResearchMeshClient({ env: {
+    ...env,
+    AGENT_A2A_RESEARCH_URL: 'https://127.0.0.1',
+  } }), error => error.code === 'A2A_AGENT_URL_PRIVATE');
+});

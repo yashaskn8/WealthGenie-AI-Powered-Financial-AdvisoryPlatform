@@ -142,6 +142,36 @@ test('SBI missing tenure and schema drift fail closed without static rates', () 
   assert.throws(() => parseSbiRetailTermDepositPage('<html>changed</html>'), /rate_header/);
 });
 
+test('SBI parser rejects impossible effective and publication dates', () => {
+  const invalidEffectiveDate = sbiPage().replaceAll('15/12/2025', '31/02/2025');
+  assert.throws(() => parseSbiRetailTermDepositPage(invalidEffectiveDate, {
+    fetchedAt: NOW.toISOString(), now: NOW,
+  }), /revised_columns/);
+
+  const invalidPublicationDate = sbiPage().replace('16-06-2026', '31-02-2026');
+  assert.throws(() => parseSbiRetailTermDepositPage(invalidPublicationDate, {
+    fetchedAt: NOW.toISOString(), now: NOW,
+  }), /last_updated/);
+});
+
+test('SBI long-form publication dates are parsed as calendar dates and future-effective rates are not current', () => {
+  const longPublicationDate = sbiPage().replace('Tuesday, 16-06-2026', 'Tuesday, June 16, 2026');
+  const snapshot = parseSbiRetailTermDepositPage(longPublicationDate, {
+    fetchedAt: NOW.toISOString(), now: NOW,
+  });
+  assert.equal(snapshot.publicationDate, '2026-06-16');
+
+  const impossibleLongDate = longPublicationDate.replace('June 16, 2026', 'February 31, 2026');
+  assert.throws(() => parseSbiRetailTermDepositPage(impossibleLongDate, {
+    fetchedAt: NOW.toISOString(), now: NOW,
+  }), /last_updated/);
+
+  const futureRate = sbiPage().replaceAll('15/12/2025', '15/12/2099');
+  assert.throws(() => parseSbiRetailTermDepositPage(futureRate, {
+    fetchedAt: NOW.toISOString(), now: NOW,
+  }), /future_effective_rates/);
+});
+
 test('WTI runs the hard suitability gate before official fixed-income provider access', async () => {
   let calls = 0;
   const rejected = await rankWhereToInvestBackend(

@@ -208,7 +208,9 @@ const CalculatorTab = ({
                       {formatINR(row.value)}
                     </div>
                     <div style={{ padding: '8px 6px', textAlign: 'right', borderBottom: '1px solid rgba(255,255,255,0.03)', fontFamily: "'JetBrains Mono', monospace" }}>
-                      <span style={{ color: '#22c55e', fontWeight: 700 }}>+{formatINR(row.gains)}</span>
+                      <span style={{ color: row.gains < 0 ? '#f87171' : '#22c55e', fontWeight: 700 }}>
+                        {row.gains >= 0 ? '+' : ''}{formatINR(row.gains)}
+                      </span>
                       {mult >= 1.5 && (
                         <span style={{ marginLeft: 6, fontSize: '0.55rem', color: mult >= 3 ? '#a78bfa' : mult >= 2 ? '#38bdf8' : '#64748b', fontWeight: 900 }}>
                           {mult.toFixed(1)}×

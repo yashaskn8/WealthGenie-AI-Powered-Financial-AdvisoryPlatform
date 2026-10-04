@@ -11,8 +11,8 @@ import { persistAdvisoryAtomically } from '../../services/advisoryPersistence.js
 import { buildCanonicalAdvisoryResponse } from '../../services/advisoryResponse.js';
 import { claimAdvisoryIdempotency, releaseAdvisoryIdempotency } from '../../middleware/idempotency.js';
 import { createAuthorizationKeyProvider } from './keyProvider.js';
-import { assertVerifiableMandate, buildSnapshotFingerprint } from './mandateService.js';
-import { createSignedExecutionReceipt, verifyExecutionReceipt } from './executionReceipt.js';
+import { assertVerifiableMandate, buildSnapshotFingerprint, verifyMandateRecord } from './mandateService.js';
+import { createSignedExecutionReceipt, executionReceiptMatchesMandate, verifyExecutionReceipt } from './executionReceipt.js';
 import { evaluateAuthorizationPolicy } from './policyEngine.js';
 import { getAgentCapabilityGrant } from './capabilityGrants.js';
 import { APPROVE_RECOMPUTE, AUTHORIZATION_AUDIENCE, mandateError } from './authorizationConstants.js';
@@ -58,6 +58,13 @@ async function committedOperationRecommendation(models, userId, profileId, manda
   return recommendation;
 }
 
+function responseRecommendationId(response) {
+  const value = response?.recommendation && typeof response.recommendation === 'object'
+    ? response.recommendation
+    : response;
+  return String(value?.recommendationId ?? value?.recommendation_id ?? value?._id ?? '');
+}
+
 function committedOperationAuditHash(recommendation, response) {
   const historical = recommendation?.responseSnapshot;
   const historicalHash = historical?.audit_hash || historical?.recommendation?.audit_hash;
@@ -74,10 +81,16 @@ function committedOperationAuditHash(recommendation, response) {
 async function reconcileCommittedExecution({ models, stored, attempt, committed, keyProvider, userId }) {
   const resultReference = attempt?.resultReference || {};
   const recommendation = committed?.recommendation;
-  const recommendationId = String(resultReference.recommendationId || recommendation?._id || '');
+  const recommendationId = String(resultReference.recommendationId || '');
   const afterSnapshotHash = resultReference.afterSnapshotHash;
-  if (!recommendationId || !afterSnapshotHash) {
-    throw mandateError('AUTHORIZED_EXECUTION_RECONCILIATION_REQUIRED', 'The committed result is missing its immutable receipt binding.');
+  const responseSnapshot = recommendation?.responseSnapshot;
+  if (!recommendationId || String(recommendation?._id || '') !== recommendationId
+      || !afterSnapshotHash
+      || !/^[a-f0-9]{64}$/.test(String(resultReference.responseHash || ''))
+      || !responseSnapshot
+      || canonicalSha256(responseSnapshot) !== resultReference.responseHash
+      || responseRecommendationId(responseSnapshot) !== recommendationId) {
+    throw mandateError('AUTHORIZED_EXECUTION_RECONCILIATION_REQUIRED', 'The committed result is missing or failed its immutable receipt binding.');
   }
   const completedAt = new Date();
   const receipt = createSignedExecutionReceipt({
@@ -103,16 +116,24 @@ async function reconcileCommittedExecution({ models, stored, attempt, committed,
     savedReceipt = await resolve(models.receiptModel.findOne({ mandateId: stored.mandateId, userId }));
   }
   const normalizedReceipt = savedReceipt?.toObject ? savedReceipt.toObject() : savedReceipt;
-  if (!normalizedReceipt || !verifyExecutionReceipt(normalizedReceipt, keyProvider)) {
+  if (!normalizedReceipt || !verifyExecutionReceipt(normalizedReceipt, keyProvider)
+      || !executionReceiptMatchesMandate(normalizedReceipt, stored)) {
     throw mandateError('AUTHORIZED_EXECUTION_RECONCILIATION_REQUIRED', 'The recovered execution receipt could not be verified.');
   }
-  await models.attemptModel.updateOne(
-    { mandateId: stored.mandateId, userId, executionGeneration: attempt.executionGeneration, status: { $in: ['COMMITTED', 'RECEIPT_PENDING', 'REQUIRES_RECONCILIATION'] } },
-    { $set: { status: 'COMPLETED', receiptId: normalizedReceipt.receiptId, completedAt, heartbeatAt: completedAt, leaseUntil: null, failureCode: null } },
-  );
-  await models.mandateModel.updateOne(
+  const mandateFinalization = await models.mandateModel.updateOne(
     { mandateId: stored.mandateId, userId, status: { $in: ['AUTHORIZED', 'EXECUTING'] } },
     { $set: { status: 'EXECUTED', executedAt: completedAt, receiptId: normalizedReceipt.receiptId } },
+  );
+  if (mandateFinalization?.matchedCount === 0) {
+    const currentMandate = await resolve(models.mandateModel.findOne({ mandateId: stored.mandateId, userId }));
+    if (currentMandate?.status !== 'EXECUTED'
+        || String(currentMandate.receiptId || '') !== String(normalizedReceipt.receiptId)) {
+      throw mandateError('AUTHORIZED_EXECUTION_RECONCILIATION_REQUIRED', 'The recovered receipt could not finalize its mandate state.');
+    }
+  }
+  await models.attemptModel.updateOne(
+    { mandateId: stored.mandateId, userId, executionGeneration: attempt.executionGeneration, status: { $in: ['COMMITTED', 'RECEIPT_PENDING', 'COMPLETED', 'REQUIRES_RECONCILIATION'] } },
+    { $set: { status: 'COMPLETED', receiptId: normalizedReceipt.receiptId, completedAt, mandateFinalizedAt: completedAt, heartbeatAt: completedAt, leaseUntil: null, failureCode: null } },
   );
   await appendAuthorizationEvent({
     runId: stored.runId,
@@ -124,7 +145,7 @@ async function reconcileCommittedExecution({ models, stored, attempt, committed,
   return { receipt: normalizedReceipt, response: committed.response };
 }
 
-async function claimExecutionAttempt(models, mandate, userId, { recovery = false, now = new Date() } = {}) {
+export async function claimExecutionAttempt(models, mandate, userId, { recovery = false, now = new Date() } = {}) {
   const existing = await resolve(models.attemptModel.findOne({ mandateId: mandate.mandateId, userId }));
   if (existing?.status === 'COMPLETED' && existing.receiptId) return { attempt: existing, replay: true };
   const activeStatuses = new Set(['CLAIMED', 'EXECUTING', 'COMMITTED', 'RECEIPT_PENDING']);
@@ -185,12 +206,27 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
     async execute({ mandateId, userId, correlationId = null, recovery = false }) {
       const stored = await resolve(models.mandateModel.findOne({ mandateId, userId }));
       if (!stored) throw mandateError('MANDATE_NOT_FOUND', 'Mandate not found or access denied.', 404);
+      const existingAttempt = await resolve(models.attemptModel.findOne({ mandateId, userId }));
+      if (!recovery && existingAttempt?.status === 'COMPLETED') {
+        verifyMandateRecord(stored, keyProvider);
+        const completedReceipt = await loadReceipt(models, existingAttempt.receiptId, mandateId, userId);
+        const completedReceiptValue = completedReceipt?.toObject ? completedReceipt.toObject() : completedReceipt;
+        if (!completedReceiptValue || !verifyExecutionReceipt(completedReceiptValue, keyProvider)
+            || !executionReceiptMatchesMandate(completedReceiptValue, stored)) {
+          throw mandateError('AUTHORIZED_EXECUTION_RECONCILIATION_REQUIRED', 'The completed execution receipt is unavailable or invalid.');
+        }
+        const reconciliation = await reconcileAuthorizedExecution({ mandateId, userId, dependencies: models, runtimeConfig });
+        if (reconciliation.status !== 'COMPLETED') {
+          throw mandateError('AUTHORIZED_EXECUTION_RECONCILIATION_REQUIRED', 'The completed execution could not reconcile its durable mandate state.');
+        }
+        return { receipt: completedReceipt.toObject ? completedReceipt.toObject() : completedReceipt, response: null };
+      }
       if (!recovery) {
         assertVerifiableMandate(stored, { keyProvider });
       } else if (!['AUTHORIZED', 'EXECUTING'].includes(stored.status)) {
         if (stored.status === 'EXECUTED' && stored.receiptId) {
           const receipt = await loadReceipt(models, stored.receiptId, stored.mandateId, userId);
-          if (receipt && verifyExecutionReceipt(receipt, keyProvider)) return { receipt, response: null };
+          if (receipt && verifyExecutionReceipt(receipt, keyProvider) && executionReceiptMatchesMandate(receipt, stored)) return { receipt, response: null };
         }
         throw mandateError('AUTHORIZED_EXECUTION_NOT_RECOVERABLE', 'This authorized action is not recoverable.');
       } else {
@@ -199,16 +235,15 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
         const { verifyMandateRecord } = await import('./mandateService.js');
         verifyMandateRecord(stored, keyProvider);
       }
-      const existingAttempt = await resolve(models.attemptModel.findOne({ mandateId, userId }));
       if (existingAttempt?.receiptId) {
         const existingReceipt = await loadReceipt(models, existingAttempt.receiptId, mandateId, userId);
-        if (existingReceipt && verifyExecutionReceipt(existingReceipt, keyProvider)) return { receipt: existingReceipt, response: null };
+        if (existingReceipt && verifyExecutionReceipt(existingReceipt, keyProvider) && executionReceiptMatchesMandate(existingReceipt, stored)) return { receipt: existingReceipt, response: null };
       }
-      if (recovery && ['COMMITTED', 'RECEIPT_PENDING', 'REQUIRES_RECONCILIATION'].includes(existingAttempt?.status)) {
+      if (recovery && ['COMMITTED', 'RECEIPT_PENDING', 'COMPLETED', 'REQUIRES_RECONCILIATION'].includes(existingAttempt?.status)) {
         const reconciled = await reconcileAuthorizedExecution({ mandateId, userId, dependencies: models });
         if (reconciled.status === 'COMPLETED' && reconciled.receiptId) {
           const receipt = await loadReceipt(models, reconciled.receiptId, mandateId, userId);
-          if (receipt && verifyExecutionReceipt(receipt, keyProvider)) return { receipt, response: null };
+          if (receipt && verifyExecutionReceipt(receipt, keyProvider) && executionReceiptMatchesMandate(receipt, stored)) return { receipt, response: null };
         }
         const committed = await committedAdvisory(models, userId, mandateId, responseBuilder);
         if (committed) return reconcileCommittedExecution({ models, stored, attempt: existingAttempt, committed, keyProvider, userId });
@@ -268,7 +303,7 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
       const claim = await claimExecutionAttempt(models, stored, userId, { recovery, now: startedAt });
       if (claim.replay) {
         const replayReceipt = await loadReceipt(models, claim.attempt.receiptId, mandateId, userId);
-        if (replayReceipt && verifyExecutionReceipt(replayReceipt, keyProvider)) return { receipt: replayReceipt, response: null };
+        if (replayReceipt && verifyExecutionReceipt(replayReceipt, keyProvider) && executionReceiptMatchesMandate(replayReceipt, stored)) return { receipt: replayReceipt, response: null };
         throw mandateError('AUTHORIZED_EXECUTION_RECONCILIATION_REQUIRED', 'Execution completed but its receipt requires reconciliation.');
       }
       const claimed = recovery && stored.status === 'EXECUTING'
@@ -331,11 +366,21 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
               core.recommendationData = await committedOperationRecommendation(models, userId, stored.profileId, mandateId);
               core.profileInputHash = core.recommendationData.profileInputHash;
             } else {
+              const committedSnapshot = buildSnapshotFingerprint({ profile, recommendation: core.recommendationData });
               persisted = await persistAdvisoryAtomically({
                 recommendation: core.recommendationData,
                 auditRecord: core.auditRecordData,
                 response: core.response,
                 idempotencyClaim,
+                executionCommit: {
+                  executionId: runningAttempt.executionId,
+                  mandateId,
+                  userId,
+                  executionGeneration: runningAttempt.executionGeneration,
+                  workerId: runningAttempt.workerId,
+                  afterSnapshotHash: committedSnapshot.financialSnapshotHash,
+                  policyDecisionId: decision.decisionId,
+                },
                 profileStateBinding: {
                   revision: Number(profileState.state.revision),
                   currentProfileId: String(profileState.profile._id),
@@ -353,17 +398,38 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
         const afterSnapshot = buildSnapshotFingerprint({ profile, recommendation: core.recommendationData });
         const recommendationId = String(core.recommendationData?._id || persisted?.recommendation?._id || '');
         if (!recommendationId) throw mandateError('AUTHORIZED_EXECUTION_RECONCILIATION_REQUIRED', 'The committed recommendation reference is unavailable.');
-        const resultReference = {
-          recommendationId,
-          auditHash: committedOperationAuditHash(core.recommendationData, persisted),
-          afterSnapshotHash: afterSnapshot.financialSnapshotHash,
-          responseHash: canonicalSha256(persisted),
-          policyDecisionId: decision.decisionId,
-        };
-        await models.attemptModel.updateOne(
-          { executionId: runningAttempt.executionId, executionGeneration: runningAttempt.executionGeneration, status: 'EXECUTING' },
-          { $set: { status: 'RECEIPT_PENDING', resultReference, heartbeatAt: completedAt, leaseUntil: new Date(completedAt.getTime() + 60000) } },
+        const committedAttempt = await resolve(models.attemptModel.findOne({
+          executionId: runningAttempt.executionId,
+          mandateId,
+          userId,
+          executionGeneration: runningAttempt.executionGeneration,
+          workerId: runningAttempt.workerId,
+          status: 'COMMITTED',
+        }));
+        const resultReference = committedAttempt?.resultReference;
+        if (!resultReference
+            || String(resultReference.recommendationId || '') !== recommendationId
+            || resultReference.afterSnapshotHash !== afterSnapshot.financialSnapshotHash
+            || !/^[a-f0-9]{64}$/.test(String(resultReference.responseHash || ''))
+            || !core.recommendationData?.responseSnapshot
+            || canonicalSha256(core.recommendationData.responseSnapshot) !== resultReference.responseHash
+            || responseRecommendationId(core.recommendationData.responseSnapshot) !== recommendationId) {
+          throw mandateError('AUTHORIZED_EXECUTION_RECONCILIATION_REQUIRED', 'The transactionally committed execution reference is unavailable or inconsistent.');
+        }
+        const receiptPending = await models.attemptModel.updateOne(
+          {
+            executionId: runningAttempt.executionId,
+            mandateId,
+            userId,
+            executionGeneration: runningAttempt.executionGeneration,
+            workerId: runningAttempt.workerId,
+            status: 'COMMITTED',
+          },
+          { $set: { status: 'RECEIPT_PENDING', heartbeatAt: completedAt, leaseUntil: new Date(completedAt.getTime() + 60000) } },
         );
+        if (receiptPending.matchedCount !== 1) {
+          throw mandateError('AUTHORIZED_EXECUTION_FENCED', 'The committed execution was claimed by another recovery worker.');
+        }
         const receipt = createSignedExecutionReceipt({
           mandate: stored,
           beforeSnapshotHash: stored.financialSnapshotHash,
@@ -386,14 +452,26 @@ export function createAuthorizedActionExecutor({ dependencies = {}, runtimeConfi
           if (error?.code !== 11000) throw error;
           savedReceipt = await resolve(models.receiptModel.findOne({ mandateId, userId }));
         }
-        if (!savedReceipt || !verifyExecutionReceipt(savedReceipt.toObject ? savedReceipt.toObject() : savedReceipt, keyProvider)) {
+        const savedReceiptValue = savedReceipt?.toObject ? savedReceipt.toObject() : savedReceipt;
+        if (!savedReceiptValue || !verifyExecutionReceipt(savedReceiptValue, keyProvider)
+            || !executionReceiptMatchesMandate(savedReceiptValue, stored)) {
           throw mandateError('AUTHORIZED_EXECUTION_RECONCILIATION_REQUIRED', 'Execution receipt could not be verified after persistence.');
         }
         await models.attemptModel.updateOne(
           { executionId: runningAttempt.executionId, executionGeneration: runningAttempt.executionGeneration, status: 'RECEIPT_PENDING' },
           { $set: { status: 'COMPLETED', receiptId: savedReceipt.receiptId, completedAt, heartbeatAt: completedAt, leaseUntil: null } },
         );
-        await models.mandateModel.updateOne({ mandateId, userId, status: 'EXECUTING' }, { $set: { status: 'EXECUTED', executedAt: completedAt, receiptId: savedReceipt.receiptId } });
+        const mandateFinalization = await models.mandateModel.updateOne({ mandateId, userId, status: 'EXECUTING' }, { $set: { status: 'EXECUTED', executedAt: completedAt, receiptId: savedReceipt.receiptId } });
+        if (mandateFinalization?.matchedCount === 0) {
+          const currentMandate = await resolve(models.mandateModel.findOne({ mandateId, userId }));
+          if (currentMandate?.status !== 'EXECUTED' || String(currentMandate.receiptId || '') !== String(savedReceipt.receiptId)) {
+            throw mandateError('AUTHORIZED_EXECUTION_RECONCILIATION_REQUIRED', 'The committed receipt could not finalize its mandate state.');
+          }
+        }
+        await models.attemptModel.updateOne(
+          { executionId: runningAttempt.executionId, executionGeneration: runningAttempt.executionGeneration, status: 'COMPLETED', receiptId: savedReceipt.receiptId },
+          { $set: { mandateFinalizedAt: completedAt } },
+        );
         await appendAuthorizationEvent({
           runId: stored.runId,
           userId,

@@ -58,12 +58,13 @@ def test_mock_llm_provider():
 
 def test_api_llm_provider():
     provider = APILLMProvider(model_name="Test-API-Model")
-    assert provider.is_healthy()
+    assert not provider.is_healthy()
 
     req = LLMGenerateRequest(prompt="Portfolio allocation rules")
-    res = provider.generate(req)
-    assert res.provider == "api"
-    assert "Portfolio" in res.text or "financial" in res.text.lower()
+    with pytest.raises(RuntimeError, match="transport is not configured"):
+        provider.generate(req)
+    with pytest.raises(RuntimeError, match="transport is not configured"):
+        provider.generate_stream(req)
 
 
 def test_huggingface_llm_provider_fallback(monkeypatch, tmp_path):
@@ -313,6 +314,8 @@ def test_local_llm_loader():
 
     with pytest.raises(ValueError, match="Unknown LLM provider"):
         LocalLLMLoader.load_provider(provider_type="typo-provider")
+    with pytest.raises(ValueError, match="transport is configured"):
+        LocalLLMLoader.load_provider(provider_type="api")
 
 
 def test_llm_model_registry():
@@ -325,8 +328,8 @@ def test_llm_model_registry():
 
     assert registry.get_active_provider().get_metadata().model_name == "Reg-Mock"
 
-    registry.set_active_provider("reg_api")
-    assert registry.get_active_provider().get_metadata().model_name == "Reg-API"
+    assert not registry.set_active_provider("reg_api")
+    assert registry.get_active_provider().get_metadata().model_name == "Reg-Mock"
 
     models_list = registry.list_models()
     assert len(models_list) >= 2

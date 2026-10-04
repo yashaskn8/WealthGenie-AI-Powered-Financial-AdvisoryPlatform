@@ -5,26 +5,22 @@ import { fileURLToPath } from 'node:url';
 import { matchesBuildSha } from '../../shared/buildIdentity.js';
 import { financialProfileCompletionSchema } from '../validation/financialSchemas.js';
 import { taxCalculationContextSchema } from '../validation/taxSchemas.js';
-import { isSafeDemoDatabaseName } from '../services/demoDatabaseIdentity.js';
-import { BACKEND_HTTP_HARD_TIMEOUT_MS, isRedisRequired, readJson } from './demoPreflight.js';
+import {
+  isSafeDemoDatabaseHost,
+  isSafeDemoDatabaseName,
+  isSafeDemoDatabasePort,
+  isSafeDemoEnvironmentId,
+} from '../services/demoDatabaseIdentity.js';
+import { BACKEND_HTTP_HARD_TIMEOUT_MS, isRedisRequired, isSafeDemoUrl, readJson } from './demoPreflight.js';
 
 const SERVER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REACTAPP_DIR = path.resolve(SERVER_DIR, '..', 'reactapp');
 const requireFromReactapp = createRequire(path.join(REACTAPP_DIR, 'package.json'));
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
 
-function safeUrl(value, { api = false } = {}) {
-  try {
-    const url = new URL(value);
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return null;
-    const localHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
-    if (url.protocol !== 'https:' && !localHosts.has(url.hostname)) return null;
-    if (api && !url.pathname.replace(/\/+$/, '').endsWith('/api')) return null;
-    if (!api && url.pathname !== '/login' && url.pathname !== '/') return null;
-    return url;
-  } catch {
-    return null;
-  }
+function safeUrl(value, { api = false, remoteOrigins } = {}) {
+  if (!isSafeDemoUrl(value, { api, remoteOrigins })) return null;
+  return new URL(value);
 }
 
 async function validateFixture(filePath, schema) {
@@ -51,7 +47,9 @@ export async function runDemoDoctor({ environment = process.env, write = line =>
   const requiredPresence = [
     'DEMO_LIVE_PREFLIGHT', 'DEMO_API_BASE_URL', 'DEMO_FRONTEND_URL',
     'DEMO_PROFILE_COMPLETION_FILE', 'DEMO_TAX_CONTEXT_FILE',
-    'DEMO_EXPECTED_BUILD_SHA', 'DEMO_EXPECTED_MONGODB_DATABASE',
+    'DEMO_EXPECTED_BUILD_SHA', 'DEMO_EXPECTED_MONGODB_DATABASE', 'DEMO_EXPECTED_MONGODB_HOST',
+    'DEMO_EXPECTED_MONGODB_PORT',
+    'DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID',
     'DEMO_COMPLETION_IDEMPOTENCY_KEY', 'DEMO_NIFTY_ETF_PARENT_ID',
     'DEMO_EMAIL', 'DEMO_PASSWORD',
   ];
@@ -62,14 +60,20 @@ export async function runDemoDoctor({ environment = process.env, write = line =>
   add(checks, write, 'Explicit live-demo mode', environment.DEMO_LIVE_PREFLIGHT === '1',
     environment.DEMO_LIVE_PREFLIGHT === '1' ? 'PASS configuration only; this doctor does not execute live preflight' : 'set DEMO_LIVE_PREFLIGHT=1 for a later explicit live run');
 
-  const api = safeUrl(environment.DEMO_API_BASE_URL, { api: true });
-  const frontend = safeUrl(environment.DEMO_FRONTEND_URL);
-  add(checks, write, 'API URL syntax', Boolean(api), api ? 'valid credential-free local HTTP or remote HTTPS /api URL' : 'configure a safe HTTP(S) API URL ending in /api');
-  add(checks, write, 'Frontend URL syntax', Boolean(frontend), frontend ? 'valid credential-free local HTTP or remote HTTPS URL' : 'configure a safe frontend URL');
+  const api = safeUrl(environment.DEMO_API_BASE_URL, { api: true, remoteOrigins: environment.DEMO_TRUSTED_REMOTE_ORIGINS });
+  const frontend = safeUrl(environment.DEMO_FRONTEND_URL, { remoteOrigins: environment.DEMO_TRUSTED_REMOTE_ORIGINS });
+  add(checks, write, 'API URL syntax', Boolean(api), api ? 'valid local URL or explicitly allowlisted HTTPS /api origin' : 'configure a safe local URL or explicitly allowlisted HTTPS API origin ending in /api');
+  add(checks, write, 'Frontend URL syntax', Boolean(frontend), frontend ? 'valid local URL or explicitly allowlisted HTTPS origin' : 'configure a safe local or explicitly allowlisted frontend URL');
   const expectedSha = matchesBuildSha(environment.DEMO_EXPECTED_BUILD_SHA, environment.DEMO_EXPECTED_BUILD_SHA);
   add(checks, write, 'Expected build SHA syntax', expectedSha, expectedSha ? 'valid full 40-character SHA' : 'configure a full 40-character hexadecimal SHA');
   const expectedDatabaseValid = isSafeDemoDatabaseName(environment.DEMO_EXPECTED_MONGODB_DATABASE);
   add(checks, write, 'Expected demo database', expectedDatabaseValid, expectedDatabaseValid ? 'safe isolated database identifier configured (value hidden)' : 'configure DEMO_EXPECTED_MONGODB_DATABASE to a non-reserved isolated database name');
+  const expectedDatabaseHostValid = isSafeDemoDatabaseHost(environment.DEMO_EXPECTED_MONGODB_HOST);
+  add(checks, write, 'Expected demo database host', expectedDatabaseHostValid, expectedDatabaseHostValid ? 'exact connected Mongo host configured (value hidden)' : 'configure DEMO_EXPECTED_MONGODB_HOST to the exact Mongo connection host');
+  const expectedDatabasePortValid = isSafeDemoDatabasePort(environment.DEMO_EXPECTED_MONGODB_PORT);
+  add(checks, write, 'Expected demo database port', expectedDatabasePortValid, expectedDatabasePortValid ? 'exact connected Mongo port configured (value hidden)' : 'configure DEMO_EXPECTED_MONGODB_PORT to the exact Mongo connection port');
+  const expectedEnvironmentIdValid = isSafeDemoEnvironmentId(environment.DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID);
+  add(checks, write, 'Expected demo environment ID', expectedEnvironmentIdValid, expectedEnvironmentIdValid ? 'UUIDv4 environment identity configured (value hidden)' : 'configure DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID with the UUIDv4 stored in the isolated demo database sentinel');
   const idempotencyValid = IDEMPOTENCY_KEY_PATTERN.test(environment.DEMO_COMPLETION_IDEMPOTENCY_KEY || '');
   add(checks, write, 'Completion idempotency key', idempotencyValid, idempotencyValid ? 'key grammar and length valid (value hidden)' : 'configure an 8–128 character URL-safe idempotency key');
   add(checks, write, 'Nifty ETF parent identity', environment.DEMO_NIFTY_ETF_PARENT_ID === 'nifty_etf',
@@ -99,6 +103,15 @@ export async function runDemoDoctor({ environment = process.env, write = line =>
           'X-Demo-Expected-Mongodb-Database': expectedDatabaseValid
             ? environment.DEMO_EXPECTED_MONGODB_DATABASE
             : '',
+          'X-Demo-Expected-Mongodb-Host': isSafeDemoDatabaseHost(environment.DEMO_EXPECTED_MONGODB_HOST)
+            ? environment.DEMO_EXPECTED_MONGODB_HOST
+            : '',
+          'X-Demo-Expected-Mongodb-Port': isSafeDemoDatabasePort(environment.DEMO_EXPECTED_MONGODB_PORT)
+            ? String(environment.DEMO_EXPECTED_MONGODB_PORT)
+            : '',
+          'X-Demo-Expected-Mongodb-Environment-Id': expectedEnvironmentIdValid
+            ? environment.DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID
+            : '',
         },
       }).catch(() => null),
       readHttp(`${api.origin}/health/deep`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null),
@@ -111,10 +124,18 @@ export async function runDemoDoctor({ environment = process.env, write = line =>
     const mongo = verification?.body?.mongo;
     const runtimeProvider = verification?.body?.marketProvider;
     const runtimeTokenPresent = verification?.body?.marketProviderTokenPresent === true;
-    const mongoVerified = mongo?.connected === true && mongo?.transactionCapable === true && mongo?.databaseIdentityVerified === true;
+    const mongoVerified = verification?.body?.status === 'DEMO_DATABASE_VERIFIED'
+      && expectedDatabaseValid
+      && expectedDatabaseHostValid
+      && expectedDatabasePortValid
+      && expectedEnvironmentIdValid
+      && mongo?.connected === true
+      && mongo?.transactionCapable === true
+      && mongo?.databaseIdentityVerified === true
+      && mongo?.environmentSentinelVerified === true;
     add(checks, write, 'Connected database identity and transaction', mongoVerified
       && matchesBuildSha(environment.DEMO_EXPECTED_BUILD_SHA, verification?.body?.buildSha),
-    mongoVerified ? 'backend verified its connected database identity and read-only transaction; database name hidden' : 'database identity, connection, transaction, or backend build was not verified');
+    mongoVerified ? 'backend verified the isolated database sentinel and read-only transaction; identity values hidden' : 'database identity, sentinel, connection, transaction, or backend build was not verified');
     const redis = verification?.body?.redis;
     const redisRequired = isRedisRequired(environment);
     add(checks, write, 'Redis policy', redis?.required === redisRequired && (!redisRequired || redis.connected === true),

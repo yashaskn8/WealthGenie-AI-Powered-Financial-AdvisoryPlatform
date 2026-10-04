@@ -5,6 +5,7 @@ import {
   assertHoldoutIsolation,
   buildCandidateScoreCard,
   createEvaluationManifest,
+  createOptimizerEvaluationManifest,
   evaluateHoldoutCandidate,
   hashEvaluationData,
 } from '../agents/evals/evaluationV2.js';
@@ -36,7 +37,7 @@ test('agent telemetry only permits bounded non-sensitive semantic attributes', (
   });
 });
 
-test('evaluation v2 seals holdout and enforces financial authority delta zero', () => {
+test('evaluation v2 keeps holdout out of optimizer projection and enforces financial authority delta zero', () => {
   const cases = [
     { id: 'train-1', partition: 'train', expectedAction: 'NONE' },
     { id: 'validation-1', partition: 'validation', expectedAction: 'NONE' },
@@ -44,14 +45,36 @@ test('evaluation v2 seals holdout and enforces financial authority delta zero', 
   ];
   const manifest = createEvaluationManifest({ cases, datasetVersion: 'dataset-1' });
   assert.equal(manifest.counts.holdout, 1);
+  const optimizerManifest = createOptimizerEvaluationManifest({ cases, datasetVersion: 'dataset-1' });
+  assert.equal(optimizerManifest.partitions.holdout, undefined);
+  assert.equal(optimizerManifest.holdoutSealed, false);
+  assert.equal(optimizerManifest.holdoutAttestation, 'UNVERIFIED');
   assert.match(hashEvaluationData(cases), /^[a-f0-9]{64}$/);
+  assert.throws(() => hashEvaluationData([{ value: Number.NaN }]), /non-finite/i);
+  assert.throws(() => hashEvaluationData([{ value: undefined }]), /JSON/i);
   assert.throws(() => assertHoldoutIsolation(cases), /Holdout/);
-  const passed = buildCandidateScoreCard({ candidateId: 'candidate-a', partition: 'validation', caseDefinition: cases[1], result: { recommendedAction: 'NONE', financialAuthorityDelta: 0 } });
+  const passed = buildCandidateScoreCard({ candidateId: 'candidate-a', partition: 'validation', caseDefinition: cases[1], result: { recommendedAction: 'NONE', financialAuthorityDelta: 0, authorityMeasurementState: 'MEASURED' } });
   assert.equal(passed.passed, true);
   const failed = buildCandidateScoreCard({ candidateId: 'candidate-b', partition: 'validation', caseDefinition: cases[1], result: { recommendedAction: 'NONE', financialAuthorityDelta: 1 } });
   assert.equal(failed.hardGatePassed, false);
-  const holdout = evaluateHoldoutCandidate({ candidateId: 'candidate-a', cases: [cases[2]], evaluator: () => ({ result: { recommendedAction: 'NONE', financialAuthorityDelta: 0 }, trajectory: [] }) });
+  const missingOracle = buildCandidateScoreCard({
+    candidateId: 'candidate-no-oracle',
+    partition: 'validation',
+    caseDefinition: { ...cases[1], expectedAction: null },
+    result: { recommendedAction: 'NONE', financialAuthorityDelta: 0, authorityMeasurementState: 'MEASURED' },
+  });
+  assert.equal(missingOracle.scores.actionCorrect, false);
+  assert.equal(missingOracle.passed, false);
+  const holdout = evaluateHoldoutCandidate({ candidateId: 'candidate-a', cases: [cases[2]], evaluator: () => ({ result: { recommendedAction: 'NONE', financialAuthorityDelta: 0, authorityMeasurementState: 'MEASURED' }, trajectory: [] }) });
   assert.equal(holdout.passed, true);
+  const unmeasured = buildCandidateScoreCard({
+    candidateId: 'candidate-unmeasured',
+    partition: 'validation',
+    caseDefinition: cases[1],
+    result: { recommendedAction: 'NONE', financialAuthorityDelta: 0 },
+  });
+  assert.equal(unmeasured.hardGates.authorityMeasurementComplete, false);
+  assert.equal(unmeasured.passed, false);
 });
 
 test('scaffold registry is immutable, read-only, and human-promotion gated', async () => {
@@ -84,12 +107,12 @@ test('offline evolution never consumes holdout and trajectory mining excludes ra
     baseSpec: base,
     enabled: true,
     cases: [
-      { partition: 'train', expectedAction: 'NONE', result: { recommendedAction: 'NONE', financialAuthorityDelta: 0 } },
-      { partition: 'validation', expectedAction: 'NONE', result: { recommendedAction: 'NONE', financialAuthorityDelta: 0 } },
+      { partition: 'train', expectedAction: 'NONE', result: { recommendedAction: 'NONE', financialAuthorityDelta: 0, authorityMeasurementState: 'MEASURED' } },
+      { partition: 'validation', expectedAction: 'NONE', result: { recommendedAction: 'NONE', financialAuthorityDelta: 0, authorityMeasurementState: 'MEASURED' } },
       { partition: 'holdout', expectedAction: 'NONE', result: { recommendedAction: 'NONE', financialAuthorityDelta: 1 } },
     ],
   });
-  assert.equal(result.holdoutSealed, true);
+  assert.equal(result.holdoutSealed, false);
   assert.equal(result.evaluation.scoreCards.length, 2);
   const events = sanitizeTrajectory([{ type: 'TOOL_FAILED', node: 'execute_safe_tools', code: 'TOOL_TIMEOUT', value: 'sensitive' }]);
   assert.equal(events[0].value, undefined);

@@ -371,6 +371,20 @@ test('dashboard portfolio projection uses exact authorized weights and excludes 
   }), /weights must total 1/);
 });
 
+test('dashboard portfolio projection preserves negative net gains instead of reporting zero', () => {
+  const projection = generatePortfolioProjection({
+    monthlyContribution: 10_000,
+    initialLumpSum: 0,
+    horizonYears: 1,
+    instruments: [{ id: 'declining-assumption', nominalReturn: -50, allocationWeight: 1 }],
+  });
+
+  const finalYear = projection.performance_data.at(-1);
+  assert.ok(finalYear.average < finalYear.invested);
+  assert.equal(finalYear.gains, finalYear.average - finalYear.invested);
+  assert.ok(finalYear.gains < 0);
+});
+
 test('riskProfiler classifies profiles and encodes categories', () => {
   const aggressive = getRiskProfile(canonicalProfile({
     age: 25, monthlyTakeHome: 400000, monthlySavings: 120000,

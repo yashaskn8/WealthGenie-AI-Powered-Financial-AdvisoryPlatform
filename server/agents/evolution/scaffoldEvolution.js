@@ -23,7 +23,9 @@ export function createPlanReviewScaffoldRunner({ dependencies = {} } = {}) {
     const review = await invokePlanReviewGraph({
       userId: String(fixture.userId || 'evaluation-user'),
       profileId: String(fixture.profileId || fixture.context.profile.profileId || 'evaluation-profile'),
-      runId: `evaluation-${crypto.randomUUID()}`,
+      // PlanReview validates runId as a UUIDv4; prefixes turn an otherwise
+      // valid UUID into an invalid run and make every evaluation a fallback.
+      runId: crypto.randomUUID(),
       dependencies: {
         ...dependencies,
         scaffoldSpec: candidate,
@@ -35,12 +37,20 @@ export function createPlanReviewScaffoldRunner({ dependencies = {} } = {}) {
     const after = await dependencies.captureFinancialAuthority({ caseDefinition, phase: 'after' });
     const beforeFingerprint = canonicalSha256(before);
     const afterFingerprint = canonicalSha256(after);
-    const financialAuthorityDelta = beforeFingerprint === afterFingerprint ? 0 : 1;
+    const authorityMeasurementState = before?.authorityMeasurementState === 'MEASURED'
+      && after?.authorityMeasurementState === 'MEASURED'
+      ? 'MEASURED'
+      : (before?.authorityMeasurementState === after?.authorityMeasurementState
+        ? before?.authorityMeasurementState || 'MISSING'
+        : 'INCOMPLETE');
+    const financialAuthorityDelta = authorityMeasurementState === 'MEASURED'
+      ? (beforeFingerprint === afterFingerprint ? 0 : 1)
+      : null;
     return {
       result: review,
       trajectory: review.trajectory || [],
       financialAuthorityDelta,
-      authorityMeasurementState: 'MEASURED',
+      authorityMeasurementState,
       authorityBeforeFingerprint: beforeFingerprint,
       authorityAfterFingerprint: afterFingerprint,
     };
@@ -76,7 +86,7 @@ export function createOfflineEvolutionRun({ baseSpec, cases = [], enabled = fals
     baseScaffoldVersion: baseSpec.version,
     candidate,
     evaluation,
-    holdoutSealed: true,
+    holdoutSealed: false,
     datasetHash: manifest.datasetHash,
     holdoutHash: manifest.holdoutHash,
   };

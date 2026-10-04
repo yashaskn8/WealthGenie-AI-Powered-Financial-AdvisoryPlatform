@@ -142,6 +142,18 @@ def test_features_require_chronological_normalized_observations():
         build_feature_frame(reversed_dataset)
 
 
+def test_dataset_retrieval_time_must_be_valid_and_not_precede_observations():
+    dataset = normalized_dataset(260)
+    dataset["retrievedAt"] = "not-a-timestamp"
+    with pytest.raises(ValueError, match="MARKET_REGIME_DATASET_RETRIEVAL_TIME_INVALID"):
+        build_feature_frame(dataset)
+
+    dataset = normalized_dataset(260)
+    dataset["retrievedAt"] = "2020-01-01T00:00:00.000Z"
+    with pytest.raises(ValueError, match="MARKET_REGIME_DATASET_RETRIEVED_BEFORE_OBSERVATIONS"):
+        build_feature_frame(dataset)
+
+
 def test_future_rows_cannot_change_previously_computed_features():
     complete = normalized_dataset(320)
     prefix = copy.deepcopy(complete)

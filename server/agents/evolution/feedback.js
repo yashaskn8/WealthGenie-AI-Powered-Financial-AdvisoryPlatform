@@ -7,12 +7,15 @@ function safeText(value, max = 500) {
 export function buildGepaFeedback({ candidateId, evaluation = null, reliability = null, authorityDelta = 0, failures = [], sandbox = null } = {}) {
   const cards = evaluation?.scoreCards || [];
   const passed = cards.filter(card => card.passed).length;
+  const authorityDeltaLabel = authorityDelta !== null && authorityDelta !== undefined && Number.isFinite(Number(authorityDelta))
+    ? (Number(authorityDelta) === 0 ? '0' : safeText(authorityDelta, 20))
+    : 'unmeasured';
   const lines = [
     `Candidate: ${safeText(candidateId, 120)}`,
     `Result: ${cards.length ? (passed / cards.length).toFixed(3) : '0.000'}`,
     `Feedback:`,
     `- train/validation scorecards passed: ${passed}/${cards.length}`,
-    `- financial authority delta: ${Number(authorityDelta) === 0 ? '0' : safeText(authorityDelta, 20)}`,
+    `- financial authority delta: ${authorityDeltaLabel}`,
     `- reliability lab: ${reliability?.passed === true ? 'passed' : 'failed'}`,
     `- sandbox attestation: ${sandbox?.manifestHash ? 'present' : 'missing'}`,
   ];

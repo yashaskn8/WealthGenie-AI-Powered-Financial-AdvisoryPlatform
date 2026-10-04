@@ -12,6 +12,7 @@ const CONTROLLED_AUTHORITY_LABELS = Object.freeze([
   'normal', 'cautious', 'high volatility', 'risk off',
   'state_0', 'state_1', 'bull', 'bear', 'crash', 'recession',
 ]);
+const UNSUPPORTED_ABSOLUTE_FINANCIAL_CLAIMS = /\b(?:risk[- ]free|zero[- ]risk|no risk|completely safe|100% safe|guaranteed returns?|assured returns?|can never lose(?: money)?|never lose(?: money)?|fully guaranteed)\b/i;
 
 function normalizedNumber(value) {
   const number = Number(String(value).replace(/,/g, ''));
@@ -177,6 +178,9 @@ export function validateGroundedExplanation(candidate, packet) {
 
   const { numberKinds, dates, urls } = collectAllowedFacts(packet);
   const content = [candidate.text, ...(candidate.claims || []).map(claim => claim?.text || '')].join('\n');
+  if (UNSUPPORTED_ABSOLUTE_FINANCIAL_CLAIMS.test(content)) {
+    errors.push('UNSUPPORTED_ABSOLUTE_FINANCIAL_CLAIM');
+  }
   const withoutCitations = content.replace(CITATION_PATTERN, '');
   const unsupportedNumbers = unsupportedNumbersInText(withoutCitations, numberKinds);
   if (unsupportedNumbers.length) errors.push('UNSUPPORTED_FINANCIAL_NUMBER');

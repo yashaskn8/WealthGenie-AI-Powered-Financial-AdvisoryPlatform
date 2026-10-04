@@ -184,9 +184,27 @@ def validate_proposal_output(proposals: list[dict[str, Any]], input_data: dict[s
         surfaces = proposal.get('mutationSurface')
         if not isinstance(surfaces, list) or not surfaces or any(surface not in allowed for surface in surfaces):
             raise ValueError('GEPA proposal exceeds its mutation surface')
+        proposal_field_surfaces = {
+            'plannerInstruction': 'promptBundle.plannerInstruction',
+            'synthesisInstruction': 'promptBundle.synthesisInstruction',
+            'evidenceOrderingPolicy': 'evidenceOrderingPolicy',
+            'contextCompressionPolicy': 'contextCompressionPolicy',
+            'safeModelRoleRouting': 'safeModelRoleRouting',
+        }
+        submitted_surfaces = sorted(surface for field, surface in proposal_field_surfaces.items() if field in proposal)
+        if sorted(set(surfaces)) != submitted_surfaces or len(surfaces) != len(submitted_surfaces):
+            raise ValueError('GEPA mutationSurface must exactly match the mutable fields present in the proposal')
         for key in ('plannerInstruction', 'synthesisInstruction'):
             if proposal.get(key) is not None:
                 _assert_prompt_text(proposal[key], f'proposal.{key}')
+        if proposal.get('evidenceOrderingPolicy') is not None and proposal['evidenceOrderingPolicy'] not in {'AS_RECEIVED', 'AUTHORITATIVE_FIRST', 'FRESHNESS_FIRST'}:
+            raise ValueError('proposal.evidenceOrderingPolicy is invalid')
+        if proposal.get('contextCompressionPolicy') is not None and proposal['contextCompressionPolicy'] not in {'BOUNDED_PROFILE_CONTEXT', 'MINIMAL_PROFILE_CONTEXT'}:
+            raise ValueError('proposal.contextCompressionPolicy is invalid')
+        if proposal.get('safeModelRoleRouting') is not None:
+            routing = proposal['safeModelRoleRouting']
+            if not isinstance(routing, dict) or set(routing) - {'planner', 'synthesis'} or any(role not in {'PLANNER', 'EXPLAINER'} for role in routing.values()):
+                raise ValueError('proposal.safeModelRoleRouting is invalid')
         if not isinstance(proposal.get('proposalId'), str) or not proposal['proposalId']:
             raise ValueError('GEPA proposalId is required')
         if not isinstance(proposal.get('mutationReason'), str) or len(proposal['mutationReason']) > 500:

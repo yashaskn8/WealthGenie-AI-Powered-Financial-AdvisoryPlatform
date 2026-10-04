@@ -40,6 +40,9 @@ async function makeFixtureEnvironment() {
       DEMO_TAX_CONTEXT_FILE: taxPath,
       DEMO_EXPECTED_BUILD_SHA: BUILD_SHA,
       DEMO_EXPECTED_MONGODB_DATABASE: 'wealthgenie_demo',
+      DEMO_EXPECTED_MONGODB_HOST: '127.0.0.1',
+      DEMO_EXPECTED_MONGODB_PORT: '27017',
+      DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID: '11111111-1111-4111-8111-111111111111',
       DEMO_COMPLETION_IDEMPOTENCY_KEY: 'doctor-test-idempotency-key',
       DEMO_NIFTY_ETF_PARENT_ID: 'nifty_etf',
       DEMO_EMAIL: 'demo@example.invalid',
@@ -61,10 +64,13 @@ function verifiedResponses({ databaseIdentityVerified = true } = {}) {
     if (parsed.pathname === '/health/ready') return response(200, { status: 'READY' });
     if (parsed.pathname === '/health/verification') {
       assert.equal(options.headers?.['X-Demo-Expected-Mongodb-Database'], 'wealthgenie_demo');
+      assert.equal(options.headers?.['X-Demo-Expected-Mongodb-Host'], '127.0.0.1');
+      assert.equal(options.headers?.['X-Demo-Expected-Mongodb-Port'], '27017');
+      assert.equal(options.headers?.['X-Demo-Expected-Mongodb-Environment-Id'], '11111111-1111-4111-8111-111111111111');
       return response(200, {
-        status: 'VERIFIED',
+        status: 'DEMO_DATABASE_VERIFIED',
         buildSha: BUILD_SHA,
-        mongo: { connected: true, transactionCapable: true, databaseIdentityVerified },
+        mongo: { connected: true, transactionCapable: true, databaseIdentityVerified, environmentSentinelVerified: true },
         redis: { required: false, connected: false },
         marketProvider: 'NSE',
         marketProviderTokenPresent: true,
@@ -126,6 +132,27 @@ test('read-only doctor fails closed when the connected database is not the confi
     await rm(fixture.directory, { recursive: true, force: true });
   }
 });
+
+test('read-only doctor marks an absent Mongo port as an unverified demo identity', async () => {
+  const fixture = await makeFixtureEnvironment();
+  delete fixture.environment.DEMO_EXPECTED_MONGODB_PORT;
+  try {
+    const result = await runDemoDoctor({
+      environment: fixture.environment,
+      write: () => {},
+      dependencies: {
+        readHttp: verifiedResponses(),
+        async launchBrowser() { return { async close() {} }; },
+      },
+    });
+    assert.equal(result.checks.find(check => check.name === 'Expected demo database port').state, 'FAIL');
+    assert.equal(result.checks.find(check => check.name === 'Connected database identity and transaction').state, 'FAIL');
+    assert.equal(result.exitCode, 1);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
 test('read-only doctor signals missing DB identity explicitly so health skips its transaction probe', async () => {
   const fixture = await makeFixtureEnvironment();
   delete fixture.environment.DEMO_EXPECTED_MONGODB_DATABASE;
@@ -140,10 +167,13 @@ test('read-only doctor signals missing DB identity explicitly so health skips it
             verificationCalls += 1;
             assert.equal(Object.hasOwn(options.headers || {}, 'X-Demo-Expected-Mongodb-Database'), true);
             assert.equal(options.headers['X-Demo-Expected-Mongodb-Database'], '');
+            assert.equal(options.headers['X-Demo-Expected-Mongodb-Host'], '127.0.0.1');
+            assert.equal(options.headers['X-Demo-Expected-Mongodb-Port'], '27017');
+            assert.equal(options.headers['X-Demo-Expected-Mongodb-Environment-Id'], '11111111-1111-4111-8111-111111111111');
             return response(503, {
               status: 'NOT_VERIFIED',
               buildSha: BUILD_SHA,
-              mongo: { connected: true, transactionCapable: false, databaseIdentityVerified: false },
+              mongo: { connected: true, transactionCapable: false, databaseIdentityVerified: false, environmentSentinelVerified: false },
               redis: { required: false, connected: false },
               marketProvider: 'NSE',
               marketProviderTokenPresent: true,
@@ -156,6 +186,27 @@ test('read-only doctor signals missing DB identity explicitly so health skips it
     });
     assert.equal(result.exitCode, 1);
     assert.equal(verificationCalls, 1);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test('read-only doctor rejects unallowlisted remote endpoints before probing or browser launch', async () => {
+  const fixture = await makeFixtureEnvironment();
+  fixture.environment.DEMO_API_BASE_URL = 'https://attacker.example/api';
+  const requestedPaths = [];
+  try {
+    const result = await runDemoDoctor({
+      environment: fixture.environment,
+      write: () => {},
+      dependencies: {
+        async readHttp(url) { requestedPaths.push(new URL(url).pathname); return response(200, {}); },
+        async launchBrowser() { throw new Error('must not launch'); },
+      },
+    });
+    assert.equal(result.exitCode, 1);
+    assert.equal(requestedPaths.some(value => value.startsWith('/health/')), false);
+    assert.equal(result.checks.find(check => check.name === 'API URL syntax').state, 'FAIL');
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
   }

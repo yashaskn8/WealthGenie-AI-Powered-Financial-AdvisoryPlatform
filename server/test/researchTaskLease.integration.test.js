@@ -9,7 +9,10 @@ import { migrateResearchTaskIndexes } from '../services/researchTaskPersistence.
 import { createResearchBrief } from '../agents/research/researchSchemas.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 
-const hasMongoUri = Boolean(process.env.MONGODB_URI || process.env.MONGO_URI);
+const noMongoPartition = process.env.MONGO_TEST_PARTITION === 'NO_MONGO';
+
+// Full mode may provision an isolated MongoMemoryReplSet; only the explicit
+// Windows no-Mongo partition should skip these replica-set integration cases.
 
 function caller() {
   return { user: { identity: { provider: 'development', authenticated: true, subject: 'phase7-lease-integration', agentType: 'PLAN_REVIEW' } } };
@@ -59,7 +62,7 @@ test('ResearchTask brief fixtures remain valid for UUIDs with private-identifier
   );
 });
 
-test('Mongo task execution claims fence stale workers and persist recovery idempotently', { skip: !hasMongoUri, timeout: 30_000 }, async () => {
+test('Mongo task execution claims fence stale workers and persist recovery idempotently', { skip: noMongoPartition, timeout: 30_000 }, async () => {
   await setupTestDatabase();
   const taskId = `phase7-lease-${crypto.randomUUID()}`;
   const context = caller();
@@ -121,7 +124,7 @@ test('Mongo task execution claims fence stale workers and persist recovery idemp
   }
 });
 
-test('Mongo global ResearchAgent capacity admits only its configured cross-replica limit and releases on completion', { skip: !hasMongoUri, timeout: 30_000 }, async () => {
+test('Mongo global ResearchAgent capacity admits only its configured cross-replica limit and releases on completion', { skip: noMongoPartition, timeout: 30_000 }, async () => {
   await setupTestDatabase();
   const context = caller();
   const firstId = `phase7-capacity-a-${crypto.randomUUID()}`;
@@ -166,7 +169,7 @@ test('Mongo global ResearchAgent capacity admits only its configured cross-repli
   }
 });
 
-test('Mongo semantic ResearchBrief deduplication is owner-scoped and ignores transport IDs/timestamps', { skip: !hasMongoUri, timeout: 30_000 }, async () => {
+test('Mongo semantic ResearchBrief deduplication is owner-scoped and ignores transport IDs/timestamps', { skip: noMongoPartition, timeout: 30_000 }, async () => {
   await setupTestDatabase();
   const taskId = `phase7-dedupe-${crypto.randomUUID()}`;
   const sameOwner = caller();

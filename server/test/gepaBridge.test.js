@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CURRENT_PROMPT_BUNDLE } from '../agents/evolution/promptBundle.js';
-import { createGepaBridgeInput, runGepaProposalBridge } from '../agents/evolution/gepaBridge.js';
+import { buildGepaSubprocessEnv, createGepaBridgeInput, runGepaProposalBridge, validateGepaProposal } from '../agents/evolution/gepaBridge.js';
+import { createPromptBundle } from '../agents/evolution/promptBundle.js';
 
 const bridgeOptions = {
   basePromptBundle: CURRENT_PROMPT_BUNDLE,
@@ -39,4 +40,39 @@ test('GEPA bridge rejects private or sealed optimizer inputs', () => {
     ...bridgeOptions,
     validationCases: [{ id: 'holdout', partition: 'holdout', question: 'bounded' }],
   }), /train or validation|holdout/i);
+});
+
+test('GEPA declared mutation surface must exactly cover each submitted mutable field', () => {
+  const basePromptBundle = createPromptBundle({ bundleId: 'surface-parent', version: '1', plannerInstruction: 'Planner A' });
+  assert.throws(() => validateGepaProposal({
+    proposalId: 'routing-smuggle',
+    parentPromptBundleHash: basePromptBundle.contentHash,
+    mutationSurface: ['promptBundle.plannerInstruction'],
+    mutationReason: 'attempt to change routing without declaring it',
+    plannerInstruction: 'Planner B',
+    safeModelRoleRouting: { planner: 'EXPLAINER', synthesis: 'PLANNER' },
+  }, { basePromptBundle, allowedMutationSurfaces: ['promptBundle.plannerInstruction', 'safeModelRoleRouting'] }), {
+    code: 'EVOLUTION_SURFACE_DELTA_MISMATCH',
+  });
+});
+
+test('GEPA Python bridge receives only runtime variables and the selected provider credential', () => {
+  const sourceEnv = {
+    PATH: 'safe-path',
+    SystemRoot: 'C:\\Windows',
+    AGENT_EVOLUTION_MODEL_API_KEY: 'selected-test-key',
+    AWS_SECRET_ACCESS_KEY: 'unrelated-test-secret',
+    NVIDIA_API_KEY: 'unrelated-provider-key',
+  };
+  const fixtureEnv = buildGepaSubprocessEnv({ provider: 'fixture', sourceEnv, pythonWorkingDirectory: 'ml-service' });
+  assert.equal(fixtureEnv.PATH, 'safe-path');
+  assert.equal(fixtureEnv.PYTHONPATH, 'ml-service');
+  assert.equal(fixtureEnv.AGENT_EVOLUTION_MODEL_API_KEY, undefined);
+  assert.equal(fixtureEnv.AWS_SECRET_ACCESS_KEY, undefined);
+  assert.equal(fixtureEnv.NVIDIA_API_KEY, undefined);
+
+  const liveEnv = buildGepaSubprocessEnv({ provider: 'dspy', sourceEnv, pythonWorkingDirectory: 'ml-service' });
+  assert.equal(liveEnv.AGENT_EVOLUTION_MODEL_API_KEY, 'selected-test-key');
+  assert.equal(liveEnv.AWS_SECRET_ACCESS_KEY, undefined);
+  assert.equal(liveEnv.NVIDIA_API_KEY, undefined);
 });

@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
-import { createOptimizerEvaluationManifest, evaluateCandidateAsync, assertHoldoutIsolation, hashEvaluationData } from '../evals/evaluationV2.js';
-import { verifyCandidateAgainstSealedHoldout } from '../evals/holdoutVerifier.js';
+import { createOptimizerEvaluationManifest, evaluateCandidateAsync, assertHoldoutIsolation } from '../evals/evaluationV2.js';
+import { evaluateCandidateOnHoldout, hashHoldoutCases } from '../evals/holdoutVerifier.js';
 import { runCandidateReliabilitySuite, RELIABILITY_SCENARIOS, CANDIDATE_RELIABILITY_SCENARIOS, buildReliabilityPromotionEvaluation } from '../reliability/index.js';
 import { createPlanReviewScaffoldRunner } from './scaffoldEvolution.js';
 import { createScaffoldSpec, assertScaffoldSpecSafe } from './scaffoldSpec.js';
@@ -35,7 +35,7 @@ function buildCandidate({ baseSpec, proposal, index }) {
     contextCompressionPolicy: proposal.contextCompressionPolicy || baseSpec.contextCompressionPolicy,
     safeModelRoleRouting: proposal.safeModelRoleRouting || baseSpec.safeModelRoleRouting,
   });
-  validateCandidateSurfaces({ mutationSurface: proposal.mutationSurface || ['promptBundle.plannerInstruction'], scaffoldSpec: candidate });
+  validateCandidateSurfaces({ mutationSurface: proposal.mutationSurface || ['promptBundle.plannerInstruction'], scaffoldSpec: candidate, parentScaffoldSpec: baseSpec });
   assertScaffoldSpecSafe(candidate);
   return candidate;
 }
@@ -106,6 +106,9 @@ export async function runGovernedEvolution({
   assertScaffoldSpecSafe(baseSpec);
   const budget = createEvolutionBudget(requestedBudget);
   const manifest = createOptimizerEvaluationManifest({ cases, datasetVersion: GOVERNED_EVOLUTION_VERSION, source: 'offline-sanitized' });
+  const expectedHoldoutHash = cases.some(item => item?.partition === 'holdout')
+    ? hashHoldoutCases(cases.filter(item => item?.partition === 'holdout'))
+    : null;
   const optimizerCases = [...manifest.partitions.train, ...manifest.partitions.validation];
   assertHoldoutIsolation(optimizerCases);
   const holdoutAvailable = typeof loadHoldoutCases === 'function';
@@ -178,7 +181,6 @@ export async function runGovernedEvolution({
     });
     const reliabilityEvaluationBase = buildReliabilityPromotionEvaluation({
       scorecards: reliability.scorecards,
-      holdout: { sealed: true },
       candidateReliabilityCoverageComplete: reliability.candidateReliabilityCoverageComplete,
     });
     const reliabilityEvaluation = reliability.scorecards.length > 0
@@ -186,23 +188,31 @@ export async function runGovernedEvolution({
       : Object.freeze({ ...reliabilityEvaluationBase, passed: false, criticalFailures: ['RELIABILITY_SUITE_EMPTY'] });
     let holdout = null;
     if (typeof loadHoldoutCases === 'function' && evaluation.passed && reliabilityEvaluation.passed) {
-      holdout = await verifyCandidateAgainstSealedHoldout({
+      holdout = await evaluateCandidateOnHoldout({
         candidateId,
         runner: item => runCandidateCase(item.caseDefinition || item),
         loadHoldoutCases,
+        expectedDatasetHash: expectedHoldoutHash,
+        expectedDatasetVersion: manifest.datasetVersion,
       });
     }
-    const authorityDelta = evaluation.scoreCards.reduce((sum, card) => sum + Number(card.hardGates.financialAuthorityDelta || 0), 0);
+    const authorityMeasurementComplete = evaluation.scoreCards.length > 0
+      && evaluation.scoreCards.every(card => card.hardGates.authorityMeasurementComplete === true);
+    const authorityDelta = authorityMeasurementComplete
+      ? evaluation.scoreCards.reduce((sum, card) => sum + Number(card.hardGates.financialAuthorityDelta), 0)
+      : null;
     const rawExecutionMetrics = measureExecution(executionObservations);
     if (rawExecutionMetrics.tokenUsage !== null) totalTokenUsage += rawExecutionMetrics.tokenUsage;
     const budgetExceeded = totalTokenUsage > budget.maxTotalTokens || sandboxElapsedMs > budget.maxSandboxMinutes * 60 * 1000;
     const hardGatePassed = evaluation.passed
       && reliabilityEvaluation.passed
       && reliabilityEvaluation.candidateReliabilityCoverageComplete === true
+      && authorityMeasurementComplete
       && authorityDelta === 0
       && !budgetExceeded
       && holdoutAvailable
-      && holdout?.passed === true;
+      && holdout?.passed === true
+      && holdout?.holdoutAttestation === 'VERIFIED';
     const feedback = buildGepaFeedback({
       candidateId,
       evaluation,
@@ -212,7 +222,21 @@ export async function runGovernedEvolution({
       sandbox,
     });
     assertGepaFeedbackSafe(feedback);
-    const evaluationHash = hashEvaluationData({ evaluation, reliability: reliabilityEvaluation, holdout: holdout ? { passed: holdout.passed } : null });
+    const holdoutSummary = holdout ? {
+      passed: holdout.passed,
+      attestation: holdout.holdoutAttestation,
+      datasetHash: holdout.datasetHash || null,
+      datasetVersion: holdout.datasetVersion || null,
+      attestationKeyId: holdout.attestationKeyId || null,
+      attestedAt: holdout.attestedAt || null,
+      failureCode: holdout.holdoutFailureCode || null,
+      scoreCards: (holdout.scoreCards || []).map(card => ({
+        passed: card.passed,
+        scores: card.scores,
+        hardGates: card.hardGates,
+      })),
+    } : null;
+    const evaluationHash = canonicalSha256({ evaluation, reliability: reliabilityEvaluation, holdout: holdoutSummary });
     const metrics = {
       correctness: evaluation.scoreCards.filter(card => card.scores.actionCorrect).length / Math.max(1, evaluation.scoreCards.length),
       grounding: evaluation.scoreCards.filter(card => card.scores.grounded).length / Math.max(1, evaluation.scoreCards.length),
@@ -225,7 +249,13 @@ export async function runGovernedEvolution({
     };
     records.push(Object.freeze({
       candidateId,
-      status: hardGatePassed ? 'SHADOW_READY' : (evaluation.passed && reliabilityEvaluation.passed && !budgetExceeded && !holdoutAvailable ? 'HOLDOUT_PENDING' : 'REJECTED'),
+      status: hardGatePassed
+        ? 'SHADOW_READY'
+        : (evaluation.passed && reliabilityEvaluation.passed && !budgetExceeded
+          ? (holdout?.holdoutAttestation === 'VERIFIED'
+            ? 'REJECTED'
+            : (holdoutAvailable ? 'HOLDOUT_ATTESTATION_REQUIRED' : 'HOLDOUT_PENDING'))
+          : 'REJECTED'),
       candidate,
       lineage: buildCandidateLineage({
         candidateId,
@@ -240,11 +270,12 @@ export async function runGovernedEvolution({
       }),
       evaluation,
       reliability: reliabilityEvaluation,
-      holdout: holdout ? { passed: holdout.passed, scoreCards: holdout.scoreCards?.map(card => ({ passed: card.passed })) } : null,
+      holdout: holdoutSummary,
       sandbox,
       feedback,
       hardGatePassed,
       financialAuthorityDelta: authorityDelta,
+      authorityMeasurementState: authorityMeasurementComplete ? 'MEASURED' : 'INCOMPLETE',
       metrics,
     }));
     if (typeof persistCandidate === 'function') {
@@ -288,7 +319,12 @@ export async function runGovernedEvolution({
     championCandidateId: null,
     shadowOnly: true,
     promotionRequired: true,
-    financialAuthorityDelta: records.reduce((sum, record) => sum + record.financialAuthorityDelta, 0),
+    financialAuthorityDelta: records.every(record => record.authorityMeasurementState === 'MEASURED')
+      ? records.reduce((sum, record) => sum + record.financialAuthorityDelta, 0)
+      : null,
+    authorityMeasurementState: records.length > 0 && records.every(record => record.authorityMeasurementState === 'MEASURED')
+      ? 'MEASURED'
+      : 'INCOMPLETE',
   };
   if (typeof persistEvolutionRun === 'function') {
     await persistEvolutionRun({

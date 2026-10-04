@@ -82,7 +82,8 @@ function displayStatusFor({ quoteSnapshot, historicalSnapshot, features }) {
 function ageSeconds(timestamp, now) {
   const parsed = Date.parse(timestamp);
   if (!Number.isFinite(parsed)) return null;
-  return Math.max(0, Math.floor((now.getTime() - parsed) / 1000));
+  const age = Math.floor((now.getTime() - parsed) / 1000);
+  return age < 0 ? null : age;
 }
 
 function cacheDescriptor(snapshot, now) {
@@ -104,8 +105,12 @@ function recommendationUsabilityFor(marketSnapshot, now) {
   if (![MARKET_DISPLAY_STATUS.CURRENT, MARKET_DISPLAY_STATUS.MARKET_CLOSED, MARKET_DISPLAY_STATUS.LAST_AVAILABLE].includes(displayStatus)) {
     return { status: 'NOT_USABLE', reasonCodes: ['MARKET_SNAPSHOT_NOT_CURRENT_OR_LAST_AVAILABLE'] };
   }
+  const session = marketSnapshot?.marketSession?.status;
+  if (![ 'MARKET_OPEN', 'MARKET_CLOSED', 'MARKET_HOLIDAY' ].includes(session)) {
+    return { status: 'NOT_USABLE', reasonCodes: ['MARKET_SESSION_UNVERIFIED'] };
+  }
   const observedAge = ageSeconds(marketSnapshot.observedAt, now);
-  const maxAgeSeconds = marketSnapshot.marketSession?.status === 'MARKET_OPEN'
+  const maxAgeSeconds = session === 'MARKET_OPEN'
     ? MARKET_CONTEXT_OPEN_MAX_AGE_SECONDS
     : MARKET_CONTEXT_CLOSED_MAX_AGE_SECONDS;
   if (observedAge === null || observedAge > maxAgeSeconds) {

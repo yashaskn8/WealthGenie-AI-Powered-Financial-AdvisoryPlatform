@@ -257,6 +257,59 @@ test('unavailable, stale, mismatched, and unsupported evidence produces zero pro
   assert.deepEqual(unsupported.ranking.reasonCodes, ['PRODUCT_CLASS_NOT_SUPPORTED_PHASE_2']);
 });
 
+test('AMFI ranking excludes duplicate and cross-instrument/provider NAV evidence', () => {
+  const wrongProvider = snapshots();
+  wrongProvider.current.facts[0] = {
+    ...wrongProvider.current.facts[0],
+    source: { ...wrongProvider.current.facts[0].source, provider: 'UPSTOX', instrumentId: '999' },
+  };
+  const wrongProviderResult = rankVerifiedMutualFundProducts({
+    parentInstrumentId: 'large_cap_mf',
+    currentSnapshot: wrongProvider.current,
+    historicalSnapshot: wrongProvider.historical,
+  });
+  assert.equal(wrongProviderResult.products.some(product => product.id === 'mf:amfi:101'), false);
+
+  const duplicate = snapshots();
+  duplicate.current.facts.push({ ...duplicate.current.facts[0], value: 1 });
+  const duplicateResult = rankVerifiedMutualFundProducts({
+    parentInstrumentId: 'large_cap_mf',
+    currentSnapshot: duplicate.current,
+    historicalSnapshot: duplicate.historical,
+  });
+  assert.equal(duplicateResult.products.some(product => product.id === 'mf:amfi:101'), false);
+
+  const wrongHistory = snapshots();
+  wrongHistory.historical.facts[0] = {
+    ...wrongHistory.historical.facts[0],
+    source: { ...wrongHistory.historical.facts[0].source, instrumentId: 'different-scheme' },
+  };
+  const wrongHistoryResult = rankVerifiedMutualFundProducts({
+    parentInstrumentId: 'large_cap_mf',
+    currentSnapshot: wrongHistory.current,
+    historicalSnapshot: wrongHistory.historical,
+  });
+  assert.equal(wrongHistoryResult.products.some(product => product.id === 'mf:amfi:101'), false);
+
+  const wrongSnapshotProvider = snapshots();
+  wrongSnapshotProvider.current.provider = 'UPSTOX';
+  const wrongSnapshotResult = rankVerifiedMutualFundProducts({
+    parentInstrumentId: 'large_cap_mf',
+    currentSnapshot: wrongSnapshotProvider.current,
+    historicalSnapshot: wrongSnapshotProvider.historical,
+  });
+  assert.equal(wrongSnapshotResult.products.length, 0);
+
+  const duplicateSchemeIdentity = snapshots();
+  duplicateSchemeIdentity.current.products[0].externalIds.push({ source: 'AMFI_SCHEME_CODE', value: '999' });
+  const duplicateIdentityResult = rankVerifiedMutualFundProducts({
+    parentInstrumentId: 'large_cap_mf',
+    currentSnapshot: duplicateSchemeIdentity.current,
+    historicalSnapshot: duplicateSchemeIdentity.historical,
+  });
+  assert.equal(duplicateIdentityResult.products.some(product => product.id === 'mf:amfi:101'), false);
+});
+
 test('WTI preserves hard parent suitability before requesting any product data', async () => {
   let sourceCalls = 0;
   const dependencies = {

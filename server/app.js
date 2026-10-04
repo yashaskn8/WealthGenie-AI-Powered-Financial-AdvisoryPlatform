@@ -3,7 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import mongoSanitize from 'express-mongo-sanitize';
-import logger, { morganStream } from './utils/logger.js';
+import logger, { formatHttpAccessLog, morganStream } from './utils/logger.js';
 import { getRuntimeConfig } from './config/runtime.js';
 import { errorHandler, sendError } from './middleware/errorHandler.js';
 import { enforceJsonContentType } from './middleware/contentType.js';
@@ -120,7 +120,19 @@ export function createApp({ env = process.env, runtimeState = null, mcpRuntime =
   app.use('/api', createCsrfProtection(config));
 
   if (config.nodeEnv !== 'test' && env.DISABLE_HTTP_LOGGING !== 'true') {
-    app.use(morgan('short', { stream: morganStream }));
+    app.use(morgan((tokens, req, res) => {
+      const routePath = typeof req.route?.path === 'string'
+        ? `${req.baseUrl || ''}${req.route.path}`
+        : (req.baseUrl || '/api');
+      return formatHttpAccessLog({
+        method: tokens.method(req, res),
+        path: routePath,
+        status: tokens.status(req, res),
+        contentLength: tokens.res(req, res, 'content-length'),
+        responseTime: tokens['response-time'](req, res),
+        requestId: req.correlationId,
+      });
+    }, { stream: morganStream }));
   }
 
   app.use((req, res, next) => {
@@ -131,7 +143,9 @@ export function createApp({ env = process.env, runtimeState = null, mcpRuntime =
         logger.warn('Slow request detected', {
           correlationId: req.correlationId,
           method: req.method,
-          path: req.originalUrl,
+          path: typeof req.route?.path === 'string'
+            ? `${req.baseUrl || ''}${req.route.path}`
+            : (req.baseUrl || '/api'),
           durationMs,
         });
       }
@@ -151,6 +165,9 @@ export function createApp({ env = process.env, runtimeState = null, mcpRuntime =
     timeoutMs: config.deepHealthTimeoutMs,
     buildSha: env.APP_BUILD_SHA,
     expectedDemoDatabase: env.DEMO_EXPECTED_MONGODB_DATABASE,
+    expectedDemoDatabaseHost: env.DEMO_EXPECTED_MONGODB_HOST,
+    expectedDemoDatabasePort: env.DEMO_EXPECTED_MONGODB_PORT,
+    expectedDemoEnvironmentId: env.DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID,
     marketProvider: String(env.MARKET_DATA_PRIMARY_PROVIDER || 'NSE').trim().toUpperCase(),
     marketProviderTokenPresent: String(env.MARKET_DATA_PRIMARY_PROVIDER || 'NSE').trim().toUpperCase() === 'NSE'
       || Boolean(env.UPSTOX_ANALYTICS_TOKEN || env.UPSTOX_ACCESS_TOKEN),

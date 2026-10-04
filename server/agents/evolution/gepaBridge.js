@@ -11,6 +11,31 @@ const MAX_BRIDGE_BYTES = 2 * 1024 * 1024;
 const PRIVATE_DATA_PATTERN = /email|phone|income|salary|monthlytakehome|bankaccount|password|jwt|rawprofile|userid|user_id|holdout|answerkey|secret|privatekey/i;
 const FORBIDDEN_OUTPUT_KEY_PATTERN = /sourcecode|shellcommand|evaluator|holdout|promotionpolicy|reliabilityhardgate|financialengine|taxrules|allocation|authorization|deployment|sandboxpolicy|script|executable|code/i;
 const SAFE_PYTHON_EXECUTABLE = /^(?:python|python3|py)(?:\.exe)?$/i;
+const MUTABLE_PROPOSAL_FIELDS = Object.freeze({
+  plannerInstruction: 'promptBundle.plannerInstruction',
+  synthesisInstruction: 'promptBundle.synthesisInstruction',
+  evidenceOrderingPolicy: 'evidenceOrderingPolicy',
+  contextCompressionPolicy: 'contextCompressionPolicy',
+  safeModelRoleRouting: 'safeModelRoleRouting',
+});
+
+export function buildGepaSubprocessEnv({ provider = 'fixture', sourceEnv = process.env, pythonWorkingDirectory } = {}) {
+  const environment = {};
+  const inheritedKeys = [
+    'PATH', 'Path', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'HOME', 'USERPROFILE',
+    'APPDATA', 'LOCALAPPDATA', 'VIRTUAL_ENV', 'PYTHONHOME', 'LANG', 'LC_ALL',
+    'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE',
+  ];
+  for (const key of inheritedKeys) {
+    if (typeof sourceEnv[key] === 'string') environment[key] = sourceEnv[key];
+  }
+  environment.PYTHONPATH = pythonWorkingDirectory;
+  if (provider === 'dspy') {
+    const modelApiKey = sourceEnv.AGENT_EVOLUTION_MODEL_API_KEY || sourceEnv.DSPY_LM_API_KEY;
+    if (modelApiKey) environment.AGENT_EVOLUTION_MODEL_API_KEY = modelApiKey;
+  }
+  return environment;
+}
 
 function assertSafeJsonValue(value, path = 'root') {
   if (value === null || value === undefined) return;
@@ -37,7 +62,7 @@ function assertSafeJsonValue(value, path = 'root') {
 function sanitizeCase(caseDefinition, index, expectedPartition) {
   if (!caseDefinition || typeof caseDefinition !== 'object') throw new TypeError(`GEPA case ${index} must be an object.`);
   if (caseDefinition.partition !== undefined && caseDefinition.partition !== expectedPartition) {
-    throw new Error(`GEPA case ${index} must be train or validation; holdout is sealed.`);
+    throw new Error(`GEPA case ${index} must be train or validation; holdout-partition rows are not accepted.`);
   }
   const safeCase = {
     id: String(caseDefinition.id || `case-${index + 1}`).slice(0, 160),
@@ -117,6 +142,17 @@ export function validateGepaProposal(rawProposal, { basePromptBundle, allowedMut
   const surfaces = validateMutationSurfaces(rawProposal.mutationSurface || []);
   const allowed = new Set(allowedMutationSurfaces);
   if (surfaces.some(surface => !allowed.has(surface))) throw new Error('GEPA proposal exceeds the declared mutation surface.');
+  const submittedSurfaces = Object.entries(MUTABLE_PROPOSAL_FIELDS)
+    .filter(([field]) => Object.hasOwn(rawProposal, field))
+    .map(([, surface]) => surface)
+    .sort();
+  const declaredSurfaces = [...surfaces].sort();
+  if (submittedSurfaces.length !== declaredSurfaces.length
+    || submittedSurfaces.some((surface, index) => surface !== declaredSurfaces[index])) {
+    const error = new Error('GEPA mutationSurface must exactly match the mutable fields present in the proposal.');
+    error.code = 'EVOLUTION_SURFACE_DELTA_MISMATCH';
+    throw error;
+  }
   const promptBundle = createPromptBundle({
     bundleId: `gepa-${String(rawProposal.proposalId || 'proposal').slice(0, 80)}`,
     version: String(rawProposal.optimizerVersion || 'gepa-candidate-1.0.0').slice(0, 160),
@@ -155,7 +191,7 @@ async function runPythonBridge({ inputPath, outputPath, provider, pythonExecutab
       cwd: pythonWorkingDirectory,
       shell: false,
       windowsHide: true,
-      env: { ...process.env, PYTHONPATH: pythonWorkingDirectory },
+      env: buildGepaSubprocessEnv({ provider, pythonWorkingDirectory }),
     });
     let stdout = '';
     let stderr = '';

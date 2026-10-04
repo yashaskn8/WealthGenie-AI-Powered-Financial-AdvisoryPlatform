@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import Recommendation from '../models/Recommendation.js';
 import FinancialProfile from '../models/FinancialProfile.js';
@@ -9,6 +10,7 @@ import IdempotencyKey from '../models/IdempotencyKey.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import RecommendationState from '../models/RecommendationState.js';
 import FinancialProfileState from '../models/FinancialProfileState.js';
+import AuthorizedExecutionAttempt from '../models/AuthorizedExecutionAttempt.js';
 import {
   claimAdvisoryIdempotency,
   releaseAdvisoryIdempotency,
@@ -19,8 +21,10 @@ import { verifyAuditChain } from '../services/auditChain.js';
 import { createManualAllocationRevision } from '../services/recommendationState.js';
 import { getCurrentRegulatoryRuleVersion } from '../services/taxEngine.js';
 import { buildRecommendationProfileHash, RECOMMENDATION_POLICY_VERSION } from '../services/recommendationProfile.js';
+import { buildSnapshotFingerprint } from '../agents/authorization/mandateService.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 import { canonicalProfile } from './helpers/canonicalProfile.js';
+import { canonicalSha256 } from '../utils/canonicalJson.js';
 import {
   PROJECTION_ASSUMPTION_POLICY_HASH,
   PROJECTION_ASSUMPTION_SOURCE,
@@ -121,6 +125,7 @@ test.beforeEach(async () => {
     RecommendationAllocationRevision.collection.deleteMany({ userId }),
     RecommendationState.deleteMany({ userId }),
     FinancialProfileState.deleteMany({ userId }),
+    AuthorizedExecutionAttempt.deleteMany({ userId }),
     AuditRecord.collection.deleteMany({ userId }),
     AuditChainHead.deleteMany({ _id: userId }),
     IdempotencyKey.deleteMany({ userId }),
@@ -143,6 +148,7 @@ test.after(async () => {
     RecommendationAllocationRevision.collection.deleteMany({ userId }),
     RecommendationState.deleteMany({ userId }),
     FinancialProfileState.deleteMany({ userId }),
+    AuthorizedExecutionAttempt.deleteMany({ userId }),
     AuditRecord.collection.deleteMany({ userId }),
     AuditChainHead.deleteMany({ _id: userId }),
     IdempotencyKey.deleteMany({ userId }),
@@ -229,6 +235,103 @@ test('successful advisory transaction persists exactly one recommendation and au
   assert.equal(String(persistedRevision.recommendationId), String(operation.recommendation._id));
   assert.equal(persistedRevision.revision, result.allocation_revision);
   assert.equal(persistedRevision.portfolioFingerprint, result.portfolio_fingerprint);
+});
+
+test('authorized advisory and COMMITTED receipt reference become durable in the same transaction', async () => {
+  const operationClaim = await claim('atomic-authorized-commit-001');
+  const operation = makeOperation(operationClaim, 'authorized-commit');
+  const execution = {
+    executionId: crypto.randomUUID(),
+    mandateId: crypto.randomUUID(),
+    userId,
+    action: 'APPROVE_RECOMPUTE',
+    status: 'EXECUTING',
+    executionGeneration: 2,
+    workerId: 'worker-authorized-commit',
+    leaseUntil: new Date(Date.now() + 60000),
+    heartbeatAt: new Date(),
+    startedAt: new Date(),
+    idempotencyKey: `mandate:${crypto.randomUUID()}`,
+    financialSnapshotHash: 'a'.repeat(64),
+  };
+  await AuthorizedExecutionAttempt.create(execution);
+  const profile = await FinancialProfile.findOne({ _id: profileId, userId }).lean();
+  const expectedSnapshot = buildSnapshotFingerprint({ profile, recommendation: operation.recommendation });
+
+  const result = await persistAdvisoryAtomically({
+    ...operation,
+    executionCommit: {
+      executionId: execution.executionId,
+      mandateId: execution.mandateId,
+      userId,
+      executionGeneration: execution.executionGeneration,
+      workerId: execution.workerId,
+      afterSnapshotHash: expectedSnapshot.financialSnapshotHash,
+      policyDecisionId: 'policy:atomic-authorized-commit',
+    },
+  });
+
+  const committed = await AuthorizedExecutionAttempt.findOne({ executionId: execution.executionId }).lean();
+  assert.equal(committed.status, 'COMMITTED');
+  assert.equal(committed.resultReference.recommendationId, String(operation.recommendation._id));
+  assert.equal(committed.resultReference.auditHash, result.audit_hash);
+  assert.equal(committed.resultReference.afterSnapshotHash, expectedSnapshot.financialSnapshotHash);
+  assert.match(committed.resultReference.responseHash, /^[a-f0-9]{64}$/);
+  const persistedRecommendation = await Recommendation.findById(operation.recommendation._id).lean();
+  assert.equal(committed.resultReference.responseHash, canonicalSha256(persistedRecommendation.responseSnapshot));
+  assert.equal(committed.resultReference.policyDecisionId, 'policy:atomic-authorized-commit');
+  assert.equal(await Recommendation.countDocuments({ userId }), 1);
+  assert.equal(await AuditRecord.countDocuments({ userId }), 1);
+  assert.equal((await IdempotencyKey.findById(operationClaim.operationId).lean()).status, 'DONE');
+});
+
+test('failure after authorized commit marker rolls back the recommendation, audit, idempotency, and receipt reference', async () => {
+  const operationClaim = await claim('atomic-authorized-rollback-001');
+  const operation = makeOperation(operationClaim, 'authorized-rollback');
+  const execution = {
+    executionId: crypto.randomUUID(),
+    mandateId: crypto.randomUUID(),
+    userId,
+    action: 'APPROVE_RECOMPUTE',
+    status: 'EXECUTING',
+    executionGeneration: 1,
+    workerId: 'worker-authorized-rollback',
+    leaseUntil: new Date(Date.now() + 60000),
+    heartbeatAt: new Date(),
+    startedAt: new Date(),
+    idempotencyKey: `mandate:${crypto.randomUUID()}`,
+    financialSnapshotHash: 'b'.repeat(64),
+  };
+  await AuthorizedExecutionAttempt.create(execution);
+  const profile = await FinancialProfile.findOne({ _id: profileId, userId }).lean();
+  const expectedSnapshot = buildSnapshotFingerprint({ profile, recommendation: operation.recommendation });
+
+  await assert.rejects(persistAdvisoryAtomically({
+    ...operation,
+    executionCommit: {
+      executionId: execution.executionId,
+      mandateId: execution.mandateId,
+      userId,
+      executionGeneration: execution.executionGeneration,
+      workerId: execution.workerId,
+      afterSnapshotHash: expectedSnapshot.financialSnapshotHash,
+      policyDecisionId: 'policy:atomic-authorized-rollback',
+    },
+    testHooks: { afterExecutionCommitMark: () => { throw new Error('injected after authorized commit mark'); } },
+  }), /injected after authorized commit mark/);
+  await releaseAdvisoryIdempotency(operationClaim);
+
+  const rolledBackAttempt = await AuthorizedExecutionAttempt.findOne({ executionId: execution.executionId }).lean();
+  assert.equal(rolledBackAttempt.status, 'EXECUTING');
+  assert.equal(rolledBackAttempt.resultReference, null);
+  assert.equal(await Recommendation.countDocuments({ userId }), 0);
+  assert.equal(await RecommendationAllocationRevision.countDocuments({ userId }), 0);
+  assert.equal(await RecommendationState.countDocuments({ userId }), 0);
+  assert.equal(await AuditRecord.countDocuments({ userId }), 0);
+  assert.equal(await AuditChainHead.countDocuments({ _id: userId }), 0);
+  assert.notEqual((await IdempotencyKey.findById(operationClaim.operationId).lean())?.status, 'DONE');
+  const unchangedProfile = await FinancialProfile.findOne({ _id: profileId, userId }).lean();
+  assert.equal(unchangedProfile.financialStateFence || 0, 0);
 });
 
 test('post-commit supersession returns newer canonical state and idempotent replay creates no duplicate effects', async () => {

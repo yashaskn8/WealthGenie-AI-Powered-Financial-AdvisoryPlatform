@@ -347,6 +347,42 @@ describe('frontend API contracts', () => {
     expect(localStorage.getItem('wg_token')).toBeNull();
   });
 
+  it('does not let a late session restore overwrite a newer login', async () => {
+    let finishRestore;
+    const restore = new Promise(resolve => { finishRestore = resolve; });
+    const fetchMock = vi.fn()
+      .mockReturnValueOnce(restore)
+      .mockResolvedValueOnce(jsonResponse({ token: 'user-b-token', user: { id: 'user-b' } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const restoring = api.restoreSession();
+    await api.login('b@example.com', 'safe-test-password');
+    finishRestore(jsonResponse({ user: { id: 'user-a' } }));
+    await restoring;
+
+    expect(api.getUserInfo()).toMatchObject({ id: 'user-b' });
+    expect(api.getAuthToken()).toBe('user-b-token');
+  });
+
+  it('does not let a late 401 from an old identity clear a newer login', async () => {
+    let finishOldRequest;
+    const oldRequest = new Promise(resolve => { finishOldRequest = resolve; });
+    const fetchMock = vi.fn()
+      .mockReturnValueOnce(oldRequest)
+      .mockResolvedValueOnce(jsonResponse({ token: 'user-b-token', user: { id: 'user-b' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    api.setAuthToken('user-a-token');
+    api.setUserInfo({ id: 'user-a' });
+
+    const oldRequestResult = api.healthCheck({ retries: 0 }).catch(error => error);
+    await api.login('b@example.com', 'safe-test-password');
+    finishOldRequest(jsonResponse({ code: 'SESSION_EXPIRED' }, 401));
+    await oldRequestResult;
+
+    expect(api.getUserInfo()).toMatchObject({ id: 'user-b' });
+    expect(api.getAuthToken()).toBe('user-b-token');
+  });
+
   it('uses the server-side precompute and single authoritative completion contracts', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ candidateId: '4f4f4f4f-1111-4111-8111-111111111111' }))

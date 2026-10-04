@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { CURRENT_PROMPT_BUNDLE } from '../agents/evolution/promptBundle.js';
 import { createScaffoldSpec } from '../agents/evolution/scaffoldSpec.js';
@@ -118,11 +118,28 @@ function buildCases() {
   return ['train', 'validation', 'holdout'].map(partition => ({
     id: `${partition}-researchmesh-fixture`,
     partition,
-    expectedAction: null,
+    expectedAction: 'NONE',
     groundingRequired: false,
     maxTrajectoryEvents: 100,
     fixture: { userId, profileId, context },
   }));
+}
+
+async function loadSignedHoldoutBundle(bundlePath) {
+  if (!bundlePath) return null;
+  const bytes = await readFile(path.resolve(bundlePath));
+  if (bytes.length > 8 * 1024 * 1024) {
+    const error = new Error('The signed holdout bundle exceeds the configured size limit.');
+    error.code = 'HOLDOUT_BUNDLE_TOO_LARGE';
+    throw error;
+  }
+  try {
+    return JSON.parse(bytes.toString('utf8'));
+  } catch {
+    const error = new Error('The signed holdout bundle is not valid JSON.');
+    error.code = 'HOLDOUT_BUNDLE_INVALID';
+    throw error;
+  }
 }
 
 function markdownReport(report) {
@@ -136,6 +153,7 @@ function markdownReport(report) {
     `- Live E2B executed: ${report.liveE2BExecuted}`,
     `- Candidate count: ${report.candidateCount}`,
     `- Financial authority delta: ${report.financialAuthorityDelta}`,
+    `- Financial authority measurement: ${report.authorityMeasurementState}`,
     `- Pareto candidates: ${report.paretoCandidateIds.join(', ') || 'none'}`,
     `- Sandbox notice: ${report.sandboxNotice || 'none'}`,
     '',
@@ -153,11 +171,17 @@ async function writeReport(outputDir, report) {
 }
 
 async function run() {
+  if (process.env.NODE_ENV === 'production') {
+    const error = new Error('Offline/operator evolution experiments cannot run in production.');
+    error.code = 'EVOLUTION_EXPERIMENT_PRODUCTION_BLOCKED';
+    throw error;
+  }
   const args = parseArgs(process.argv.slice(2));
   assertManualFlags();
   const liveModels = args.gepaProvider === 'dspy' ? requireLiveGepaCredentials() : { model: null, reflectionModel: null };
   const sandbox = getSandbox(args);
   const cases = buildCases();
+  const holdoutBundlePath = process.env.AGENT_HOLDOUT_BUNDLE_PATH?.trim() || null;
   const baseSpec = createScaffoldSpec({ version: 'experiment-base', promptBundle: CURRENT_PROMPT_BUNDLE });
   const safeOptimizerCases = cases.filter(item => item.partition !== 'holdout').map(item => ({
     id: item.id,
@@ -176,7 +200,16 @@ async function run() {
     pythonWorkingDirectory: path.resolve('ml-service'),
   });
   const runner = createPlanReviewScaffoldRunner({ dependencies: {
-    captureFinancialAuthority: async () => ({ allocation: [{ id: 'fixture-asset', weight: 1 }], suitability: 'Moderate' }),
+    captureFinancialAuthority: async ({ caseDefinition }) => {
+      const fixtureContext = caseDefinition?.fixture?.context;
+      return {
+        authorityMeasurementState: 'SIMULATED',
+        fingerprint: canonicalSha256({
+          profile: fixtureContext?.profile || null,
+          recommendation: fixtureContext?.recommendation || null,
+        }),
+      };
+    },
     plannerProvider: { generate: async () => ({ text: '{"checks":["get_current_profile_context"]}' }) },
     loadPlanReviewContext: async () => context,
     explanationProviders: [],
@@ -192,7 +225,9 @@ async function run() {
     runner,
     sandboxProvider: sandbox.provider,
     candidateCaseFactory: async () => ({ fixture: { userId, profileId, context } }),
-    loadHoldoutCases: async () => [cases.find(item => item.partition === 'holdout')],
+    loadHoldoutCases: holdoutBundlePath
+      ? () => loadSignedHoldoutBundle(holdoutBundlePath)
+      : null,
     budget: { maxCandidates: proposals.length || 1, maxMetricCalls: 12, maxSandboxRuns: 20 },
   });
   const report = {
@@ -207,11 +242,13 @@ async function run() {
     candidateCount: result.candidateRecords.length,
     paretoCandidateIds: result.paretoCandidateIds,
     financialAuthorityDelta: result.financialAuthorityDelta,
+    authorityMeasurementState: result.authorityMeasurementState,
     candidates: result.candidateRecords.map(item => ({
       candidateId: item.candidateId,
       status: item.status,
       hardGatePassed: item.hardGatePassed,
       financialAuthorityDelta: item.financialAuthorityDelta,
+      authorityMeasurementState: item.authorityMeasurementState,
       evaluationPassed: item.evaluation.passed,
       reliabilityPassed: item.reliability.passed,
       candidateReliabilityCoverageComplete: item.reliability.candidateReliabilityCoverageComplete,
@@ -227,7 +264,7 @@ async function run() {
 
 try {
   const report = await run();
-  console.log(JSON.stringify({ status: report.status, candidateCount: report.candidateCount, liveGepaExecuted: report.liveGepaExecuted, liveE2BExecuted: report.liveE2BExecuted }));
+  console.log(JSON.stringify({ status: report.status, candidateCount: report.candidateCount, authorityMeasurementState: report.authorityMeasurementState, liveGepaExecuted: report.liveGepaExecuted, liveE2BExecuted: report.liveE2BExecuted }));
 } catch (error) {
   const safeCode = error?.code || 'EVOLUTION_EXPERIMENT_FAILED';
   console.error(`${safeCode}: ${error?.message || 'Evolution experiment failed.'}`);

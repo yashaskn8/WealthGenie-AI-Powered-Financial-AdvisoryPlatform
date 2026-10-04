@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { AVAILABILITY, MARKET_DATA_SCHEMA_VERSION, PROVIDERS } from './contracts.js';
+import { AVAILABILITY, MARKET_DATA_SCHEMA_VERSION, PROVIDERS, normalizeTimestamp } from './contracts.js';
 import { MARKET_BENCHMARKS } from './marketBenchmarks.js';
 
 export const MARKET_REGIME_DATASET_SCHEMA_VERSION = 'market-regime-dataset-1.0.0';
@@ -7,6 +7,11 @@ export const MARKET_REGIME_DATASET_SCHEMA_VERSION = 'market-regime-dataset-1.0.0
 function requireAvailableSnapshot(snapshot, benchmark) {
   if (snapshot?.status !== AVAILABILITY.AVAILABLE || !Array.isArray(snapshot.candles)) {
     throw new Error(`${benchmark.displayName} normalized history is unavailable.`);
+  }
+  if (snapshot.freshness?.status !== 'FRESH' || snapshot.calendar?.status !== 'AVAILABLE'
+      || snapshot.calendar?.source?.provider !== PROVIDERS.NSE
+      || !normalizeTimestamp(snapshot.calendar?.fetchedAt)) {
+    throw new Error(`${benchmark.displayName} history lacks qualified calendar/freshness evidence.`);
   }
   if (snapshot.provider !== PROVIDERS.NSE
       || snapshot.instrumentKey !== benchmark.canonicalProductId
@@ -33,8 +38,8 @@ function normalizedLeg(candle) {
 export function buildMarketRegimeDataset({ niftySnapshot, vixSnapshot, retrievedAt }) {
   requireAvailableSnapshot(niftySnapshot, MARKET_BENCHMARKS.NIFTY_50);
   requireAvailableSnapshot(vixSnapshot, MARKET_BENCHMARKS.INDIA_VIX);
-  const normalizedRetrievedAt = new Date(retrievedAt);
-  if (Number.isNaN(normalizedRetrievedAt.getTime())) {
+  const normalizedRetrievedAt = normalizeTimestamp(retrievedAt);
+  if (!normalizedRetrievedAt) {
     throw new TypeError('retrievedAt must be a valid timestamp.');
   }
 
@@ -50,6 +55,19 @@ export function buildMarketRegimeDataset({ niftySnapshot, vixSnapshot, retrieved
     nifty50: normalizedLeg(niftyByDate.get(effectiveTradingDate)),
     indiaVix: normalizedLeg(vixByDate.get(effectiveTradingDate)),
   }));
+  const retrievedAtMs = Date.parse(normalizedRetrievedAt);
+  const sourceFetchedAtMs = Math.max(
+    Date.parse(normalizeTimestamp(niftySnapshot.fetchedAt) || ''),
+    Date.parse(normalizeTimestamp(vixSnapshot.fetchedAt) || ''),
+  );
+  const latestObservationMs = Math.max(...rows.flatMap(row => [
+    Date.parse(row.nifty50.observedAt),
+    Date.parse(row.indiaVix.observedAt),
+  ]));
+  if (!Number.isFinite(latestObservationMs) || latestObservationMs > retrievedAtMs
+      || !Number.isFinite(sourceFetchedAtMs) || sourceFetchedAtMs > retrievedAtMs) {
+    throw new TypeError('retrievedAt must not precede source fetches or observations.');
+  }
   const hashInput = {
     schemaVersion: MARKET_REGIME_DATASET_SCHEMA_VERSION,
     marketDataSchemaVersion: MARKET_DATA_SCHEMA_VERSION,
@@ -63,7 +81,7 @@ export function buildMarketRegimeDataset({ niftySnapshot, vixSnapshot, retrieved
     marketDataSchemaVersion: MARKET_DATA_SCHEMA_VERSION,
     datasetVersion: `${MARKET_REGIME_DATASET_SCHEMA_VERSION}+sha256:${contentHash.slice(0, 16)}`,
     contentHash,
-    retrievedAt: normalizedRetrievedAt.toISOString(),
+    retrievedAt: normalizedRetrievedAt,
     period: {
       start: commonDates[0],
       end: commonDates.at(-1),

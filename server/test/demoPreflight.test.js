@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -12,12 +13,14 @@ import {
   hasAuthenticatedDashboard,
   hasCurrentFinancialBinding,
   isRedisRequired,
+  isSafeDemoUrl,
   LOGIN_BROWSER_TIMEOUT_MS,
   MARKET_DEPENDENCY_PROBE_TIMEOUT_MS,
   makeReporter,
   matchesBuildSha,
   matchesRecommendationBinding,
   PROFILE_USER_FLOW_TIMEOUT_MS,
+  readLocalBuildIdentity,
   readJson,
   REDIS_PROBE_TIMEOUT_MS,
   reportWtiProductChecks,
@@ -265,7 +268,7 @@ function browserFlowFixture(scenario = {}) {
         };
       });
     },
-    async evaluate() { return scenario.frontendBuildSha ?? 'c'.repeat(40); },
+    async evaluate() { return { buildSha: scenario.frontendBuildSha ?? 'c'.repeat(40), scripts: ['http://127.0.0.1:5173/assets/app.js'] }; },
     url: () => currentUrl,
     request: {
       async post(url) {
@@ -297,9 +300,17 @@ function browserFlowFixture(scenario = {}) {
     },
   };
   const browser = {
-    async newContext() {
+    async newContext(options) {
+      scenario.browserContextOptions = options;
       return {
         newPage: async () => page,
+        ...(scenario.browserRouteMissing ? {} : { async route() {} }),
+        request: {
+          async get() {
+            const assetSha = scenario.frontendAssetShaMismatch ? 'd'.repeat(40) : 'c'.repeat(40);
+            return { ok: () => true, text: async () => `const buildIdentity = '${assetSha}'` };
+          },
+        },
         cookies: async () => scenario.missingCsrfCookie ? [] : [{ name: 'wg_csrf', value: 'fake-csrf-value' }],
       };
     },
@@ -325,6 +336,27 @@ async function runBrowserFlow(scenario = {}) {
   }, fixture);
   return { ...reporter.finish(), lines };
 }
+
+test('local build identity scopes Git safe.directory to this repository', () => {
+  const calls = [];
+  const result = readLocalBuildIdentity((command, args, options) => {
+    calls.push({ command, args, options });
+    return args.includes('HEAD')
+      ? { status: 0, stdout: `${'a'.repeat(40)}\n` }
+      : { status: 0, stdout: '' };
+  });
+
+  assert.equal(result.sha, 'a'.repeat(40));
+  assert.equal(result.clean, true);
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    assert.equal(call.command, 'git');
+    assert.match(call.args[1], /^safe\.directory=/);
+    assert.ok(call.args[1].includes('/'));
+    assert.notEqual(call.args[1], 'safe.directory=*');
+    assert.equal(call.options.cwd, calls[0].options.cwd);
+  }
+});
 
 test('demo preflight only accepts a complete current financial-state binding', () => {
   assert.equal(hasCurrentFinancialBinding(currentBinding()), true);
@@ -791,7 +823,7 @@ test('frontend build environment forwards only required non-secret runtime input
     VITE_ENABLE_BEARER_AUTH: 'false',
     VITE_API_TIMEOUT_MS: '12000',
     VITE_BUILD_SHA: 'attacker-value',
-  }, 'a'.repeat(40));
+  }, 'a'.repeat(40), 'a'.repeat(40));
 
   assert.deepEqual(environment, {
     PATH: 'safe-path',
@@ -805,9 +837,11 @@ test('frontend build environment forwards only required non-secret runtime input
   for (const name of ['DEMO_PASSWORD', 'MONGODB_URI', 'JWT_SECRET', 'UPSTOX_ACCESS_TOKEN']) {
     assert.equal(Object.hasOwn(environment, name), false, `${name} must not enter the Vite process`);
   }
-  const credentialedUrl = createFrontendBuildEnvironment({ VITE_API_URL: 'https://user:secret@example.invalid/api' }, 'a'.repeat(40));
+  const mismatchedSource = createFrontendBuildEnvironment({}, 'a'.repeat(40), 'b'.repeat(40));
+  assert.equal(mismatchedSource.VITE_BUILD_SHA, '');
+  const credentialedUrl = createFrontendBuildEnvironment({ VITE_API_URL: 'https://user:secret@example.invalid/api' }, 'a'.repeat(40), 'a'.repeat(40));
   assert.equal(Object.hasOwn(credentialedUrl, 'VITE_API_URL'), false);
-  const insecureRemoteUrl = createFrontendBuildEnvironment({ VITE_API_URL: 'http://api.example.invalid/api' }, 'a'.repeat(40));
+  const insecureRemoteUrl = createFrontendBuildEnvironment({ VITE_API_URL: 'http://api.example.invalid/api' }, 'a'.repeat(40), 'a'.repeat(40));
   assert.equal(Object.hasOwn(insecureRemoteUrl, 'VITE_API_URL'), false);
 });
 
@@ -821,6 +855,9 @@ test('production frontend build uses and cleans an isolated output directory', a
       DEMO_PROFILE_COMPLETION_FILE: 'injected-profile.json',
       DEMO_TAX_CONTEXT_FILE: 'injected-tax.json',
       DEMO_EXPECTED_MONGODB_DATABASE: 'wealthgenie_demo',
+      DEMO_EXPECTED_MONGODB_HOST: '127.0.0.1',
+      DEMO_EXPECTED_MONGODB_PORT: '27017',
+      DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID: '11111111-1111-4111-8111-111111111111',
       DEMO_EXPECTED_BUILD_SHA: 'b'.repeat(40),
       MONGODB_URI: 'must-not-forward',
       DEMO_PASSWORD: 'must-not-forward',
@@ -835,8 +872,11 @@ test('production frontend build uses and cleans an isolated output directory', a
       spawnBuild(_command, args, options) {
         outputDirectory = args[3];
         childEnvironment = options.env;
+        mkdirSync(path.join(outputDirectory, 'assets'), { recursive: true });
+        writeFileSync(path.join(outputDirectory, 'assets', 'app.js'), `document.documentElement.dataset.buildSha='${options.env.VITE_BUILD_SHA}'`);
         return { status: 0 };
       },
+      getSourceBuildIdentity: async () => ({ sha: 'b'.repeat(40), clean: true }),
     },
   });
 
@@ -846,6 +886,15 @@ test('production frontend build uses and cleans an isolated output directory', a
   assert.equal(Object.hasOwn(childEnvironment, 'MONGODB_URI'), false);
   assert.equal(Object.hasOwn(childEnvironment, 'DEMO_PASSWORD'), false);
   await assert.rejects(stat(outputDirectory), { code: 'ENOENT' });
+});
+
+test('remote demo URLs require exact HTTPS origin allowlisting', () => {
+  assert.equal(isSafeDemoUrl('https://demo.example/api', { api: true }), false);
+  assert.equal(isSafeDemoUrl('https://demo.example/api', { api: true, remoteOrigins: 'https://demo.example' }), true);
+  assert.equal(isSafeDemoUrl('https://demo.example/login', { remoteOrigins: 'https://demo.example' }), true);
+  assert.equal(isSafeDemoUrl('https://other.example/login', { remoteOrigins: 'https://demo.example' }), false);
+  assert.equal(isSafeDemoUrl('https://demo.example/login?token=secret', { remoteOrigins: 'https://demo.example' }), false);
+  assert.equal(isSafeDemoUrl('http://demo.example/api', { api: true, remoteOrigins: 'http://demo.example' }), false);
 });
 
 test('frontend build verifier exceptions are recorded as failures without exposing details', async () => {
@@ -858,6 +907,9 @@ test('frontend build verifier exceptions are recorded as failures without exposi
       DEMO_PROFILE_COMPLETION_FILE: 'injected-profile.json',
       DEMO_TAX_CONTEXT_FILE: 'injected-tax.json',
       DEMO_EXPECTED_MONGODB_DATABASE: 'wealthgenie_demo',
+      DEMO_EXPECTED_MONGODB_HOST: '127.0.0.1',
+      DEMO_EXPECTED_MONGODB_PORT: '27017',
+      DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID: '11111111-1111-4111-8111-111111111111',
       DEMO_EXPECTED_BUILD_SHA: 'c'.repeat(40),
     },
     write: line => output.push(line),
@@ -871,6 +923,7 @@ test('frontend build verifier exceptions are recorded as failures without exposi
         outputDirectory = args[3];
         throw new Error('sensitive build configuration');
       },
+      getSourceBuildIdentity: async () => ({ sha: 'c'.repeat(40), clean: true }),
     },
   });
 
@@ -914,12 +967,16 @@ function injectedOrchestrationDependencies({
     DEMO_NIFTY_ETF_PARENT_ID: 'nifty_etf',
     DEMO_EXPECTED_BUILD_SHA: expectedSha,
     DEMO_EXPECTED_MONGODB_DATABASE: 'wealthgenie_demo',
+    DEMO_EXPECTED_MONGODB_HOST: '127.0.0.1',
+    DEMO_EXPECTED_MONGODB_PORT: '27017',
+    DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID: '11111111-1111-4111-8111-111111111111',
     NODE_ENV: 'test',
   };
   if (failGate === 'Explicit live-demo mode') environment.DEMO_LIVE_PREFLIGHT = '0';
   if (failGate === 'Backend URL configuration') environment.DEMO_API_BASE_URL = 'not-a-url';
   if (failGate === 'Redis if required') environment.REQUIRE_REDIS = '1';
   const dependencies = {
+    async getSourceBuildIdentity() { return { sha: expectedSha, clean: true }; },
     marketNow,
     async loadJson(filePath, label, reporter) {
       const failed = (failGate === 'Profile completion payload' && label === 'Profile completion payload')
@@ -934,11 +991,14 @@ function injectedOrchestrationDependencies({
       if (url.endsWith('/health/verification')) {
         assert.equal(Object.hasOwn(options.headers || {}, 'X-Demo-Expected-Mongodb-Database'), true);
         assert.equal(options.headers['X-Demo-Expected-Mongodb-Database'], environment.DEMO_EXPECTED_MONGODB_DATABASE || '');
-        const databaseVerified = failGate !== 'Mongo/transaction support' && Boolean(environment.DEMO_EXPECTED_MONGODB_DATABASE);
+        assert.equal(options.headers['X-Demo-Expected-Mongodb-Host'], environment.DEMO_EXPECTED_MONGODB_HOST || '');
+        assert.equal(options.headers['X-Demo-Expected-Mongodb-Port'], environment.DEMO_EXPECTED_MONGODB_PORT || '');
+        assert.equal(options.headers['X-Demo-Expected-Mongodb-Environment-Id'], environment.DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID || '');
+        const databaseVerified = failGate !== 'Mongo/transaction support' && Boolean(environment.DEMO_EXPECTED_MONGODB_DATABASE && environment.DEMO_EXPECTED_MONGODB_HOST && environment.DEMO_EXPECTED_MONGODB_PORT && environment.DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID);
         return response(databaseVerified ? 200 : 503, {
-        status: databaseVerified ? 'VERIFIED' : 'NOT_VERIFIED',
+        status: databaseVerified ? 'DEMO_DATABASE_VERIFIED' : 'NOT_VERIFIED',
         buildSha: expectedSha,
-        mongo: { connected: true, transactionCapable: databaseVerified, databaseIdentityVerified: databaseVerified },
+        mongo: { connected: true, transactionCapable: databaseVerified, databaseIdentityVerified: databaseVerified, environmentSentinelVerified: databaseVerified },
         redis: { required: failGate === 'Redis if required', connected: failGate !== 'Redis if required' },
         marketProvider: failGate === 'Market provider configuration' ? 'UNSUPPORTED' : 'NSE',
         marketProviderTokenPresent: true,
@@ -1043,6 +1103,17 @@ test('preflight never enters the browser mutation boundary before live prerequis
   }
 });
 
+test('failed production frontend build prevents the authenticated browser mutation path', async () => {
+  const fixture = injectedOrchestrationDependencies({ failGate: 'Production frontend build', userPathPass: true });
+  let browserMutationBoundaryCalls = 0;
+  fixture.dependencies.verifyBrowser = async () => { browserMutationBoundaryCalls += 1; };
+  const result = await runDemoPreflight({ ...fixture, write: () => {} });
+  assert.equal(result.checks.find(check => check.name === 'Production frontend build').state, 'FAIL');
+  assert.equal(result.checks.find(check => check.name === 'Critical browser path').state, 'NOT_EVALUATED');
+  assert.equal(result.checks.find(check => check.name === 'Profile completion/auth').state, 'NOT_EVALUATED');
+  assert.equal(browserMutationBoundaryCalls, 0);
+});
+
 test('missing isolated database configuration sends an explicit identity failure signal and stops before provider or browser work', async () => {
   const fixture = injectedOrchestrationDependencies({ userPathPass: true, qualifiedProductTax: true });
   delete fixture.environment.DEMO_EXPECTED_MONGODB_DATABASE;
@@ -1053,6 +1124,40 @@ test('missing isolated database configuration sends an explicit identity failure
   assert.equal(result.checks.find(check => check.name === 'Profile completion/auth').state, 'NOT_EVALUATED');
   assert.equal(result.checks.find(check => check.name === 'Critical browser path').state, 'NOT_EVALUATED');
   assert.equal(result.exitCode, 1);
+});
+
+test('preflight requires connected demo Mongo host identity as well as database name', async () => {
+  const fixture = injectedOrchestrationDependencies({ userPathPass: true, qualifiedProductTax: true });
+  delete fixture.environment.DEMO_EXPECTED_MONGODB_HOST;
+  const result = await runDemoPreflight({ ...fixture, write: () => {} });
+  assert.equal(result.checks.find(check => check.name === 'Mongo/transaction support').state, 'FAIL');
+  assert.equal(result.checks.find(check => check.name === 'NIFTY quote').state, 'NOT_EVALUATED');
+  assert.equal(result.checks.find(check => check.name === 'Critical browser path').state, 'NOT_EVALUATED');
+});
+
+test('preflight requires an exact expected Mongo port before treating a database as demo-verified', async () => {
+  const fixture = injectedOrchestrationDependencies({ userPathPass: true, qualifiedProductTax: true });
+  delete fixture.environment.DEMO_EXPECTED_MONGODB_PORT;
+  const result = await runDemoPreflight({ ...fixture, write: () => {} });
+  assert.equal(result.checks.find(check => check.name === 'Mongo/transaction support').state, 'FAIL');
+  assert.equal(result.checks.find(check => check.name === 'NIFTY quote').state, 'NOT_EVALUATED');
+  assert.equal(result.checks.find(check => check.name === 'Critical browser path').state, 'NOT_EVALUATED');
+});
+
+test('preflight refuses to call a database demo-verified without the out-of-band sentinel result', async () => {
+  const fixture = injectedOrchestrationDependencies({ userPathPass: true, qualifiedProductTax: true });
+  const originalReadHttp = fixture.dependencies.readHttp;
+  fixture.dependencies.readHttp = async (url, options = {}) => {
+    const result = await originalReadHttp(url, options);
+    if (url.endsWith('/health/verification')) {
+      result.body.mongo.environmentSentinelVerified = false;
+    }
+    return result;
+  };
+  const result = await runDemoPreflight({ ...fixture, write: () => {} });
+  assert.equal(result.checks.find(check => check.name === 'Mongo/transaction support').state, 'FAIL');
+  assert.equal(result.checks.find(check => check.name === 'NIFTY quote').state, 'NOT_EVALUATED');
+  assert.equal(result.checks.find(check => check.name === 'Critical browser path').state, 'NOT_EVALUATED');
 });
 
 test('live orchestration retains all checks and successful probes cannot override market, tax, or user-flow failures', async () => {
@@ -1473,7 +1578,27 @@ test('critical browser path requires the real frontend WTI request, exact ETF re
 test('critical browser path rejects a frontend runtime built from a different revision', async () => {
   const result = await runBrowserFlow({ frontendBuildSha: 'd'.repeat(40) });
   assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
-  assert.match(result.checks.find(check => check.name === 'Critical browser path').detail, /build identity/i);
+  assert.match(result.checks.find(check => check.name === 'Critical browser path').detail, /FRONTEND_BUILD_IDENTITY_MISMATCH/);
+});
+
+test('a mismatched served frontend asset is rejected before demo credentials are submitted', async () => {
+  const result = await runBrowserFlow({ frontendAssetShaMismatch: true });
+  assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
+  assert.match(result.checks.find(check => check.name === 'Critical browser path').detail, /FRONTEND_BUILD_IDENTITY_MISMATCH/);
+  assert.equal(result.checks.find(check => check.name === 'Profile completion/auth').state, 'NOT_EVALUATED');
+});
+
+test('browser authentication fails closed when outbound-origin interception is unavailable', async () => {
+  const result = await runBrowserFlow({ browserRouteMissing: true });
+  assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
+  assert.match(result.checks.find(check => check.name === 'Critical browser path').detail, /BROWSER_ORIGIN_GUARD_UNAVAILABLE/);
+  assert.equal(result.checks.find(check => check.name === 'Profile completion/auth').state, 'NOT_EVALUATED');
+});
+
+test('browser preflight blocks service workers before installing the outbound-origin guard', async () => {
+  const scenario = {};
+  await runBrowserFlow(scenario);
+  assert.deepEqual(scenario.browserContextOptions, { serviceWorkers: 'block' });
 });
 
 test('profile and recommendation failures retain all dependent checks as NOT_EVALUATED', async () => {

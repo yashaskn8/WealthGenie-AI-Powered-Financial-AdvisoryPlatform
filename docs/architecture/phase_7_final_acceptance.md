@@ -1,10 +1,24 @@
 # Phase 7 Final End-to-End Acceptance
 
+> Historical acceptance record for the exact initial Phase-7 SHA and date
+> below. It is superseded for present release decisions and does not certify
+> the current `main` SHA, current pinned A2A TCK result, or current CI status.
+> Re-run the release gates against the exact current commit before relying on
+> any release conclusion in this record.
+
+> Known separate A2A conformance evidence from the later pinned MUST run:
+> TCK `263b9cfaf16a554bdfb166a7ba5b67716e946349` reported 52 passed, 5 failed,
+> 178 skipped, and 30 deselected. The five failures were the four DM-ART-001
+> artifact cases and DM-MSG-001 Message-vs-Task case using the same generic
+> prompt without a request-visible scenario selector. This is not a green MUST
+> result and must remain visible in merge/release decisions; do not satisfy it
+> with TCK-specific IDs, canned output, or weakened conformance checks.
+
 Date: 2026-09-09
 
 Initial Phase 7 HEAD: `d7a652c4e939dd0817f664ea3ad5745121b0862b`
 
-Release decision: **RELEASE_READY_WITH_DOCUMENTED_NON_BLOCKING_LIMITATIONS**
+Historical release decision at that snapshot: **RELEASE_READY_WITH_DOCUMENTED_NON_BLOCKING_LIMITATIONS**
 
 ## Final architecture
 
@@ -203,4 +217,4 @@ The real Playwright lifecycle passed in 44.2 seconds (test body 37.9 seconds):
 - Ungrounded LLM fallback: **NONE**
 - Phase 8 started: **NO**
 
-The repository is ready for an academic demonstration with the limitations above disclosed. Phase 7 is closed; no subsequent feature phase is authorized by this acceptance.
+At the historical snapshot identified above, the reviewers recorded readiness for an academic demonstration with the listed limitations disclosed. This statement does not certify current readiness, close Phase 7 on the current SHA, or restrict later project phases.

@@ -12,6 +12,7 @@ import { MARKET_BENCHMARKS, benchmarkByCanonicalId } from './marketBenchmarks.js
 import { isoDateInIndia } from './indiaMarketTime.js';
 import { getNseJson, safeNseHttpError } from './nseHttp.js';
 import {
+  isUsableNseTradingCalendar,
   NSE_DAILY_HISTORY_MAX_AGE_SECONDS,
   evaluateNseDailyHistoryFreshness,
   fetchNseTradingHolidays,
@@ -209,7 +210,7 @@ export default class NseHistoricalDataProvider extends MarketDataProvider {
     const normalizedFromDate = requireIsoDate(fromDate, 'fromDate');
     const normalizedToDate = requireIsoDate(toDate, 'toDate');
     if (normalizedFromDate > normalizedToDate) throw new RangeError('fromDate must not be after toDate.');
-    return readThroughMarketCache({
+    const snapshot = await readThroughMarketCache({
       cacheKey: cacheKeyFor(benchmark.canonicalProductId, normalizedFromDate, normalizedToDate),
       ttlSeconds: NSE_HISTORY_CACHE_TTL_SECONDS,
       forceRefresh,
@@ -223,7 +224,7 @@ export default class NseHistoricalDataProvider extends MarketDataProvider {
           ]);
           if (historyResult.status !== 'fulfilled') throw historyResult.reason;
           const holidaySnapshot = calendarResult.status === 'fulfilled' ? calendarResult.value : null;
-          const calendarAvailable = holidaySnapshot?.status === AVAILABILITY.AVAILABLE;
+          const calendarAvailable = isUsableNseTradingCalendar(holidaySnapshot, this.clock());
           const rows = [];
           historyResult.value.forEach((response, index) => {
             if (!response?.data || !Array.isArray(response.data.data)) {
@@ -253,12 +254,24 @@ export default class NseHistoricalDataProvider extends MarketDataProvider {
                 fetchedAt: holidaySnapshot?.fetchedAt ?? null,
                 error: calendarResult.status === 'rejected'
                   ? { code: 'NSE_HOLIDAY_FETCH_FAILED', message: 'NSE trading calendar request failed.' }
-                  : holidaySnapshot?.error ?? { code: 'NSE_HOLIDAY_FETCH_FAILED', message: 'NSE trading calendar was unavailable.' },
+                  : holidaySnapshot?.status === AVAILABILITY.AVAILABLE
+                    ? { code: 'NSE_HOLIDAY_CALENDAR_UNQUALIFIED', message: 'NSE trading calendar provenance, freshness, or current-year coverage is not verified.' }
+                    : holidaySnapshot?.error ?? { code: 'NSE_HOLIDAY_FETCH_FAILED', message: 'NSE trading calendar was unavailable.' },
               },
               reasonCodes: ['NSE_TRADING_CALENDAR_UNAVAILABLE'],
             };
           }
-          return { ...snapshot, calendar: { status: 'AVAILABLE', source: holidaySnapshot.source, fetchedAt: holidaySnapshot.fetchedAt } };
+          return {
+            ...snapshot,
+            calendar: {
+              schemaVersion: MARKET_DATA_SCHEMA_VERSION,
+              provider: PROVIDERS.NSE,
+              status: 'AVAILABLE',
+              dates: holidaySnapshot.dates,
+              source: holidaySnapshot.source,
+              fetchedAt: holidaySnapshot.fetchedAt,
+            },
+          };
         } catch (error) {
           return {
             schemaVersion: MARKET_DATA_SCHEMA_VERSION,
@@ -291,5 +304,23 @@ export default class NseHistoricalDataProvider extends MarketDataProvider {
         }
       },
     });
+    if (snapshot?.status !== AVAILABILITY.AVAILABLE
+        || isUsableNseTradingCalendar(snapshot.calendar, this.clock())) return snapshot;
+    return {
+      ...snapshot,
+      freshness: {
+        status: FRESHNESS.UNKNOWN,
+        ageSeconds: null,
+        maxAgeSeconds: NSE_DAILY_HISTORY_MAX_AGE_SECONDS,
+      },
+      calendar: {
+        status: 'UNAVAILABLE',
+        source: snapshot.calendar?.source ?? null,
+        fetchedAt: snapshot.calendar?.fetchedAt ?? null,
+        error: snapshot.calendar?.error
+          ?? { code: 'NSE_HOLIDAY_CALENDAR_EXPIRED', message: 'NSE trading calendar qualification expired.' },
+      },
+      reasonCodes: [...new Set([...(snapshot.reasonCodes || []), 'NSE_TRADING_CALENDAR_UNAVAILABLE'])],
+    };
   }
 }

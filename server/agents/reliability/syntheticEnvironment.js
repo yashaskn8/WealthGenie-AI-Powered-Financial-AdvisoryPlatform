@@ -10,7 +10,7 @@ export class SyntheticReliabilityEnvironment {
       task: { id: 'task-opaque', state: null, duplicateCount: 0, canceledAt: null },
       provider: { available: true, retries: 0, calls: 0 },
       worker: { status: 'IDLE', generation: 0, staleWritesRejected: 0 },
-      evidence: { fresh: true, contradictory: false, promptInjectionContained: true },
+      evidence: { fresh: true, contradictory: false, promptInjectionContained: false },
       health: { events: [], reactionHours: null, unnecessaryActions: 0 },
       commit: { count: 0, reconciled: false },
       cancellation: { requested: false, propagated: false, completionAfterCancelPrevented: false },

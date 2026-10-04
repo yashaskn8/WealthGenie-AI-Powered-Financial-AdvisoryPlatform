@@ -30,13 +30,33 @@ function stripHtml(value) {
 function parseDmyDate(value) {
   const match = String(value || '').match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);
   if (!match) return null;
-  const iso = `${match[3]}-${String(match[2]).padStart(2, '0')}-${String(match[1]).padStart(2, '0')}`;
-  return Number.isNaN(Date.parse(`${iso}T00:00:00.000Z`)) ? null : iso;
+  const day = Number(match[1]);
+  const month = Number(match[2]);
+  const year = Number(match[3]);
+  if (year < 1000 || month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 || parsed.getUTCDate() !== day) return null;
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
 function parseLongDate(value) {
-  const parsed = new Date(String(value || '').trim());
-  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString().slice(0, 10);
+  const match = /^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$/.exec(String(value || '').trim());
+  if (!match) return null;
+  const months = new Map([
+    ['jan', 1], ['january', 1], ['feb', 2], ['february', 2], ['mar', 3], ['march', 3],
+    ['apr', 4], ['april', 4], ['may', 5], ['jun', 6], ['june', 6], ['jul', 7], ['july', 7],
+    ['aug', 8], ['august', 8], ['sep', 9], ['september', 9], ['oct', 10], ['october', 10],
+    ['nov', 11], ['november', 11], ['dec', 12], ['december', 12],
+  ]);
+  const month = months.get(match[1].toLowerCase());
+  const day = Number(match[2]);
+  const year = Number(match[3]);
+  if (!month || year < 1000 || day < 1 || day > 31) return null;
+  const parsed = new Date(0);
+  parsed.setUTCHours(0, 0, 0, 0);
+  parsed.setUTCFullYear(year, month - 1, day);
+  if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1 || parsed.getUTCDate() !== day) return null;
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
 function tableRows(html) {
@@ -87,6 +107,12 @@ export function parseSbiRetailTermDepositPage(html, {
     isRevised: /revised rates/i.test(cell),
   })).filter(column => column.depositorType && column.effectiveFrom && column.isRevised);
   if (rateColumns.length !== 2) throw new Error('SBI_FD_SCHEMA_MISMATCH:revised_columns');
+  const effectiveReference = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(now instanceof Date ? now : new Date(now));
+  if (rateColumns.some(column => column.effectiveFrom > effectiveReference)) {
+    throw new Error('SBI_FD_SCHEMA_MISMATCH:future_effective_rates');
+  }
 
   const plainText = stripHtml(html);
   const numericUpdatedMatch = plainText.match(

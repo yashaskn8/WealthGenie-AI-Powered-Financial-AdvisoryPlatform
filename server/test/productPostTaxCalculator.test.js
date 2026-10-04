@@ -219,6 +219,15 @@ test('generateBeginnerSuitability produces deterministic plain-English reasons, 
   assert.equal(suitability.verifiedFactValue, '7.10% p.a.');
 });
 
+test('SBI suitability copy does not make unsupported guarantee or deposit-insurance claims', () => {
+  const suitability = generateBeginnerSuitability({
+    product: { id: 'sbi-fd:tenure', name: 'SBI Term Deposit', parentInstrumentId: 'sbi_fd' },
+    profile: { investmentGoals: ['Capital preservation'], investmentHorizonYears: 3, riskTolerance: 'Conservative' },
+  });
+  assert.match(suitability.whyThisFitsYou, /publishes rates for selected term-deposit tenures/i);
+  assert.doesNotMatch(suitability.whyThisFitsYou, /guaranteed|DICGC|insurance|largest bank/i);
+});
+
 test('enrichProductsWithPostTaxAndSuitability enriches product array without mutating historicalReturn', () => {
   const products = [
     {

@@ -4,6 +4,7 @@ import { ClientFactory, RestTransportFactory } from '@a2a-js/sdk/client';
 import { validateResearchBrief } from './researchSchemas.js';
 import { hashResearchBrief, verifyArtifactContentHash } from './researchArtifact.js';
 import { verifyResearchArtifact } from './researchClaimVerifier.js';
+import { requestPinnedHttps, validatePublicUrl } from './safePublicDocumentFetcher.js';
 
 function clientError(code, message, status = 502) {
   const error = new Error(message);
@@ -51,6 +52,12 @@ function safeBaseUrl(value, env = process.env) {
     && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname.toLowerCase());
   if ((!localHttpAllowed && url.protocol !== 'https:') || url.username || url.password || url.search || url.hash) {
     throw clientError('A2A_AGENT_URL_INVALID', 'ResearchAgent URL must be a credential-free HTTPS origin.', 503);
+  }
+  if (env.NODE_ENV === 'production') {
+    try { validatePublicUrl(url.href); } catch (error) {
+      const code = error?.code === 'RESEARCH_SSRF_BLOCKED' ? 'A2A_AGENT_URL_PRIVATE' : 'A2A_AGENT_URL_INVALID';
+      throw clientError(code, 'Production ResearchAgent URL must resolve through the pinned public HTTPS transport.', 503);
+    }
   }
   url.pathname = url.pathname.replace(/\/+$/, '');
   return url;
@@ -123,8 +130,33 @@ function authenticatedFetch(token, fetchImpl, rpcUrl) {
     }
     const headers = new Headers(init.headers || {});
     headers.delete('authorization');
+    headers.delete('cookie');
+    headers.delete('proxy-authorization');
     if (token) headers.set('authorization', `Bearer ${token}`);
     return boundedFetch(fetchImpl, target, { ...init, headers }, { maxBytes: 1_000_000, timeoutMs: 10_000 });
+  };
+}
+
+export function createPinnedResearchMeshFetch({ dnsLookup, httpsRequest } = {}) {
+  return async (input, init = {}) => {
+    const target = validatePublicUrl(input instanceof URL ? input.href : String(input));
+    const headers = Object.fromEntries(new Headers(init.headers || {}).entries());
+    const result = await requestPinnedHttps(target, {
+      method: init.method || 'GET',
+      headers,
+      body: init.body,
+      signal: init.signal,
+      maxBytes: 1_000_000,
+      timeoutMs: 10_000,
+      ...(dnsLookup ? { dnsLookup } : {}),
+      ...(httpsRequest ? { httpsRequest } : {}),
+    });
+    const status = Number(result.status);
+    const bodylessStatus = [204, 205, 304].includes(status);
+    return new Response(bodylessStatus ? null : result.body, {
+      status,
+      headers: result.headers,
+    });
   };
 }
 
@@ -217,10 +249,12 @@ function artifactFromTask(task) {
 }
 
 export class ResearchMeshClient {
-  constructor({ baseUrl, token, fetchImpl = globalThis.fetch, requireSignedCard = false, configuredJwk = null, env = process.env } = {}) {
+  constructor({ baseUrl, token, fetchImpl = globalThis.fetch, requireSignedCard = false, configuredJwk = null, env = process.env, dnsLookup, httpsRequest } = {}) {
     this.baseUrl = safeBaseUrl(baseUrl, env).toString().replace(/\/$/, '');
     this.token = token;
-    this.fetchImpl = fetchImpl;
+    this.fetchImpl = env.NODE_ENV === 'production'
+      ? createPinnedResearchMeshFetch({ dnsLookup, httpsRequest })
+      : fetchImpl;
     this.requireSignedCard = requireSignedCard;
     this.configuredJwk = configuredJwk;
     this.requireIndependentSourceMetadata = env.NODE_ENV === 'production';
@@ -292,7 +326,7 @@ export class ResearchMeshClient {
   }
 }
 
-export function createResearchMeshClient({ env = process.env, fetchImpl = globalThis.fetch } = {}) {
+export function createResearchMeshClient({ env = process.env, fetchImpl = globalThis.fetch, dnsLookup, httpsRequest } = {}) {
   const baseUrl = env.AGENT_A2A_RESEARCH_URL;
   if (!baseUrl) throw clientError('RESEARCH_AGENT_URL_MISSING', 'AGENT_A2A_RESEARCH_URL is required when ResearchMesh is enabled.', 503);
   let configuredJwk = null;
@@ -317,5 +351,7 @@ export function createResearchMeshClient({ env = process.env, fetchImpl = global
     requireSignedCard: env.NODE_ENV === 'production' || env.AGENT_A2A_CARD_SIGNING_ENABLED === 'true',
     configuredJwk,
     env,
+    dnsLookup,
+    httpsRequest,
   });
 }

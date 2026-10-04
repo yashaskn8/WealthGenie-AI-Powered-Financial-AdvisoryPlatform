@@ -14,14 +14,13 @@ This log documents the empirical research, system architecture, performance benc
    - **Implementation**: Evaluated `SentenceTransformer` (`all-MiniLM-L6-v2`) 384D vector search across 35 hand-labeled test queries (25 in-domain tax & regulatory queries + 10 out-of-domain negative controls).
    - **Committed Report**: [`ml-service/reports/rag_eval_report.json`](ml-service/reports/rag_eval_report.json) (In-Domain Recall@4: **96.0%**, In-Domain MRR: **0.9600**, Citation Accuracy: **100.0%**, Mean Grounding Score: **0.7716**).
 
-3. **Real Multi-Model Deep Learning Benchmark (Phase 3)**
-   - **Implementation**: Trained and evaluated **Random Forest**, **PyTorch MLP**, and **FT-Transformer** (*NeurIPS 2021*) on the exact same 20,000 NAV-derived investor profile dataset (16 canonical features, identical 60/20/20 train/val/test split).
-   - **Committed Report & Checkpoints**: [`ml-service/reports/multi_model_benchmark.json`](ml-service/reports/multi_model_benchmark.json) and checkpoints [`mlp_benchmark.pt`](ml-service/model/checkpoints/mlp_benchmark.pt) & [`ft_transformer_benchmark.pt`](ml-service/model/checkpoints/ft_transformer_benchmark.pt).
-   - **Results**: FT-Transformer achieved **97.05%** accuracy (**0.9331** Macro-F1) vs Random Forest **95.63%** accuracy (**0.9144** Macro-F1). Random Forest trained 19x faster (4.16s vs 79.15s) and matched balanced accuracy (**0.9221** vs **0.9220**).
+3. **Model Bundle Evaluation (current repository scope)**
+   - The old 20,000-row NAV-derived benchmark, its `multi_model_benchmark.json`, and the named checkpoints are not present in this checkout; those old metrics are not reproducible evidence and are withdrawn from this log.
+   - Current per-architecture bundle manifests, metadata, and evaluation reports are under `ml-service/model/bundles/{random_forest,pytorch_mlp,ft_transformer}/`. These artifacts describe synthetic suitability-policy label agreement, not investor outcomes or financial performance; consult each bundle's own lineage and report rather than sharing one architecture's metadata with another.
 
 4. **Base LLM Evaluation Harness (Phase 4)**
    - **Implementation**: Evaluated base open-weight `Qwen/Qwen2.5-0.5B-Instruct` across 25 financial advisory prompts against hand-labeled gold reference answers.
-   - **Committed Report**: [`ml-service/reports/llm_eval_report.json`](ml-service/reports/llm_eval_report.json) (Mean BLEU: **0.0278**, Mean ROUGE-L: **0.2844**, Mean Lexical Overlap: **0.4998**, Mean Semantic Embedding Similarity: **0.6660**, Mean Faithfulness: **0.5608**). Includes worst 3 failure cases with root-cause analysis (lack of domain grounding without RAG).
+   - **Historical report note**: the report's `0.5608` field is a lexical grounding-overlap heuristic, not faithfulness, entailment, factual support, or a hallucination test. Other scores are historical similarity/overlap measures and do not establish factual correctness.
 
 ---
 
@@ -98,8 +97,8 @@ I conducted an ablation study comparing the lightweight hash-based n-gram bucket
 
 ### Server-Side WTI Ranking Endpoint (`POST /api/instruments/rank-wti`)
 
-The backend exposes `rankWhereToInvestBackend()` from `server/services/RecommendationPipeline.js` at `POST /api/instruments/rank-wti`. This endpoint incorporates tax-regime-aware ranking (Section 87A rebate logic) and macro-regime tilts that go beyond what the client-side `wtiGenerator.js` engine computes.
+The current Express route is defined in `server/routes/instruments.js` and delegates to the current server-side WTI ranking service. Do not use the legacy `RecommendationPipeline.js` path or this historical note as proof of current financial/tax semantics; inspect the route, service, schemas, and tests together.
 
-**Current status**: This endpoint is **intentionally not called by the frontend**. The client app uses `reactapp/src/utils/wtiGenerator.js` (`rankWhereToInvest()`) for all "Where to Invest" product ranking. The server-side endpoint exists as a secondary API-only path for potential external integrations or future backend-driven ranking scenarios.
+**Current status**: The API client contains a helper for this endpoint, but no production React call site was found in the inspected tree. The UI ranking path must be confirmed from actual call sites rather than inferred from helper presence.
 
-**Decision**: This is a deliberate architectural split, not a bug. The client engine was updated (Aug 2026) to accept `instrumentRiskLevel` from the catalog to align with the same catalog-risk-aware approach used server-side, eliminating the keyword-inference drift that previously existed. If future requirements call for server-side WTI ranking in the UI (e.g. to leverage 87A rebate logic), this endpoint is ready to be wired in.
+**Decision**: This paragraph is a source note, not an approval to move ranking authority to React. The deterministic backend remains the financial authority; any UI integration must call the backend API and preserve the current product, suitability, evidence, and tax contracts.

@@ -5,6 +5,8 @@ import { createServer } from 'node:http';
 import { createHealthRouter } from '../routes/health.js';
 import { assertFetchResponseMatchesOpenApi } from './helpers/openapiRuntimeContract.js';
 
+const DEMO_ENVIRONMENT_ID = '11111111-1111-4111-8111-111111111111';
+
 async function withVerificationServer(options, callback) {
   const app = express();
   app.use('/health', createHealthRouter(options));
@@ -35,9 +37,9 @@ test('runtime verification reports only the running process build and connected 
     const body = await assertFetchResponseMatchesOpenApi(response, 'GET', '/health/verification');
     assert.equal(response.status, 200);
     assert.deepEqual(body, {
-      status: 'VERIFIED',
+      status: 'RUNTIME_VERIFIED',
       buildSha: 'a'.repeat(40),
-      mongo: { connected: true, transactionCapable: true, databaseIdentityVerified: false },
+      mongo: { connected: true, transactionCapable: true, databaseIdentityVerified: false, environmentSentinelVerified: false },
       redis: { required: true, connected: true },
       marketProvider: 'NSE',
       marketProviderTokenPresent: true,
@@ -60,7 +62,7 @@ test('runtime verification fails closed when the connected Mongo or required Red
     const body = await assertFetchResponseMatchesOpenApi(response, 'GET', '/health/verification');
     assert.equal(response.status, 503);
     assert.equal(body.status, 'NOT_VERIFIED');
-    assert.deepEqual(body.mongo, { connected: true, transactionCapable: false, databaseIdentityVerified: false });
+    assert.deepEqual(body.mongo, { connected: true, transactionCapable: false, databaseIdentityVerified: false, environmentSentinelVerified: false });
     assert.deepEqual(body.redis, { required: true, connected: false });
   });
 });
@@ -102,15 +104,29 @@ test('optional Redis is reported truthfully without making runtime verification 
   assert.equal(redisCalled, true);
 });
 
-test('demo database verification is exact, rejects reserved/mismatched names before transaction probing, and does not expose the name', async t => {
+test('demo database verification is exact, rejects reserved/mismatched identities before transaction probing, and does not expose the name', async t => {
   const scenarios = [
-    { label: 'exact isolated database', configured: 'wealthgenie_demo', actual: 'wealthgenie_demo', requested: 'wealthgenie_demo', expectedStatus: 200, expectedIdentity: true, expectedTransactionCalls: 1 },
-    { label: 'actual database differs', configured: 'wealthgenie_demo', actual: 'test', requested: 'wealthgenie_demo', expectedStatus: 503, expectedIdentity: false, expectedTransactionCalls: 0 },
-    { label: 'backend and preflight expectations differ', configured: 'wealthgenie_demo', actual: 'wealthgenie_demo', requested: 'other_demo', expectedStatus: 503, expectedIdentity: false, expectedTransactionCalls: 0 },
-    { label: 'reserved default database', configured: 'test', actual: 'test', requested: 'test', expectedStatus: 503, expectedIdentity: false, expectedTransactionCalls: 0 },
-    { label: 'missing expected database signaled with empty header', configured: undefined, actual: 'test', requested: '', expectedStatus: 503, expectedIdentity: false, expectedTransactionCalls: 0 },
-    { label: 'missing actual database identity', configured: 'wealthgenie_demo', actual: null, requested: 'wealthgenie_demo', expectedStatus: 503, expectedIdentity: false, expectedTransactionCalls: 0 },
-  ];
+    { label: 'exact isolated database, host, and sentinel', configured: 'wealthgenie_demo', actual: 'wealthgenie_demo', requested: 'wealthgenie_demo', configuredHost: 'cluster.demo.example', actualHost: 'cluster.demo.example', requestedHost: 'cluster.demo.example', configuredEnvironmentId: DEMO_ENVIRONMENT_ID, requestedEnvironmentId: DEMO_ENVIRONMENT_ID, sentinel: true, expectedStatus: 200, expectedIdentity: true, expectedSentinel: true, expectedTransactionCalls: 1 },
+    { label: 'actual database differs', configured: 'wealthgenie_demo', actual: 'test', requested: 'wealthgenie_demo', configuredHost: 'cluster.demo.example', actualHost: 'cluster.demo.example', requestedHost: 'cluster.demo.example', configuredEnvironmentId: DEMO_ENVIRONMENT_ID, requestedEnvironmentId: DEMO_ENVIRONMENT_ID, sentinel: true, expectedStatus: 503, expectedIdentity: false, expectedSentinel: false, expectedTransactionCalls: 0 },
+    { label: 'backend and preflight expectations differ', configured: 'wealthgenie_demo', actual: 'wealthgenie_demo', requested: 'other_demo', configuredHost: 'cluster.demo.example', actualHost: 'cluster.demo.example', requestedHost: 'cluster.demo.example', configuredEnvironmentId: DEMO_ENVIRONMENT_ID, requestedEnvironmentId: DEMO_ENVIRONMENT_ID, sentinel: true, expectedStatus: 503, expectedIdentity: false, expectedSentinel: false, expectedTransactionCalls: 0 },
+    { label: 'same demo database name on a different Mongo deployment', configured: 'wealthgenie_demo', actual: 'wealthgenie_demo', requested: 'wealthgenie_demo', configuredHost: 'prod.cluster.example', actualHost: 'prod.cluster.example', requestedHost: 'cluster.demo.example', configuredEnvironmentId: DEMO_ENVIRONMENT_ID, requestedEnvironmentId: DEMO_ENVIRONMENT_ID, sentinel: true, expectedStatus: 503, expectedIdentity: false, expectedSentinel: false, expectedTransactionCalls: 0 },
+    { label: 'actual host differs from configured demo host', configured: 'wealthgenie_demo', actual: 'wealthgenie_demo', requested: 'wealthgenie_demo', configuredHost: 'cluster.demo.example', actualHost: 'prod.cluster.example', requestedHost: 'cluster.demo.example', configuredEnvironmentId: DEMO_ENVIRONMENT_ID, requestedEnvironmentId: DEMO_ENVIRONMENT_ID, sentinel: true, expectedStatus: 503, expectedIdentity: false, expectedSentinel: false, expectedTransactionCalls: 0 },
+    { label: 'backend and preflight host expectations differ', configured: 'wealthgenie_demo', actual: 'wealthgenie_demo', requested: 'wealthgenie_demo', configuredHost: 'cluster.demo.example', actualHost: 'cluster.demo.example', requestedHost: 'other.demo.example', configuredEnvironmentId: DEMO_ENVIRONMENT_ID, requestedEnvironmentId: DEMO_ENVIRONMENT_ID, sentinel: true, expectedStatus: 503, expectedIdentity: false, expectedSentinel: false, expectedTransactionCalls: 0 },
+    { label: 'same host and database on a different Mongo port', configured: 'wealthgenie_demo', actual: 'wealthgenie_demo', requested: 'wealthgenie_demo', configuredHost: 'cluster.demo.example', actualHost: 'cluster.demo.example', requestedHost: 'cluster.demo.example', configuredPort: '27017', actualPort: 27018, requestedPort: '27017', configuredEnvironmentId: DEMO_ENVIRONMENT_ID, requestedEnvironmentId: DEMO_ENVIRONMENT_ID, sentinel: true, expectedStatus: 503, expectedIdentity: false, expectedSentinel: false, expectedTransactionCalls: 0 },
+    { label: 'backend and preflight port expectations differ', configured: 'wealthgenie_demo', actual: 'wealthgenie_demo', requested: 'wealthgenie_demo', configuredHost: 'cluster.demo.example', actualHost: 'cluster.demo.example', requestedHost: 'cluster.demo.example', configuredPort: '27017', actualPort: 27017, requestedPort: '27018', configuredEnvironmentId: DEMO_ENVIRONMENT_ID, requestedEnvironmentId: DEMO_ENVIRONMENT_ID, sentinel: true, expectedStatus: 503, expectedIdentity: false, expectedSentinel: false, expectedTransactionCalls: 0 },
+    { label: 'missing actual Mongo port', configured: 'wealthgenie_demo', actual: 'wealthgenie_demo', requested: 'wealthgenie_demo', configuredHost: 'cluster.demo.example', actualHost: 'cluster.demo.example', requestedHost: 'cluster.demo.example', configuredPort: '27017', actualPort: null, requestedPort: '27017', configuredEnvironmentId: DEMO_ENVIRONMENT_ID, requestedEnvironmentId: DEMO_ENVIRONMENT_ID, sentinel: true, expectedStatus: 503, expectedIdentity: false, expectedSentinel: false, expectedTransactionCalls: 0 },
+    { label: 'production database cannot be certified as demo isolation', configured: 'wealthgenie', actual: 'wealthgenie', requested: 'wealthgenie', configuredHost: 'cluster.demo.example', actualHost: 'cluster.demo.example', requestedHost: 'cluster.demo.example', configuredEnvironmentId: DEMO_ENVIRONMENT_ID, requestedEnvironmentId: DEMO_ENVIRONMENT_ID, sentinel: true, expectedStatus: 503, expectedIdentity: false, expectedSentinel: false, expectedTransactionCalls: 0 },
+    { label: 'reserved default database', configured: 'test', actual: 'test', requested: 'test', configuredHost: 'cluster.demo.example', actualHost: 'cluster.demo.example', requestedHost: 'cluster.demo.example', configuredEnvironmentId: DEMO_ENVIRONMENT_ID, requestedEnvironmentId: DEMO_ENVIRONMENT_ID, sentinel: true, expectedStatus: 503, expectedIdentity: false, expectedSentinel: false, expectedTransactionCalls: 0 },
+    { label: 'missing expected database signaled with empty header', configured: undefined, actual: 'test', requested: '', configuredHost: undefined, actualHost: 'cluster.demo.example', requestedHost: '', configuredEnvironmentId: undefined, requestedEnvironmentId: '', sentinel: false, expectedStatus: 503, expectedIdentity: false, expectedSentinel: false, expectedTransactionCalls: 0 },
+    { label: 'missing expected environment ID', configured: 'wealthgenie_demo', actual: 'wealthgenie_demo', requested: 'wealthgenie_demo', configuredHost: 'cluster.demo.example', actualHost: 'cluster.demo.example', requestedHost: 'cluster.demo.example', configuredEnvironmentId: undefined, requestedEnvironmentId: '', sentinel: false, expectedStatus: 503, expectedIdentity: true, expectedSentinel: false, expectedTransactionCalls: 0 },
+    { label: 'missing actual database identity', configured: 'wealthgenie_demo', actual: null, requested: 'wealthgenie_demo', configuredHost: 'cluster.demo.example', actualHost: null, requestedHost: 'cluster.demo.example', configuredEnvironmentId: DEMO_ENVIRONMENT_ID, requestedEnvironmentId: DEMO_ENVIRONMENT_ID, sentinel: true, expectedStatus: 503, expectedIdentity: false, expectedSentinel: false, expectedTransactionCalls: 0 },
+    { label: 'sentinel absent despite matching name and host', configured: 'wealthgenie_demo', actual: 'wealthgenie_demo', requested: 'wealthgenie_demo', configuredHost: 'cluster.demo.example', actualHost: 'cluster.demo.example', requestedHost: 'cluster.demo.example', configuredEnvironmentId: DEMO_ENVIRONMENT_ID, requestedEnvironmentId: DEMO_ENVIRONMENT_ID, sentinel: false, expectedStatus: 503, expectedIdentity: true, expectedSentinel: false, expectedTransactionCalls: 0 },
+  ].map(scenario => ({
+    configuredPort: '27017',
+    actualPort: 27017,
+    requestedPort: '27017',
+    ...scenario,
+  }));
   for (const scenario of scenarios) {
     await t.test(scenario.label, async () => {
       let transactionCalls = 0;
@@ -119,20 +135,88 @@ test('demo database verification is exact, rejects reserved/mismatched names bef
         timeoutMs: 100,
         verificationTimeoutMs: 100,
         expectedDemoDatabase: scenario.configured,
+        expectedDemoDatabaseHost: scenario.configuredHost,
+        expectedDemoDatabasePort: scenario.configuredPort,
+        expectedDemoEnvironmentId: scenario.configuredEnvironmentId,
         verifyMongoTransaction: async () => { transactionCalls += 1; return true; },
+        verifyDemoEnvironmentSentinel: async () => scenario.sentinel,
         verifyRedisConnection: async () => false,
         isMongoConnected: () => true,
         getMongoDatabaseName: () => scenario.actual,
+        getMongoHost: () => scenario.actualHost,
+        getMongoPort: () => scenario.actualPort,
       }, async baseUrl => {
         const response = await fetch(`${baseUrl}/health/verification`, {
-          headers: { 'X-Demo-Expected-Mongodb-Database': scenario.requested },
+          headers: {
+            'X-Demo-Expected-Mongodb-Database': scenario.requested,
+            'X-Demo-Expected-Mongodb-Host': scenario.requestedHost,
+            'X-Demo-Expected-Mongodb-Port': scenario.requestedPort,
+            'X-Demo-Expected-Mongodb-Environment-Id': scenario.requestedEnvironmentId,
+          },
         });
         const body = await assertFetchResponseMatchesOpenApi(response, 'GET', '/health/verification');
         assert.equal(response.status, scenario.expectedStatus);
         assert.equal(body.mongo.databaseIdentityVerified, scenario.expectedIdentity);
+        assert.equal(body.mongo.environmentSentinelVerified, scenario.expectedSentinel);
+        assert.equal(body.status, scenario.expectedStatus === 200 ? 'DEMO_DATABASE_VERIFIED' : 'NOT_VERIFIED');
         assert.doesNotMatch(JSON.stringify(body), /wealthgenie_demo|other_demo|mongodb|password|credential|secret/i);
       });
       assert.equal(transactionCalls, scenario.expectedTransactionCalls);
     });
   }
+});
+
+test('readiness fails when configured isolated Mongo identity is not the connected host and database', async () => {
+  let transactionCalls = 0;
+  await withVerificationServer({
+    expectedDemoDatabase: 'wealthgenie_demo',
+    expectedDemoDatabaseHost: 'cluster.demo.example',
+    expectedDemoDatabasePort: '27017',
+    expectedDemoEnvironmentId: DEMO_ENVIRONMENT_ID,
+    getMongoDatabaseName: () => 'wealthgenie_demo',
+    getMongoHost: () => 'production.cluster.example',
+    getMongoPort: () => 27017,
+    isMongoConnected: () => true,
+    verifyMongoTransaction: async () => { transactionCalls += 1; return true; },
+    verifyDemoEnvironmentSentinel: async () => false,
+  }, async baseUrl => {
+    const response = await fetch(`${baseUrl}/health/ready`);
+    const body = await response.json();
+    assert.equal(response.status, 503);
+    assert.equal(body.status, 'NOT_READY');
+    assert.ok(body.reasons.some(reason => reason.includes('isolated database identity')));
+    assert.doesNotMatch(JSON.stringify(body), /cluster\.demo|production\.cluster|wealthgenie_demo/);
+
+    const verification = await fetch(`${baseUrl}/health/verification`);
+    const verificationBody = await verification.json();
+    assert.equal(verification.status, 503);
+    assert.equal(verificationBody.mongo.databaseIdentityVerified, false);
+  });
+  assert.equal(transactionCalls, 0);
+});
+
+test('readiness fails closed when the exact demo database sentinel is absent', async () => {
+  let sentinelCalls = 0;
+  await withVerificationServer({
+    expectedDemoDatabase: 'wealthgenie_demo',
+    expectedDemoDatabaseHost: 'cluster.demo.example',
+    expectedDemoDatabasePort: '27017',
+    expectedDemoEnvironmentId: DEMO_ENVIRONMENT_ID,
+    getMongoDatabaseName: () => 'wealthgenie_demo',
+    getMongoHost: () => 'cluster.demo.example',
+    getMongoPort: () => 27017,
+    verifyDemoEnvironmentSentinel: async ({ expectedEnvironmentId }) => {
+      sentinelCalls += 1;
+      assert.equal(expectedEnvironmentId, DEMO_ENVIRONMENT_ID);
+      return false;
+    },
+  }, async baseUrl => {
+    const response = await fetch(`${baseUrl}/health/ready`);
+    const body = await response.json();
+    assert.equal(response.status, 503);
+    assert.equal(body.status, 'NOT_READY');
+    assert.ok(body.reasons.some(reason => reason.includes('demo environment sentinel')));
+    assert.doesNotMatch(JSON.stringify(body), /cluster\.demo|wealthgenie_demo|11111111/);
+  });
+  assert.equal(sentinelCalls, 1);
 });

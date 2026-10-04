@@ -26,11 +26,25 @@ evaluation and scaffold promotion requires `financialAuthorityDelta === 0`.
 
 ## Evaluation and evolution
 
-Evaluation manifests hash train, validation, and sealed holdout partitions.
-Optimizer/evolution code receives only train and validation cases; holdout is
-available to a separate verifier. Candidate score cards have hard gates for
-forbidden tools, sensitive-data leaks, budget violations, and any financial
-authority delta.
+Evaluation manifests hash caller-labelled train, validation, and holdout
+partitions. The optimizer projection omits holdout rows. The holdout verifier
+now accepts only a strict `wealthgenie-holdout-bundle/v1` envelope whose full
+case set is bound by an Ed25519 signature to the evaluation version, dataset
+version, case count, SHA-256, signer key identity, and canonical attestation
+time. The deployment must provide the externally trusted public key through
+`AGENT_HOLDOUT_TRUSTED_PUBLIC_KEY`; the private signing key is not part of this
+repository or application runtime. The expected holdout hash is independently
+derived from the run's declared holdout partition. Missing trust configuration
+does not load holdout data or call the candidate runner; malformed, altered,
+wrong-key, wrong-version, or mismatched data fails closed before candidate
+execution. After successful verification the candidate receives only its
+sanitized execution fixture, while grading fields stay evaluator-only. A
+verified dataset alone does not qualify a candidate: measured holdout scores,
+reliability, budget, and zero-financial-authority-delta gates still apply, and
+human approval remains separate. CI uses ephemeral test keys only; no checked-in
+key or production attestation is implied. Candidate score cards retain hard
+gates for forbidden tools, sensitive-data leaks, budget violations, and any
+financial authority delta.
 
 Scaffold specifications are data-only, versioned, immutable contracts. The
 offline evolution interface is disabled by default. A challenger cannot affect

@@ -57,13 +57,14 @@ jobs:
       - name: Build Docker Container Images
         run: |
           echo "Building wealthgenie-server image..."
-          docker build -f server/Dockerfile -t wealthgenie-server:latest .
+          docker build --build-arg APP_BUILD_SHA=${{ github.sha }} -f server/Dockerfile -t wealthgenie-server:latest .
 
           echo "Building wealthgenie-ml-service image..."
           docker build -t wealthgenie-ml-service:latest ml-service/
 
           echo "Building wealthgenie-frontend image..."
           docker build --build-arg VITE_API_URL=/api \
+            --build-arg VITE_BUILD_SHA=${{ github.sha }} \
             -f reactapp/Dockerfile \
             -t wealthgenie-frontend:latest \
             .
@@ -271,7 +272,7 @@ jobs:
             local status
             response_file=$(mktemp)
             for attempt in $(seq 1 "$attempts"); do
-              status=$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' "$url" || true)
+              status=$(curl --silent --show-error --connect-timeout 5 --max-time 10 --output "$response_file" --write-out '%{http_code}' "$url" || true)
               if [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
                 cat "$response_file"
                 rm -f "$response_file"
@@ -293,7 +294,12 @@ jobs:
           fi
 
           echo "1. Testing /health/live..."
-          LIVE_RES=$(curl -s -f http://127.0.0.1:5000/health/live)
+          LIVE_RES=$(curl --silent --show-error --fail --connect-timeout 5 --max-time 10 http://127.0.0.1:5000/health/live)
+          if ! jq -e --arg expected "$GITHUB_SHA" '.buildSha == $expected' <<< "$LIVE_RES" > /dev/null; then
+            echo "ERROR: live server build identity does not match the workflow SHA"
+            print_server_diagnostics
+            exit 1
+          fi
           echo "Live Response: $LIVE_RES"
           echo "- **Liveness Probe (/health/live)**: \`$LIVE_RES\`" >> $GITHUB_STEP_SUMMARY
 
@@ -302,7 +308,7 @@ jobs:
             print_server_diagnostics
             exit 1
           fi
-          READY_RES=$(curl -s -f http://127.0.0.1:5000/health/ready)
+          READY_RES=$(curl --silent --show-error --fail --connect-timeout 5 --max-time 10 http://127.0.0.1:5000/health/ready)
           echo "Ready Response: $READY_RES"
           echo "- **Readiness Probe (/health/ready)**: \`$READY_RES\`" >> $GITHUB_STEP_SUMMARY
 
@@ -311,15 +317,15 @@ jobs:
             print_server_diagnostics
             exit 1
           fi
-          DEEP_RES=$(curl -s -f http://127.0.0.1:5000/health/deep)
+          DEEP_RES=$(curl --silent --show-error --fail --connect-timeout 5 --max-time 10 http://127.0.0.1:5000/health/deep)
           echo "Deep Response: $DEEP_RES"
           echo "- **Deep Health Probe (/health/deep)**: \`$DEEP_RES\`" >> $GITHUB_STEP_SUMMARY
 
           echo "4. Testing Business Endpoint /api/tax/compare..."
           TAX_URL="http://127.0.0.1:5000/api/tax/compare?income=1200000&incomeSource=salary&fiscalYear=FY2026-27&age=30"
-          if ! TAX_RES=$(curl -s -f "$TAX_URL"); then
+          if ! TAX_RES=$(curl --silent --show-error --fail --connect-timeout 5 --max-time 10 "$TAX_URL"); then
             echo "ERROR: tax compare smoke request failed: $TAX_URL"
-            curl -s "$TAX_URL" || true
+            curl --silent --show-error --connect-timeout 5 --max-time 10 "$TAX_URL" || true
             print_server_diagnostics
             exit 1
           fi
@@ -337,7 +343,7 @@ jobs:
           trap 'kill "$HPA_PORT_FORWARD_PID" 2>/dev/null || true' EXIT
 
           for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:5000/health/live > /dev/null; then
+            if curl --fail --silent --connect-timeout 5 --max-time 10 http://127.0.0.1:5000/health/live > /dev/null; then
               break
             fi
             if [ "$attempt" -eq 30 ]; then
@@ -375,7 +381,7 @@ jobs:
           echo "Initial server metrics: $SERVER_METRICS"
 
           LOAD_URL="http://127.0.0.1:5000/api/tax/compare?income=1200000&incomeSource=salary&fiscalYear=FY2026-27&age=30"
-          if ! curl --fail --silent "$LOAD_URL" > /dev/null; then
+          if ! curl --fail --silent --connect-timeout 5 --max-time 10 "$LOAD_URL" > /dev/null; then
             echo "ERROR: valid HPA load probe failed: $LOAD_URL"
             cat hpa-port-forward.log || true
             exit 1

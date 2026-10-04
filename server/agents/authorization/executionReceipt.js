@@ -76,3 +76,19 @@ export function verifyExecutionReceipt(receipt, keyProvider) {
   const details = verifyExecutionReceiptDetails(receipt, keyProvider);
   return Boolean(details.receiptHashValid && details.signatureValid);
 }
+
+export function executionReceiptMatchesMandate(receipt, mandate) {
+  return Boolean(receipt && mandate
+    && receipt.status === 'EXECUTED'
+    && receipt.mandateId && mandate.mandateId
+    && String(receipt.mandateId) === String(mandate.mandateId)
+    && receipt.userId && mandate.userId
+    && String(receipt.userId) === String(mandate.userId)
+    && receipt.action && receipt.action === mandate.action
+    && receipt.resourceId && mandate.resourceId
+    && String(receipt.resourceId) === String(mandate.resourceId)
+    && receipt.runId && mandate.runId
+    && String(receipt.runId) === String(mandate.runId)
+    && receipt.mandateHash && mandate.mandateHash
+    && receipt.mandateHash === mandate.mandateHash);
+}

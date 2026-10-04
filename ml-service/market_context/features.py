@@ -79,6 +79,22 @@ def validate_normalized_dataset(dataset: dict[str, Any]) -> None:
     expected_hash = dataset.get("contentHash")
     if not isinstance(expected_hash, str) or _canonical_dataset_hash(dataset) != expected_hash:
         raise ValueError("MARKET_REGIME_DATASET_HASH_MISMATCH")
+    retrieved_at = pd.to_datetime(dataset.get("retrievedAt"), utc=True, errors="coerce")
+    if pd.isna(retrieved_at):
+        raise ValueError("MARKET_REGIME_DATASET_RETRIEVAL_TIME_INVALID")
+    latest_observation = None
+    for row in rows:
+        for field in ("nifty50", "indiaVix"):
+            leg = row.get(field) if isinstance(row, dict) else None
+            observed_at = pd.to_datetime(
+                leg.get("observedAt") if isinstance(leg, dict) else None,
+                utc=True,
+                errors="coerce",
+            )
+            if not pd.isna(observed_at):
+                latest_observation = observed_at if latest_observation is None else max(latest_observation, observed_at)
+    if latest_observation is None or retrieved_at < latest_observation:
+        raise ValueError("MARKET_REGIME_DATASET_RETRIEVED_BEFORE_OBSERVATIONS")
 
 
 def _positive_finite(value: Any, field: str) -> float:

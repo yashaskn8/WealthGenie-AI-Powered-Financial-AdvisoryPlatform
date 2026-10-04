@@ -20,7 +20,19 @@ export const NIFTY_50_INSTRUMENT_KEY = 'NSE_INDEX|Nifty 50';
 
 function requireIsoDate(value, fieldName) {
   const text = String(value || '').trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || Number.isNaN(Date.parse(`${text}T00:00:00.000Z`))) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  if (!match) throw new TypeError(`${fieldName} must use YYYY-MM-DD format.`);
+  const [, yearText, monthText, dayText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const calendarDate = new Date(0);
+  calendarDate.setUTCHours(0, 0, 0, 0);
+  calendarDate.setUTCFullYear(year, month - 1, day);
+  if (month < 1 || month > 12 || day < 1
+      || calendarDate.getUTCFullYear() !== year
+      || calendarDate.getUTCMonth() !== month - 1
+      || calendarDate.getUTCDate() !== day) {
     throw new TypeError(`${fieldName} must use YYYY-MM-DD format.`);
   }
   return text;

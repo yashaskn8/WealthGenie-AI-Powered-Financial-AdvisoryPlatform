@@ -8,7 +8,11 @@ import { verifyPersistenceIndexes } from '../services/persistenceIndexReadiness.
 import { verifyAgentRuntimePersistence } from '../services/planHealthPersistence.js';
 import { normalizeBuildSha } from '../../shared/buildIdentity.js';
 import { REDIS_PROBE_TIMEOUT_MS } from '../../shared/demoPreflightContracts.js';
-import { verifyDemoDatabaseIdentity } from '../services/demoDatabaseIdentity.js';
+import {
+  isSafeDemoEnvironmentId,
+  verifyDemoDatabaseIdentity,
+  verifyDemoEnvironmentSentinel as verifyConnectedDemoEnvironmentSentinel,
+} from '../services/demoDatabaseIdentity.js';
 
 function withTimeout(promise, timeoutMs, label) {
   let timer;
@@ -33,13 +37,19 @@ export function createHealthRouter({
   verifyAgentRuntime = verifyAgentRuntimePersistence,
   buildSha = process.env.APP_BUILD_SHA,
   expectedDemoDatabase = process.env.DEMO_EXPECTED_MONGODB_DATABASE,
+  expectedDemoDatabaseHost = process.env.DEMO_EXPECTED_MONGODB_HOST,
+  expectedDemoDatabasePort = process.env.DEMO_EXPECTED_MONGODB_PORT,
+  expectedDemoEnvironmentId = process.env.DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID,
   marketProvider = String(process.env.MARKET_DATA_PRIMARY_PROVIDER || 'NSE').trim().toUpperCase(),
   marketProviderTokenPresent = String(process.env.MARKET_DATA_PRIMARY_PROVIDER || 'NSE').trim().toUpperCase() === 'NSE'
     || Boolean(process.env.UPSTOX_ANALYTICS_TOKEN || process.env.UPSTOX_ACCESS_TOKEN),
   verifyMongoTransaction = verifyConnectedMongoTransaction,
+  verifyDemoEnvironmentSentinel = verifyConnectedDemoEnvironmentSentinel,
   verifyRedisConnection = verifyConnectedRedis,
   isMongoConnected = () => mongoose.connection.readyState === 1,
   getMongoDatabaseName = () => mongoose.connection.db?.databaseName || null,
+  getMongoHost = () => mongoose.connection.host || null,
+  getMongoPort = () => mongoose.connection.port || null,
 } = {}) {
   const router = Router();
 
@@ -146,6 +156,33 @@ export function createHealthRouter({
     const reasons = [];
     if (runtimeState && !runtimeState.isReady()) reasons.push(`Application lifecycle is ${runtimeState.snapshot().phase}`);
     if (mongoose.connection.readyState !== 1) reasons.push('Database not connected');
+    const demoIdentityConfigured = expectedDemoDatabase !== undefined
+      || expectedDemoDatabaseHost !== undefined
+      || expectedDemoDatabasePort !== undefined
+      || expectedDemoEnvironmentId !== undefined;
+    if (demoIdentityConfigured) {
+      const identityVerified = verifyDemoDatabaseIdentity({
+        actual: getMongoDatabaseName(),
+        configuredExpected: expectedDemoDatabase,
+        requestedExpected: expectedDemoDatabase,
+        actualHost: getMongoHost(),
+        configuredExpectedHost: expectedDemoDatabaseHost,
+        requestedExpectedHost: expectedDemoDatabaseHost,
+        actualPort: getMongoPort(),
+        configuredExpectedPort: expectedDemoDatabasePort,
+        requestedExpectedPort: expectedDemoDatabasePort,
+      });
+      const environmentIdValid = isSafeDemoEnvironmentId(expectedDemoEnvironmentId);
+      if (!identityVerified || !environmentIdValid) {
+        reasons.push('Configured isolated database identity is not verified');
+      } else {
+        const sentinelVerified = await withTimeout(verifyDemoEnvironmentSentinel({
+          database: mongoose.connection.db,
+          expectedEnvironmentId: expectedDemoEnvironmentId,
+        }), timeoutMs, 'Demo database sentinel verification').catch(() => false);
+        if (!sentinelVerified) reasons.push('Configured demo environment sentinel is not verified');
+      }
+    }
     if (requireRedis && (!redisAvailable || !redisClient?.isReady)) reasons.push('Redis not connected');
     if (requireMcp) {
       let capacityReady = false;
@@ -202,28 +239,55 @@ export function createHealthRouter({
   router.get('/verification', asyncHandler(async (req, res) => {
     const mongoConnected = isMongoConnected();
     const requestedDatabase = req.get('x-demo-expected-mongodb-database');
-    const identityRequested = typeof requestedDatabase === 'string';
-    const databaseIdentityVerified = identityRequested && mongoConnected && verifyDemoDatabaseIdentity({
+    const requestedHost = req.get('x-demo-expected-mongodb-host');
+    const requestedPort = req.get('x-demo-expected-mongodb-port');
+    const requestedEnvironmentId = req.get('x-demo-expected-mongodb-environment-id');
+    const identityRequested = typeof requestedDatabase === 'string'
+      || typeof requestedHost === 'string'
+      || typeof requestedPort === 'string'
+      || typeof requestedEnvironmentId === 'string';
+    const identityRequired = identityRequested
+      || expectedDemoDatabase !== undefined
+      || expectedDemoDatabaseHost !== undefined
+      || expectedDemoDatabasePort !== undefined
+      || expectedDemoEnvironmentId !== undefined;
+    const databaseIdentityVerified = identityRequired && mongoConnected && verifyDemoDatabaseIdentity({
       actual: getMongoDatabaseName(),
       configuredExpected: expectedDemoDatabase,
-      requestedExpected: requestedDatabase,
+      requestedExpected: identityRequested ? requestedDatabase : expectedDemoDatabase,
+      actualHost: getMongoHost(),
+      configuredExpectedHost: expectedDemoDatabaseHost,
+      requestedExpectedHost: identityRequested ? requestedHost : expectedDemoDatabaseHost,
+      actualPort: getMongoPort(),
+      configuredExpectedPort: expectedDemoDatabasePort,
+      requestedExpectedPort: identityRequested ? requestedPort : expectedDemoDatabasePort,
     });
+    const environmentIdMatches = identityRequired
+      && isSafeDemoEnvironmentId(expectedDemoEnvironmentId)
+      && normalizeExpectedEnvironmentId(requestedEnvironmentId, expectedDemoEnvironmentId);
+    const environmentSentinelVerified = databaseIdentityVerified && environmentIdMatches && mongoConnected
+      ? await withTimeout(verifyDemoEnvironmentSentinel({
+        database: mongoose.connection.db,
+        expectedEnvironmentId: expectedDemoEnvironmentId,
+      }), timeoutMs, 'Demo database sentinel verification').catch(() => false)
+      : false;
     const [transactionCapable, redisConnected] = await Promise.all([
-      identityRequested && !databaseIdentityVerified
+      identityRequired && (!databaseIdentityVerified || !environmentSentinelVerified)
         ? Promise.resolve(false)
         : withTimeout(verifyMongoTransaction({ timeoutMs, connection: mongoose.connection }), timeoutMs, 'Mongo verification probe').catch(() => false),
       withTimeout(verifyRedisConnection({ timeoutMs: verificationTimeoutMs, client: redisClient, available: redisAvailable }), verificationTimeoutMs, 'Redis verification probe').catch(() => false),
     ]);
     const verified = mongoConnected && transactionCapable
-      && (!identityRequested || databaseIdentityVerified)
+      && (!identityRequired || (databaseIdentityVerified && environmentSentinelVerified))
       && (!requireRedis || redisConnected);
     const body = {
-      status: verified ? 'VERIFIED' : 'NOT_VERIFIED',
+      status: verified ? (identityRequired ? 'DEMO_DATABASE_VERIFIED' : 'RUNTIME_VERIFIED') : 'NOT_VERIFIED',
       buildSha: normalizeBuildSha(buildSha),
       mongo: {
         connected: mongoConnected,
         transactionCapable: Boolean(mongoConnected && transactionCapable),
         databaseIdentityVerified: Boolean(databaseIdentityVerified),
+        environmentSentinelVerified: Boolean(environmentSentinelVerified),
       },
       redis: { required: requireRedis, connected: Boolean(redisConnected) },
       marketProvider: ['NSE', 'UPSTOX'].includes(marketProvider) ? marketProvider : 'INVALID',
@@ -233,6 +297,11 @@ export function createHealthRouter({
   }));
 
   return router;
+}
+
+function normalizeExpectedEnvironmentId(requested, configured) {
+  return isSafeDemoEnvironmentId(requested)
+    && requested.toLowerCase() === configured.toLowerCase();
 }
 
 async function verifyConnectedMongoTransaction({ timeoutMs, connection }) {

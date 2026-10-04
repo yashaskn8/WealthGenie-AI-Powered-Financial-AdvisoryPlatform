@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,7 +32,12 @@ import {
   NSE_TRADING_HOLIDAY_URL,
 } from '../services/marketData/nseTradingCalendar.js';
 import { indiaClockParts, isoDateInIndia } from '../services/marketData/indiaMarketTime.js';
-import { isSafeDemoDatabaseName } from '../services/demoDatabaseIdentity.js';
+import {
+  isSafeDemoDatabaseHost,
+  isSafeDemoDatabaseName,
+  isSafeDemoDatabasePort,
+  isSafeDemoEnvironmentId,
+} from '../services/demoDatabaseIdentity.js';
 import { financialProfileCompletionSchema } from '../validation/financialSchemas.js';
 import { taxCalculationContextSchema } from '../validation/taxSchemas.js';
 
@@ -46,6 +51,70 @@ export {
   WTI_USER_FLOW_TIMEOUT_MS,
 };
 export { matchesBuildSha };
+
+function trustedRemoteOrigins(value) {
+  if (value == null || value === '') return new Set();
+  if (typeof value !== 'string') return null;
+  const origins = new Set();
+  for (const entry of value.split(',')) {
+    try {
+      const candidate = new URL(entry.trim());
+      if (candidate.protocol !== 'https:' || candidate.username || candidate.password
+          || candidate.pathname !== '/' || candidate.search || candidate.hash) return null;
+      origins.add(candidate.origin);
+    } catch {
+      return null;
+    }
+  }
+  return origins;
+}
+
+export function isSafeDemoUrl(value, { api = false, remoteOrigins } = {}) {
+  try {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) return false;
+    const localHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
+    const local = localHosts.has(url.hostname);
+    if (local ? url.protocol !== 'http:' && url.protocol !== 'https:' : url.protocol !== 'https:') return false;
+    if (!local) {
+      const allowedOrigins = trustedRemoteOrigins(remoteOrigins);
+      if (!allowedOrigins || !allowedOrigins.has(url.origin)) return false;
+    }
+    if (api && !url.pathname.replace(/\/+$/, '').endsWith('/api')) return false;
+    if (!api && url.pathname !== '/' && url.pathname !== '/login') return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function servedFrontendBuildMatches({ page, request, expectedBuildSha, origin }) {
+  if (!matchesBuildSha(expectedBuildSha, expectedBuildSha)) return false;
+  const runtime = await page.evaluate(() => ({
+    buildSha: globalThis.document.documentElement.dataset.buildSha || null,
+    scripts: [...globalThis.document.scripts].map(script => script.src).filter(Boolean),
+  }));
+  if (!matchesBuildSha(expectedBuildSha, runtime?.buildSha) || !Array.isArray(runtime?.scripts)) return false;
+  const firstPartyScripts = runtime.scripts.filter(source => {
+    try {
+      const url = new URL(source);
+      return url.origin === origin && ['http:', 'https:'].includes(url.protocol)
+        && !url.username && !url.password && !url.search && !url.hash && url.pathname.endsWith('.js');
+    } catch {
+      return false;
+    }
+  });
+  if (firstPartyScripts.length === 0 || typeof request?.get !== 'function') return false;
+  for (const source of firstPartyScripts) {
+    try {
+      const response = await request.get(source, { timeout: LOGIN_BROWSER_TIMEOUT_MS });
+      if (responseOk(response) && (await response.text()).includes(expectedBuildSha.toLowerCase())) return true;
+    } catch {
+      // A served-asset fetch failure is a failed attestation, not a reason to authenticate.
+    }
+  }
+  return false;
+}
 
 const TRUSTED_TAX_SOURCE_HOSTS = Object.freeze([
   'incometax.gov.in',
@@ -82,6 +151,44 @@ const FINANCIAL_PROVIDER_HOSTS = Object.freeze([
   'incometaxindia.gov.in',
   'upstox.com',
 ]);
+
+export function readLocalBuildIdentity(gitRunner = spawnSync) {
+  const safeRepositoryPath = REPO_ROOT.replace(/\\/g, '/');
+  const gitArgs = ['-c', `safe.directory=${safeRepositoryPath}`];
+  const head = gitRunner('git', [...gitArgs, 'rev-parse', 'HEAD'], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    timeout: BACKEND_HTTP_HARD_TIMEOUT_MS,
+    windowsHide: true,
+  });
+  const status = gitRunner('git', [...gitArgs, 'status', '--porcelain=v1', '--untracked-files=all'], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    timeout: BACKEND_HTTP_HARD_TIMEOUT_MS,
+    windowsHide: true,
+  });
+  const sha = head?.status === 0 ? String(head.stdout || '').trim() : '';
+  return {
+    sha: matchesBuildSha(sha, sha) ? sha : null,
+    clean: status?.status === 0 && String(status.stdout || '').trim() === '',
+  };
+}
+
+async function frontendArtifactContainsBuildSha(outputDirectory, expectedSha) {
+  const assetsDirectory = path.join(outputDirectory, 'assets');
+  let entries;
+  try {
+    entries = await readdir(assetsDirectory, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.js')) continue;
+    const content = await readFile(path.join(assetsDirectory, entry.name), 'utf8').catch(() => '');
+    if (content.includes(expectedSha)) return true;
+  }
+  return false;
+}
 
 export function hasCurrentFinancialBinding(value) {
   return Boolean(value)
@@ -834,13 +941,21 @@ async function readConfiguredJson(filePath, label, reporter, schema) {
 async function checkMongoTransaction(reporter, { environment = process.env, verification } = {}) {
   const mongo = verification?.mongo;
   const expectedDatabase = environment.DEMO_EXPECTED_MONGODB_DATABASE;
+  const expectedHost = environment.DEMO_EXPECTED_MONGODB_HOST;
+  const expectedPort = environment.DEMO_EXPECTED_MONGODB_PORT;
+  const expectedEnvironmentId = environment.DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID;
   const passed = isSafeDemoDatabaseName(expectedDatabase)
+    && isSafeDemoDatabaseHost(expectedHost)
+    && isSafeDemoDatabasePort(expectedPort)
+    && isSafeDemoEnvironmentId(expectedEnvironmentId)
     && mongo?.connected === true
     && mongo?.transactionCapable === true
-    && mongo?.databaseIdentityVerified === true;
+    && mongo?.databaseIdentityVerified === true
+    && mongo?.environmentSentinelVerified === true
+    && verification?.status === 'DEMO_DATABASE_VERIFIED';
   reporter.add('Mongo/transaction support', passed, passed
-    ? 'the running backend verified a read-only transaction and exact isolated database identity'
-    : 'expected demo database is missing/unsafe or the running backend did not verify connection, transaction, and exact database identity');
+    ? 'the running backend verified the configured isolated database, environment sentinel, and read-only transaction'
+    : 'expected isolated database name/host/port/environment ID is missing or unsafe, or the backend did not verify the sentinel and transaction');
 }
 
 async function checkRedis(reporter, { environment = process.env, verification } = {}) {
@@ -869,6 +984,7 @@ export async function checkBrowserAndFinancialFlow(reporter, {
   idempotencyKey = process.env.DEMO_COMPLETION_IDEMPOTENCY_KEY,
   parentInstrumentId = process.env.DEMO_NIFTY_ETF_PARENT_ID,
   expectedBuildSha = process.env.DEMO_EXPECTED_BUILD_SHA,
+  trustedRemoteOrigins = process.env.DEMO_TRUSTED_REMOTE_ORIGINS,
 }, { launchBrowser, onTiming } = {}) {
   if (!frontendUrl || !email || !password) {
     reporter.add('Critical browser path', false, 'browser launch/navigation NOT_EVALUATED because demo browser configuration is missing');
@@ -898,10 +1014,7 @@ export async function checkBrowserAndFinancialFlow(reporter, {
   try {
     try {
       const frontend = new URL(frontendUrl);
-      const localHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
-      if (!['http:', 'https:'].includes(frontend.protocol)
-          || (frontend.protocol !== 'https:' && !localHosts.has(frontend.hostname))
-          || frontend.username || frontend.password || frontend.search || frontend.hash) {
+      if (!isSafeDemoUrl(frontendUrl, { remoteOrigins: trustedRemoteOrigins })) {
         throw new Error('Unsafe frontend URL configuration.');
       }
       if (launchBrowser) {
@@ -915,7 +1028,19 @@ export async function checkBrowserAndFinancialFlow(reporter, {
         throw Object.assign(new Error('Browser launch returned an invalid browser handle.'), { code: 'BROWSER_HANDLE_INVALID' });
       }
       browserLaunched = true;
-      context = await browser.newContext();
+      context = await browser.newContext({ serviceWorkers: 'block' });
+      const allowedBrowserOrigins = new Set([new URL(frontendUrl).origin, new URL(apiBase).origin]);
+      if (typeof context.route !== 'function') {
+        throw Object.assign(new Error('Browser request-origin guard is unavailable.'), { code: 'BROWSER_ORIGIN_GUARD_UNAVAILABLE' });
+      }
+      await context.route('**/*', async route => {
+        try {
+          if (allowedBrowserOrigins.has(new URL(route.request().url()).origin)) await route.continue();
+          else await route.abort('blockedbyclient');
+        } catch {
+          await route.abort('blockedbyclient');
+        }
+      });
       page = await context.newPage();
       page.on('request', request => {
         try {
@@ -941,8 +1066,15 @@ export async function checkBrowserAndFinancialFlow(reporter, {
         page.locator('#login-email'),
         page.locator('#login-password'),
       ].map(locator => locator.waitFor({ state: 'visible', timeout: loginReadyTimeoutMs })));
-      const reportedFrontendBuildSha = await page.evaluate(() => globalThis.document.documentElement.dataset.buildSha || null);
-      frontendBuildVerified = matchesBuildSha(expectedBuildSha, reportedFrontendBuildSha);
+      frontendBuildVerified = await servedFrontendBuildMatches({
+        page,
+        request: context.request,
+        expectedBuildSha,
+        origin: frontend.origin,
+      });
+      if (!frontendBuildVerified) {
+        throw Object.assign(new Error('Served frontend build identity did not match.'), { code: 'FRONTEND_BUILD_IDENTITY_MISMATCH' });
+      }
       loginPageRendered = true;
     } catch (error) {
       const status = Number.isInteger(error?.status) ? ` HTTP ${error.status}` : '';
@@ -1284,6 +1416,7 @@ export async function runDemoPreflight({
     verifyRedis = checkRedis,
     verifyBrowser = checkBrowserAndFinancialFlow,
     verifyBuild = null,
+    getSourceBuildIdentity = readLocalBuildIdentity,
   } = dependencies;
   const reporter = makeReporter(write);
   const finish = () => finishPreflight(reporter, write);
@@ -1298,13 +1431,8 @@ export async function runDemoPreflight({
   let backendOrigin;
   try {
     const apiUrl = new URL(apiBase);
-    if (!['http:', 'https:'].includes(apiUrl.protocol)) throw new TypeError('Unsupported API URL protocol.');
-    if (!apiUrl.pathname.replace(/\/+$/, '').endsWith('/api') || apiUrl.username || apiUrl.password || apiUrl.search || apiUrl.hash) {
+    if (!isSafeDemoUrl(apiBase, { api: true, remoteOrigins: environment.DEMO_TRUSTED_REMOTE_ORIGINS })) {
       throw new TypeError('API URL must end in /api and contain no credentials, query, or fragment.');
-    }
-    const localHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
-    if (apiUrl.protocol !== 'https:' && !localHosts.has(apiUrl.hostname)) {
-      throw new TypeError('Remote API URLs must use HTTPS.');
     }
     apiBase = `${apiUrl.origin}${apiUrl.pathname.replace(/\/+$/, '')}`;
     backendOrigin = apiUrl.origin;
@@ -1312,7 +1440,7 @@ export async function runDemoPreflight({
     reporter.add('Backend URL configuration', false, 'DEMO_API_BASE_URL must be a valid safe HTTP(S) URL ending in /api');
     return finish();
   }
-  reporter.add('Backend URL configuration', true, 'safe local HTTP or remote HTTPS API URL verified');
+  reporter.add('Backend URL configuration', true, 'safe local URL or explicitly allowlisted HTTPS origin verified');
   const frontendUrl = environment.DEMO_FRONTEND_URL;
   const completionPayload = await loadJson(environment.DEMO_PROFILE_COMPLETION_FILE, 'Profile completion payload', reporter, financialProfileCompletionSchema);
   const taxContext = await loadJson(environment.DEMO_TAX_CONTEXT_FILE, 'Tax input payload', reporter, taxCalculationContextSchema);
@@ -1326,6 +1454,15 @@ export async function runDemoPreflight({
       ? environment.DEMO_EXPECTED_MONGODB_DATABASE
       : '',
   };
+  expectedDatabaseHeader['X-Demo-Expected-Mongodb-Host'] = typeof environment.DEMO_EXPECTED_MONGODB_HOST === 'string'
+    ? environment.DEMO_EXPECTED_MONGODB_HOST
+    : '';
+  expectedDatabaseHeader['X-Demo-Expected-Mongodb-Port'] = isSafeDemoDatabasePort(environment.DEMO_EXPECTED_MONGODB_PORT)
+    ? String(environment.DEMO_EXPECTED_MONGODB_PORT)
+    : '';
+  expectedDatabaseHeader['X-Demo-Expected-Mongodb-Environment-Id'] = isSafeDemoEnvironmentId(environment.DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID)
+    ? environment.DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID
+    : '';
   const runtimeVerification = await readHttp(`${backendOrigin}/health/verification`, {
     timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS,
     headers: expectedDatabaseHeader,
@@ -1347,7 +1484,7 @@ export async function runDemoPreflight({
     'Mongo/transaction support', 'Redis if required',
   ].includes(check.name));
   if (prerequisiteChecks.some(check => check.state !== 'PASS')) {
-    reporter.notEvaluated('Market provider configuration', 'backend identity, readiness, isolated database, transaction, required Redis, or fixture prerequisite failed');
+    reporter.notEvaluated('Market provider configuration', 'backend identity, readiness, isolated database host/name, transaction, required Redis, or fixture prerequisite failed');
     for (const name of [
       'NIFTY quote', 'VIX quote', 'Market history', 'Market context', 'Provider token presence',
       'Tax-policy metadata', 'Profile completion/auth', 'Recommendation current-state binding',
@@ -1355,7 +1492,7 @@ export async function runDemoPreflight({
     ]) {
       reporter.notEvaluated(name, 'no provider or authenticated operation is allowed before backend, fixture, isolated database, transaction, and dependency checks pass');
     }
-    await recordProductionBuildCheck(reporter, environment, verifyBuild, dependencies.spawnBuild);
+    await recordProductionBuildCheck(reporter, environment, verifyBuild, dependencies.spawnBuild, getSourceBuildIdentity);
     return finish();
   }
 
@@ -1368,6 +1505,8 @@ export async function runDemoPreflight({
   reporter.add('Market provider configuration', Boolean(services.database === 'UP' && backendProviderValid
     && runtimeBody?.mongo?.connected === true
     && runtimeBody?.mongo?.databaseIdentityVerified === true
+    && runtimeBody?.mongo?.environmentSentinelVerified === true
+    && runtimeBody?.status === 'DEMO_DATABASE_VERIFIED'
     && (!redisRequired || (services.redis === 'UP' && runtimeBody?.redis?.connected === true))),
   'backend dependency health, selected provider, isolated database identity, and connected runtime capabilities are evaluated without exposing configuration values');
 
@@ -1407,13 +1546,16 @@ export async function runDemoPreflight({
     ? `current policy ${policies.body.currentFiscalYear} is server-verified`
     : 'current fiscal-year policy metadata is missing, stale, malformed, or unverified');
 
-  const browserConfigPresent = Boolean(frontendUrl && environment.DEMO_EMAIL && environment.DEMO_PASSWORD
+  const productionBuildVerified = await recordProductionBuildCheck(reporter, environment, verifyBuild, dependencies.spawnBuild, getSourceBuildIdentity);
+  const browserConfigPresent = productionBuildVerified && Boolean(frontendUrl && environment.DEMO_EMAIL && environment.DEMO_PASSWORD
     && completionPayload && taxContext
     && /^[A-Za-z0-9._:-]{8,128}$/.test(environment.DEMO_COMPLETION_IDEMPOTENCY_KEY || '')
     && environment.DEMO_NIFTY_ETF_PARENT_ID === 'nifty_etf');
   if (!browserConfigPresent) {
-    reporter.add('Critical browser path', false, 'set DEMO_FRONTEND_URL, DEMO_EMAIL, and DEMO_PASSWORD');
-    reporter.notEvaluated('Profile completion/auth', 'complete demo identity, valid fixtures, stable key, or exact ETF parent is missing');
+    reporter.notEvaluated('Critical browser path', productionBuildVerified
+      ? 'complete demo identity, valid fixtures, stable key, exact ETF parent, or frontend URL allowlist is missing'
+      : 'production frontend build was not verified; browser authentication and profile mutation were not attempted');
+    reporter.notEvaluated('Profile completion/auth', 'browser authentication/profile completion was not run');
     reporter.notEvaluated('Recommendation current-state binding', 'authenticated profile completion was not run');
     reporter.notEvaluated('ETF product source', 'authenticated rank-wti flow was not run');
     reporter.notEvaluated('Nifty ETF exact-product result', 'authenticated rank-wti flow was not run');
@@ -1429,10 +1571,9 @@ export async function runDemoPreflight({
       idempotencyKey: environment.DEMO_COMPLETION_IDEMPOTENCY_KEY,
       parentInstrumentId: environment.DEMO_NIFTY_ETF_PARENT_ID,
       expectedBuildSha: environment.DEMO_EXPECTED_BUILD_SHA,
+      trustedRemoteOrigins: environment.DEMO_TRUSTED_REMOTE_ORIGINS,
     }, dependencies.browserOptions);
   }
-
-  await recordProductionBuildCheck(reporter, environment, verifyBuild, dependencies.spawnBuild);
 
   return finish();
 }
@@ -1453,13 +1594,13 @@ function finishPreflight(reporter, write = line => process.stdout.write(`${line}
   };
 }
 
-export function createFrontendBuildEnvironment(environment, expectedSha) {
+export function createFrontendBuildEnvironment(environment, expectedSha, sourceSha) {
   const childEnvironment = {};
   for (const name of ['PATH', 'Path', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR']) {
     if (typeof environment[name] === 'string') childEnvironment[name] = environment[name];
   }
   childEnvironment.NODE_ENV = 'production';
-  childEnvironment.VITE_BUILD_SHA = matchesBuildSha(expectedSha, expectedSha) ? expectedSha : '';
+  childEnvironment.VITE_BUILD_SHA = matchesBuildSha(expectedSha, sourceSha) ? sourceSha : '';
 
   if (typeof environment.VITE_API_URL === 'string') {
     try {
@@ -1484,30 +1625,42 @@ export function createFrontendBuildEnvironment(environment, expectedSha) {
   return childEnvironment;
 }
 
-async function recordProductionBuildCheck(reporter, environment, verifyBuild, spawnBuild = spawnSync) {
+async function recordProductionBuildCheck(reporter, environment, verifyBuild, spawnBuild = spawnSync, getSourceBuildIdentity = readLocalBuildIdentity) {
   let passed = false;
   let detail = 'production build could not be verified';
   let outputDirectory;
   try {
+    const sourceIdentity = await getSourceBuildIdentity();
+    const expectedShaValid = sourceIdentity?.clean === true
+      && matchesBuildSha(environment.DEMO_EXPECTED_BUILD_SHA, sourceIdentity.sha);
+    if (!expectedShaValid) {
+      detail = sourceIdentity?.clean === false
+        ? 'production frontend build refused because the local source tree is dirty'
+        : 'expected build SHA does not match a valid clean local Git source SHA';
+      reporter.add('Production frontend build', false, detail);
+      return false;
+    }
     if (verifyBuild) {
-      const build = await verifyBuild({ environment });
+      const build = await verifyBuild({ environment, sourceSha: sourceIdentity.sha });
       passed = build?.passed === true;
       detail = build?.detail || 'production frontend build was not verified';
     } else {
-      const expectedShaValid = matchesBuildSha(environment.DEMO_EXPECTED_BUILD_SHA, environment.DEMO_EXPECTED_BUILD_SHA);
       outputDirectory = await mkdtemp(path.join(os.tmpdir(), 'wealthgenie-demo-build-'));
       const build = spawnBuild(process.execPath, [path.join(REACTAPP_DIR, 'node_modules', 'vite', 'bin', 'vite.js'), 'build', '--outDir', outputDirectory], {
         cwd: REACTAPP_DIR,
         encoding: 'utf8',
         timeout: BACKEND_HTTP_HARD_TIMEOUT_MS * 6,
         windowsHide: true,
-        env: createFrontendBuildEnvironment(environment, environment.DEMO_EXPECTED_BUILD_SHA),
+        env: createFrontendBuildEnvironment(environment, environment.DEMO_EXPECTED_BUILD_SHA, sourceIdentity.sha),
       });
-      passed = build?.status === 0 && expectedShaValid;
+      const artifactMatches = build?.status === 0
+        && await frontendArtifactContainsBuildSha(outputDirectory, sourceIdentity.sha);
+      passed = build?.status === 0 && artifactMatches;
       detail = build?.status !== 0
         ? 'production build failed or frontend dependencies are unavailable'
-        : expectedShaValid ? 'Vite production build succeeded with the explicit expected build identity in an isolated temporary output directory'
-          : 'expected build SHA is missing or malformed; build identity was not substituted from local Git';
+        : artifactMatches
+          ? 'Vite production build contains the verified clean local Git source identity in an isolated temporary output directory'
+          : 'Vite output is missing the expected source build identity';
     }
   } catch {
     detail = 'production build could not be verified because the isolated build or verifier failed';
@@ -1522,6 +1675,7 @@ async function recordProductionBuildCheck(reporter, environment, verifyBuild, sp
     }
   }
   reporter.add('Production frontend build', passed, detail);
+  return passed;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

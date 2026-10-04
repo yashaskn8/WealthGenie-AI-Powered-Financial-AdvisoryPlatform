@@ -40,7 +40,7 @@ export const MARKET_FACT_SEMANTIC_CLASSES = Object.freeze({
 });
 
 export function nullableFiniteNumber(value) {
-  if (value === null || value === undefined || value === '') return null;
+  if (value === null || value === undefined || (typeof value === 'string' && value.trim() === '')) return null;
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
@@ -53,6 +53,22 @@ export function normalizeTimestamp(value) {
   }
   if (typeof candidate === 'number' && Number.isFinite(candidate)) {
     candidate = candidate < 10_000_000_000 ? candidate * 1000 : candidate;
+  }
+  if (typeof candidate === 'string') {
+    const isoDate = /^(\d{4})-(\d{2})-(\d{2})(?:$|[T\s])/.exec(candidate.trim());
+    if (isoDate) {
+      const [, yearText, monthText, dayText] = isoDate;
+      const year = Number(yearText);
+      const month = Number(monthText);
+      const day = Number(dayText);
+      const calendarDate = new Date(0);
+      calendarDate.setUTCHours(0, 0, 0, 0);
+      calendarDate.setUTCFullYear(year, month - 1, day);
+      if (month < 1 || month > 12 || day < 1
+          || calendarDate.getUTCFullYear() !== year
+          || calendarDate.getUTCMonth() !== month - 1
+          || calendarDate.getUTCDate() !== day) return null;
+    }
   }
   const parsed = candidate instanceof Date ? candidate : new Date(candidate);
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
@@ -69,7 +85,13 @@ export function evaluateFreshness({ observedAt, fetchedAt, maxAgeSeconds, now = 
   if (!referenceTime) {
     return { status: FRESHNESS.UNKNOWN, ageSeconds: null, maxAgeSeconds: maximumAge };
   }
-  const ageSeconds = Math.max(0, Math.floor((Date.parse(referenceTime) - Date.parse(observed)) / 1000));
+  const referenceMs = Date.parse(referenceTime);
+  const observedMs = Date.parse(observed);
+  const fetchedMs = Date.parse(fetched);
+  if (observedMs > referenceMs || fetchedMs > referenceMs) {
+    return { status: FRESHNESS.UNKNOWN, ageSeconds: null, maxAgeSeconds: maximumAge };
+  }
+  const ageSeconds = Math.floor((referenceMs - observedMs) / 1000);
   return {
     status: ageSeconds <= maximumAge ? FRESHNESS.FRESH : FRESHNESS.STALE,
     ageSeconds,

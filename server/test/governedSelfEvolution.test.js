@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { planWithProvider } from '../agents/planReview/planReviewGraph.js';
 import { createPromptBundle, CURRENT_PROMPT_BUNDLE, verifyPromptBundleHash } from '../agents/evolution/promptBundle.js';
 import { createScaffoldSpec } from '../agents/evolution/scaffoldSpec.js';
@@ -9,6 +10,7 @@ import { createEvolutionBudget } from '../agents/evolution/evolutionBudget.js';
 import { scanPromptBundleSecurity } from '../agents/evolution/candidateSecurity.js';
 import { selectParetoFrontier } from '../agents/evolution/pareto.js';
 import { runGovernedEvolution } from '../agents/evolution/governedEvolution.js';
+import { buildHoldoutAttestationSigningPayload, holdoutPublicKeyId, HOLDOUT_BUNDLE_SCHEMA_VERSION } from '../agents/evals/holdoutVerifier.js';
 import { createPlanReviewScaffoldRunner } from '../agents/evolution/scaffoldEvolution.js';
 import { runCandidateReliabilitySuite, CANDIDATE_RELIABILITY_SCENARIOS } from '../agents/reliability/index.js';
 import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
@@ -56,6 +58,18 @@ const context = {
   recommendationSummary: { instruments: [] },
   freshness: { fresh: true, reasonCodes: [] },
 };
+
+async function withTrustedHoldoutKey(key, operation) {
+  const previousKey = process.env.AGENT_HOLDOUT_TRUSTED_PUBLIC_KEY;
+  if (key == null) delete process.env.AGENT_HOLDOUT_TRUSTED_PUBLIC_KEY;
+  else process.env.AGENT_HOLDOUT_TRUSTED_PUBLIC_KEY = String(key);
+  try {
+    return await operation();
+  } finally {
+    if (previousKey === undefined) delete process.env.AGENT_HOLDOUT_TRUSTED_PUBLIC_KEY;
+    else process.env.AGENT_HOLDOUT_TRUSTED_PUBLIC_KEY = previousKey;
+  }
+}
 
 test('PromptBundle is immutable, hashed, and is a real PlanReview prompt input', async () => {
   assert.equal(Object.isFrozen(CURRENT_PROMPT_BUNDLE), true);
@@ -126,7 +140,7 @@ test('governed evolution executes the real PlanReview runner and remains shadow-
   const baseSpec = createScaffoldSpec({ version: 'base' });
   let observedCandidatePrompt = '';
   const runner = createPlanReviewScaffoldRunner({ dependencies: {
-    captureFinancialAuthority: async () => ({ allocation: [{ id: 'fixture-asset', weight: 1 }], suitability: 'Moderate' }),
+    captureFinancialAuthority: async () => ({ authorityMeasurementState: 'MEASURED', allocation: [{ id: 'fixture-asset', weight: 1 }], suitability: 'Moderate' }),
     plannerProvider: {
       generate: async ({ systemPrompt }) => {
         observedCandidatePrompt = systemPrompt;
@@ -142,10 +156,11 @@ test('governed evolution executes the real PlanReview runner and remains shadow-
   const cases = ['train', 'validation', 'holdout'].map(partition => ({
     id: `${partition}-1`,
     partition,
-    expectedAction: null,
+    expectedAction: 'REVIEW_GOALS',
     fixture: { userId, profileId, context },
   }));
-  const result = await runGovernedEvolution({
+  let holdoutLoaderCalled = false;
+  const result = await withTrustedHoldoutKey(null, () => runGovernedEvolution({
     baseSpec,
     cases,
     enabled: true,
@@ -155,22 +170,88 @@ test('governed evolution executes the real PlanReview runner and remains shadow-
       mutationReason: 'failure-cluster feedback',
       promptBundle: createPromptBundle({ plannerInstruction: 'candidate planner instruction.' }),
     }],
-    loadHoldoutCases: async () => [cases[2]],
+    loadHoldoutCases: async () => { holdoutLoaderCalled = true; return [cases[2]]; },
     candidateCaseFactory: async () => ({ fixture: { userId, profileId, context } }),
-  });
+  }));
   assert.equal(result.status, 'COMPLETED');
   assert.equal(result.shadowOnly, true);
   assert.equal(result.championCandidateId, null);
   assert.equal(result.financialAuthorityDelta, 0);
   assert.ok(result.candidateRecords[0].evaluation.scoreCards.length === 2);
   assert.equal(result.candidateRecords[0].evaluation.passed, true);
+  assert.equal(holdoutLoaderCalled, false);
+  assert.equal(result.candidateRecords[0].status, 'HOLDOUT_ATTESTATION_REQUIRED');
+  assert.equal(result.candidateRecords[0].holdout.failureCode, 'HOLDOUT_TRUST_KEY_MISSING');
+  assert.equal(result.candidateRecords[0].holdout.scoreCards.length, 0);
   assert.equal(result.candidateRecords[0].reliability.candidateReliabilityCoverageComplete, true);
   assert.match(observedCandidatePrompt, /candidate planner instruction/);
 });
 
+test('externally signed matching holdout can reach SHADOW_READY only after every governed gate passes', async () => {
+  const baseSpec = createScaffoldSpec({ version: 'base' });
+  const runner = createPlanReviewScaffoldRunner({ dependencies: {
+    captureFinancialAuthority: async () => ({ authorityMeasurementState: 'MEASURED', allocation: [{ id: 'fixture-asset', weight: 1 }], suitability: 'Moderate' }),
+    plannerProvider: { generate: async () => ({ text: '{"checks":["get_current_profile_context"]}' }) },
+    loadPlanReviewContext: async () => context,
+    explanationProviders: [],
+    persistAgentRun: async () => undefined,
+    timeoutMs: 2000,
+    toolTimeoutMs: 100,
+  } });
+  const cases = ['train', 'validation', 'holdout'].map(partition => ({
+    id: `${partition}-signed-1`,
+    partition,
+    expectedAction: 'REVIEW_GOALS',
+    fixture: { userId, profileId, context },
+  }));
+  const keyPair = crypto.generateKeyPairSync('ed25519');
+  const trustedPublicKey = keyPair.publicKey.export({ format: 'pem', type: 'spki' });
+  const datasetVersion = 'governed-self-evolution-1.0.0';
+  const attestedAt = '2026-09-25T12:00:00.000Z';
+  const payload = buildHoldoutAttestationSigningPayload({
+    cases: [cases[2]],
+    datasetVersion,
+    attestedAt,
+    keyId: holdoutPublicKeyId(keyPair.publicKey),
+  });
+  const holdoutBundle = {
+    schemaVersion: HOLDOUT_BUNDLE_SCHEMA_VERSION,
+    cases: [cases[2]],
+    attestation: {
+      ...payload.claims,
+      signature: crypto.sign(null, payload.signingBytes, keyPair.privateKey).toString('base64'),
+    },
+  };
+  const result = await withTrustedHoldoutKey(trustedPublicKey, () => runGovernedEvolution({
+    baseSpec,
+    cases,
+    enabled: true,
+    runner,
+    proposals: [{
+      mutationSurface: ['promptBundle.plannerInstruction'],
+      mutationReason: 'bounded signed-holdout regression fixture',
+      promptBundle: createPromptBundle({ plannerInstruction: 'verified holdout candidate instruction.' }),
+    }],
+    loadHoldoutCases: async () => holdoutBundle,
+    reliabilityScenarios: CANDIDATE_RELIABILITY_SCENARIOS,
+    candidateCaseFactory: async () => ({ fixture: { userId, profileId, context } }),
+  }));
+
+  const [record] = result.candidateRecords;
+  assert.equal(record.holdout.attestation, 'VERIFIED');
+  assert.equal(record.holdout.datasetHash, payload.claims.datasetHash);
+  assert.equal(record.holdout.passed, true);
+  assert.equal(record.hardGatePassed, true);
+  assert.equal(record.status, 'SHADOW_READY');
+  assert.equal(record.financialAuthorityDelta, 0);
+  assert.equal(record.reliability.passed, true);
+  assert.equal(result.championCandidateId, null);
+  assert.equal(result.shadowOnly, true);
+});
+
 test('candidate-bound reliability executes and binds the actual candidate, with A/B sensitivity', async () => {
   const runner = createPlanReviewScaffoldRunner({ dependencies: {
-    captureFinancialAuthority: async () => ({ allocation: [{ id: 'fixture-asset', weight: 1 }], suitability: 'Moderate' }),
+    captureFinancialAuthority: async () => ({ authorityMeasurementState: 'MEASURED', allocation: [{ id: 'fixture-asset', weight: 1 }], suitability: 'Moderate' }),
     plannerProvider: { generate: async () => ({ text: '{"checks":["get_current_profile_context"]}' }) },
     loadPlanReviewContext: async () => context,
     explanationProviders: [],

@@ -11,6 +11,9 @@ import NseHistoricalDataProvider, {
 import { MARKET_BENCHMARKS, DEFAULT_BENCHMARK_IDS } from '../services/marketData/marketBenchmarks.js';
 import {
   evaluateNseQuoteFreshness,
+  isUsableNseTradingCalendar,
+  NSE_TRADING_HOLIDAY_CACHE_TTL_SECONDS,
+  NSE_TRADING_HOLIDAY_URL,
   parseNseTradingHolidays,
 } from '../services/marketData/nseTradingCalendar.js';
 import { clearInFlightMarketRequestsForTest } from '../services/marketData/requestCache.js';
@@ -224,6 +227,13 @@ test('market-regime dataset joins only verified common sessions and records a st
     ...options,
     canonicalProductId: MARKET_BENCHMARKS.INDIA_VIX.canonicalProductId,
   });
+  const verifiedCalendar = {
+    status: 'AVAILABLE',
+    source: { provider: 'NSE', url: NSE_TRADING_HOLIDAY_URL },
+    fetchedAt: '2026-09-08T04:00:00.000Z',
+  };
+  niftySnapshot.calendar = verifiedCalendar;
+  vixSnapshot.calendar = verifiedCalendar;
   const first = buildMarketRegimeDataset({
     niftySnapshot,
     vixSnapshot,
@@ -241,6 +251,21 @@ test('market-regime dataset joins only verified common sessions and records a st
   assert.equal(first.missingObservations.policy, 'INNER_JOIN_NO_IMPUTATION_NO_FORWARD_FILL');
   assert.equal(first.contentHash, second.contentHash);
   assert.equal(first.source.provider, 'NSE');
+  assert.throws(() => buildMarketRegimeDataset({
+    niftySnapshot,
+    vixSnapshot,
+    retrievedAt: '2020-01-01T00:00:00.000Z',
+  }), /retrievedAt must not precede source fetches or observations/);
+  assert.throws(() => buildMarketRegimeDataset({
+    niftySnapshot,
+    vixSnapshot,
+    retrievedAt: '2026-09-08T03:59:00.000Z',
+  }), /retrievedAt must not precede source fetches or observations/);
+  assert.throws(() => buildMarketRegimeDataset({
+    niftySnapshot,
+    vixSnapshot,
+    retrievedAt: '2026-02-30T00:00:00.000Z',
+  }), /retrievedAt must be a valid timestamp/);
 });
 
 test('malformed OHLC, conflicting duplicates, schema drift, and stale history are rejected', () => {
@@ -302,6 +327,124 @@ test('provider HTTP and parser failures return SOURCE_ERROR with no quote or can
   assert.deepEqual(history.candles, []);
 });
 
+test('NSE quote and history providers withhold freshness for stale, empty, or unverified calendars', async () => {
+  const now = new Date(FETCHED_AT);
+  const staleCalendar = {
+    schemaVersion: 'market-fact-1.0.0',
+    provider: 'NSE',
+    status: 'AVAILABLE',
+    fetchedAt: '2020-01-01T00:00:00.000Z',
+    dates: [],
+    source: { provider: 'NSE', url: NSE_TRADING_HOLIDAY_URL },
+  };
+  assert.equal(isUsableNseTradingCalendar(staleCalendar, now), false);
+  assert.equal(isUsableNseTradingCalendar({
+    ...staleCalendar,
+    fetchedAt: FETCHED_AT,
+    dates: ['2026-10-02'],
+  }, now), true);
+  assert.equal(isUsableNseTradingCalendar({
+    ...staleCalendar,
+    fetchedAt: FETCHED_AT,
+    dates: ['2025-10-02'],
+  }, now), false);
+
+  const quoteProvider = new NseMarketDataProvider({
+    clock: () => now,
+    holidayLoader: async () => staleCalendar,
+    httpClient: { get: async () => ({ data: QUOTE_PAYLOAD }) },
+  });
+  const quote = await quoteProvider.getQuotes(DEFAULT_BENCHMARK_IDS, { forceRefresh: true });
+  assert.equal(quote.status, 'AVAILABLE');
+  assert.equal(quote.calendar.status, 'UNAVAILABLE');
+  assert.equal(quote.calendar.error.code, 'NSE_HOLIDAY_CALENDAR_UNQUALIFIED');
+  assert.equal(quote.marketSession.status, 'UNKNOWN');
+  assert(quote.facts.every(fact => fact.freshness.status === 'UNKNOWN'));
+
+  const historyProvider = new NseHistoricalDataProvider({
+    clock: () => now,
+    holidayLoader: async () => staleCalendar,
+    httpClient: { get: async () => ({ data: { data: [historyRow('2026-09-07', 24020)] } }) },
+  });
+  const history = await historyProvider.getDailyCandles(
+    MARKET_BENCHMARKS.NIFTY_50.canonicalProductId,
+    { fromDate: '2026-09-01', toDate: '2026-09-07', forceRefresh: true },
+  );
+  assert.equal(history.status, 'AVAILABLE');
+  assert.equal(history.calendar.status, 'UNAVAILABLE');
+  assert.equal(history.calendar.error.code, 'NSE_HOLIDAY_CALENDAR_UNQUALIFIED');
+  assert.equal(history.freshness.status, 'UNKNOWN');
+});
+
+test('cached NSE quote and history are demoted when their trusted calendar expires', async () => {
+  let now = Date.parse('2026-09-08T10:00:30.000Z');
+  const cache = new Map();
+  let calendarLoads = 0;
+  setRedisClient({
+    get: async key => {
+      const entry = cache.get(key);
+      if (!entry || now >= entry.expiresAt) return null;
+      return entry.value;
+    },
+    setEx: async (key, ttlSeconds, value) => {
+      cache.set(key, { value, expiresAt: now + ttlSeconds * 1000 });
+    },
+  });
+  setRedisAvailable(true);
+  clearInFlightMarketRequestsForTest();
+  const validCalendar = {
+    schemaVersion: 'market-fact-1.0.0',
+    provider: 'NSE',
+    status: 'AVAILABLE',
+    fetchedAt: new Date(now - NSE_TRADING_HOLIDAY_CACHE_TTL_SECONDS * 1000 + 30_000).toISOString(),
+    dates: ['2026-10-02'],
+    source: { provider: 'NSE', url: NSE_TRADING_HOLIDAY_URL },
+  };
+  const holidayLoader = async () => {
+    calendarLoads += 1;
+    return validCalendar;
+  };
+  const quoteProvider = new NseMarketDataProvider({
+    clock: () => new Date(now),
+    holidayLoader,
+    httpClient: { get: async () => ({ data: QUOTE_PAYLOAD }) },
+  });
+  const historyProvider = new NseHistoricalDataProvider({
+    clock: () => new Date(now),
+    holidayLoader,
+    httpClient: { get: async () => ({ data: { data: [historyRow('2026-09-07', 24020)] } }) },
+  });
+  try {
+    const freshQuote = await quoteProvider.getQuotes(DEFAULT_BENCHMARK_IDS, { forceRefresh: true });
+    const freshHistory = await historyProvider.getDailyCandles(
+      MARKET_BENCHMARKS.NIFTY_50.canonicalProductId,
+      { fromDate: '2026-09-01', toDate: '2026-09-07', forceRefresh: true },
+    );
+    assert.equal(freshQuote.calendar.status, 'AVAILABLE');
+    assert.equal(freshQuote.facts[0].freshness.status, 'FRESH');
+    assert.equal(freshHistory.calendar.status, 'AVAILABLE');
+    assert.equal(freshHistory.freshness.status, 'FRESH');
+
+    now += 31_000; // Market snapshots remain cached while the 24-hour calendar qualification expires.
+    const expiredQuote = await quoteProvider.getQuotes(DEFAULT_BENCHMARK_IDS);
+    const expiredHistory = await historyProvider.getDailyCandles(
+      MARKET_BENCHMARKS.NIFTY_50.canonicalProductId,
+      { fromDate: '2026-09-01', toDate: '2026-09-07' },
+    );
+    assert.equal(expiredQuote.cache.hit, true);
+    assert.equal(expiredQuote.calendar.status, 'UNAVAILABLE');
+    assert.equal(expiredQuote.facts[0].freshness.status, 'UNKNOWN');
+    assert.equal(expiredHistory.cache.hit, true);
+    assert.equal(expiredHistory.calendar.status, 'UNAVAILABLE');
+    assert.equal(expiredHistory.freshness.status, 'UNKNOWN');
+    assert.equal(calendarLoads, 2, 'cached market snapshots must be revalidated without refetching a calendar');
+  } finally {
+    clearInFlightMarketRequestsForTest();
+    setRedisAvailable(false);
+    setRedisClient(null);
+  }
+});
+
 test('NSE calendar failure preserves valid quote and history facts but withholds freshness/session authority', async () => {
   const quoteProvider = new NseMarketDataProvider({
     clock: () => new Date(FETCHED_AT),
@@ -330,6 +473,11 @@ test('NSE calendar failure preserves valid quote and history facts but withholds
   assert.equal(history.candles[0].close, 24020);
   assert.equal(history.freshness.status, 'UNKNOWN');
   assert.equal(history.calendar.status, 'UNAVAILABLE');
+  assert.throws(() => buildMarketRegimeDataset({
+    niftySnapshot: history,
+    vixSnapshot: history,
+    retrievedAt: '2026-09-08T05:00:00.000Z',
+  }), /lacks qualified calendar\/freshness evidence/);
 
   const features = computeMarketContextFeatures({ quoteSnapshot: quote, historicalSnapshot: history });
   assert.equal(features.status, 'FEATURES_UNAVAILABLE');

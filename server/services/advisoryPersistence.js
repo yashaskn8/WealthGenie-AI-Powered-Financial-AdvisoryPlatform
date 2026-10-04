@@ -6,6 +6,7 @@ import IdempotencyKey from '../models/IdempotencyKey.js';
 import RecommendationState from '../models/RecommendationState.js';
 import FinancialProfileState from '../models/FinancialProfileState.js';
 import PlanHealthEvent from '../models/PlanHealthEvent.js';
+import AuthorizedExecutionAttempt from '../models/AuthorizedExecutionAttempt.js';
 import { prepareAuditChainEntry, advanceAuditChainHead } from './auditChain.js';
 import { omitUnsetOptionalUniqueFields } from '../config/mongoCompatibility.js';
 import { verifyPersistenceIndexes } from './persistenceIndexReadiness.js';
@@ -18,6 +19,7 @@ import {
 import { createAllocationRevision } from './recommendationState.js';
 import { buildRecommendationProfile, buildRecommendationProfileHash, RECOMMENDATION_POLICY_VERSION } from './recommendationProfile.js';
 import { getCurrentRegulatoryRuleVersion } from './taxEngine.js';
+import { canonicalSha256 } from '../utils/canonicalJson.js';
 import {
   buildPostCommitAdvisoryResponse,
   buildPostCommitProfileResponse,
@@ -149,10 +151,34 @@ export async function persistAdvisoryAtomically({
   response,
   idempotencyClaim,
   profileStateBinding,
+  executionCommit: requestedExecutionCommit = null,
   testHooks = {},
 }) {
   assertRecommendationResponseBinding(recommendation, response);
   const profileUpdate = requestedProfileUpdate ? validatedProfileUpdate(requestedProfileUpdate) : null;
+  let executionCommit = null;
+  if (requestedExecutionCommit != null) {
+    const candidate = requestedExecutionCommit;
+    if (!candidate || typeof candidate !== 'object'
+        || !/^[0-9a-f-]{36}$/i.test(String(candidate.executionId || ''))
+        || typeof candidate.mandateId !== 'string' || !candidate.mandateId
+        || String(candidate.userId || '') !== String(recommendation.userId)
+        || !Number.isSafeInteger(Number(candidate.executionGeneration)) || Number(candidate.executionGeneration) < 1
+        || typeof candidate.workerId !== 'string' || !candidate.workerId
+        || !/^[a-f0-9]{64}$/i.test(String(candidate.afterSnapshotHash || ''))
+        || typeof candidate.policyDecisionId !== 'string' || !candidate.policyDecisionId) {
+      throw new TypeError('A complete fenced authorized-execution commit reference is required.');
+    }
+    executionCommit = {
+      executionId: String(candidate.executionId),
+      mandateId: candidate.mandateId,
+      userId: recommendation.userId,
+      executionGeneration: Number(candidate.executionGeneration),
+      workerId: candidate.workerId,
+      afterSnapshotHash: String(candidate.afterSnapshotHash),
+      policyDecisionId: candidate.policyDecisionId,
+    };
+  }
   if (profile && profileUpdate) throw new TypeError('Profile creation and profile update cannot be combined.');
   if (!profileStateBinding || !Number.isSafeInteger(Number(profileStateBinding.revision))
       || Number(profileStateBinding.revision) < 0) {
@@ -487,6 +513,38 @@ export async function persistAdvisoryAtomically({
 
       if (completion.matchedCount !== 1) {
         throw new Error('Advisory idempotency claim disappeared before transaction completion.');
+      }
+
+      if (executionCommit) {
+        const executionResult = await AuthorizedExecutionAttempt.updateOne({
+          executionId: executionCommit.executionId,
+          mandateId: executionCommit.mandateId,
+          userId: executionCommit.userId,
+          executionGeneration: executionCommit.executionGeneration,
+          workerId: executionCommit.workerId,
+          status: 'EXECUTING',
+        }, {
+          $set: {
+            status: 'COMMITTED',
+            resultReference: {
+              recommendationId: String(persistedRecommendation._id),
+              auditHash: chainEntry.record.record_hash,
+              afterSnapshotHash: executionCommit.afterSnapshotHash,
+              responseHash: canonicalSha256(historicalResponseSnapshot(committedResponse)),
+              policyDecisionId: executionCommit.policyDecisionId,
+            },
+            heartbeatAt: new Date(),
+            leaseUntil: new Date(Date.now() + 60000),
+            failureCode: null,
+          },
+        }, { session, runValidators: true });
+        if (executionResult.matchedCount !== 1) {
+          const error = new Error('The authorized execution lease changed before its financial commit.');
+          error.status = 409;
+          error.code = 'AUTHORIZED_EXECUTION_FENCED';
+          throw error;
+        }
+        await testHooks.afterExecutionCommitMark?.(session);
       }
     }, {
       readConcern: { level: 'snapshot' },

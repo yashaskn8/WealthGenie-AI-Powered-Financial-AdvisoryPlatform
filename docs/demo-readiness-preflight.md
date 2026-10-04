@@ -17,21 +17,60 @@ credentials, customer profile facts, or a production database.
 Before enabling live mode, run `npm run demo:doctor --prefix server`. This is a
 read-only prerequisite check: it does not authenticate, call market providers,
 or invoke profile/recommendation/tax mutation endpoints. Configure
-`DEMO_EXPECTED_MONGODB_DATABASE` in both the backend and preflight process. The
-running backend must prove that its actual connected database name exactly
-matches this explicit isolated database. Reserved/default database names such
-as `test`, `admin`, `config`, and `local` are rejected. A missing or mismatched
-database identity blocks the live mutation path.
+`DEMO_EXPECTED_MONGODB_DATABASE`, `DEMO_EXPECTED_MONGODB_HOST`,
+`DEMO_EXPECTED_MONGODB_PORT`, and `DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID` in
+both the backend and preflight process. The connected database name, URI host,
+and selected Mongo server port must match exactly, and the database must
+contain the operator-provisioned sentinel below with that same UUIDv4
+environment ID. The sentinel check is read-only; application startup and
+health routes never create or repair it. This prevents a similarly named
+database or a different endpoint on the same host from passing the demo gate. Reserved or
+default database names such as `test`, `admin`, `config`, and `local` are
+rejected. Missing or mismatched identity/sentinel blocks readiness and every
+preflight provider/authenticated mutation stage.
+
+Provision the marker only after independently confirming the target is the
+disposable demo database. Its exact document in
+`demo_environment_sentinels` is:
+
+```json
+{
+  "_id": "wealthgenie-phase15-demo",
+  "environmentId": "<operator-generated UUIDv4>",
+  "purpose": "WEALTHGENIE_PHASE15_DEMO",
+  "schemaVersion": 1
+}
+```
+
+Use the same UUIDv4 as `DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID` in both
+processes. The application only reads this record and requires its exact field
+set and values; an absent, unreadable, or mismatched marker is not verified.
 
 Configure these values through a secret-aware environment mechanism; never put
 credentials or financial payloads in shell history, source control, or logs:
 
 - `DEMO_LIVE_PREFLIGHT=1` — explicit opt-in.
 - `DEMO_API_BASE_URL` — backend API URL ending in `/api`; remote URLs must use
-  HTTPS. Defaults to local `http://127.0.0.1:5000/api`.
-- `DEMO_FRONTEND_URL` — the running frontend origin; remote URLs must use HTTPS.
+  HTTPS and the exact origin must appear in `DEMO_TRUSTED_REMOTE_ORIGINS`.
+  Defaults to local `http://127.0.0.1:5000/api`.
+- `DEMO_FRONTEND_URL` — the running frontend origin; remote URLs must use HTTPS
+  and the exact origin must appear in `DEMO_TRUSTED_REMOTE_ORIGINS`.
+- `DEMO_TRUSTED_REMOTE_ORIGINS` — optional comma-separated exact HTTPS origins
+  approved for this disposable demo, such as `https://demo.example`; it does
+  not accept paths, query strings, credentials, wildcards, or plain HTTP. Local
+  loopback URLs do not require this allowlist. Browser traffic is restricted to
+  the configured frontend and backend origins before login credentials are
+  entered.
 - `DEMO_EXPECTED_MONGODB_DATABASE` — exact isolated database name expected from
   the live backend connection; configure the same value in both processes.
+- `DEMO_EXPECTED_MONGODB_HOST` — exact Mongo URI host expected from the live
+  backend connection; configure the same host in both processes.
+- `DEMO_EXPECTED_MONGODB_PORT` — exact TCP port of the selected live Mongo
+  server (normally `27017`); configure the same port in both processes. The
+  preflight requires an exact match and does not infer a port from the host.
+- `DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID` — UUIDv4 that matches the isolated
+  database's out-of-band `demo_environment_sentinels` marker; not a secret,
+  but unique to this disposable demo environment.
 - `DEMO_EMAIL` and `DEMO_PASSWORD` — disposable demo login credentials.
 - `DEMO_PROFILE_COMPLETION_FILE` — path to a JSON profile-completion request
   body, stored outside the repository.

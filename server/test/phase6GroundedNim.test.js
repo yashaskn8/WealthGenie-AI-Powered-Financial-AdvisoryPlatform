@@ -133,6 +133,8 @@ test('grounding validator requires citations and rejects unsupported financial v
     ['Your suitability is Aggressive [E_TEST_RATE].', 'UNSUPPORTED_AUTHORITY_LABEL'],
     ['Your return is 35% [E_PROFILE_AGE].', 'UNSUPPORTED_FINANCIAL_NUMBER'],
     ['The amount is INR 7.1 [E_TEST_RATE].', 'UNSUPPORTED_FINANCIAL_NUMBER'],
+    ['This option is completely risk-free and can never lose money [E_TEST_RATE].', 'UNSUPPORTED_ABSOLUTE_FINANCIAL_CLAIM'],
+    ['This investment provides guaranteed returns [E_TEST_RATE].', 'UNSUPPORTED_ABSOLUTE_FINANCIAL_CLAIM'],
   ];
   for (const [text, code] of cases) {
     assert.ok(validateGroundedExplanation(candidate(text), packet).errors.includes(code));

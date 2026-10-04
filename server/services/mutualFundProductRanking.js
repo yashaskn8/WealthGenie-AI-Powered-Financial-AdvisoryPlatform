@@ -1,4 +1,4 @@
-import { AVAILABILITY, FRESHNESS, PROVIDERS } from './marketData/contracts.js';
+import { AVAILABILITY, FRESHNESS, MARKET_DATA_SCHEMA_VERSION, PROVIDERS } from './marketData/contracts.js';
 
 export const MUTUAL_FUND_RANKING_VERSION = 'wti-mutual-fund-ranking-2.0.1';
 export const MUTUAL_FUND_RESULT_LIMIT = 5;
@@ -155,7 +155,54 @@ function establishedNumber(value) {
 }
 
 function sourceSchemeCode(product) {
-  return product.externalIds?.find(item => item.source === 'AMFI_SCHEME_CODE')?.value || null;
+  const ids = (Array.isArray(product?.externalIds) ? product.externalIds : [])
+    .filter(item => item?.source === 'AMFI_SCHEME_CODE');
+  if (ids.length !== 1) return null;
+  const value = ids[0]?.value;
+  return value === null || value === undefined ? null : String(value);
+}
+
+function isOfficialAmfiUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.hostname === 'portal.amfiindia.com'
+      && !url.username && !url.password && !url.port;
+  } catch {
+    return false;
+  }
+}
+
+function isQualifiedNavFactForProduct(fact, product, schemeCode) {
+  return fact?.schemaVersion === MARKET_DATA_SCHEMA_VERSION
+    && fact?.kind === 'MUTUAL_FUND_NAV'
+    && fact?.canonicalProductId === product.canonicalProductId
+    && fact?.availabilityStatus === AVAILABILITY.AVAILABLE
+    && fact?.freshness?.status === FRESHNESS.FRESH
+    && fact?.currency === 'INR'
+    && fact?.unit === 'NAV_PER_UNIT'
+    && fact?.source?.provider === PROVIDERS.AMFI
+    && String(fact?.source?.instrumentId ?? '') === schemeCode
+    && isOfficialAmfiUrl(fact?.source?.url);
+}
+
+function uniqueFactsByProduct(facts) {
+  const result = new Map();
+  for (const fact of facts || []) {
+    const id = fact?.canonicalProductId;
+    if (!id) continue;
+    result.set(id, result.has(id) ? null : fact);
+  }
+  return result;
+}
+
+function uniqueProducts(products) {
+  const grouped = new Map();
+  for (const product of products || []) {
+    const id = product?.canonicalProductId;
+    if (!id) continue;
+    grouped.set(id, [...(grouped.get(id) || []), product]);
+  }
+  return [...grouped.values()].filter(group => group.length === 1).map(group => group[0]);
 }
 
 function isEstablishedGrowthOption(option) {
@@ -331,20 +378,26 @@ export function rankVerifiedMutualFundProducts({
   }
 
   const categoryKeys = new Set(categories.map(exactCategoryKey));
-  const currentFacts = new Map((currentSnapshot?.facts || []).map(fact => [fact.canonicalProductId, fact]));
-  const historicalFacts = new Map((historicalSnapshot?.facts || []).map(fact => [fact.canonicalProductId, fact]));
-  const verifiedCategoryProducts = [...new Map((currentSnapshot?.products || [])
+  const currentFacts = uniqueFactsByProduct(currentSnapshot?.facts);
+  const historicalFacts = uniqueFactsByProduct(historicalSnapshot?.facts);
+  const currentSnapshotQualified = currentSnapshot?.provider === PROVIDERS.AMFI
+    && [AVAILABILITY.AVAILABLE, AVAILABILITY.PARTIAL].includes(currentSnapshot?.status);
+  const historicalSnapshotQualified = historicalSnapshot?.provider === PROVIDERS.AMFI
+    && [AVAILABILITY.AVAILABLE, AVAILABILITY.PARTIAL].includes(historicalSnapshot?.status);
+  const verifiedCategoryProducts = currentSnapshotQualified ? uniqueProducts((currentSnapshot?.products || [])
     .filter(product => (
       product?.productType === 'MUTUAL_FUND'
         && product?.source?.provider === PROVIDERS.AMFI
+        && /^\d+$/.test(sourceSchemeCode(product) || '')
+        && product.canonicalProductId === `mf:amfi:${sourceSchemeCode(product)}`
+        && isOfficialAmfiUrl(product?.source?.url)
         && categoryKeys.has(exactCategoryKey(product.schemeCategory))
-    ))
-    .map(product => [product.canonicalProductId, product])).values()];
+    ))) : [];
 
   const freshCategoryProducts = verifiedCategoryProducts.flatMap(product => {
     const currentFact = currentFacts.get(product.canonicalProductId);
-    if (currentFact?.availabilityStatus !== AVAILABILITY.AVAILABLE
-        || currentFact?.freshness?.status !== FRESHNESS.FRESH
+    const schemeCode = sourceSchemeCode(product);
+    if (!isQualifiedNavFactForProduct(currentFact, product, schemeCode)
         || establishedNumber(currentFact.value) === null
         || currentFact.value <= 0) return [];
     return [{
@@ -358,7 +411,13 @@ export function rankVerifiedMutualFundProducts({
     .map(item => ({
       ...item,
       historicalReturn: !COMPARISON_ONLY_PARENT_CATEGORIES.has(parentInstrumentId)
+        && historicalSnapshotQualified
         && isEstablishedGrowthOption(item.product.option)
+        && isQualifiedNavFactForProduct(
+          historicalFacts.get(item.product.canonicalProductId),
+          item.product,
+          sourceSchemeCode(item.product),
+        )
         ? annualizedHistoricalReturn(item.currentFact, historicalFacts.get(item.product.canonicalProductId))
         : null,
     }));

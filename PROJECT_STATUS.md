@@ -1,11 +1,16 @@
 # WealthGenie - Project Status
 
+> Historical project snapshot. Counts and acceptance statements below are not
+> evidence for the current `main` SHA; use the exact-SHA CI run and current
+> validation reports for release decisions. No current release approval is
+> asserted by this document.
+
 ## Verified, working components
 
 | Component | Location | Details |
 |---|---|---|
 | **Design Tokens System** | [`reactapp/src/styles/tokens.css`](reactapp/src/styles/tokens.css) | Comprehensive CSS token system (4px/8px modular spacing, semantic dark mode palette, typography scale, radii, shadows, and glows) |
-| **Frontend CSS Migration (17/17)** | [`reactapp/src/`](reactapp/src/) | 100% of the 17 CSS files migrated to design tokens with zero visual regressions and unified aesthetic |
+| **Frontend CSS Tokens (historical inventory only)** | [`reactapp/src/styles/tokens.css`](reactapp/src/styles/tokens.css) | A shared design-token system exists. The old 17-file migration count is not a current audit; the present tree contains additional CSS files and hard-coded color matches, so no zero-hex or zero-regression claim is made here. |
 | **Unified State Handling** | [`reactapp/src/components/StateMessages.jsx`](reactapp/src/components/StateMessages.jsx) | Standardized `LoadingState`, `ErrorState`, and `EmptyState` components with ARIA live regions (`role="status"`, `role="alert"`) |
 | **Accessibility (0 Violations)** | [`reactapp/src/__tests__/a11y.test.jsx`](reactapp/src/__tests__/a11y.test.jsx) | Automated `axe-core` testing verifying 0 accessibility violations across all 5 audited core screens |
 | **Playwright Full-Lifecycle E2E Suite** | [`reactapp/e2e/full-flow.spec.ts`](reactapp/e2e/full-flow.spec.ts) & [`scripts/run_e2e_stack.ps1`](scripts/run_e2e_stack.ps1) | Full end-to-end integration test (Signup -> Profile -> Recommendations & DeepDive -> Goal Planning -> GenieChat grounded advice) passing in ~21s with automated stack orchestrator |
@@ -15,8 +20,9 @@
 | **Kind Cluster CD Pipeline** | [`.github/workflows/cd.yml`](.github/workflows/cd.yml) | GitHub Actions CD workflow configured to spin up Kind, install `metrics-server`, deploy manifests via Kustomize, run live smoke tests (`/health/live`, `/health/ready`, `/health/deep`, `/api/tax/compare`), and verify HPA metrics; this host lacks Docker/Kind/kubectl, so the workflow was not run locally in this task |
 | **Horizontal Pod Autoscaling (HPA)** | [`k8s/server/hpa.yaml`](k8s/server/hpa.yaml) | CPU-based autoscaling (70% utilization target, 1 min / 4 max replicas) wired with `metrics-server` |
 | **Terraform AWS Scaffolding** | [`terraform/`](terraform/) | Modular scaffolding for AWS VPC, Amazon DocumentDB, ALB, and Route53 DNS. It does not provision application compute/runtime attachment; engine version, workload security group, TLS/domain, and destructive-database settings are explicit inputs. No apply is performed. |
-| **Random Forest classifier** | Production-serving `model.pkl` with TreeSHAP explainability | 95.63% rule-approx. fidelity (independent CFP benchmark: 25.26%) |
-| **FT-Transformer benchmark** | [`multi_model_benchmark.json`](ml-service/reports/multi_model_benchmark.json) | 97.05% rule-approx. fidelity (independent CFP benchmark: 15.83%) |
+| **Random Forest diagnostic model** | [`random_forest` verified bundle](ml-service/model/bundles/random_forest/) | 99.00% test accuracy, 0.9839 macro F1, 0.9769 balanced accuracy on 2,000 synthetic policy-imitation examples. Diagnostic only; not investor outcomes or financial authority. |
+| **PyTorch MLP diagnostic model** | [`pytorch_mlp` verified bundle](ml-service/model/bundles/pytorch_mlp/) | 94.67% test accuracy, 0.9352 macro F1, 0.9521 balanced accuracy on the same synthetic policy-imitation dataset. Diagnostic only; not investor outcomes or financial authority. |
+| **FT-Transformer diagnostic model** | [`ft_transformer` verified bundle](ml-service/model/bundles/ft_transformer/) | 98.00% test accuracy, 0.9638 macro F1, 0.9699 balanced accuracy on the same synthetic policy-imitation dataset. Diagnostic only; not investor outcomes or financial authority. |
 | **RAG research subsystem** | Standalone FastAPI `/rag/query` retrieval and tenant-isolation evaluation; it is not the active financial authority for Express chat | 508-chunk corpus (Tax, SEBI, RBI/DICGC), FAISS `IndexFlatIP` vector store, 75-query evaluation ([`real_corpus_evaluation_report.json`](ml-service/reports/real_corpus_evaluation_report.json)): 98.7% document hit rate, Precision@4 0.7367, MRR 0.9022, NDCG@4 0.7564, 31.7ms average latency |
 | **Embedding ablation study** | [`embedding_ablation.json`](ml-service/reports/embedding_ablation.json) | Semantic vs hash: +2.0% Recall, +0.09 MRR |
 | **Base LLM evaluation** | [`llm_eval_report.json`](ml-service/reports/llm_eval_report.json) | BLEU 0.028, ROUGE-L 0.284, Semantic Sim 0.666 |
@@ -35,7 +41,7 @@
 | [`server/test/failClosed.test.js`](server/test/failClosed.test.js) | Fail-closed security integration test suite (5/5 pass) |
 | [`server/test/idempotency.test.js`](server/test/idempotency.test.js) | Idempotency deduplication & dead-letter queue routing suite (3/3 pass) |
 | [`server/test/auditTrail.test.js`](server/test/auditTrail.test.js) | Regulatory advisory audit trail integration test suite (4/4 pass) |
-| **Offline-Resilient Test Database Provisioning** | [`server/test/helpers/mongoTestHelper.js`](server/test/helpers/mongoTestHelper.js) | Unified 4-tier test database engine: `MONGODB_URI` env → Testcontainers `mongo:7.0` → `MongoMemoryServer` fallback → Fail-Fast actionable diagnostics. All 11 integration test files centralized through helper. Full suite: **384/384 pass, 0 failures**. |
+| **Offline-Resilient Test Database Provisioning** | [`server/test/helpers/mongoTestHelper.js`](server/test/helpers/mongoTestHelper.js) | Unified test-database helper supports configured MongoDB, Testcontainers, and `MongoMemoryServer` fallback. The **384/384** count below is a historical snapshot only; it is not the current suite result or a release gate. |
 | **Grounded Explanation Boundary (Phase 6)** | [`server/services/geminiChatService.js`](server/services/geminiChatService.js), [`server/services/groundedExplanationService.js`](server/services/groundedExplanationService.js), [`server/services/groundingValidator.js`](server/services/groundingValidator.js) | Saved profile/current recommendation → minimal evidence packet → provider-neutral explanation → strict evidence validation. NVIDIA NIM is preferred, Gemini/Groq are optional fallbacks, the LLM tool allowlist is empty, and a deterministic grounded template handles provider failure. |
 | **Read-Only LLM Provider Boundary** | [`server/services/providerAbstraction.js`](server/services/providerAbstraction.js) | Provider credentials remain server-only. Providers cannot call financial tools, alter allocation, change suitability, rank products, or fetch arbitrary sources. |
 | **Conversation Persistence and Cost Bound** | [`server/services/geminiChatService.js`](server/services/geminiChatService.js) | Conversation evidence metadata is persisted, chat requests are rate-limited, and a 50,000-token session ceiling forces provider-free grounded fallback. There is no current multi-agent or replanning authority claim. |
@@ -55,30 +61,8 @@
 - **Typography**: Responsive font sizes (`--font-size-xs` to `--font-size-4xl`) with defined weights (`--font-weight-regular` to `--font-weight-black`).
 - **Border Radii & Shadows**: `--radius-sm` (6px) through `--radius-pill` (9999px); ambient card shadows and semantic glows.
 
-### 2. CSS Migration Inventory (278 -> 0 Hex Instances Across All 18 Files)
-All 18 CSS files in `reactapp/src` outside `tokens.css` were scanned with `#[0-9a-fA-F]{3,8}\b` and migrated to design tokens with automated per-file verification:
-
-| File | Before | After | Migrated Tokens |
-|---|---|---|---|
-| `App.css` | 45 | **0** | `--color-white`, `--color-accent-purple`, `--color-success`, `--color-error`, `--surface-0` |
-| `components/DeepDiveModal.css` | 44 | **0** | `--color-white`, `--color-success`, `--color-error-light`, `--color-accent-purple-light` |
-| `components/GenieChat.css` | 35 | **0** | `--color-primary-700`, `--color-success`, `--color-white`, `--color-violet-light` |
-| `HealthScoreScreen.css` | 25 | **0** | `--color-white`, `--text-faint`, `--text-muted`, `--color-gray-100` |
-| `components/TaxScreen.css` | 18 | **0** | `--color-white`, `--color-primary`, `--color-violet-500`, `--color-success-light` |
-| `components/RebalancerScreen.css` | 18 | **0** | `--surface-1`, `--surface-2`, `--color-secondary-500`, `--color-secondary-400` |
-| `ComparisonTableModal.css` | 15 | **0** | `--color-white`, `--color-accent-teal-light`, `--text-faint` |
-| `components/StepUpPlanner.css` | 14 | **0** | `--color-accent-purple`, `--color-accent-purple-light`, `--color-white` |
-| `Dashboard.css` | 12 | **0** | `--color-white`, `--color-primary-700`, `--color-gray-200`, `--text-muted` |
-| `components/GoalTracker.css` | 9 | **0** | `--color-white`, `--text-secondary` |
-| `components/Sidebar.css` | 9 | **0** | `--color-white`, `--color-error`, `--text-muted` |
-| `index.css` | 8 | **0** | `--color-white`, `--color-primary-light`, `--color-accent-purple-light` |
-| `LandingPage.css` | 8 | **0** | `--surface-0`, `--color-white`, `--color-accent-purple-light` |
-| `HelpTourScreen.css` | 7 | **0** | `--color-white`, `--text-muted`, `--text-faint`, `--surface-2` |
-| `components/AllocationPlanner.css` | 5 | **0** | `--color-accent-purple` (line 75 fix), `--color-white`, `--color-success` |
-| `InsightsScreen.css` | 2 | **0** | `--color-white`, `--text-muted` |
-| `PostTaxAnalysis.css` | 2 | **0** | `--color-white`, `--color-accent-purple-light` |
-| `components/JargonTooltip.css` | 2 | **0** | `--color-violet-light` |
-| **Total Across All Files** | **278** | **0** | **100% tokenized (0 hardcoded hex codes remaining outside tokens.css)** |
+### 2. CSS Inventory Note
+The detailed 17/18-file, 278-to-zero CSS migration table formerly recorded here was a historical snapshot and is not an accurate current-tree audit. A scan of this checkout found 20 CSS files outside `tokens.css` and 254 matches for `#[0-9a-fA-F]{3,8}\b`. No present-day zero-hex or zero-visual-regression claim is made.
 
 ### 3. Accessibility (a11y) Audit & Violation Counts
 Automated testing conducted via `axe-core` and `@testing-library/react` in `reactapp/src/__tests__/a11y.test.jsx`:
@@ -88,8 +72,8 @@ Automated testing conducted via `axe-core` and `@testing-library/react` in `reac
   - `RebalancerScreen`: Inaccessible data tables and threshold input controls.
   - `GenieChat`: Unlabeled icon buttons (voice input, clear chat, close chat).
   - `DeepDiveModal`: Missing `role="dialog"`, `aria-modal="true"`, and `aria-labelledby` semantics.
-- **After Migration**: **0 violations across all 5 audited screens** (WCAG 2.1 Level AA compliant).
-- **Test Suite Results**: 21 Vitest test suites (67 unit/integration tests) passing (`npm test`).
+- **After Migration (five-screen test scope only)**: **0 axe-detected violations in those five tested screens**. This is not a whole-application WCAG 2.1 AA conformance certification.
+- **Historical Test Suite Results**: 21 Vitest test suites (67 tests) were recorded in this snapshot. This number is not a current result; check the current exact-SHA CI run before release decisions.
 
 ### 4. Playwright End-to-End Suite & Reproducible Stack Execution
 - **Test File**: `reactapp/e2e/full-flow.spec.ts` (Playwright configuration in `reactapp/playwright.config.js`).
@@ -149,10 +133,7 @@ To transition from the Kind-based verification to a live production AWS/GCP clou
 - **Rate limiter in-memory fallback**: `passOnStoreError: false` is enforced for `authLimiter` (fail-closed), but `apiLimiter` still falls back to in-memory `Map` counters if Redis disconnects, effectively multiplying rate limits across independent replicas during an outage.
 - **LoRA/QLoRA fine-tuning**: interface exists in code, but is not functional. Deferred indefinitely due to CPU compute constraints. Phase 4 evaluation was run against the base (non-fine-tuned) `Qwen/Qwen2.5-0.5B-Instruct` model.
 - **Model Version Registry Live Wiring & Cold-Start Bootstrapping**: The model version registry (`mongo_registry_store.py`, `registry_store.py`, SHA-256 tamper-evident integrity, and rollback) is wired directly into the FastAPI application lifespan via `store_factory.get_model_registry()`, resolving active versions, artifacts, and rigor metrics dynamically upon startup and exposing live HTTP endpoints (`/model/registry/versions`, `/model/registry/active`, `/model/registry/integrity/{id}`, `/model/registry/register`, `/model/registry/rollback/{id}`) with hot reload support.
-- **Pre-generated Qualified Serving Artifacts**: Production Docker images consume pre-generated RF, PyTorch MLP, and FT-Transformer serving artifacts supplied in the image build context and run the read-only `ml-service/scripts/verify_serving_artifacts.py` verifier during image build. Missing or incompatible artifacts fail the image build; the application never trains at startup and instead leaves the affected model unavailable/readiness false. The current checkout has all eight files for local verification, but seven binary artifacts remain Git-ignored; a reproducible release still requires an approved versioned artifact channel before commit.
-  - **RandomForest**: `model/model.pkl`, `model/label_encoder.pkl`, and `model/metadata.json` are verified against the exact v4 feature schema and six-class serving allowlist.
-  - **PyTorch MLP**: `model/saved_models/mlp_model.pt`, shared `scaler.pkl`, and `pytorch_metadata.json` are verified, including CPU state-dict compatibility.
-  - **FT-Transformer**: `model/saved_models/ft_transformer.pt`, shared `scaler.pkl`, and `ft_transformer_metadata.json` are verified, including CPU state-dict compatibility.
+- **Pre-generated Serving Artifact Bundles**: Per-architecture bundle manifests, metadata, and evaluation reports live under `ml-service/model/bundles/{random_forest,pytorch_mlp,ft_transformer}/`. The read-only build verifier checks supplied artifacts before they can be served; this status page does not claim that local ignored binaries are a reproducible release artifact source. The exact immutable artifact channel and final-image contents must be verified for a release.
 
 ---
 
@@ -216,7 +197,7 @@ WealthGenie is purpose-built and scoped strictly to **Indian personal income tax
 
 ## Distributed Systems Failure-Mode Verification & Hardening
 
-> **Verified**: August 2026. All tests run against real MongoDB 7.0 and real Redis on localhost.
+> **Historical verification record**: August 2026. This section records tests and interpretations from that snapshot; it is not current evidence for `main`, and its counts/findings may be superseded by later transaction, persistence, and concurrency changes. Do not use it as current release certification.
 
 ### Phase 1 — Chaos Test Audit & Rewrite (`chaos.test.js`)
 

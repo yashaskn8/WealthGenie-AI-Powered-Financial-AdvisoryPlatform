@@ -35,6 +35,7 @@ function quoteFact(instrumentId, canonicalProductId, value, { previousClose = nu
 function quoteSnapshot({ nifty = 160, previousClose = 159, vix = 14, niftyFreshness = 'FRESH', vixFreshness = 'FRESH', includeVix = true, provider = 'NSE' } = {}) {
   return {
     status: 'AVAILABLE',
+    marketSession: { status: 'MARKET_CLOSED', tradingDate: '2026-09-08' },
     facts: [
       quoteFact(NIFTY, MARKET_BENCHMARKS.NIFTY_50.canonicalProductId, nifty, { previousClose, freshness: niftyFreshness, provider }),
       ...(includeVix ? [quoteFact(VIX, MARKET_BENCHMARKS.INDIA_VIX.canonicalProductId, vix, { freshness: vixFreshness, provider })] : []),
@@ -337,4 +338,35 @@ test('qualified market context survives Redis and process-memory loss through du
   assert.equal(recovered.recoveredFromLastKnownGood, true);
   assert.equal(recovered.marketSnapshot.status, 'LAST_AVAILABLE');
   assert.equal(recovered.recommendationUsability.status, 'USABLE');
+});
+
+test('LKG with an unknown market session is not recommendation-usable inside the age window', async () => {
+  const snapshot = {
+    status: 'LAST_AVAILABLE',
+    observedAt: '2026-09-07T00:00:00.000Z',
+    marketSession: { status: 'UNKNOWN' },
+    policyAvailability: 'AVAILABLE',
+    policyOutput: { status: 'MARKET_CONTEXT_AVAILABLE' },
+  };
+  const result = await getLatestQualifiedMarketContextForRecommendation({ now: NOW }, {
+    getCache: async () => ({ marketContext: { marketSnapshot: snapshot, reasonCodes: [] } }),
+    getDurableLkg: async () => null,
+  });
+  assert.equal(result.recommendationUsability.status, 'NOT_USABLE');
+  assert(result.recommendationUsability.reasonCodes.includes('MARKET_SESSION_UNVERIFIED'));
+});
+
+test('future-dated LKG market evidence is not recommendation-usable', async () => {
+  const snapshot = {
+    status: 'LAST_AVAILABLE',
+    observedAt: '2026-09-08T12:00:01.000Z',
+    marketSession: { status: 'MARKET_CLOSED' },
+    policyAvailability: 'AVAILABLE',
+    policyOutput: { status: 'MARKET_CONTEXT_AVAILABLE' },
+  };
+  const result = await getLatestQualifiedMarketContextForRecommendation({ now: NOW }, {
+    getCache: async () => ({ marketContext: { marketSnapshot: snapshot, reasonCodes: [] } }),
+    getDurableLkg: async () => null,
+  });
+  assert.equal(result.recommendationUsability.status, 'NOT_USABLE');
 });

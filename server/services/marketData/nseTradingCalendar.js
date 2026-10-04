@@ -206,6 +206,40 @@ export function parseNseTradingHolidays(payload) {
   return [...new Set(dates)].sort();
 }
 
+export function isUsableNseTradingCalendar(snapshot, now = new Date()) {
+  const reference = normalizeTimestamp(now);
+  const fetchedAt = normalizeTimestamp(snapshot?.fetchedAt);
+  const nowParts = indiaClockParts(reference);
+  const referenceMs = reference ? Date.parse(reference) : NaN;
+  const fetchedMs = fetchedAt ? Date.parse(fetchedAt) : NaN;
+  const dates = snapshot?.dates;
+  if (snapshot?.schemaVersion !== MARKET_DATA_SCHEMA_VERSION
+      || snapshot?.provider !== PROVIDERS.NSE
+      || snapshot?.status !== AVAILABILITY.AVAILABLE
+      || snapshot?.source?.provider !== PROVIDERS.NSE
+      || snapshot?.source?.url !== NSE_TRADING_HOLIDAY_URL
+      || !nowParts?.isoDate || !Number.isFinite(referenceMs) || !Number.isFinite(fetchedMs)
+      || fetchedMs > referenceMs
+      || referenceMs - fetchedMs > NSE_TRADING_HOLIDAY_CACHE_TTL_SECONDS * 1000
+      || !Array.isArray(dates) || dates.length === 0) return false;
+
+  const currentYear = nowParts.isoDate.slice(0, 4);
+  return dates.every(date => {
+    if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+    const [yearText, monthText, dayText] = date.split('-');
+    const year = Number(yearText);
+    const month = Number(monthText);
+    const day = Number(dayText);
+    const parsed = new Date(0);
+    parsed.setUTCHours(0, 0, 0, 0);
+    parsed.setUTCFullYear(year, month - 1, day);
+    return month >= 1 && month <= 12 && day >= 1
+      && parsed.getUTCFullYear() === year
+      && parsed.getUTCMonth() === month - 1
+      && parsed.getUTCDate() === day;
+  }) && dates.some(date => date.startsWith(`${currentYear}-`));
+}
+
 export async function fetchNseTradingHolidays({
   httpClient,
   clock = () => new Date(),

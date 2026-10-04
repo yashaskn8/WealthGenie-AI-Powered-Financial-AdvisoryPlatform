@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import {
@@ -124,12 +124,25 @@ const PlanReviewPanel = ({ profile, profileId, financialStateKey, onRecomputePla
   const [review, setReview] = useState(null);
   const [error, setError] = useState(null);
   const [evidenceOpen, setEvidenceOpen] = useState(false);
+  const reviewRequestSequence = useRef(0);
+  const bindingKey = `${profileId || ''}:${financialStateKey || ''}`;
+  const [stateBindingKey, setStateBindingKey] = useState(bindingKey);
+  const bindingIsCurrent = stateBindingKey === bindingKey;
+  const visibleStatus = bindingIsCurrent ? status : 'idle';
+  const visibleRun = bindingIsCurrent ? run : null;
+  const visibleReview = bindingIsCurrent ? review : null;
+  const visibleError = bindingIsCurrent ? error : null;
+
+  useLayoutEffect(() => {
+    reviewRequestSequence.current += 1;
+  }, [profileId, financialStateKey]);
 
   useEffect(() => {
     if (!profileId) return undefined;
     let cancelled = false;
     api.getCurrentPlanReviewRun(profileId, { timeoutMs: 1500 }).then(current => {
       if (cancelled || !current) return;
+      setStateBindingKey(bindingKey);
       if (current.currentStateMatch !== true || current.status === 'SUPERSEDED') {
         setStatus('error');
         setError('This plan review no longer matches your current saved plan. Run it again.');
@@ -151,14 +164,14 @@ const PlanReviewPanel = ({ profile, profileId, financialStateKey, onRecomputePla
       // A missing run is the normal initial state; it is not a panel error.
     });
     return () => { cancelled = true; };
-  }, [profileId, financialStateKey]);
+  }, [profileId, financialStateKey, bindingKey]);
 
   useEffect(() => {
-    if (!run?.runId || status !== 'running') return undefined;
+    if (!visibleRun?.runId || visibleStatus !== 'running') return undefined;
     let cancelled = false;
     const poll = async () => {
       try {
-        const current = await api.getPlanReviewRun(run.runId);
+        const current = await api.getPlanReviewRun(visibleRun.runId);
         if (cancelled) return;
         if (current.currentStateMatch !== true || current.status === 'SUPERSEDED') {
           setRun(null);
@@ -188,16 +201,19 @@ const PlanReviewPanel = ({ profile, profileId, financialStateKey, onRecomputePla
     void poll();
     const timer = window.setInterval(poll, 1000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [run?.runId, status]);
+  }, [visibleRun?.runId, visibleStatus]);
 
   const runReview = async () => {
-    if (!profileId || status === 'running') return;
+    if (!profileId || (bindingIsCurrent && status === 'running')) return;
+    const requestId = ++reviewRequestSequence.current;
+    setStateBindingKey(bindingKey);
     setStatus('running');
     setRun(null);
     setReview(null);
     setError(null);
     try {
       const queued = await api.runPlanReview(profileId);
+      if (requestId !== reviewRequestSequence.current) return;
       if (queued.currentStateMatch !== true || queued.status === 'SUPERSEDED') {
         setRun(null);
         setReview(null);
@@ -207,22 +223,28 @@ const PlanReviewPanel = ({ profile, profileId, financialStateKey, onRecomputePla
       }
       setRun(queued);
       if (queued.result) setReview(queued.result);
-      if (queued.status === 'COMPLETED' || queued.status === 'WAITING_FOR_APPROVAL' || queued.summary) {
+      if (queued.status === 'COMPLETED' && queued.recommendedAction === 'RECOMPUTE_PLAN') {
+        setStatus('error');
+        setError('The review recommended a recompute but is not awaiting authorization. Refresh the review before continuing.');
+        return;
+      }
+      if (queued.status === 'COMPLETED' || queued.status === 'WAITING_FOR_APPROVAL') {
         setReview(queued.result || queued);
         setStatus('completed');
         toast.success('Plan review ready', { description: 'No plan changes were made.' });
       }
     } catch (err) {
+      if (requestId !== reviewRequestSequence.current) return;
       setStatus('error');
       setError(err?.message || 'Plan review is temporarily unavailable.');
       toast.error('Plan review unavailable', { description: err?.message || 'Try again later.' });
     }
   };
 
-  const evidenceEntries = review?.evidence?.entries || [];
-  const actionNeedsRecompute = review?.recommendedAction === 'RECOMPUTE_PLAN';
-  const progressPercent = run?.progress?.percent ?? 0;
-  const progressLabel = run?.progress?.label || PLAN_REVIEW_STAGES[0];
+  const evidenceEntries = visibleReview?.evidence?.entries || [];
+  const actionNeedsRecompute = visibleReview?.recommendedAction === 'RECOMPUTE_PLAN';
+  const progressPercent = visibleRun?.progress?.percent ?? 0;
+  const progressLabel = visibleRun?.progress?.label || PLAN_REVIEW_STAGES[0];
 
   return (
     <motion.section
@@ -247,34 +269,34 @@ const PlanReviewPanel = ({ profile, profileId, financialStateKey, onRecomputePla
             <p>The review checks your current profile, recommendation freshness, goals, and available evidence. It cannot change allocations or save a new plan.</p>
           </div>
         </div>
-        {status === 'idle' && (
+        {visibleStatus === 'idle' && (
           <button type="button" className="ap-review-primary" onClick={runReview} disabled={!profileId}>
             <Sparkles size={17} aria-hidden="true" />
             {profileId ? 'Run plan review' : 'Profile required'}
           </button>
         )}
-        {status === 'running' && (
+        {visibleStatus === 'running' && (
           <div className="ap-review-progress" role="status" aria-live="polite">
             <div className="ap-review-progress-label"><LoaderCircle className="ap-spin" size={17} aria-hidden="true" /><span>{progressLabel}…</span><strong>{progressPercent}%</strong></div>
             <div className="ap-review-progress-track"><span style={{ width: `${progressPercent}%` }} /></div>
           </div>
         )}
-        {status === 'error' && (
+        {visibleStatus === 'error' && (
           <div className="ap-review-result ap-review-error" role="alert">
             <AlertTriangle size={17} aria-hidden="true" />
-            <span>{error}</span>
+            <span>{visibleError}</span>
             <button type="button" className="ap-review-link-button" onClick={runReview}>Try again</button>
           </div>
         )}
-        {status === 'completed' && review && (
+        {visibleStatus === 'completed' && visibleReview && (
           <div className="ap-review-result">
             <div className="ap-review-result-head">
               <div className="ap-review-ready"><CheckCircle2 size={17} aria-hidden="true" /><span>Review complete</span></div>
-              <span className={`ap-review-action ap-review-action-${review.recommendedAction.toLowerCase()}`}>{review.recommendedAction.replaceAll('_', ' ')}</span>
+              <span className={`ap-review-action ap-review-action-${visibleReview.recommendedAction.toLowerCase()}`}>{visibleReview.recommendedAction.replaceAll('_', ' ')}</span>
             </div>
-            <p className="ap-review-summary">{review.summary}</p>
+            <p className="ap-review-summary">{visibleReview.summary}</p>
             <div className="ap-review-findings">
-              {(review.findings || []).slice(0, 3).map(finding => (
+              {(visibleReview.findings || []).slice(0, 3).map(finding => (
                 <div className={`ap-review-finding ap-review-finding-${finding.severity.toLowerCase()}`} key={finding.code}>
                   <span>{finding.title}</span><small>{finding.detail}</small>
                 </div>
@@ -305,9 +327,9 @@ const PlanReviewPanel = ({ profile, profileId, financialStateKey, onRecomputePla
                   </Dialog.Content>
                 </Dialog.Portal>
               </Dialog.Root>
-              {actionNeedsRecompute && typeof onRecomputePlan === 'function' && (
+              {actionNeedsRecompute && run?.status === 'WAITING_FOR_APPROVAL' && typeof onRecomputePlan === 'function' && (
                 <PlanReviewAuthorization
-                  run={run}
+                  run={visibleRun}
                   onAuthorizationUnavailable={() => onRecomputePlan(profile, null)}
                   onExecutionComplete={response => onRecomputePlan(profile, response)}
                 />

@@ -20,6 +20,7 @@ const schema = new mongoose.Schema({
   heartbeatAt: { type: Date, required: true },
   startedAt: { type: Date, required: true },
   completedAt: { type: Date, default: null },
+  mandateFinalizedAt: { type: Date, default: null },
   idempotencyKey: { type: String, required: true, immutable: true, maxlength: 240 },
   financialSnapshotHash: { type: String, required: true, immutable: true, match: /^[a-f0-9]{64}$/ },
   resultReference: { type: resultReferenceSchema, default: null },

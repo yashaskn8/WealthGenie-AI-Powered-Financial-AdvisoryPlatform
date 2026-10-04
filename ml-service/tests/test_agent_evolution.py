@@ -167,3 +167,33 @@ def test_gepa_bridge_schema_is_holdout_and_surface_safe():
         validate_gepa_input({**document, 'holdoutCases': []})
     with pytest.raises(ValueError):
         validate_proposal_output([{**proposals[0], 'sourceCode': 'forbidden'}], document)
+
+
+def test_gepa_proposal_rejects_mutable_field_outside_declared_surface():
+    document = {
+        'schemaVersion': 'gepa-bridge-input-1.0.0',
+        'basePromptBundle': {
+            'bundleId': 'champion', 'version': '1.0.0',
+            'plannerInstruction': 'bounded planner',
+            'synthesisInstruction': 'bounded synthesis',
+            'metadata': {}, 'contentHash': 'a' * 64,
+        },
+        'allowedMutationSurfaces': ['promptBundle.plannerInstruction', 'safeModelRoleRouting'],
+        'trainCases': [], 'validationCases': [], 'failureFeedback': [],
+        'budget': {
+            'max_generations': 3, 'max_candidates': 1, 'max_reflection_calls': 1,
+            'max_metric_calls': 1, 'max_sandbox_runs': 1, 'max_sandbox_minutes': 1,
+            'max_total_tokens': 100,
+        },
+        'optimizer': {'provider': 'fixture', 'reflectionModel': None, 'taskModel': None},
+    }
+    proposal = {
+        'proposalId': 'routing-smuggle',
+        'parentPromptBundleHash': 'a' * 64,
+        'mutationSurface': ['promptBundle.plannerInstruction'],
+        'mutationReason': 'undeclared routing change',
+        'plannerInstruction': 'changed planner',
+        'safeModelRoleRouting': {'planner': 'EXPLAINER', 'synthesis': 'PLANNER'},
+    }
+    with pytest.raises(ValueError, match='exactly match'):
+        validate_proposal_output([proposal], document)

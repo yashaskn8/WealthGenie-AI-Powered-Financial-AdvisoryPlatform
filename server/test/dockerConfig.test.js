@@ -125,11 +125,11 @@ test('Kind image builds use repository-root contexts for shared-module Dockerfil
   assert.ok(buildStep, 'CD Docker image build step is missing');
   const commands = buildStep.replace(/\\\r?\n\s*/g, ' ');
 
-  assert.match(commands, /docker build\s+-f server\/Dockerfile\s+-t wealthgenie-server:latest\s+\./);
+  assert.match(commands, /docker build\s+--build-arg APP_BUILD_SHA=\$\{\{\s*github\.sha\s*\}\}\s+-f server\/Dockerfile\s+-t wealthgenie-server:latest\s+\./);
   assert.match(commands, /docker build\s+-t wealthgenie-ml-service:latest\s+ml-service\//);
-  assert.match(commands, /docker build\s+--build-arg VITE_API_URL=\/api\s+-f reactapp\/Dockerfile\s+-t wealthgenie-frontend:latest\s+\./);
+  assert.match(commands, /docker build\s+--build-arg VITE_API_URL=\/api\s+--build-arg VITE_BUILD_SHA=\$\{\{\s*github\.sha\s*\}\}\s+-f reactapp\/Dockerfile\s+-t wealthgenie-frontend:latest\s+\./);
   assert.doesNotMatch(commands, /docker build\s+-t wealthgenie-server:latest\s+server\//);
-  assert.doesNotMatch(commands, /docker build\s+--build-arg VITE_API_URL=\/api\s+-t wealthgenie-frontend:latest\s+reactapp\//);
+  assert.doesNotMatch(commands, /docker build\s+--build-arg VITE_API_URL=\/api\s+--build-arg VITE_BUILD_SHA=\$\{\{\s*github\.sha\s*\}\}\s+-t wealthgenie-frontend:latest\s+reactapp\//);
 });
 
 test('Kubernetes supplies every production ML credential using the expected variable names', () => {
@@ -168,6 +168,9 @@ test('Kind smoke verification owns and cleans up its server port-forward', () =>
   assert.match(smokeStep, /PORT_FORWARD_PID=\$!/);
   assert.match(smokeStep, /trap 'kill "\$PORT_FORWARD_PID"[^\n]+EXIT/);
   assert.match(smokeStep, /for attempt in \$\(seq 1 "\$attempts"\)/);
+  assert.match(smokeStep, /curl[^\n]*--connect-timeout 5[^\n]*--max-time 10/);
+  assert.match(smokeStep, /jq -e --arg expected "\$GITHUB_SHA" '\.buildSha == \$expected'/);
+  assert.match(smokeStep, /curl[^\n]*--max-time 10[^\n]*"\$TAX_URL"/);
   assert.match(smokeStep, /income=1200000&incomeSource=salary&fiscalYear=FY2026-27&age=30/);
   assert.doesNotMatch(cdWorkflow, /- name: Port-Forward Express Server for Live Request Verification/);
 });

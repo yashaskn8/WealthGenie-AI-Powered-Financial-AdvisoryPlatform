@@ -11,7 +11,6 @@ from llm.evaluation.metrics import (
     compute_bertscore_approx,
     compute_grounding_faithfulness,
 )
-from llm.providers.api_provider import APILLMProvider
 from llm.providers.mock_provider import MockLLMProvider
 
 
@@ -55,7 +54,6 @@ def test_grounding_faithfulness_metric():
 def test_evaluator_provider_evaluation_and_comparison():
     evaluator = LLMEvaluator()
     mock_p = MockLLMProvider()
-    api_p = APILLMProvider()
 
     test_samples = [
         {
@@ -72,8 +70,3 @@ def test_evaluator_provider_evaluation_and_comparison():
     assert mock_report["sample_count"] == 2
     assert mock_report["avg_latency_ms"] >= 0.0
     assert "mean_bleu" in mock_report["quality_metrics"]
-
-    comparison = evaluator.compare_providers(mock_p, api_p, test_samples)
-    assert "local_model_report" in comparison
-    assert "api_model_report" in comparison
-    assert "comparison_summary" in comparison

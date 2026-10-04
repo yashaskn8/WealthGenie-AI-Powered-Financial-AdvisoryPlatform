@@ -22,7 +22,13 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
   const [showSlabBreakdown, setShowSlabBreakdown] = useState(false);
 
   // Server state tracking
-  const [serverTaxData, setServerTaxData] = useState(null);
+  const taxInputKey = JSON.stringify([
+    annualIncome, fiscalYear, incomeSource, existing80C, existing80CCD,
+    existingHRA, existingHomeLoan, existing80DSelf, existing80DParents,
+    parentsSenior, profile?.age,
+  ]);
+  const [serverTaxResult, setServerTaxResult] = useState(null);
+  const serverTaxData = serverTaxResult?.inputKey === taxInputKey ? serverTaxResult.data : null;
   const [isLoading, setIsLoading] = useState(false);
   const [apiError, setApiError] = useState(null);
   const [taxPolicyMetadata, setTaxPolicyMetadata] = useState(null);
@@ -67,7 +73,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
         };
         const response = await api.compareTax(annualIncome, payload);
         if (active) {
-          setServerTaxData(response);
+          setServerTaxResult({ inputKey: taxInputKey, data: response });
           setApiError(null);
         }
       } catch (err) {
@@ -86,7 +92,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
       active = false;
       clearTimeout(timer);
     };
-  }, [annualIncome, fiscalYear, incomeSource, existing80C, existing80CCD, existingHRA, existingHomeLoan, existing80DSelf, existing80DParents, parentsSenior, profile?.age]);
+  }, [annualIncome, fiscalYear, incomeSource, existing80C, existing80CCD, existingHRA, existingHomeLoan, existing80DSelf, existing80DParents, parentsSenior, profile?.age, taxInputKey]);
 
   const section80CLimit = serverTaxData?.deduction_limits?.section80C ?? null;
   const section80CCDLimit = serverTaxData?.deduction_limits?.section80CCD1B ?? null;
@@ -328,7 +334,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
             value={incomeSource}
             onChange={(event) => {
               setIncomeSource(event.target.value);
-              if (!event.target.value) setServerTaxData(null);
+              if (!event.target.value) setServerTaxResult(null);
             }}
             aria-label="Income source for tax calculation"
           >
@@ -348,7 +354,7 @@ const TaxScreen = ({ profile, recommendations = [], onLearnMore }) => {
             value={fiscalYear}
             onChange={(event) => {
               setFiscalYear(event.target.value);
-              if (!event.target.value) setServerTaxData(null);
+              if (!event.target.value) setServerTaxResult(null);
             }}
             aria-label="Fiscal year for tax calculation"
           >

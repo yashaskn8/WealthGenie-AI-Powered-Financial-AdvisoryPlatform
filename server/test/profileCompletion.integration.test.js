@@ -704,6 +704,15 @@ test('50 concurrent profile completions from one captured state revision produce
     const requests = Array.from({ length: requestCount }, (_, index) => {
       const payload = canonicalProfilePayload();
       payload.monthly_savings += index;
+      // This test proves persistence CAS under contention, not ML availability.
+      // Omit optional capacity facts so profile completion uses its documented
+      // non-imputing fallback and the race remains independent of an ML service.
+      delete payload.has_lump_sum;
+      delete payload.lump_sum_amount;
+      delete payload.liquid_savings;
+      delete payload.emi_burden_pct;
+      delete payload.financial_dependents;
+      delete payload.emergency_fund_months;
       return fetch(`${baseUrl}/api/profile/complete`, {
         method: 'POST',
         headers: { ...headers, 'Idempotency-Key': crypto.randomUUID() },

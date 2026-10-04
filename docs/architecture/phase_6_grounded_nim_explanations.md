@@ -10,7 +10,7 @@ NVIDIA NIM is not a decision engine. Its output is never written into a Financia
 
 ## Provider contract
 
-The preferred provider is the hosted NVIDIA API at `https://integrate.api.nvidia.com/v1/chat/completions` using `nvidia/nemotron-3.5-lightning-30b-a3b`. Requests are server-only, use bearer authentication, JSON response mode, temperature 0, disabled thinking output, a 20-second timeout, and one bounded retry for HTTP 429 or 5xx responses. No self-hosted NIM or GPU is required.
+The preferred provider is the hosted NVIDIA API at `https://integrate.api.nvidia.com/v1/chat/completions` using `nvidia/nemotron-3.5-lightning-30b-a3b`. Requests are server-only, use bearer authentication, JSON response mode, temperature 0, disabled thinking output, and a 20-second timeout. Each provider adapter makes one HTTP attempt per invocation; a 429, 5xx, timeout, or other provider failure advances to the next configured provider, then the deterministic template. The adapter does not retry the same HTTP request. No self-hosted NIM or GPU is required.
 
 Gemini and Groq are optional language fallbacks. Every provider receives the same evidence payload, the same system boundary, no tools, and the same post-generation validator. Runtime response metadata supplies the provider/model label; stale marketing labels are not used. The terminal fallback is a deterministic evidence template rather than an ungrounded model prompt.
 

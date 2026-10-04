@@ -34,6 +34,7 @@ import {
   AVAILABILITY,
   MARKET_DATA_SCHEMA_VERSION,
 } from './marketData/contracts.js';
+import { isoDateInIndia } from './marketData/indiaMarketTime.js';
 import { persistVerifiedMarketSnapshot } from './marketData/MarketDataRepository.js';
 
 const amfiProvider = new AmfiNavProvider();
@@ -220,8 +221,9 @@ export async function fetchBenchmarkQuotes({ forceRefresh = false, persist = tru
 export function buildNiftyHistoryWindow(now = new Date()) {
   const reference = now instanceof Date ? new Date(now.getTime()) : new Date(now);
   if (Number.isNaN(reference.getTime())) throw new TypeError('now must be a valid date.');
-  reference.setUTCHours(0, 0, 0, 0);
-  const to = new Date(reference.getTime());
+  const indiaDate = isoDateInIndia(reference);
+  if (!indiaDate) throw new TypeError('now must be a valid date.');
+  const to = new Date(`${indiaDate}T00:00:00.000Z`);
   to.setUTCDate(to.getUTCDate() - 1);
   const from = new Date(to.getTime());
   from.setUTCDate(from.getUTCDate() - 400);

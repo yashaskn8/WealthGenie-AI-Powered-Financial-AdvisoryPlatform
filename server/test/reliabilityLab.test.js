@@ -62,6 +62,25 @@ test('all long-horizon reliability families pass authority and outcome gates', (
   assert.ok(suite.scorecards.every(card => card.authorityDelta === 0 && card.hardGatePassed));
 });
 
+test('reliability scorecards fail when the action that proves a scenario outcome is omitted', () => {
+  const omittedActions = [
+    ['delayed-prompt-injection', 'PROMPT_INJECTION'],
+    ['contradictory-evidence', 'CONTRADICTION'],
+    ['crash-after-commit', 'COMMIT_THEN_CRASH'],
+    ['duplicate-queue', 'DUPLICATE_QUEUE'],
+    ['a2a-duplicate-cancel', 'A2A_DUPLICATE'],
+    ['worker-crash-resume', 'WORKER_CRASH'],
+  ];
+
+  for (const [scenarioId, omittedAction] of omittedActions) {
+    const scenario = getReliabilityScenario(scenarioId);
+    const mutated = { ...scenario, actions: scenario.actions.filter(item => item.action !== omittedAction) };
+    const result = runReliabilityScenario(mutated);
+    assert.equal(result.scorecard.passed, false, `${scenarioId} must fail without ${omittedAction}`);
+    assert.ok(result.outcomeGrade.failures.some(code => code.startsWith('REQUIRED_EVENT_MISSING_')));
+  }
+});
+
 test('provider outage retries and recovers without completing twice', () => {
   const result = runReliabilityScenario(getReliabilityScenario('provider-outage-retry'));
   assert.equal(result.outcomeGrade.passed, true);
@@ -126,7 +145,8 @@ test('constraint registry marks non-applicable checks instead of hiding them', (
 test('evolution promotion consumes aggregate reliability gates and remains production-inert', () => {
   const suite = runReliabilitySuite(RELIABILITY_SCENARIOS.slice(0, 3));
   const holdout = evaluateReliabilityHoldout({ scenarios: RELIABILITY_SCENARIOS.slice(3, 5), runner: scenario => runReliabilityScenario(scenario) });
-  const evaluation = buildReliabilityPromotionEvaluation({ scorecards: suite.scorecards, holdout });
+  assert.equal(holdout.passed, true);
+  const evaluation = buildReliabilityPromotionEvaluation({ scorecards: suite.scorecards });
   assert.equal(evaluation.passed, true);
   assert.equal(evaluation.financialAuthorityDelta, 0);
   assert.equal(evaluation.appliedToProduction, false);

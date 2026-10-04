@@ -257,20 +257,36 @@ test('mandate expiry during WebAuthn verification cannot win the final authoriza
   let finalWriteUpdate;
   let credentialWrite;
   let mandateStatus = 'PENDING_USER_VERIFICATION';
+  let transactionCalls = 0;
+  const transactionSession = {};
   const query = value => ({ lean: async () => value });
   const dependencies = {
     mandateModel: {
       findOne: filter => query(filter.$expr?.$lte ? mandateStatus === 'PENDING_USER_VERIFICATION' && mandate.expiresAt <= new Date() ? mandate : null : mandate),
-      findOneAndUpdate(filter, update) {
+      findOneAndUpdate(filter, update, options) {
+        assert.equal(options.session, transactionSession);
         finalWriteFilter = filter;
         finalWriteUpdate = update;
         return query(null);
       },
       async updateOne() { mandateStatus = 'EXPIRED'; return { modifiedCount: 1 }; },
     },
+    async authorizationTransaction(operation) {
+      transactionCalls += 1;
+      const counterBefore = credential.counter;
+      const consumedAtBefore = challenge.consumedAt;
+      try {
+        return await operation(transactionSession);
+      } catch (error) {
+        credential.counter = counterBefore;
+        challenge.consumedAt = consumedAtBefore;
+        throw error;
+      }
+    },
     challengeModel: {
       findOne: () => query(challenge),
-      async findOneAndUpdate(filter) {
+      async findOneAndUpdate(filter, _update, options) {
+        assert.equal(options.session, transactionSession);
         assert.equal(filter.consumedAt, null);
         assert.deepEqual(filter.$expr, { $gt: ['$expiresAt', '$$NOW'] });
         challenge.consumedAt = new Date();
@@ -279,10 +295,11 @@ test('mandate expiry during WebAuthn verification cannot win the final authoriza
     },
     credentialModel: {
       findOne: () => query(credential),
-      async findOneAndUpdate(filter, update) {
+      async findOneAndUpdate(filter, update, options) {
+        assert.equal(options.session, transactionSession);
         assert.equal(filter.counter, credential.counter);
         credentialWrite = update;
-        credential.counter = 0;
+        credential.counter = update.$set.counter;
         return credential;
       },
     },
@@ -294,7 +311,7 @@ test('mandate expiry during WebAuthn verification cannot win the final authoriza
           verified: true,
           method: 'WEBAUTHN',
           credentialId: credential.credentialId,
-          newCounter: 0,
+          newCounter: 1,
           deviceType: 'singleDevice',
           backedUp: false,
           verifiedAt: new Date().toISOString(),
@@ -317,5 +334,8 @@ test('mandate expiry during WebAuthn verification cannot win the final authoriza
   assert.equal(finalWriteUpdate.$set.approval.credentialBackedUp, false);
   assert.equal(credentialWrite.$set.deviceType, 'singleDevice');
   assert.equal(credentialWrite.$set.backedUp, false);
+  assert.equal(transactionCalls, 1);
+  assert.equal(credential.counter, 0);
+  assert.equal(challenge.consumedAt, null);
   assert.equal(mandateStatus, 'EXPIRED');
 });

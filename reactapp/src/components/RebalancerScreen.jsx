@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { Scale, HelpCircle, ShieldCheck, CheckCircle2, Check, TrendingUp, Calendar, Sparkles, ArrowRight, Shield, Wallet, PieChart } from 'lucide-react';
 import { formatINR } from '../utils/indianNumberFormat';
@@ -112,6 +112,14 @@ const toBackendAllocations = allocations => {
   return result;
 };
 
+const buildCalculationBinding = ({ profile, recommendations, allocations, horizon, totalSavings }) => JSON.stringify({
+  profile: profile ?? null,
+  recommendations: recommendations ?? [],
+  allocations: Object.entries(allocations || {}).sort(([left], [right]) => left.localeCompare(right)),
+  horizon,
+  totalSavings,
+});
+
 const RebalancerScreen = ({ profile, recommendations, onSave }) => {
   const totalSavingsCandidate = Number(profile?.monthly_savings);
   const totalSavings = Number.isFinite(totalSavingsCandidate) && totalSavingsCandidate > 0 ? totalSavingsCandidate : null;
@@ -121,6 +129,11 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
   const recs = useMemo(() => recommendations || [], [recommendations]);
 
   const [allocations, setAllocations] = useState(() => buildAllocations(recs));
+  const calculationBinding = buildCalculationBinding({ profile, recommendations: recs, allocations, horizon, totalSavings });
+  const allocationEditRevision = useRef(0);
+  const optimizerRequestId = useRef(0);
+  const projectionRequestId = useRef(0);
+  const monteCarloRequestId = useRef(0);
   const [preset, setPreset] = useState('AI Recommended');
   const [prevRecs, setPrevRecs] = useState(recommendations);
 
@@ -130,19 +143,28 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
   // Sync allocations when recommendations change during render
   if (recommendations !== prevRecs) {
     setPrevRecs(recommendations);
+    allocationEditRevision.current += 1;
+    optimizerRequestId.current += 1;
     const newAllocs = buildAllocations(recommendations || []);
     setAllocations(newAllocs);
     setPreset('AI Recommended');
   }
 
   const [loadingProjection, setLoadingProjection] = useState(false);
-  const [projectionData, setProjectionData] = useState(null);
-  const [projectionError, setProjectionError] = useState(null);
+  const [projectionState, setProjectionState] = useState({ binding: null, data: null, error: null });
+  const projectionStateIsCurrent = projectionState.binding === calculationBinding;
+  const projectionData = projectionStateIsCurrent ? projectionState.data : null;
+  const projectionError = projectionStateIsCurrent ? projectionState.error : null;
+  const projectionPending = loadingProjection || !projectionStateIsCurrent;
+  const setProjectionError = useCallback(error => {
+    setProjectionState({ binding: calculationBinding, data: null, error });
+  }, [calculationBinding]);
 
-  const fetchProjections = useCallback(async (currentAllocs) => {
+  const fetchProjections = useCallback(async (currentAllocs, binding) => {
+    const requestId = ++projectionRequestId.current;
+    const isCurrent = () => requestId === projectionRequestId.current;
     try {
       setLoadingProjection(true);
-      setProjectionError(null);
       
       const profileId = profile?.profileId;
       if (!profileId) {
@@ -155,23 +177,28 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
         toBackendAllocations(currentAllocs),
         horizon,
       );
-      setProjectionData(response);
+      if (isCurrent()) setProjectionState({ binding, data: response, error: null });
     } catch (err) {
-      setProjectionData(null);
-      setProjectionError(err.message);
+      if (isCurrent()) {
+        setProjectionState({ binding, data: null, error: err.message });
+      }
     } finally {
-      setLoadingProjection(false);
+      if (isCurrent()) setLoadingProjection(false);
     }
   }, [profile?.profileId, horizon, totalSavings]);
 
   const [loadingMC, setLoadingMC] = useState(false);
-  const [mcData, setMcData] = useState(null);
-  const [mcError, setMcError] = useState(null);
+  const [monteCarloState, setMonteCarloState] = useState({ binding: null, data: null, error: null });
+  const monteCarloStateIsCurrent = monteCarloState.binding === calculationBinding;
+  const mcData = monteCarloStateIsCurrent ? monteCarloState.data : null;
+  const mcError = monteCarloStateIsCurrent ? monteCarloState.error : null;
+  const monteCarloPending = loadingMC || !monteCarloStateIsCurrent;
 
-  const fetchMonteCarlo = useCallback(async (currentAllocs) => {
+  const fetchMonteCarlo = useCallback(async (currentAllocs, binding) => {
+    const requestId = ++monteCarloRequestId.current;
+    const isCurrent = () => requestId === monteCarloRequestId.current;
     try {
       setLoadingMC(true);
-      setMcError(null);
       
       const profileId = profile?.profileId;
       if (!profileId) {
@@ -185,24 +212,32 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
         projectionDisplayYear,
         null,
       );
-      setMcData(result);
+      if (isCurrent()) setMonteCarloState({ binding, data: result, error: null });
     } catch (err) {
-      setMcData(null);
-      setMcError(err.message);
+      if (isCurrent()) {
+        setMonteCarloState({ binding, data: null, error: err.message });
+      }
     } finally {
-      setLoadingMC(false);
+      if (isCurrent()) setLoadingMC(false);
     }
   }, [profile?.profileId, projectionDisplayYear, totalSavings]);
 
   // Debounce backend requests
   useEffect(() => {
+    let active = true;
     const timer = setTimeout(() => {
-      fetchProjections(allocations);
-      fetchMonteCarlo(allocations);
+      if (!active) return;
+      fetchProjections(allocations, calculationBinding);
+      fetchMonteCarlo(allocations, calculationBinding);
     }, 300);
 
-    return () => clearTimeout(timer);
-  }, [allocations, fetchProjections, fetchMonteCarlo]);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+      projectionRequestId.current += 1;
+      monteCarloRequestId.current += 1;
+    };
+  }, [allocations, calculationBinding, fetchProjections, fetchMonteCarlo]);
 
   const projectionResults = useMemo(() => {
     const point = projectionData?.performance_data?.find(item => item.year === projectionDisplayYear);
@@ -358,6 +393,8 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
    * among other instruments so total stays at 100%.
    */
   const handleSliderChange = useCallback((id, newPct) => {
+    allocationEditRevision.current += 1;
+    optimizerRequestId.current += 1;
     setPreset('Custom');
     setAllocations(prev => {
       const oldPct = prev[id] || 0;
@@ -403,6 +440,10 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
       setProjectionError('No Financial Profile ID is available');
       return;
     }
+    const requestId = ++optimizerRequestId.current;
+    const startingEditRevision = allocationEditRevision.current;
+    const isCurrent = () => requestId === optimizerRequestId.current
+      && startingEditRevision === allocationEditRevision.current;
     try {
       setLoadingProjection(true);
       setProjectionError(null);
@@ -416,14 +457,16 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
         }
         next[inv.id] = weight * 100;
       });
+      if (!isCurrent()) return;
+      allocationEditRevision.current += 1;
       setAllocations(next);
       setPreset(presetName);
     } catch (error) {
-      setProjectionError(error.message);
+      if (isCurrent()) setProjectionError(error.message);
     } finally {
-      setLoadingProjection(false);
+      if (requestId === optimizerRequestId.current) setLoadingProjection(false);
     }
-  }, [profile?.profileId, recs]);
+  }, [profile?.profileId, recs, setProjectionError]);
 
   const handleSave = () => {
     const percentages = recs.map(inv => Number(allocations[inv.id]));
@@ -532,6 +575,8 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
             <button
               type="button"
               onClick={() => {
+                allocationEditRevision.current += 1;
+                optimizerRequestId.current += 1;
                 const targetAllocs = buildAllocations(recs);
                 setAllocations(targetAllocs);
                 setPreset('AI Recommended');
@@ -590,6 +635,8 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
                 <button
                   type="button"
                   onClick={() => {
+                    allocationEditRevision.current += 1;
+                    optimizerRequestId.current += 1;
                     setAllocations(originalAllocations);
                     setPreset('AI Recommended');
                   }}
@@ -837,7 +884,7 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
               Future Wealth Projection
             </h2>
 
-            {loadingProjection ? (
+            {projectionPending ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                 <div style={{ height: '20px', width: '60%', borderRadius: '4px', background: 'rgba(255,255,255,0.05)', animation: 'pulse 1.5s infinite ease-in-out' }} />
                 <div style={{ height: '60px', width: '100%', borderRadius: '8px', background: 'rgba(255,255,255,0.05)', animation: 'pulse 1.5s infinite ease-in-out' }} />
@@ -861,7 +908,9 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
 
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.88rem' }}>
                   <span style={{ color: '#94a3b8' }}>Estimated Returns</span>
-                  <span style={{ fontWeight: 700, color: '#10b981' }}>+<AnimatedCurrency value={projectionResults.estReturns} /></span>
+                  <span style={{ fontWeight: 700, color: projectionResults.estReturns < 0 ? '#f87171' : '#10b981' }}>
+                    {projectionResults.estReturns >= 0 ? '+' : ''}<AnimatedCurrency value={projectionResults.estReturns} />
+                  </span>
                 </div>
 
               </div>
@@ -918,7 +967,7 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
               Market Scenario Projections ({projectionDisplayYear} Years)
             </h2>
 
-            {loadingMC ? (
+            {monteCarloPending ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
                 <div style={{ height: '48px', width: '100%', borderRadius: '8px', background: 'rgba(255,255,255,0.05)', animation: 'pulse 1.5s infinite ease-in-out' }} />
                 <div style={{ height: '48px', width: '100%', borderRadius: '8px', background: 'rgba(255,255,255,0.05)', animation: 'pulse 1.5s infinite ease-in-out' }} />
@@ -1075,7 +1124,7 @@ const RebalancerScreen = ({ profile, recommendations, onSave }) => {
               <div className="summary-stat-card">
                 <div className="summary-stat-label">Expected Value ({projectionDisplayYear}Y)</div>
                 <div className="summary-stat-value value-blue">
-                  {loadingProjection ? (
+                  {projectionPending ? (
                     <span style={{ fontSize: '1rem', color: '#64748b' }}>Calculating...</span>
                   ) : (
                     <>{Number.isFinite(projectionResults.wealth10y) ? formatINR(projectionResults.wealth10y) : '—'}</>

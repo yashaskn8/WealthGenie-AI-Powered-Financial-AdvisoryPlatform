@@ -1,6 +1,6 @@
 import React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import AllocationPlanner from '../AllocationPlanner';
 import * as api from '../../services/api';
 
@@ -141,7 +141,7 @@ describe('AllocationPlanner', () => {
       version: 'plan-review-1.0.0',
       runId: '4f4f4f4f-1111-4111-8111-111111111111',
       currentStateMatch: true,
-      status: 'COMPLETED',
+      status: 'WAITING_FOR_APPROVAL',
       recommendedAction: 'RECOMPUTE_PLAN',
       summary: 'The saved recommendation needs a fresh authoritative recommendation.',
       findings: [{ code: 'PROFILE_CHANGED', severity: 'ATTENTION', title: 'Profile changed', detail: 'Recompute the saved plan.', evidenceIds: [] }],
@@ -215,5 +215,50 @@ describe('AllocationPlanner', () => {
     await waitFor(() => expect(screen.getByText('Review for allocation revision two.')).toBeInTheDocument());
     expect(screen.queryByText('Review for allocation revision one.')).not.toBeInTheDocument();
     expect(api.getCurrentPlanReviewRun).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not attach a late review result to a different profile binding', async () => {
+    let finishReview;
+    const pendingReview = new Promise(resolve => { finishReview = resolve; });
+    vi.spyOn(api, 'getCurrentPlanReviewRun').mockResolvedValue(null);
+    vi.spyOn(api, 'runPlanReview').mockReturnValue(pendingReview);
+    const nextProfile = { ...profile, profileId: '64b000000000000000000099' };
+    const { rerender } = render(<AllocationPlanner profile={profile} recommendations={recommendations} recommendationMeta={recommendationMeta} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Run plan review/i }));
+    rerender(<AllocationPlanner profile={nextProfile} recommendations={recommendations} recommendationMeta={recommendationMeta} />);
+    await act(async () => {
+      finishReview({
+        version: 'plan-review-1.0.0',
+        runId: '4f4f4f4f-1111-4111-8111-111111111111',
+        currentStateMatch: true,
+        status: 'COMPLETED',
+        recommendedAction: 'NONE',
+        summary: 'Late result for the previous profile.',
+        findings: [],
+        evidence: { entries: [] },
+      });
+      await pendingReview;
+    });
+
+    expect(screen.queryByText('Late result for the previous profile.')).not.toBeInTheDocument();
+  });
+
+  it('does not request recompute approval unless the server run is waiting for approval', async () => {
+    vi.spyOn(api, 'runPlanReview').mockResolvedValue({
+      version: 'plan-review-1.0.0',
+      runId: '4f4f4f4f-1111-4111-8111-111111111111',
+      currentStateMatch: true,
+      status: 'COMPLETED',
+      recommendedAction: 'RECOMPUTE_PLAN',
+      summary: 'The review needs an updated plan.',
+      findings: [],
+      evidence: { entries: [] },
+    });
+
+    render(<AllocationPlanner profile={profile} recommendations={recommendations} recommendationMeta={recommendationMeta} onRecomputePlan={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /Run plan review/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/not awaiting authorization/i));
+    expect(screen.queryByRole('button', { name: /Request step-up approval/i })).not.toBeInTheDocument();
   });
 });

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import AmfiNavProvider, { parseAmfiNavReport } from '../services/marketData/AmfiNavProvider.js';
 import AmfiNavHistoryProvider from '../services/marketData/AmfiNavHistoryProvider.js';
-import { fetchAmfiHistoricalNavSnapshot, fetchAmfiProductSnapshot } from '../services/marketDataService.js';
+import { buildNiftyHistoryWindow, fetchAmfiHistoricalNavSnapshot, fetchAmfiProductSnapshot } from '../services/marketDataService.js';
 import UpstoxMarketDataProvider from '../services/marketData/UpstoxMarketDataProvider.js';
 import UpstoxHistoricalCandleProvider, {
   parseUpstoxDailyCandles,
@@ -10,7 +10,9 @@ import UpstoxHistoricalCandleProvider, {
 import {
   AVAILABILITY,
   FRESHNESS,
+  evaluateFreshness,
   nullableFiniteNumber,
+  normalizeTimestamp,
 } from '../services/marketData/contracts.js';
 import { buildAmfiProductIdentity } from '../services/marketData/productIdentity.js';
 import {
@@ -41,6 +43,53 @@ const AMFI_REPORT_WITHOUT_PLAN_OPTION = [
   '125;INF000A01028;;Example Legacy Format Fund;25.50;07-Sep-2026',
 ].join('\n');
 
+test('the production freshness helper never promotes future observed or fetched timestamps to fresh', () => {
+  const offsetsMs = [1, 1_000, 30_000, 5 * 60_000, 60 * 60_000, 24 * 60 * 60_000];
+  const maxAgeSeconds = 60 * 60;
+
+  for (const offsetMs of offsetsMs) {
+    const future = new Date(FIXED_NOW.getTime() + offsetMs).toISOString();
+    assert.deepEqual(evaluateFreshness({
+      observedAt: future,
+      fetchedAt: FIXED_NOW.toISOString(),
+      maxAgeSeconds,
+      now: FIXED_NOW,
+    }), {
+      status: FRESHNESS.UNKNOWN,
+      ageSeconds: null,
+      maxAgeSeconds,
+    }, `future observation +${offsetMs}ms must not be fresh`);
+
+    assert.deepEqual(evaluateFreshness({
+      observedAt: new Date(FIXED_NOW.getTime() - 30_000).toISOString(),
+      fetchedAt: future,
+      maxAgeSeconds,
+      now: FIXED_NOW,
+    }), {
+      status: FRESHNESS.UNKNOWN,
+      ageSeconds: null,
+      maxAgeSeconds,
+    }, `future fetch timestamp +${offsetMs}ms must not be fresh`);
+  }
+});
+
+test('market timestamp normalization rejects impossible ISO calendar dates', () => {
+  assert.equal(normalizeTimestamp('2026-02-30'), null);
+  assert.equal(normalizeTimestamp('2026-02-30T12:00:00.000Z'), null);
+  assert.equal(normalizeTimestamp('2026-02-30 12:00:00Z'), null);
+  assert.deepEqual(evaluateFreshness({
+    observedAt: '2026-02-30T12:00:00.000Z',
+    fetchedAt: FIXED_NOW.toISOString(),
+    maxAgeSeconds: 60,
+    now: FIXED_NOW,
+  }), { status: FRESHNESS.UNKNOWN, ageSeconds: null, maxAgeSeconds: 60 });
+});
+
+test('NIFTY history request window uses the Indian calendar date near UTC midnight', () => {
+  const window = buildNiftyHistoryWindow(new Date('2026-10-05T20:30:00.000Z'));
+  assert.equal(window.toDate, '2026-10-05');
+});
+
 test('AMFI current header is mapped by name and valuation date/provenance are preserved', () => {
   const snapshot = parseAmfiNavReport(AMFI_REPORT, {
     fetchedAt: FIXED_NOW.toISOString(),
@@ -67,6 +116,7 @@ test('missing financial values remain null and unavailable instead of becoming z
   });
   assert.equal(nullableFiniteNumber(null), null);
   assert.equal(nullableFiniteNumber(''), null);
+  assert.equal(nullableFiniteNumber('   '), null);
   assert.equal(nullableFiniteNumber('not-a-number'), null);
   assert.equal(nullableFiniteNumber(0), 0);
   assert.equal(snapshot.facts[1].value, null);
@@ -229,6 +279,20 @@ test('Upstox history returns PROVIDER_NOT_CONFIGURED without a request or fallba
   assert.equal(snapshot.status, AVAILABILITY.PROVIDER_NOT_CONFIGURED);
   assert.deepEqual(snapshot.candles, []);
   assert.equal(snapshot.error.code, 'PROVIDER_NOT_CONFIGURED');
+  assert.equal(calls, 0);
+});
+
+test('Upstox history rejects impossible calendar dates before making a provider request', async () => {
+  let calls = 0;
+  const provider = new UpstoxHistoricalCandleProvider({
+    accessToken: 'configured-for-test',
+    clock: () => FIXED_NOW,
+    httpClient: { get: async () => { calls += 1; return { data: { data: { candles: [] } } }; } },
+  });
+  await assert.rejects(
+    provider.getDailyCandles('NSE_INDEX|Nifty 50', { fromDate: '2026-02-01', toDate: '2026-02-30' }),
+    /toDate must use YYYY-MM-DD format/,
+  );
   assert.equal(calls, 0);
 });
 

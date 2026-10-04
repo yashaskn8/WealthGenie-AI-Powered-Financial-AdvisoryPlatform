@@ -26,11 +26,11 @@
 * **Source-Backed Product and Market Data**: Normalized provider-neutral facts from NSE, AMFI, India Post/Department of Posts, and SBI, with timestamps, freshness, caching, request coalescing, and explicit unavailable states.
 * **OpenTelemetry Distributed Tracing**: Full W3C `traceparent` and `X-Correlation-ID` context propagation across Express and FastAPI; local runs use the repository `traces.jsonl`, while containers use writable `/app/traces.jsonl`.
 * **Tamper-Evident Advisory Audit Chain**: Transactional SHA-256 hash chaining binds advisory inputs, outputs, model/rule versions, provenance, timestamps, and correlation data. MongoDB records are not described as immutable.
-* **Multi-Model Tabular Deep Learning**: Comparative suitability modeling benchmarking **Random Forest** (95.63% test rule-approximation fidelity, TreeSHAP explainability), **PyTorch MLP** (95.60%), and **FT-Transformer** (*NeurIPS 2021*, 97.05% test rule-approximation fidelity).
+* **ML evaluation boundary**: Tracked model-bundle reports measure agreement with a deterministic synthetic suitability-policy label set only. These shadow/diagnostic metrics are not investor outcomes, financial performance, or recommendation authority; the Node backend remains the sole financial decision-maker.
 * **Grounded Explanation Boundary**: NVIDIA NIM is preferred only for explaining a minimal read-only backend evidence packet. Gemini and Groq are optional fallback providers; every model response is validated, and a deterministic grounded template remains available without changing financial decisions.
 * **Market Context Evaluation**: The deterministic market-context policy is the recommendation champion. A CPU-friendly HMM is loaded and evaluated in shadow mode only; it cannot change allocations or suitability.
 * **Fiscal-year-versioned Tax Engine**: Backend-owned Indian tax calculations preserve historical FY2025-26 law and use Income-tax Act, 2025 authority for FY2026-27. Legacy deduction field names remain compatibility inputs, not current statutory labels.
-* **REST Architecture**: Express gateway benchmarked up to **5,537.7 req/s** on local load tests (`autocannon` v8.0.0) with fail-closed API security and Mongoose schema validation.
+* **Tax API benchmark (historical)**: `GET /api/tax/compare` reached **5,537.7 req/s** in one single-host `autocannon` v8.0.0 run at concurrency 200. This is endpoint- and environment-specific, not Express-gateway or production capacity evidence ([benchmark](load_test_report.md)).
 
 ---
 
@@ -43,9 +43,9 @@
 | **Distributed Tracing** | OpenTelemetry SDK with W3C `traceparent` propagation across Express <-> FastAPI; `TRACE_LOG_PATH` is configurable and container deployments use `/app/traces.jsonl` | [`server/config/tracing.js`](server/config/tracing.js), [`ml-service/tracing.py`](ml-service/tracing.py), [`scripts/verify_distributed_tracing.js`](scripts/verify_distributed_tracing.js) |
 | **Tamper-Evident Advisory Audit Chain** | Transactional canonical SHA-256 record chain with fail-loudly guarantees and verification endpoint | [`server/models/AuditRecord.js`](server/models/AuditRecord.js), [`server/test/auditChain.test.js`](server/test/auditChain.test.js) |
 | **Playwright Full-Lifecycle E2E Suite** | Real-service user lifecycle against replica-set MongoDB, Redis, FastAPI, Express, and Vite | [`reactapp/e2e/full-flow.spec.ts`](reactapp/e2e/full-flow.spec.ts), [`.github/workflows/ci.yml`](.github/workflows/ci.yml) |
-| **Investor Classification** | Random Forest (`model.pkl`), PyTorch MLP, and FT-Transformer tabular neural network | FT-Transformer: **97.05%** rule-approx. (independent CFP: 15.83%), RF: **95.63%** rule-approx. (independent CFP: 25.26%) ([`multi_model_benchmark.json`](ml-service/reports/multi_model_benchmark.json)) |
+| **ML suitability-policy diagnostics** | Random Forest, PyTorch MLP, and FT-Transformer verified model bundles | Synthetic policy-label test accuracy only: RF **99.00%**, MLP **94.67%**, FT-Transformer **98.00%**. Not investor-outcome or financial-performance metrics; ML cannot determine financial results ([RF report](ml-service/model/bundles/random_forest/evaluation_report.json), [MLP report](ml-service/model/bundles/pytorch_mlp/evaluation_report.json), [FT report](ml-service/model/bundles/ft_transformer/evaluation_report.json)) |
 | **Grounded Advisory Explanation** | Backend evidence packet → provider adapter → strict grounding validator → React provenance rendering; LLM tool allowlist is empty | [`server/services/groundedExplanationService.js`](server/services/groundedExplanationService.js), [`server/services/groundingValidator.js`](server/services/groundingValidator.js) |
-| **Tax Regime Computation** | Fiscal-year-versioned Old vs New regime calculator with statute metadata, rule provenance and explicit unavailable states | Compute throughput: **3,736.7–5,537.7 req/s** (historical benchmark; not a current performance guarantee) ([`load_test_report.md`](load_test_report.md)) |
+| **Tax Regime Computation** | Fiscal-year-versioned Old vs New regime calculator with statute metadata, rule provenance and explicit unavailable states | Historical single-host `GET /api/tax/compare` throughput: **3,736.7–5,537.7 req/s** across reported concurrency levels; not a current or production capacity guarantee ([`load_test_report.md`](load_test_report.md)) |
 | **Where-to-Invest Product Evidence** | AMFI-backed mutual-fund universe and official India Post/SBI fixed-income facts; 0–5 truthful results with unavailable/comparable states | [`server/services/mutualFundProductRanking.js`](server/services/mutualFundProductRanking.js), [`server/services/fixedIncomeProductRanking.js`](server/services/fixedIncomeProductRanking.js) |
 | **Security Controls** | Fail-closed API key verification, prompt injection defense pipeline, Joi validation | [`test_fail_closed_auth_when_api_key_unset`](ml-service/tests/test_ml_validation.py) |
 | **Distributed Systems Failure-Mode Testing** | Real-failure chaos tests (MongoDB disconnect, Redis disconnect, ML ECONNREFUSED), mid-transaction partial-write proof, Redis fail-closed audit | [`chaos.test.js`](server/test/chaos.test.js), [`midTransaction.test.js`](server/test/midTransaction.test.js), [`redisFailClosed.test.js`](server/test/redisFailClosed.test.js) |
@@ -76,15 +76,15 @@ The public Express contract is defined by [`server/openapi.yaml`](server/openapi
 ## AI & Machine Learning Architecture
 
 ### 1. Tabular Deep Learning Suitability Benchmark (Phase 3)
-The platform trains and evaluates three model architectures on a dataset of **20,000 NAV-derived investor profiles** (16 canonical features, 60/20/20 train/val/test split):
+The tracked model bundles report evaluation on **2,000 synthetic suitability-policy examples**, with 19 input features and a stratified 70/15/15 train/validation/test split (1,400/300/300). This is policy-label imitation evidence only: it does not measure investor outcomes, investment performance, or suitability quality for real clients. These models are diagnostic/shadow components and cannot affect eligibility, suitability, ranking, allocation, tax, or product inclusion.
 
-| Model Architecture | Test Rule-Approx. Fidelity | Macro F1 | Balanced Accuracy | Training Time | Primary Use Case & Independent CFP Benchmark |
-| :--- | :---: | :---: | :---: | :---: | :--- |
-| **FT-Transformer** (*NeurIPS 2021*) | **97.05%** | **0.9331** | 0.9220 | 79.15s | High-precision deep learning benchmark checkpoint ([`ft_transformer_benchmark.pt`](ml-service/model/checkpoints/ft_transformer_benchmark.pt)); independent CFP benchmark: **15.83%** |
-| **Random Forest** | **95.63%** | 0.9144 | **0.9221** | **4.16s** | **Production Serving**: Fast inference + TreeSHAP explainability (`model.pkl`); independent CFP benchmark: **25.26%** |
-| **PyTorch MLP** | 95.60% | 0.9012 | 0.9080 | 12.40s | Neural baseline comparison checkpoint ([`mlp_benchmark.pt`](ml-service/model/checkpoints/mlp_benchmark.pt)) |
+| Model Architecture | Test Accuracy | Macro F1 | Balanced Accuracy | Evidence |
+| :--- | :---: | :---: | :---: | :--- |
+| **Random Forest** | **99.00%** | **0.9839** | **0.9769** | [Tracked bundle evaluation](ml-service/model/bundles/random_forest/evaluation_report.json) |
+| **PyTorch MLP** | **94.67%** | **0.9352** | **0.9521** | [Tracked bundle evaluation](ml-service/model/bundles/pytorch_mlp/evaluation_report.json) |
+| **FT-Transformer** | **98.00%** | **0.9638** | **0.9699** | [Tracked bundle evaluation](ml-service/model/bundles/ft_transformer/evaluation_report.json) |
 
-*Report source*: [`ml-service/reports/multi_model_benchmark.json`](ml-service/reports/multi_model_benchmark.json).
+These scores describe agreement with synthetic rule-generated labels for the held-out test split only; they are not evidence that the models predict suitable real-world investments.
 
 ### 2. Retrieval-Augmented Generation (RAG) Subsystem (Phase 2 & 5)
 The FastAPI microservice implements a dense vector search pipeline indexing vectorized chunks of SEBI regulations, RBI circulars, and the Indian Income Tax Act.
@@ -95,13 +95,8 @@ The FastAPI microservice implements a dense vector search pipeline indexing vect
 * **Embedder**: `SentenceTransformerEmbeddingProvider` using `all-MiniLM-L6-v2` (384D dense vectors).
 * **Vector Store**: `PersistentVectorStore` in `ml-service/rag/vector_store/memory_vector_store.py`.
 
-#### Empirical RAG Evaluation Metrics (75 Evaluation Queries, incl. 5 Adversarial Controls):
-* **Document-Level Hit Rate**: **98.7%** (74/75 queries retrieved >=1 chunk from expected document; measures document provenance, not passage precision).
-* **Precision@4**: **0.7367** (73.7% of all retrieved top-4 chunks belong to expected source document).
-* **Mean Reciprocal Rank (MRR)**: **0.9022** (first relevant document chunk returned at Rank 1 for most queries).
-* **NDCG@4**: **0.7564** (ranking quality with realistic score variance).
-* **Citation-ID validity**: returned citations are checked against retrieved seed chunk IDs; this is not presented as factual entailment.
-* **Adversarial Control Discrimination**: Near-miss & out-of-scope questions show clear score separation (e.g., Precision@4 = 0.0 on Section 80D health insurance near-miss, 0.25 on SIP minimum near-miss).
+#### Legacy RAG Evaluation Snapshot
+The figures in the August 2026 report (75 queries, 508 chunks) are historical and are not current-corpus quality evidence. Its two out-of-domain controls still received source-hit credit against an FY2025-26 tax source, so those results do not establish correct abstention. The current answerability-aware evaluation set contains five cases; abstention controls have no relevant source and cannot earn source-hit credit. See the current evaluator and corpus manifest before relying on any metric. Citation-ID validity is not factual entailment.
 
 #### Embedding Provider Ablation Study (Dense Transformer vs Hash-Based):
 An ablation study ([`ml-service/reports/embedding_ablation.json`](ml-service/reports/embedding_ablation.json)) compared 128D character n-gram feature hashing against 384D transformer embeddings:
@@ -117,7 +112,7 @@ An ablation study ([`ml-service/reports/embedding_ablation.json`](ml-service/rep
 Base `Qwen/Qwen2.5-0.5B-Instruct` was evaluated across 25 financial prompts against gold reference answers ([`ml-service/reports/llm_eval_report.json`](ml-service/reports/llm_eval_report.json)):
 * **Mean Lexical Overlap**: 0.4998
 * **Dense Semantic Embedding Similarity**: **0.6660** (SentenceTransformer cosine similarity)
-* **Mean Faithfulness**: 0.5608
+* **Mean lexical grounding-overlap heuristic**: 0.5608. This token-overlap measure is not a faithfulness, entailment, factual-support, or hallucination test.
 
 ---
 
@@ -429,7 +424,7 @@ WealthGenie-Architecture-Restoration/
 ├── ml-service/                    # FastAPI Machine Learning Microservice
 │   ├── main.py                    # FastAPI routes (/predict, /rag/query, /health)
 │   ├── tracing.py                 # OpenTelemetry instrumentation & FileSpanExporter
-│   ├── model/                     # Random Forest (model.pkl) & FT-Transformer checkpoints
+│   ├── model/bundles/             # Per-architecture manifests, metadata, and evaluation reports
 │   ├── rag/                       # Multi-tenant vector store, SentenceTransformer 384D embedder
 │   ├── reports/                   # Committed JSON evaluation reports
 │   └── tests/                     # Pytest ML, registry, persistence, RAG, and contract tests
@@ -448,8 +443,8 @@ WealthGenie-Architecture-Restoration/
 4. **Local Load Test Disclosure**: Load test benchmarks were conducted on a single host (`localhost:5000` / `127.0.0.1:8000`). They measure single-node event loop throughput and microservice latency, not multi-region cloud network conditions.
 5. **Fine-Tuning Scope**: LoRA/QLoRA LLM fine-tuning pipelines are defined in code interfaces but were deferred due to CPU compute constraints during evaluation. Base `Qwen/Qwen2.5-0.5B-Instruct` was used for LLM evaluation.
 6. **Computer Vision**: The platform intentionally focuses on tabular ML, text RAG, and financial tax algorithms. Computer vision (VLM) is explicitly out of scope.
-7. **WTI Authority Boundary**: The React client sends only the saved profile ID and parent instrument ID to protected `POST /api/instruments/rank-wti`. Express preserves the parent-category hard-suitability boundary. For explicitly mapped mutual-fund categories, the product universe comes from AMFI; ranking uses a versioned one-year historical NAV-return rule only when complete Growth-option evidence exists. Historical return is never presented as expected return. Missing evidence produces comparable or unavailable results, and the legacy WTI catalog supplies non-financial reference text only.
-8. **Benchmark Sourcing & Independent Evaluation**: The 97.05% (FT-Transformer) and 95.63% (Random Forest) test metrics represent rule-approximation fidelity against synthetic baseline allocations. When evaluated against independent Certified Financial Planner (CFP) benchmark profiles, real-world agreement rates are **15.83%** for FT-Transformer and **25.26%** for Random Forest.
+7. **WTI Authority Boundary**: The API client exposes a helper for protected `POST /api/instruments/rank-wti`; a production React component call site was not found in the inspected tree. The route preserves the parent-category hard-suitability boundary. For explicitly mapped mutual-fund categories, the product universe comes from AMFI; ranking uses a versioned one-year historical NAV-return rule only when complete Growth-option evidence exists. Historical return is never presented as expected return. Missing evidence produces comparable or unavailable results, and the legacy WTI catalog supplies non-financial reference text only.
+8. **ML evaluation scope**: The tracked model-bundle test metrics represent agreement with synthetic deterministic-policy labels only. The repository does not claim independent CFP validation or real-world investor-outcome accuracy from those numbers.
 9. **In-Memory Vector Search**: MongoDB 7.0 Community Edition does not support Atlas Vector Search. Chunks and embeddings are persisted in MongoDB for cross-replica sharing, but vector similarity search executes in-memory via FAISS/NumPy after loading vectors from Mongo on startup.
 10. **Per-Replica Memory Scaling**: Because vector search runs in-memory, each ML service replica loads the complete embedding matrix into local RAM. Memory consumption scales linearly with $N_{\text{replicas}} \times N_{\text{chunks}}$.
 11. **DAG Crash Resume Scope**: Redis Streams step persistence allows resuming a deterministic multi-step agent DAG from the last completed step index. External non-deterministic side-effects without compensating transactions are not managed by a distributed saga orchestrator.

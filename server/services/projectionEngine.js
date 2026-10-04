@@ -526,7 +526,8 @@ export function generatePortfolioProjection({
       year,
       average,
       invested,
-      gains: Math.max(0, average - invested),
+      // Keep net gains signed so loss scenarios are not silently flattened to 0.
+      gains: average - invested,
       wealth_multiple: Number((average / invested).toFixed(2)),
     });
   }
