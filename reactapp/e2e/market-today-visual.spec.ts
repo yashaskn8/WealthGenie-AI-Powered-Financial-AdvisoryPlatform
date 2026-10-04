@@ -101,6 +101,15 @@ const VISUAL_CURRENT_STATE = currentFinancialState({
   instruments: VISUAL_INSTRUMENTS,
   monthlyAllocations: { ppf: 30000 },
 });
+const VISUAL_WTI_BINDING = {
+  profileId: VISUAL_CURRENT_STATE.profileId,
+  profileVersion: VISUAL_CURRENT_STATE.profile_version,
+  recommendationId: VISUAL_CURRENT_STATE.recommendationId,
+  allocationRevision: VISUAL_CURRENT_STATE.allocation_revision,
+  allocationRevisionId: VISUAL_CURRENT_STATE.allocation_revision_id,
+  portfolioFingerprint: VISUAL_CURRENT_STATE.portfolio_fingerprint,
+  recommendationFingerprint: VISUAL_CURRENT_STATE.recommendation_fingerprint,
+};
 
 test.describe('Market Today Card Visual & Responsive Review', () => {
   test.beforeEach(async ({ page }) => {
@@ -201,11 +210,22 @@ test.describe('Market Today Card Visual & Responsive Review', () => {
     // ── 5. WTI product ranking: POST /api/instruments/rank-wti ──
     // WhereToInvestTab calls api.rankInvestmentCandidates → request('POST', '/instruments/rank-wti')
     await page.route('**/api/instruments/rank-wti', async route => {
+      const rankingRequest = route.request().postDataJSON();
+      expect(rankingRequest).toMatchObject({
+        profileId: VISUAL_WTI_BINDING.profileId,
+        profileVersion: VISUAL_WTI_BINDING.profileVersion,
+        recommendationId: VISUAL_WTI_BINDING.recommendationId,
+        expectedAllocationRevision: VISUAL_WTI_BINDING.allocationRevision,
+        expectedAllocationRevisionId: VISUAL_WTI_BINDING.allocationRevisionId,
+        expectedPortfolioFingerprint: VISUAL_WTI_BINDING.portfolioFingerprint,
+        expectedRecommendationFingerprint: VISUAL_WTI_BINDING.recommendationFingerprint,
+      });
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
           success: true,
+          financialStateBinding: VISUAL_WTI_BINDING,
           total: 1,
           excluded: [],
           suitability: { status: 'SUITABLE', riskReconciliation: { final_risk_tier: 'MEDIUM' } },
@@ -299,11 +319,14 @@ test.describe('Market Today Card Visual & Responsive Review', () => {
     // In modal, click "Where to Invest" tab
     const wtiTab = page.locator('.ddm-tab-btn', { hasText: /Where to Invest/i });
     await expect(wtiTab).toBeVisible({ timeout: 10000 });
+    const rankingResponse = page.waitForResponse(response => response.url().includes('/api/instruments/rank-wti'));
     await wtiTab.click({ force: true });
+    expect((await rankingResponse).status()).toBe(200);
 
     // Verify "Market today" card renders
     const marketCard = page.locator('.wti-beginner-market-card');
     await expect(marketCard).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.wti-status-banner--error')).toHaveCount(0);
 
     // Verify CAUTIOUS badge
     await expect(marketCard.locator('.wti-beginner-market-badge')).toHaveText('CAUTIOUS');

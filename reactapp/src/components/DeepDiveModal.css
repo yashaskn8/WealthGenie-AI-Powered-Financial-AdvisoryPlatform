@@ -3694,7 +3694,7 @@ input[type=range]::-moz-range-thumb:hover {
 .wti-beginner-market-card {
   border-left-width: 1px;
   border-top: 2px solid var(--market-accent, #38bdf8);
-  padding: 15px 18px 13px;
+  padding: 15px 18px 12px;
   background: linear-gradient(145deg, rgba(15, 23, 42, 0.9), rgba(5, 11, 23, 0.96));
   box-shadow: 0 12px 28px -22px rgba(0, 0, 0, 0.95), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
