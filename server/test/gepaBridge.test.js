@@ -169,9 +169,14 @@ test('GEPA timeout terminates the spawned process tree, including grandchildren'
     const exitDeadline = Date.now() + 5000;
     let alive = true;
     while (alive && Date.now() < exitDeadline) {
-      if (process.platform !== 'win32' && existsSync(`/proc/${grandchildPid}/stat`)) {
-        const state = readFileSync(`/proc/${grandchildPid}/stat`, 'utf8').split(' ')[2];
-        alive = state !== 'Z';
+      if (process.platform !== 'win32') {
+        try {
+          const state = readFileSync(`/proc/${grandchildPid}/stat`, 'utf8').split(' ')[2];
+          alive = state !== 'Z';
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+          alive = false;
+        }
       } else {
         try {
           process.kill(grandchildPid, 0);
