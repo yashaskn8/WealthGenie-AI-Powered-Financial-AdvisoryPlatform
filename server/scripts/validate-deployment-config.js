@@ -23,8 +23,12 @@ walk(path.join(root, 'k8s'));
 const docs = deploymentFiles.map(file => ({ file, value: parse(fs.readFileSync(file, 'utf8')) }));
 const worker = docs.find(item => item.value?.kind === 'Deployment' && item.value?.metadata?.name === 'wealthgenie-agent-worker');
 if (!worker) throw new Error('Kubernetes agent-worker Deployment is missing');
-const container = worker.value.spec.template.spec.containers.find(item => item.name === 'agent-worker');
+const workerPodSpec = worker.value.spec.template.spec;
+const container = workerPodSpec.containers.find(item => item.name === 'agent-worker');
 if (!container || container.command?.join(' ') !== 'node worker.js') throw new Error('Kubernetes agent-worker command is invalid');
+if (workerPodSpec.securityContext?.runAsNonRoot !== true || workerPodSpec.securityContext?.runAsUser !== 1000) {
+  throw new Error('Kubernetes agent-worker must explicitly run as non-root UID 1000');
+}
 if (!container.readinessProbe?.httpGet?.path || !container.livenessProbe?.httpGet?.path) throw new Error('Kubernetes agent-worker probes are required');
 
 const migration = docs.find(item => item.value?.kind === 'Job'

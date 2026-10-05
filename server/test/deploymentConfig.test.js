@@ -44,6 +44,19 @@ test('deployment validator accepts the complete ordered Phase 2 through Phase 7 
   assert.match(result.stdout, /ordered Phase 2\/3\/4\/5\/7 migrations/);
 });
 
+test('deployment validator requires the agent-worker to use its explicit non-root image UID', () => {
+  withDeploymentFixture(root => {
+    const workerPath = 'k8s/agent-worker/deployment.yaml';
+    const worker = readYaml(root, workerPath);
+    delete worker.spec.template.spec.securityContext.runAsUser;
+    writeYaml(root, workerPath, worker);
+
+    const result = validate(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /agent-worker must explicitly run as non-root UID 1000/);
+  });
+});
+
 test('deployment validator rejects CD application before the Phase 3 migration', () => {
   withDeploymentFixture(root => {
     const workflowPath = '.github/workflows/cd.yml';
