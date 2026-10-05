@@ -1,9 +1,11 @@
 import sys
+import tempfile
 from types import SimpleNamespace
 
 import pytest
 
 from agent_evolution.feedback import build_feedback
+from agent_evolution.cli import _safe_path
 from agent_evolution.gepa_optimizer import DspyGepaOptimizer, GEPA_VERSION
 from agent_evolution.runner import FixtureGepaProposalProvider, _configure_gepa_cache, _load_live_dspy
 from agent_evolution.schemas import EvolutionBudget, validate_gepa_input, validate_optimizer_dataset, validate_proposal_output
@@ -15,6 +17,32 @@ def test_optimizer_dataset_rejects_private_and_holdout_fields():
         validate_optimizer_dataset([{'partition': 'train', 'email': 'private@example.com'}])
     with pytest.raises(ValueError):
         validate_optimizer_dataset([{'partition': 'holdout', 'answerKey': 'sealed'}])
+
+
+def test_gepa_cli_paths_are_confined_to_bridge_temp_directory(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, 'gettempdir', lambda: str(tmp_path))
+    bridge_dir = tmp_path / 'wealthgenie-gepa-unit-test'
+    bridge_dir.mkdir()
+    input_path = bridge_dir / 'input.json'
+    output_path = bridge_dir / 'output.json'
+    input_path.write_text('{}', encoding='utf-8')
+
+    assert _safe_path(str(input_path), must_exist=True) == input_path.resolve()
+    assert _safe_path(str(output_path), must_exist=False) == output_path.resolve()
+
+    outside_path = tmp_path / 'outside.json'
+    outside_path.write_text('{}', encoding='utf-8')
+    with pytest.raises(ValueError, match='approved sanitized workspace path'):
+        _safe_path(str(outside_path), must_exist=True)
+
+    nested_path = bridge_dir / 'nested' / 'input.json'
+    with pytest.raises(ValueError, match='approved sanitized workspace path'):
+        _safe_path(str(nested_path), must_exist=True)
+
+    alternate_name = bridge_dir / 'private.json'
+    alternate_name.write_text('{}', encoding='utf-8')
+    with pytest.raises(ValueError, match='approved sanitized workspace path'):
+        _safe_path(str(alternate_name), must_exist=True)
 
 
 def test_evolution_budget_cannot_exceed_immutable_maximum():

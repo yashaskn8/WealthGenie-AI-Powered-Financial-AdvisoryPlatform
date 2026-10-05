@@ -182,6 +182,7 @@ export async function runGovernedEvolution({
     const reliabilityEvaluationBase = buildReliabilityPromotionEvaluation({
       scorecards: reliability.scorecards,
       candidateReliabilityCoverageComplete: reliability.candidateReliabilityCoverageComplete,
+      expectedScenarioIds: reliabilityScenarios.map(scenario => scenario.id),
     });
     const reliabilityEvaluation = reliability.scorecards.length > 0
       ? reliabilityEvaluationBase

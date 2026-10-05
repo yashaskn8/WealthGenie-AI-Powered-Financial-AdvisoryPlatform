@@ -16,9 +16,10 @@
  */
 
 import mongoose from 'mongoose';
+import { isIP } from 'node:net';
 import {
+  MIGRATION_INDEX_MODELS,
   MARKET_DATA_INDEX_MODELS,
-  PHASE2_INDEX_MODELS,
 } from '../../services/persistenceIndexReadiness.js';
 
 const MONGO_IMAGE = process.env.MONGO_TEST_IMAGE || 'mongo:7.0';
@@ -32,7 +33,31 @@ let activeMechanism = null;
 async function initializeTestIndexes() {
   // Test databases are disposable. Install their schema indexes explicitly so
   // tests exercise the same read-only readiness gate as a migrated deploy.
-  await Promise.all([...PHASE2_INDEX_MODELS, ...MARKET_DATA_INDEX_MODELS].map(model => model.createIndexes()));
+  await Promise.all([...MIGRATION_INDEX_MODELS, ...MARKET_DATA_INDEX_MODELS].map(model => model.createIndexes()));
+}
+
+function assertDisposableTestDatabaseUri(uri) {
+  let databaseName;
+  try {
+    const parsed = new URL(uri);
+    if (!['mongodb:', 'mongodb+srv:'].includes(parsed.protocol)) throw new Error('unsupported scheme');
+    databaseName = decodeURIComponent(parsed.pathname.replace(/^\/+/, '').split('/')[0] || '');
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    const isLoopback = hostname === 'localhost'
+      || hostname.endsWith('.localhost')
+      || (isIP(hostname) === 4 && Number(hostname.split('.')[0]) === 127)
+      || hostname === '::1'
+      || hostname === '0:0:0:0:0:0:0:1';
+    if (!isLoopback) {
+      throw new Error('External MongoDB test URI must use a loopback host.');
+    }
+  } catch {
+    throw new Error('External MongoDB test URI is invalid; refusing to connect.');
+  }
+
+  if (!/(?:^|[-_])(?:test|testing|e2e)$/i.test(databaseName)) {
+    throw new Error('External MongoDB test URI must target a dedicated database ending in _test, -test, _testing, -testing, _e2e, or -e2e.');
+  }
 }
 
 /**
@@ -74,17 +99,45 @@ async function assertReplicaSet() {
   }
 }
 
+async function connectAndInitializeTestDatabase(uri, { requireReplicaSet = false } = {}) {
+  if (mongoose.connection.readyState !== 0) {
+    const error = new Error('Mongoose has an unowned connection; refusing to reuse it for tests.');
+    error.code = 'MONGO_TEST_UNOWNED_CONNECTION';
+    throw error;
+  }
+
+  try {
+    await mongoose.connect(uri);
+    await initializeTestIndexes();
+    if (requireReplicaSet) await assertReplicaSet();
+  } catch (setupError) {
+    try {
+      if (mongoose.connection.readyState !== 0) await mongoose.disconnect();
+    } catch {
+      const cleanupError = new Error('MongoDB test setup failed and its connection could not be closed; refusing fallback.');
+      cleanupError.code = 'MONGO_TEST_CONNECTION_CLEANUP_FAILED';
+      throw cleanupError;
+    }
+    if (mongoose.connection.readyState !== 0) {
+      const cleanupError = new Error('MongoDB test setup failed and its connection remains open; refusing fallback.');
+      cleanupError.code = 'MONGO_TEST_CONNECTION_CLEANUP_FAILED';
+      throw cleanupError;
+    }
+    throw setupError;
+  }
+}
+
 async function tryExternalUri(requireReplicaSet = false) {
   const envUri = process.env.MONGODB_URI || process.env.MONGO_URI;
   if (!envUri) {
     throw new Error('MONGODB_URI / MONGO_URI environment variable not set');
   }
 
-  if (mongoose.connection.readyState === 0) {
-    await mongoose.connect(envUri);
-  }
-  await initializeTestIndexes();
-  if (requireReplicaSet) await assertReplicaSet();
+  // Integration suites delete and mutate fixture records. Never point them at
+  // a demo or production database merely because an environment variable is set.
+  assertDisposableTestDatabaseUri(envUri);
+
+  await connectAndInitializeTestDatabase(envUri, { requireReplicaSet });
   activeUri = envUri;
   activeMechanism = 'external_uri';
   return { uri: envUri, mechanism: 'external_uri' };
@@ -101,12 +154,12 @@ async function tryTestcontainers(requireReplicaSet = false) {
   const { MongoDBContainer } = await import('@testcontainers/mongodb');
   const container = await new MongoDBContainer(MONGO_IMAGE).start();
   const uri = container.getConnectionString();
-
-  if (mongoose.connection.readyState === 0) {
-    await mongoose.connect(uri);
+  try {
+    await connectAndInitializeTestDatabase(uri, { requireReplicaSet });
+  } catch (error) {
+    try { await container.stop(); } catch {}
+    throw error;
   }
-  await initializeTestIndexes();
-  if (requireReplicaSet) await assertReplicaSet();
 
   activeContainer = container;
   activeUri = uri;
@@ -128,11 +181,12 @@ async function tryMongoMemoryServer() {
     replSet: { count: 1, storageEngine: 'wiredTiger' },
   });
   const uri = mongoServer.getUri();
-
-  if (mongoose.connection.readyState === 0) {
-    await mongoose.connect(uri);
+  try {
+    await connectAndInitializeTestDatabase(uri);
+  } catch (error) {
+    try { await mongoServer.stop(); } catch {}
+    throw error;
   }
-  await initializeTestIndexes();
 
   activeMongoServer = mongoServer;
   activeUri = uri;
@@ -156,6 +210,12 @@ export async function setupTestDatabase({ requireReplicaSet = false } = {}) {
     throw error;
   }
 
+  if (!activeUri && mongoose.connection.readyState !== 0) {
+    const error = new Error('Mongoose has an unowned connection; refusing to reuse it for tests.');
+    error.code = 'MONGO_TEST_UNOWNED_CONNECTION';
+    throw error;
+  }
+
   // If already connected and provisioned in this process, reuse
   if (mongoose.connection.readyState === 1 && activeUri) {
     await initializeTestIndexes();
@@ -169,9 +229,7 @@ export async function setupTestDatabase({ requireReplicaSet = false } = {}) {
 
   // If already provisioned but mongoose was disconnected, just reconnect to existing URI!
   if (activeUri && mongoose.connection.readyState === 0) {
-    await mongoose.connect(activeUri);
-    await initializeTestIndexes();
-    if (requireReplicaSet) await assertReplicaSet();
+    await connectAndInitializeTestDatabase(activeUri, { requireReplicaSet });
     return {
       uri: activeUri,
       mechanism: activeMechanism,
@@ -187,6 +245,7 @@ export async function setupTestDatabase({ requireReplicaSet = false } = {}) {
       const res = await tryExternalUri(requireReplicaSet);
       return { ...res, stop: teardownTestDatabase };
     } catch (err) {
+      if (['MONGO_TEST_UNOWNED_CONNECTION', 'MONGO_TEST_CONNECTION_CLEANUP_FAILED'].includes(err?.code)) throw err;
       errors['MONGODB_URI'] = err;
     }
   } else {
@@ -198,6 +257,7 @@ export async function setupTestDatabase({ requireReplicaSet = false } = {}) {
     const res = await tryTestcontainers(requireReplicaSet);
     return { ...res, stop: teardownTestDatabase };
   } catch (err) {
+    if (['MONGO_TEST_UNOWNED_CONNECTION', 'MONGO_TEST_CONNECTION_CLEANUP_FAILED'].includes(err?.code)) throw err;
     errors['Testcontainers (Docker ' + MONGO_IMAGE + ')'] = err;
   }
 
@@ -206,6 +266,7 @@ export async function setupTestDatabase({ requireReplicaSet = false } = {}) {
     const res = await tryMongoMemoryServer();
     return { ...res, stop: teardownTestDatabase };
   } catch (err) {
+    if (['MONGO_TEST_UNOWNED_CONNECTION', 'MONGO_TEST_CONNECTION_CLEANUP_FAILED'].includes(err?.code)) throw err;
     errors['MongoMemoryServer (' + MONGO_VERSION + ')'] = err;
   }
 
@@ -221,19 +282,19 @@ export async function teardownTestDatabase() {
     if (mongoose.connection.readyState !== 0) {
       await mongoose.disconnect();
     }
-  } catch (_) {}
+  } catch {}
 
   if (activeContainer) {
     try {
       await activeContainer.stop();
-    } catch (_) {}
+    } catch {}
     activeContainer = null;
   }
 
   if (activeMongoServer) {
     try {
       await activeMongoServer.stop();
-    } catch (_) {}
+    } catch {}
     activeMongoServer = null;
   }
 

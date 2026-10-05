@@ -20,6 +20,7 @@ export function createPlanReviewScaffoldRunner({ dependencies = {} } = {}) {
       throw error;
     }
     const before = await dependencies.captureFinancialAuthority({ caseDefinition, phase: 'before' });
+    const trajectory = [];
     const review = await invokePlanReviewGraph({
       userId: String(fixture.userId || 'evaluation-user'),
       profileId: String(fixture.profileId || fixture.context.profile.profileId || 'evaluation-profile'),
@@ -32,6 +33,10 @@ export function createPlanReviewScaffoldRunner({ dependencies = {} } = {}) {
         loadPlanReviewContext: async () => fixture.context,
         persistAgentRun: undefined,
         modelPlannerEnabled: false,
+        onNodeProgress: async payload => {
+          if (payload.event && typeof payload.event.type === 'string') trajectory.push(payload.event);
+          await dependencies.onNodeProgress?.(payload);
+        },
       },
     });
     const after = await dependencies.captureFinancialAuthority({ caseDefinition, phase: 'after' });
@@ -48,7 +53,7 @@ export function createPlanReviewScaffoldRunner({ dependencies = {} } = {}) {
       : null;
     return {
       result: review,
-      trajectory: review.trajectory || [],
+      trajectory,
       financialAuthorityDelta,
       authorityMeasurementState,
       authorityBeforeFingerprint: beforeFingerprint,

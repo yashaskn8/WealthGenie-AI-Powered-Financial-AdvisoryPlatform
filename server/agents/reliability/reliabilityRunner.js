@@ -19,7 +19,7 @@ export function runReliabilityScenario(scenario, { clock = new VirtualClock(), f
   const outcomeGrade = gradeOutcome({ scenario, environment });
   const failures = localizeFailures({ scenario, processGrade, outcomeGrade, trajectory });
   const metrics = collectReliabilityMetrics({ scenario, environment, trajectory, processGrade, outcomeGrade });
-  const scorecard = buildScorecard({ scenario, processGrade, outcomeGrade, failures, metrics });
+  const scorecard = buildScorecard({ scenario, processGrade, outcomeGrade, failures, metrics, trajectoryHash: trajectory.contentHash });
   return Object.freeze({ scenarioId: scenario.id, scenario, trajectory, environment: environment.state, constraints, processGrade, outcomeGrade, failures, metrics, scorecard });
 }
 

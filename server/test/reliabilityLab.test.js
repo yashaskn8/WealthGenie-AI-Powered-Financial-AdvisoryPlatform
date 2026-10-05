@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   FaultInjector,
+  CANDIDATE_RELIABILITY_SCENARIOS,
   RELIABILITY_SCENARIOS,
   VirtualClock,
   createConstraintRegistry,
@@ -14,6 +15,7 @@ import {
   runCounterfactual,
   runReliabilityScenario,
   runReliabilitySuite,
+  runCandidateReliabilitySuite,
   assertReliabilityHoldoutIsolation,
   assertReliabilityPromotionSafe,
   assertDeterministicReplay,
@@ -146,12 +148,90 @@ test('evolution promotion consumes aggregate reliability gates and remains produ
   const suite = runReliabilitySuite(RELIABILITY_SCENARIOS.slice(0, 3));
   const holdout = evaluateReliabilityHoldout({ scenarios: RELIABILITY_SCENARIOS.slice(3, 5), runner: scenario => runReliabilityScenario(scenario) });
   assert.equal(holdout.passed, true);
-  const evaluation = buildReliabilityPromotionEvaluation({ scorecards: suite.scorecards });
+  const evaluation = buildReliabilityPromotionEvaluation({
+    scorecards: suite.scorecards,
+    expectedScenarioIds: suite.scorecards.map(card => card.scenarioId),
+  });
   assert.equal(evaluation.passed, true);
   assert.equal(evaluation.financialAuthorityDelta, 0);
   assert.equal(evaluation.appliedToProduction, false);
   assert.doesNotThrow(() => assertReliabilityPromotionSafe(evaluation));
   assert.throws(() => assertReliabilityPromotionSafe({ ...evaluation, financialAuthorityDelta: 1 }), /failed closed/i);
+});
+
+test('reliability promotion fails closed when no candidate scorecards were evaluated', () => {
+  const evaluation = buildReliabilityPromotionEvaluation({ scorecards: [], expectedScenarioIds: ['required-scenario'] });
+  assert.equal(evaluation.passed, false);
+  assert.throws(
+    () => assertReliabilityPromotionSafe(evaluation),
+    error => error.code === 'RELIABILITY_PROMOTION_GATE_FAILED',
+  );
+});
+
+test('reliability promotion requires complete, measured evidence for every expected scenario', () => {
+  const suite = runReliabilitySuite(RELIABILITY_SCENARIOS.slice(0, 2));
+  const expectedScenarioIds = suite.scorecards.map(card => card.scenarioId);
+  const evaluate = scorecards => buildReliabilityPromotionEvaluation({ scorecards, expectedScenarioIds });
+
+  const booleanOnly = suite.scorecards.map(card => ({
+    scenarioId: card.scenarioId,
+    family: card.family,
+    hardGatePassed: true,
+    passed: true,
+  }));
+  assert.equal(evaluate(booleanOnly).passed, false, 'boolean assertions without measured evidence cannot qualify');
+
+  const missingAuthority = suite.scorecards.map(({ authorityDelta: _authorityDelta, ...card }) => card);
+  assert.equal(evaluate(missingAuthority).passed, false, 'an omitted authority measurement cannot default to zero');
+
+  const missingExecutionEvidence = suite.scorecards.map(card => ({
+    ...card,
+    metrics: { ...card.metrics, eventCount: 0 },
+  }));
+  assert.equal(evaluate(missingExecutionEvidence).passed, false, 'zero-event scenarios cannot qualify');
+
+  assert.equal(evaluate(suite.scorecards.slice(0, 1)).passed, false, 'missing expected scenarios cannot qualify');
+  assert.equal(evaluate([...suite.scorecards, suite.scorecards[0]]).passed, false, 'duplicate scenarios cannot qualify');
+  assert.equal(evaluate([...suite.scorecards, { ...suite.scorecards[0], scenarioId: 'unexpected' }]).passed, false);
+  assert.equal(evaluate([null, suite.scorecards[1]]).passed, false, 'malformed cards must fail closed');
+});
+
+test('candidate-bound promotion requires an executed trajectory and measured authority evidence', async () => {
+  const scenario = CANDIDATE_RELIABILITY_SCENARIOS[0];
+  const expectedScenarioIds = [scenario.id];
+  const suite = await runCandidateReliabilitySuite([scenario], {
+    candidate: {
+      contentHash: 'a'.repeat(64),
+      promptBundleHash: 'b'.repeat(64),
+      safeModelRoleRouting: { planner: 'PLANNER' },
+    },
+    candidateCaseFactory: async () => ({ fixture: { context: { profile: { riskTolerance: 'LOW' } } } }),
+    runner: async () => ({
+      trajectory: [{ kind: 'PLAN_REVIEW_STARTED' }],
+      authorityMeasurementState: 'MEASURED',
+      financialAuthorityDelta: 0,
+    }),
+  });
+  const evaluation = buildReliabilityPromotionEvaluation({
+    scorecards: suite.scorecards,
+    candidateReliabilityCoverageComplete: suite.candidateReliabilityCoverageComplete,
+    expectedScenarioIds,
+  });
+  assert.equal(suite.scorecards[0].candidateExecuted, true);
+  assert.equal(suite.scorecards[0].candidateTrajectoryEventCount, 1);
+  assert.equal(evaluation.passed, true);
+
+  const unmeasured = suite.scorecards.map(card => ({
+    ...card,
+    candidateAuthorityMeasured: false,
+    candidateTrajectoryEventCount: 0,
+    metrics: { ...card.metrics, eventCount: 0 },
+  }));
+  assert.equal(buildReliabilityPromotionEvaluation({
+    scorecards: unmeasured,
+    candidateReliabilityCoverageComplete: true,
+    expectedScenarioIds,
+  }).passed, false, 'coverage booleans cannot replace candidate execution evidence');
 });
 
 test('benchmark reports length buckets and deterministic replay metrics', () => {

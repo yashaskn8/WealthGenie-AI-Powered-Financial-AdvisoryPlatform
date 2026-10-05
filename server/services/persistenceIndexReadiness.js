@@ -10,6 +10,13 @@ import Recommendation from '../models/Recommendation.js';
 import RecommendationAllocationRevision from '../models/RecommendationAllocationRevision.js';
 import RecommendationState from '../models/RecommendationState.js';
 import FinancialProfileState from '../models/FinancialProfileState.js';
+import User from '../models/User.js';
+import UserIntentMandate from '../models/UserIntentMandate.js';
+import PasskeyCredential from '../models/PasskeyCredential.js';
+import MandateApprovalChallenge from '../models/MandateApprovalChallenge.js';
+import PasskeyRegistrationChallenge from '../models/PasskeyRegistrationChallenge.js';
+import ExecutionReceipt from '../models/ExecutionReceipt.js';
+import AuthorizedExecutionAttempt from '../models/AuthorizedExecutionAttempt.js';
 import { createError } from '../middleware/errorHandler.js';
 
 export const PHASE2_INDEX_MODELS = Object.freeze([
@@ -23,6 +30,24 @@ export const PHASE2_INDEX_MODELS = Object.freeze([
   AuditChainHead,
   Goal,
   ConversationHistory,
+  User,
+]);
+
+// Unique identities for verifiable authorization and its durable receipts.
+// These are deployed through the explicit Phase 2 migration and checked
+// read-only at startup when verifiable actions are enabled.
+export const AUTHORIZATION_INDEX_MODELS = Object.freeze([
+  UserIntentMandate,
+  PasskeyCredential,
+  MandateApprovalChallenge,
+  PasskeyRegistrationChallenge,
+  ExecutionReceipt,
+  AuthorizedExecutionAttempt,
+]);
+
+export const MIGRATION_INDEX_MODELS = Object.freeze([
+  ...PHASE2_INDEX_MODELS,
+  ...AUTHORIZATION_INDEX_MODELS,
 ]);
 
 // These schema-declared unique indexes fence every durable market-data upsert.
@@ -73,11 +98,12 @@ function indexMatches(actual, required) {
 }
 
 function indexReadinessError(missing, scope = 'financial') {
-  const subject = scope === 'market-data' ? 'market-data' : 'financial';
+  const subject = ['market-data', 'authorization', 'persistence'].includes(scope) ? scope : 'financial';
+  const displaySubject = subject === 'market-data' ? 'Market data' : subject[0].toUpperCase() + subject.slice(1);
   return createError(
     503,
     `Required ${subject} persistence indexes are unavailable.`,
-    `${subject === 'market-data' ? 'Market data' : 'Financial data'} services are temporarily unavailable.`,
+    `${displaySubject} services are temporarily unavailable.`,
     { code: 'PERSISTENCE_INDEXES_UNAVAILABLE', details: { missing } },
   );
 }
@@ -137,8 +163,13 @@ export async function verifyMarketDataPersistenceIndexes({ models = MARKET_DATA_
   return verifyPersistenceIndexes({ models, force, scope: 'market-data' });
 }
 
+/** Read-only startup gate for durable verifiable-authorization identities. */
+export async function verifyAuthorizationPersistenceIndexes({ models = AUTHORIZATION_INDEX_MODELS, force = true } = {}) {
+  return verifyPersistenceIndexes({ models, force, scope: 'authorization' });
+}
+
 /** Explicit migration entry point. Never call from an HTTP request or app startup. */
-export async function migratePersistenceIndexes({ models = PHASE2_INDEX_MODELS } = {}) {
+export async function migratePersistenceIndexes({ models = MIGRATION_INDEX_MODELS } = {}) {
   const idempotencyIndexes = await IdempotencyKey.collection.indexes().catch(error => {
     if (error.code === 26 || error.codeName === 'NamespaceNotFound') return [];
     throw error;
@@ -159,7 +190,7 @@ export async function migratePersistenceIndexes({ models = PHASE2_INDEX_MODELS }
     }
     await model.createIndexes();
   }
-  return verifyPersistenceIndexes({ models, force: true });
+  return verifyPersistenceIndexes({ models, force: true, scope: 'persistence' });
 }
 
 function migrationIndexOptions(required) {

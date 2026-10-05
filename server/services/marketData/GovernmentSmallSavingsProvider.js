@@ -34,7 +34,7 @@ function parseIndianDate(value) {
   if (!match) return null;
   const iso = `${match[3]}-${match[2]}-${match[1]}`;
   const parsed = new Date(`${iso}T00:00:00.000Z`);
-  return Number.isNaN(parsed.getTime()) ? null : iso;
+  return Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== iso ? null : iso;
 }
 
 function decodeHtml(value) {
@@ -83,7 +83,12 @@ export function parseIndiaPostSavingsBundle(bundleText, {
   const fetchedDate = new Date(fetchedAt);
   const intervalEnd = new Date(`${effectiveTo}T23:59:59.999Z`);
   const intervalStart = new Date(`${effectiveFrom}T00:00:00.000Z`);
-  const nowDate = now instanceof Date ? now : new Date(now);
+  const nowDate = now instanceof Date ? new Date(now.getTime()) : new Date(now);
+  if (!Number.isFinite(fetchedDate.getTime())
+      || !Number.isFinite(nowDate.getTime())
+      || fetchedDate > nowDate) {
+    throw new Error('INDIA_POST_SCHEMA_MISMATCH:timestamps');
+  }
   const freshnessStatus = nowDate >= intervalStart && nowDate <= intervalEnd
     ? FRESHNESS.FRESH
     : FRESHNESS.STALE;
@@ -93,8 +98,9 @@ export function parseIndiaPostSavingsBundle(bundleText, {
   for (const row of rows) {
     const identity = SCHEME_IDENTITIES[String(row?.instrument || '').trim()];
     if (!identity) continue;
-    const rateMatch = String(row?.interestRate || '').match(/(\d+(?:\.\d+)?)\s*%/);
-    const value = rateMatch ? Number(rateMatch[1]) : null;
+    const rateMatch = String(row?.interestRate || '').trim().match(/^([+-]?\d+(?:\.\d+)?)\s*%$/);
+    const parsedRate = rateMatch ? Number(rateMatch[1]) : null;
+    const value = Number.isFinite(parsedRate) && parsedRate > 0 ? parsedRate : null;
     const canonicalProductId = `government:india-post:${identity.id}`;
     const fact = createMarketFact({
       kind: FACT_KINDS.SCHEME_INTEREST_RATE,

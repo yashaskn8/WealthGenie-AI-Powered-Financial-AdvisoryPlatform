@@ -1,7 +1,8 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createPromptBundle, verifyPromptBundleHash } from './promptBundle.js';
 import { scanPromptBundleSecurity } from './candidateSecurity.js';
 import { validateMutationSurfaces } from './evolutionSurfaceRegistry.js';
@@ -11,6 +12,7 @@ const MAX_BRIDGE_BYTES = 2 * 1024 * 1024;
 const PRIVATE_DATA_PATTERN = /email|phone|income|salary|monthlytakehome|bankaccount|password|jwt|rawprofile|userid|user_id|holdout|answerkey|secret|privatekey/i;
 const FORBIDDEN_OUTPUT_KEY_PATTERN = /sourcecode|shellcommand|evaluator|holdout|promotionpolicy|reliabilityhardgate|financialengine|taxrules|allocation|authorization|deployment|sandboxpolicy|script|executable|code/i;
 const SAFE_PYTHON_EXECUTABLE = /^(?:python|python3|py)(?:\.exe)?$/i;
+const TRUSTED_ML_SERVICE_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), '../../../ml-service');
 const MUTABLE_PROPOSAL_FIELDS = Object.freeze({
   plannerInstruction: 'promptBundle.plannerInstruction',
   synthesisInstruction: 'promptBundle.synthesisInstruction',
@@ -19,10 +21,10 @@ const MUTABLE_PROPOSAL_FIELDS = Object.freeze({
   safeModelRoleRouting: 'safeModelRoleRouting',
 });
 
-export function buildGepaSubprocessEnv({ provider = 'fixture', sourceEnv = process.env, pythonWorkingDirectory } = {}) {
+export function buildGepaSubprocessEnv({ provider = 'fixture', sourceEnv = process.env, pythonWorkingDirectory, pythonTempRoot } = {}) {
   const environment = {};
   const inheritedKeys = [
-    'PATH', 'Path', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'HOME', 'USERPROFILE',
+    'PATH', 'Path', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE',
     'APPDATA', 'LOCALAPPDATA', 'VIRTUAL_ENV', 'PYTHONHOME', 'LANG', 'LC_ALL',
     'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE',
   ];
@@ -30,6 +32,14 @@ export function buildGepaSubprocessEnv({ provider = 'fixture', sourceEnv = proce
     if (typeof sourceEnv[key] === 'string') environment[key] = sourceEnv[key];
   }
   environment.PYTHONPATH = pythonWorkingDirectory;
+  if (pythonTempRoot) {
+    // Node and Python have different TEMP/TMP precedence on some platforms.
+    // Point all supported names at the same root so the Python CLI enforces
+    // the exact private workspace created for this bridge request.
+    environment.TMPDIR = pythonTempRoot;
+    environment.TEMP = pythonTempRoot;
+    environment.TMP = pythonTempRoot;
+  }
   if (provider === 'dspy') {
     const modelApiKey = sourceEnv.AGENT_EVOLUTION_MODEL_API_KEY || sourceEnv.DSPY_LM_API_KEY;
     if (modelApiKey) environment.AGENT_EVOLUTION_MODEL_API_KEY = modelApiKey;
@@ -179,7 +189,7 @@ export function validateGepaProposal(rawProposal, { basePromptBundle, allowedMut
   });
 }
 
-async function runPythonBridge({ inputPath, outputPath, provider, pythonExecutable, pythonWorkingDirectory, timeoutMs }) {
+async function runPythonBridge({ inputPath, outputPath, provider, pythonExecutable, pythonWorkingDirectory, pythonTempRoot, timeoutMs }) {
   if (!SAFE_PYTHON_EXECUTABLE.test(pythonExecutable)) throw new Error('Only the python/python3/py executables are allowed for the GEPA bridge.');
   const baseArguments = ['-m', 'agent_evolution.cli', 'run', '--input', inputPath, '--output', outputPath, '--provider', provider];
   const invocations = [{ executable: pythonExecutable, arguments: baseArguments }];
@@ -191,21 +201,31 @@ async function runPythonBridge({ inputPath, outputPath, provider, pythonExecutab
       cwd: pythonWorkingDirectory,
       shell: false,
       windowsHide: true,
-      env: buildGepaSubprocessEnv({ provider, pythonWorkingDirectory }),
+      env: buildGepaSubprocessEnv({ provider, pythonWorkingDirectory, pythonTempRoot }),
     });
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    let spawnError = null;
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill();
-      const error = new Error('GEPA bridge timed out.');
-      error.code = 'GEPA_BRIDGE_TIMEOUT';
-      rejectPromise(error);
     }, timeoutMs);
     child.stdout.on('data', chunk => { stdout = `${stdout}${chunk}`.slice(-MAX_BRIDGE_BYTES); });
     child.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-MAX_BRIDGE_BYTES); });
-    child.on('error', error => { clearTimeout(timer); rejectPromise(error); });
+    child.on('error', error => { spawnError = error; });
     child.on('close', code => {
       clearTimeout(timer);
+      if (timedOut) {
+        const error = new Error('GEPA bridge timed out and the child process has exited.');
+        error.code = 'GEPA_BRIDGE_TIMEOUT';
+        rejectPromise(error);
+        return;
+      }
+      if (spawnError) {
+        rejectPromise(spawnError);
+        return;
+      }
       if (code !== 0) {
         const error = new Error(`GEPA bridge failed with exit code ${code}.`);
         error.code = 'GEPA_BRIDGE_FAILED';
@@ -227,14 +247,28 @@ async function runPythonBridge({ inputPath, outputPath, provider, pythonExecutab
   throw new Error('No approved Python executable was available for the GEPA bridge.');
 }
 
-export async function runGepaProposalBridge({ basePromptBundle, allowedMutationSurfaces, trainCases = [], validationCases = [], failureFeedback = [], budget = {}, optimizerConfig = {}, pythonExecutable = 'python', pythonWorkingDirectory = resolve(process.cwd(), 'ml-service'), timeoutMs = 60000 } = {}) {
+export async function runGepaProposalBridge({ basePromptBundle, allowedMutationSurfaces, trainCases = [], validationCases = [], failureFeedback = [], budget = {}, optimizerConfig = {}, pythonExecutable = 'python', pythonWorkingDirectory = TRUSTED_ML_SERVICE_DIRECTORY, timeoutMs = 60000 } = {}) {
+  let resolvedPythonWorkingDirectory;
+  try {
+    const [requestedDirectory, trustedDirectory] = await Promise.all([
+      realpath(resolve(pythonWorkingDirectory)),
+      realpath(TRUSTED_ML_SERVICE_DIRECTORY),
+    ]);
+    if (requestedDirectory !== trustedDirectory) throw new Error('directory mismatch');
+    resolvedPythonWorkingDirectory = trustedDirectory;
+  } catch {
+    const error = new Error('GEPA bridge Python working directory must be the repository ML service.');
+    error.code = 'GEPA_BRIDGE_UNTRUSTED_WORKING_DIRECTORY';
+    throw error;
+  }
   const input = createGepaBridgeInput({ basePromptBundle, allowedMutationSurfaces, trainCases, validationCases, failureFeedback, budget, optimizerConfig });
-  const temporaryDirectory = await mkdtemp(join(tmpdir(), 'wealthgenie-gepa-'));
+  const pythonTempRoot = tmpdir();
+  const temporaryDirectory = await mkdtemp(join(pythonTempRoot, 'wealthgenie-gepa-'));
   const inputPath = join(temporaryDirectory, 'input.json');
   const outputPath = join(temporaryDirectory, 'output.json');
   try {
     await writeFile(inputPath, JSON.stringify(input), { encoding: 'utf8', flag: 'wx' });
-    await runPythonBridge({ inputPath, outputPath, provider: input.optimizer.provider, pythonExecutable, pythonWorkingDirectory, timeoutMs });
+    await runPythonBridge({ inputPath, outputPath, provider: input.optimizer.provider, pythonExecutable, pythonWorkingDirectory: resolvedPythonWorkingDirectory, pythonTempRoot, timeoutMs });
     const output = JSON.parse(await readFile(outputPath, { encoding: 'utf8' }));
     if (!Array.isArray(output) || output.length > input.budget.max_candidates) throw new Error('GEPA bridge output must be a bounded proposal array.');
     return Object.freeze(output.map(proposal => validateGepaProposal(proposal, input)));

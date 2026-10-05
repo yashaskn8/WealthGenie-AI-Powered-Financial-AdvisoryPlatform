@@ -1,8 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import IdempotencyKey from '../models/IdempotencyKey.js';
+import User from '../models/User.js';
+import UserIntentMandate from '../models/UserIntentMandate.js';
+import PasskeyCredential from '../models/PasskeyCredential.js';
+import MandateApprovalChallenge from '../models/MandateApprovalChallenge.js';
+import ExecutionReceipt from '../models/ExecutionReceipt.js';
+import AuthorizedExecutionAttempt from '../models/AuthorizedExecutionAttempt.js';
 import {
+  AUTHORIZATION_INDEX_MODELS,
+  MIGRATION_INDEX_MODELS,
   migratePersistenceIndexes,
+  verifyAuthorizationPersistenceIndexes,
   verifyPersistenceIndexes,
 } from '../services/persistenceIndexReadiness.js';
 
@@ -60,6 +69,46 @@ test('runtime readiness rejects the obsolete idempotency TTL index without remov
     IdempotencyKey.collection.indexes = originalIndexes;
     IdempotencyKey.collection.dropIndex = originalDropIndex;
   }
+});
+
+test('explicit Phase 2 migration includes user and verifiable-authorization identity indexes', () => {
+  const expected = new Map([
+    [User, ['email']],
+    [UserIntentMandate, ['mandateId', 'nonce']],
+    [PasskeyCredential, ['credentialId']],
+    [MandateApprovalChallenge, ['mandateId']],
+    [ExecutionReceipt, ['receiptId', 'mandateId']],
+    [AuthorizedExecutionAttempt, ['executionId', 'mandateId']],
+  ]);
+
+  for (const [model, fields] of expected) {
+    assert.ok(MIGRATION_INDEX_MODELS.includes(model), `${model.modelName} must be explicitly migrated`);
+    for (const field of fields) {
+      const hasUniqueIndex = model.schema.indexes().some(([key, options]) => (
+        options.unique === true && Object.keys(key).length === 1 && key[field] === 1
+      ));
+      assert.ok(hasUniqueIndex, `${model.modelName}.${field} must have a unique schema index`);
+    }
+  }
+
+  for (const model of AUTHORIZATION_INDEX_MODELS) {
+    assert.ok(MIGRATION_INDEX_MODELS.includes(model), `${model.modelName} authorization indexes must be in migration`);
+  }
+});
+
+test('authorization readiness fails closed and performs no index DDL when required uniqueness is missing', async () => {
+  const model = fakeModel();
+  let ddlCalls = 0;
+  model.collection.createIndex = async () => { ddlCalls += 1; };
+
+  await assert.rejects(
+    verifyAuthorizationPersistenceIndexes({ models: [model], force: true }),
+    error => error.status === 503
+      && error.code === 'PERSISTENCE_INDEXES_UNAVAILABLE'
+      && error.clientMessage.startsWith('Authorization services')
+      && error.clientDetails.missing.includes('fixture_records:unique_owner_resource'),
+  );
+  assert.equal(ddlCalls, 0);
 });
 
 test('explicit migration removes the obsolete idempotency TTL and creates required schema indexes', async () => {

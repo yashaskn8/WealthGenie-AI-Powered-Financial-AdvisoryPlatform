@@ -43,7 +43,7 @@ export function localizeFailures({ scenario, processGrade, outcomeGrade, traject
   });
 }
 
-export function buildScorecard({ scenario, processGrade, outcomeGrade, failures, metrics }) {
+export function buildScorecard({ scenario, processGrade, outcomeGrade, failures, metrics, trajectoryHash }) {
   const criticalFailures = failures.filter(item => ['FINANCIAL_AUTHORITY_CHANGED', 'COMPLETED_AFTER_CANCEL', 'SAFETY_NOT_CONTAINED'].includes(item.code));
   return Object.freeze({
     scenarioId: scenario.id,
@@ -55,6 +55,7 @@ export function buildScorecard({ scenario, processGrade, outcomeGrade, failures,
     criticalFailures: criticalFailures.map(item => item.code),
     failureCount: failures.length,
     authorityDelta: metrics.authorityDelta,
+    trajectoryHash,
     metrics: { ...metrics },
   });
 }

@@ -31,6 +31,16 @@ test('GEPA Node/Python bridge runs the deterministic provider and revalidates pr
   assert.match(proposals[0].promptBundle.plannerInstruction, /minimum safe read-only/);
 });
 
+test('GEPA bridge rejects a caller-selected Python import directory outside the repository ML service', async () => {
+  await assert.rejects(
+    runGepaProposalBridge({
+      ...bridgeOptions,
+      pythonWorkingDirectory: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'),
+    }),
+    error => error.code === 'GEPA_BRIDGE_UNTRUSTED_WORKING_DIRECTORY',
+  );
+});
+
 test('GEPA bridge rejects private or sealed optimizer inputs', () => {
   assert.throws(() => createGepaBridgeInput({
     ...bridgeOptions,
@@ -60,6 +70,8 @@ test('GEPA Python bridge receives only runtime variables and the selected provid
   const sourceEnv = {
     PATH: 'safe-path',
     SystemRoot: 'C:\\Windows',
+    TMPDIR: 'C:\\Users\\test\\AppData\\Local\\Temp',
+    TEMP: 'C:\\Users\\test\\AppData\\Local\\Temp',
     AGENT_EVOLUTION_MODEL_API_KEY: 'selected-test-key',
     AWS_SECRET_ACCESS_KEY: 'unrelated-test-secret',
     NVIDIA_API_KEY: 'unrelated-provider-key',
@@ -67,6 +79,8 @@ test('GEPA Python bridge receives only runtime variables and the selected provid
   const fixtureEnv = buildGepaSubprocessEnv({ provider: 'fixture', sourceEnv, pythonWorkingDirectory: 'ml-service' });
   assert.equal(fixtureEnv.PATH, 'safe-path');
   assert.equal(fixtureEnv.PYTHONPATH, 'ml-service');
+  assert.equal(fixtureEnv.TMPDIR, sourceEnv.TMPDIR);
+  assert.equal(fixtureEnv.TEMP, sourceEnv.TEMP);
   assert.equal(fixtureEnv.AGENT_EVOLUTION_MODEL_API_KEY, undefined);
   assert.equal(fixtureEnv.AWS_SECRET_ACCESS_KEY, undefined);
   assert.equal(fixtureEnv.NVIDIA_API_KEY, undefined);
@@ -75,4 +89,14 @@ test('GEPA Python bridge receives only runtime variables and the selected provid
   assert.equal(liveEnv.AGENT_EVOLUTION_MODEL_API_KEY, 'selected-test-key');
   assert.equal(liveEnv.AWS_SECRET_ACCESS_KEY, undefined);
   assert.equal(liveEnv.NVIDIA_API_KEY, undefined);
+
+  const isolatedEnv = buildGepaSubprocessEnv({
+    provider: 'fixture',
+    sourceEnv: { PATH: 'safe-path', TEMP: 'different-temp', TMP: 'other-temp' },
+    pythonWorkingDirectory: 'ml-service',
+    pythonTempRoot: 'bridge-temp-root',
+  });
+  assert.equal(isolatedEnv.TMPDIR, 'bridge-temp-root');
+  assert.equal(isolatedEnv.TEMP, 'bridge-temp-root');
+  assert.equal(isolatedEnv.TMP, 'bridge-temp-root');
 });

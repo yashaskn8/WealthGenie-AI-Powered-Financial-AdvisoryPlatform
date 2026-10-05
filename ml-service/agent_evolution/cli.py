@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import tempfile
 from pathlib import Path
 
 from .gepa_optimizer import GEPA_VERSION
@@ -12,8 +13,16 @@ from .schemas import validate_gepa_input, validate_proposal_output
 
 def _safe_path(value: str, *, must_exist: bool) -> Path:
     path = Path(value).resolve()
-    lowered = str(path).lower()
-    if any(token in lowered for token in ('.env', 'production', 'mongo', 'credential', 'secret')):
+    temporary_root = Path(tempfile.gettempdir()).resolve()
+    try:
+        relative = path.relative_to(temporary_root)
+    except ValueError as error:
+        raise ValueError('GEPA CLI path is not an approved sanitized workspace path') from error
+
+    expected_name = 'input.json' if must_exist else 'output.json'
+    if (len(relative.parts) != 2
+            or not relative.parts[0].startswith('wealthgenie-gepa-')
+            or path.name != expected_name):
         raise ValueError('GEPA CLI path is not an approved sanitized workspace path')
     if must_exist and not path.is_file():
         raise FileNotFoundError(str(path))

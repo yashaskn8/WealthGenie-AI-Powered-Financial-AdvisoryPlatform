@@ -142,22 +142,28 @@ test('passkey registration persists verifier-reported device and backup state', 
   };
   let createdCredential;
   let consumed = false;
+  const transactionSession = {};
   const dependencies = {
+    async authorizationTransaction(operation) { return operation(transactionSession); },
     challengeModel: {
       findOne() {
         return { sort: () => ({ lean: async () => challenge }) };
       },
-      async findOneAndUpdate(filter) {
+      async findOneAndUpdate(filter, _update, options) {
         assert.equal(filter._id, challenge._id);
+        assert.equal(filter.userId, 'user-1');
         assert.equal(filter.consumedAt, null);
+        assert.deepEqual(filter.$expr, { $gt: ['$expiresAt', '$$NOW'] });
+        assert.equal(options.session, transactionSession);
         consumed = true;
         return { ...challenge, consumedAt: new Date() };
       },
     },
     credentialModel: {
-      async create(value) {
-        createdCredential = value;
-        return { ...value, createdAt: new Date() };
+      async create(values, options) {
+        assert.equal(options.session, transactionSession);
+        createdCredential = values[0];
+        return [{ ...createdCredential, createdAt: new Date() }];
       },
     },
     approvalProvider: {
@@ -178,6 +184,116 @@ test('passkey registration persists verifier-reported device and backup state', 
   assert.equal(createdCredential.deviceType, 'multiDevice');
   assert.equal(createdCredential.backedUp, true);
   assert.equal(consumed, true);
+});
+
+test('passkey registration expiry is rechecked atomically after WebAuthn verification', async () => {
+  const challenge = {
+    _id: 'registration-challenge-expired',
+    userId: 'user-1',
+    challenge: 'expected-registration-challenge',
+    expiresAt: new Date(Date.now() + 60_000),
+    consumedAt: null,
+  };
+  let finalFilter;
+  let credentialWrite = false;
+  let transactionCalls = 0;
+  const session = {};
+
+  await assert.rejects(() => verifyPasskeyRegistration({
+    userId: 'user-1',
+    response: {},
+    dependencies: {
+      async authorizationTransaction(operation) {
+        transactionCalls += 1;
+        return operation(session);
+      },
+      challengeModel: {
+        findOne: () => ({ sort: () => ({ lean: async () => challenge }) }),
+        async findOneAndUpdate(filter, _update, options) {
+          finalFilter = filter;
+          assert.equal(options.session, session);
+          challenge.expiresAt = new Date(0);
+          return null;
+        },
+      },
+      credentialModel: {
+        async create() { credentialWrite = true; return []; },
+      },
+      approvalProvider: {
+        name: 'WEBAUTHN',
+        async verifyRegistration() {
+          return {
+            credential: { id: 'Y3JlZGVudGlhbC0y', publicKey: Buffer.from('public-key'), counter: 0 },
+            credentialDeviceType: 'singleDevice',
+            credentialBackedUp: false,
+          };
+        },
+      },
+    },
+  }), error => error.code === 'TRUSTED_APPROVAL_INVALID');
+
+  assert.deepEqual(finalFilter.$expr, { $gt: ['$expiresAt', '$$NOW'] });
+  assert.equal(transactionCalls, 1);
+  assert.equal(credentialWrite, false);
+});
+
+test('credential persistence failure aborts the passkey challenge consumption transaction', async () => {
+  const challenge = {
+    _id: 'registration-challenge-persistence-failure',
+    userId: 'user-1',
+    challenge: 'expected-registration-challenge',
+    expiresAt: new Date(Date.now() + 60_000),
+    consumedAt: null,
+  };
+  const session = {};
+  let transactionEntered = false;
+  let credentialWriteSession;
+
+  await assert.rejects(() => verifyPasskeyRegistration({
+    userId: 'user-1',
+    response: {},
+    dependencies: {
+      async authorizationTransaction(operation) {
+        transactionEntered = true;
+        const consumedBefore = challenge.consumedAt;
+        try {
+          return await operation(session);
+        } catch (error) {
+          challenge.consumedAt = consumedBefore;
+          throw error;
+        }
+      },
+      challengeModel: {
+        findOne: () => ({ sort: () => ({ lean: async () => challenge }) }),
+        async findOneAndUpdate(filter, update, options) {
+          assert.equal(options.session, session);
+          assert.deepEqual(filter.$expr, { $gt: ['$expiresAt', '$$NOW'] });
+          challenge.consumedAt = update.$set.consumedAt;
+          return challenge;
+        },
+      },
+      credentialModel: {
+        async create(_documents, options) {
+          credentialWriteSession = options.session;
+          throw new Error('injected credential persistence failure');
+        },
+      },
+      approvalProvider: {
+        name: 'WEBAUTHN',
+        async verifyRegistration() {
+          return {
+            credential: { id: 'Y3JlZGVudGlhbC0z', publicKey: Buffer.from('public-key'), counter: 0 },
+            credentialDeviceType: 'singleDevice',
+            credentialBackedUp: false,
+          };
+        },
+      },
+    },
+  }), /injected credential persistence failure/);
+
+  assert.equal(transactionEntered, true);
+  assert.equal(credentialWriteSession, session);
+  assert.equal(challenge.consumedAt, null);
 });
 
 test('passkey registration fails closed when verifier backup state is incomplete', async () => {

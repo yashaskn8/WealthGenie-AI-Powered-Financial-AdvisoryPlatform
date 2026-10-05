@@ -55,6 +55,7 @@ test('transaction request paths verify migrated indexes without running DDL', ()
     'server/middleware/idempotency.js',
     'server/services/advisoryPersistence.js',
     'server/services/chatSessionStore.js',
+    'server/services/authorizationPersistence.js',
     'server/routes/goals.js',
   ];
   for (const file of sourceFiles) {

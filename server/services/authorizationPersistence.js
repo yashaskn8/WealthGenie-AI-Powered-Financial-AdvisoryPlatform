@@ -1,22 +1,12 @@
-import UserIntentMandate from '../models/UserIntentMandate.js';
-import PasskeyCredential from '../models/PasskeyCredential.js';
-import MandateApprovalChallenge from '../models/MandateApprovalChallenge.js';
-import ExecutionReceipt from '../models/ExecutionReceipt.js';
-import PasskeyRegistrationChallenge from '../models/PasskeyRegistrationChallenge.js';
-import AuthorizedExecutionAttempt from '../models/AuthorizedExecutionAttempt.js';
+import { verifyAuthorizationPersistenceIndexes } from './persistenceIndexReadiness.js';
 
 let ready = null;
 
 export async function warmAuthorizationPersistence() {
   if (!ready) {
-    ready = Promise.all([
-      UserIntentMandate.init(),
-      PasskeyCredential.init(),
-      MandateApprovalChallenge.init(),
-      ExecutionReceipt.init(),
-      PasskeyRegistrationChallenge.init(),
-      AuthorizedExecutionAttempt.init(),
-    ]).catch(error => {
+    // Do not run index DDL during application startup. The explicit migration
+    // provisions schema indexes; runtime only verifies durable uniqueness.
+    ready = verifyAuthorizationPersistenceIndexes({ force: true }).catch(error => {
       ready = null;
       throw error;
     });

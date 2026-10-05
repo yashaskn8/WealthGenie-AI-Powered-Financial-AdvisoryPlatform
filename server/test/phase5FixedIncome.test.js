@@ -17,7 +17,7 @@ import {
   parseRbiOperationalGuidelines,
   RBI_FRSB_NOTIFICATION_URL,
 } from '../services/marketData/RbiFloatingRateSavingsBondProvider.js';
-import { PROVIDERS } from '../services/marketData/contracts.js';
+import { AVAILABILITY, PROVIDERS } from '../services/marketData/contracts.js';
 
 const NOW = new Date('2026-09-08T12:00:00.000Z');
 const ROWS = [
@@ -71,6 +71,46 @@ test('official India Post parser preserves rate semantics and effective interval
   assert.equal(ppf.source.provider, 'GOVERNMENT_OF_INDIA');
 });
 
+test('official India Post parser never converts negative or malformed rates into positive facts', () => {
+  const rows = ROWS.map(row => row.instrument === 'Public Provident Fund Scheme'
+    ? { ...row, interestRate: '-1.5%' }
+    : row);
+  const snapshot = parseIndiaPostSavingsBundle(governmentBundle('01.07.2026', '30.09.2026', rows), {
+    fetchedAt: NOW.toISOString(), now: NOW,
+  });
+  const ppf = snapshot.facts.find(fact => fact.canonicalProductId.endsWith(':ppf'));
+
+  assert.equal(snapshot.status, 'PARTIAL');
+  assert.equal(ppf.value, null);
+  assert.equal(ppf.availabilityStatus, AVAILABILITY.UNAVAILABLE);
+  assert.equal(compareVerifiedFixedIncomeProducts({
+    parentInstrumentId: 'ppf', snapshot, profile: canonicalProfile(),
+  }).products.length, 0);
+
+  const malformedRows = ROWS.map(row => row.instrument === 'Public Provident Fund Scheme'
+    ? { ...row, interestRate: 'approx 7.1%' }
+    : row);
+  const malformed = parseIndiaPostSavingsBundle(governmentBundle('01.07.2026', '30.09.2026', malformedRows), {
+    fetchedAt: NOW.toISOString(), now: NOW,
+  });
+  const malformedPpf = malformed.facts.find(fact => fact.canonicalProductId.endsWith(':ppf'));
+  assert.equal(malformedPpf.value, null);
+  assert.equal(malformedPpf.availabilityStatus, AVAILABILITY.UNAVAILABLE);
+
+  for (const invalidRate of ['7.1%garbage', '7.1% approx', 'NaN%', 'Infinity%', '', '0%']) {
+    const invalidRows = ROWS.map(row => row.instrument === 'Public Provident Fund Scheme'
+      ? { ...row, interestRate: invalidRate }
+      : row);
+    const invalidSnapshot = parseIndiaPostSavingsBundle(
+      governmentBundle('01.07.2026', '30.09.2026', invalidRows),
+      { fetchedAt: NOW.toISOString(), now: NOW },
+    );
+    const invalidPpf = invalidSnapshot.facts.find(fact => fact.canonicalProductId.endsWith(':ppf'));
+    assert.equal(invalidPpf.value, null, `${JSON.stringify(invalidRate)} must not be parsed as a usable rate`);
+    assert.equal(invalidPpf.availabilityStatus, AVAILABILITY.UNAVAILABLE);
+  }
+});
+
 test('multiple official intervals remain distinct and latest current fact is selected', () => {
   const prior = parseIndiaPostSavingsBundle(governmentBundle('01.04.2026', '30.06.2026'), {
     fetchedAt: '2026-06-01T00:00:00.000Z', now: new Date('2026-06-01T00:00:00.000Z'),
@@ -96,10 +136,39 @@ test('stale or missing government source facts never become recommendations', ()
   assert.equal(result.products.length, 0);
   assert.deepEqual(result.ranking.reasonCodes, ['CURRENT_EFFECTIVE_SCHEME_RATE_UNAVAILABLE']);
   assert.throws(
-    () => parseIndiaPostSavingsBundle(governmentBundle(undefined, undefined, ROWS.slice(0, -1)), { now: NOW }),
+    () => parseIndiaPostSavingsBundle(governmentBundle(undefined, undefined, ROWS.slice(0, -1)), {
+      fetchedAt: NOW.toISOString(), now: NOW,
+    }),
     /incomplete_rate_table/,
   );
   assert.throws(() => parseIndiaPostSavingsBundle('not the official schema', { now: NOW }), /effective_interval/);
+});
+
+test('India Post effective dates and observation timestamps must be valid calendar values', () => {
+  assert.throws(
+    () => parseIndiaPostSavingsBundle(governmentBundle('31.02.2026', '30.09.2026'), {
+      fetchedAt: NOW.toISOString(), now: NOW,
+    }),
+    /effective_interval/,
+  );
+  assert.throws(
+    () => parseIndiaPostSavingsBundle(governmentBundle(), {
+      fetchedAt: 'not-a-timestamp', now: NOW,
+    }),
+    /timestamps/,
+  );
+  assert.throws(
+    () => parseIndiaPostSavingsBundle(governmentBundle(), {
+      fetchedAt: NOW.toISOString(), now: new Date(Number.NaN),
+    }),
+    /timestamps/,
+  );
+  assert.throws(
+    () => parseIndiaPostSavingsBundle(governmentBundle(), {
+      fetchedAt: '2026-09-08T12:00:00.001Z', now: NOW,
+    }),
+    /timestamps/,
+  );
 });
 
 test('SBI parser uses only revised official columns and preserves depositor and tenure classes', () => {

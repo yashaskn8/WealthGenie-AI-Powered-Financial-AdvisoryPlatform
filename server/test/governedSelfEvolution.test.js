@@ -179,6 +179,10 @@ test('governed evolution executes the real PlanReview runner and remains shadow-
   assert.equal(result.financialAuthorityDelta, 0);
   assert.ok(result.candidateRecords[0].evaluation.scoreCards.length === 2);
   assert.equal(result.candidateRecords[0].evaluation.passed, true);
+  assert.equal(result.candidateRecords[0].reliability.passed, true);
+  assert.ok(result.candidateRecords[0].reliability.scoreCards
+    .filter(card => card.executionMode === 'CANDIDATE_BOUND')
+    .every(card => card.candidateTrajectoryEventCount > 0));
   assert.equal(holdoutLoaderCalled, false);
   assert.equal(result.candidateRecords[0].status, 'HOLDOUT_ATTESTATION_REQUIRED');
   assert.equal(result.candidateRecords[0].holdout.failureCode, 'HOLDOUT_TRUST_KEY_MISSING');
@@ -267,6 +271,7 @@ test('candidate-bound reliability executes and binds the actual candidate, with 
 
   assert.equal(resultA.candidateReliabilityCoverageComplete, true);
   assert.equal(resultA.passed, true);
+  assert.ok(resultA.scorecards.every(card => card.candidateTrajectoryEventCount > 0));
   assert.ok(resultA.scorecards.every(card => card.candidateExecuted && card.candidateId === candidateA.contentHash && card.scaffoldHash === candidateA.contentHash));
   assert.equal(resultB.candidateReliabilityCoverageComplete, true);
   assert.equal(resultB.passed, false);

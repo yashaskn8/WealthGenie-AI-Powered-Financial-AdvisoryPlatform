@@ -4,6 +4,45 @@ import PasskeyRegistrationChallenge from '../../models/PasskeyRegistrationChalle
 import { createTrustedApprovalProvider } from './approvalProviders.js';
 import { mandateError } from './authorizationConstants.js';
 import { normalizeWebAuthnCredential } from './webAuthnBytes.js';
+import logger from '../../utils/logger.js';
+
+async function endAuthorizationSession(session) {
+  try {
+    await session?.endSession?.();
+  } catch (error) {
+    logger.warn('Passkey registration session cleanup failed', {
+      code: error?.code || 'SESSION_CLEANUP_FAILED',
+    });
+  }
+}
+
+async function withPasskeyRegistrationTransaction(models, dependencies, operation) {
+  if (typeof dependencies.authorizationTransaction === 'function') {
+    return dependencies.authorizationTransaction(operation);
+  }
+
+  const connection = models.challengeModel.db;
+  if (typeof connection?.startSession !== 'function') {
+    throw mandateError('AUTHORIZATION_TRANSACTION_UNAVAILABLE', 'Passkey enrollment requires transaction-capable persistence.', 503);
+  }
+
+  let session;
+  try {
+    session = await connection.startSession();
+  } catch {
+    throw mandateError('AUTHORIZATION_TRANSACTION_UNAVAILABLE', 'Passkey enrollment requires transaction-capable persistence.', 503);
+  }
+  if (typeof session?.withTransaction !== 'function') {
+    await endAuthorizationSession(session);
+    throw mandateError('AUTHORIZATION_TRANSACTION_UNAVAILABLE', 'Passkey enrollment requires transaction-capable persistence.', 503);
+  }
+
+  try {
+    return await session.withTransaction(() => operation(session));
+  } finally {
+    await endAuthorizationSession(session);
+  }
+}
 
 export async function createPasskeyRegistrationOptions({ userId, runtimeConfig = {}, dependencies = {} }) {
   const models = { userModel: User, credentialModel: PasskeyCredential, challengeModel: PasskeyRegistrationChallenge, ...dependencies };
@@ -33,12 +72,21 @@ export async function verifyPasskeyRegistration({ userId, response, runtimeConfi
     deviceType: info.credentialDeviceType,
     backedUp: info.credentialBackedUp,
   });
-  const consumed = await models.challengeModel.findOneAndUpdate(
-    { _id: challenge._id, consumedAt: null },
-    { $set: { consumedAt: new Date() } },
-    { new: true },
-  );
-  if (!consumed) throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey enrollment challenge was already consumed.');
-  const saved = await models.credentialModel.create({ userId, ...credential });
-  return { credentialId: saved.credentialId, createdAt: saved.createdAt };
+  return withPasskeyRegistrationTransaction(models, dependencies, async session => {
+    const consumed = await models.challengeModel.findOneAndUpdate(
+      {
+        _id: challenge._id,
+        userId,
+        consumedAt: null,
+        $expr: { $gt: ['$expiresAt', '$$NOW'] },
+      },
+      { $set: { consumedAt: new Date() } },
+      { new: true, session },
+    );
+    if (!consumed) throw mandateError('TRUSTED_APPROVAL_INVALID', 'Passkey enrollment challenge was consumed or expired.');
+
+    const [saved] = await models.credentialModel.create([{ userId, ...credential }], { session });
+    if (!saved) throw new Error('Passkey credential persistence returned no document.');
+    return { credentialId: saved.credentialId, createdAt: saved.createdAt };
+  });
 }
