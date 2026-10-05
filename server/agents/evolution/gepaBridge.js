@@ -1,6 +1,7 @@
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { lstat, mkdtemp, open, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, posix, resolve, win32 } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createPromptBundle, verifyPromptBundleHash } from './promptBundle.js';
@@ -11,7 +12,6 @@ import { createEvolutionBudget } from './evolutionBudget.js';
 const MAX_BRIDGE_BYTES = 2 * 1024 * 1024;
 const PRIVATE_DATA_PATTERN = /email|phone|income|salary|monthlytakehome|bankaccount|password|jwt|rawprofile|userid|user_id|holdout|answerkey|secret|privatekey/i;
 const FORBIDDEN_OUTPUT_KEY_PATTERN = /sourcecode|shellcommand|evaluator|holdout|promotionpolicy|reliabilityhardgate|financialengine|taxrules|allocation|authorization|deployment|sandboxpolicy|script|executable|code/i;
-const SAFE_PYTHON_EXECUTABLE = /^(?:python|python3|py)(?:\.exe)?$/i;
 const TRUSTED_ML_SERVICE_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), '../../../ml-service');
 const MUTABLE_PROPOSAL_FIELDS = Object.freeze({
   plannerInstruction: 'promptBundle.plannerInstruction',
@@ -21,21 +21,97 @@ const MUTABLE_PROPOSAL_FIELDS = Object.freeze({
   safeModelRoleRouting: 'safeModelRoleRouting',
 });
 
-export function buildGepaSubprocessEnv({ provider = 'fixture', sourceEnv = process.env, pythonWorkingDirectory, pythonTempRoot } = {}) {
-  const environment = {};
-  const inheritedKeys = [
-    'PATH', 'Path', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE',
-    'APPDATA', 'LOCALAPPDATA', 'VIRTUAL_ENV', 'PYTHONHOME', 'LANG', 'LC_ALL',
-    'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE',
-  ];
-  for (const key of inheritedKeys) {
-    if (typeof sourceEnv[key] === 'string') environment[key] = sourceEnv[key];
+function pathApiFor(platform) {
+  return platform === 'win32' ? win32 : posix;
+}
+
+function isWithinDirectory(root, candidate, pathApi = pathApiFor(process.platform)) {
+  const relativePath = pathApi.relative(pathApi.resolve(root), pathApi.resolve(candidate));
+  return relativePath === ''
+    || (relativePath !== '..'
+      && !relativePath.startsWith(`..${pathApi.sep}`)
+      && !pathApi.isAbsolute?.(relativePath));
+}
+
+function approvedPythonRoots(sourceEnv, platform) {
+  if (platform === 'win32') {
+    const roots = [
+      sourceEnv.LOCALAPPDATA && win32.join(sourceEnv.LOCALAPPDATA, 'Programs', 'Python'),
+      sourceEnv.ProgramFiles,
+      sourceEnv['ProgramFiles(x86)'],
+      sourceEnv.SystemDrive && win32.join(sourceEnv.SystemDrive, 'hostedtoolcache', 'windows', 'Python'),
+      'C:\\hostedtoolcache\\windows\\Python',
+      'D:\\a\\_tool\\Python',
+      'C:\\Python',
+    ].filter(Boolean);
+    const launchers = [sourceEnv.SystemRoot && win32.join(sourceEnv.SystemRoot, 'py.exe')].filter(Boolean);
+    return { roots, exactFiles: launchers };
   }
-  environment.PYTHONPATH = pythonWorkingDirectory;
+  return {
+    roots: ['/usr/bin', '/usr/local/bin', '/opt/hostedtoolcache', '/opt/python', '/opt/homebrew/bin'],
+    exactFiles: [],
+  };
+}
+
+export async function resolveApprovedPythonExecutable(pythonExecutable = 'python', { sourceEnv = process.env, platform = process.platform } = {}) {
+  const pathApi = pathApiFor(platform);
+  const requested = String(pythonExecutable || 'python');
+  const requestedName = pathApi.basename(requested).replace(/\.exe$/i, '').toLowerCase();
+  if (!['python', 'python3', 'py'].includes(requestedName)) {
+    const error = new Error('Only an approved Python interpreter name or absolute path is allowed for the GEPA bridge.');
+    error.code = 'GEPA_BRIDGE_PYTHON_NOT_APPROVED';
+    throw error;
+  }
+
+  const approved = approvedPythonRoots(sourceEnv, platform);
+  const requestedIsAbsolute = pathApi.isAbsolute(requested);
+  const entries = requestedIsAbsolute
+    ? [requested]
+    : String(sourceEnv.PATH || sourceEnv.Path || '').split(platform === 'win32' ? ';' : ':')
+      .filter(entry => pathApi.isAbsolute(entry));
+  const candidates = [];
+  for (const entry of entries) {
+    const base = requestedIsAbsolute ? entry : pathApi.join(entry, requestedName);
+    if (platform === 'win32') candidates.push(requestedIsAbsolute ? base : `${base}.exe`);
+    else candidates.push(base);
+  }
+
+  for (const candidate of candidates) {
+    let canonicalPath;
+    try {
+      const candidateStat = await lstat(candidate);
+      if (candidateStat.isSymbolicLink() && platform === 'win32') continue;
+      canonicalPath = await realpath(candidate);
+      const canonicalStat = await lstat(canonicalPath);
+      if (!canonicalStat.isFile()) continue;
+    } catch {
+      continue;
+    }
+    const name = pathApi.basename(canonicalPath).replace(/\.exe$/i, '').toLowerCase();
+    if (!/^python(?:3(?:\.\d+)*)?$/.test(name) && name !== 'py') continue;
+    const inApprovedRoot = approved.roots.some(root => isWithinDirectory(root, canonicalPath, pathApi))
+      || approved.exactFiles.some(file => pathApi.resolve(file).toLowerCase() === pathApi.resolve(canonicalPath).toLowerCase());
+    if (!inApprovedRoot) continue;
+    return canonicalPath;
+  }
+
+  const error = new Error('No Python interpreter under an approved installation directory was found for the GEPA bridge.');
+  error.code = 'GEPA_BRIDGE_PYTHON_NOT_APPROVED';
+  throw error;
+}
+
+export function buildGepaSubprocessEnv({ provider = 'fixture', sourceEnv = process.env, pythonWorkingDirectory, pythonTempRoot, pythonExecutable } = {}) {
+  const environment = {};
+  if (typeof sourceEnv.SystemRoot === 'string') environment.SystemRoot = sourceEnv.SystemRoot;
+  if (typeof sourceEnv.WINDIR === 'string') environment.WINDIR = sourceEnv.WINDIR;
+  const safePathEntries = [
+    pythonExecutable ? dirname(pythonExecutable) : null,
+    sourceEnv.SystemRoot ? join(sourceEnv.SystemRoot, 'System32') : null,
+  ].filter(Boolean);
+  if (safePathEntries.length > 0) environment.PATH = [...new Set(safePathEntries)].join(process.platform === 'win32' ? ';' : ':');
+  if (typeof pythonWorkingDirectory === 'string') environment.PYTHONPATH = pythonWorkingDirectory;
+  environment.PYTHONNOUSERSITE = '1';
   if (pythonTempRoot) {
-    // Node and Python have different TEMP/TMP precedence on some platforms.
-    // Point all supported names at the same root so the Python CLI enforces
-    // the exact private workspace created for this bridge request.
     environment.TMPDIR = pythonTempRoot;
     environment.TEMP = pythonTempRoot;
     environment.TMP = pythonTempRoot;
@@ -128,6 +204,17 @@ export function createGepaBridgeInput({ basePromptBundle, allowedMutationSurface
   return Object.freeze(input);
 }
 
+export function serializeGepaBridgeInput(input) {
+  const serialized = JSON.stringify(input);
+  const byteLength = Buffer.byteLength(serialized, 'utf8');
+  if (byteLength > MAX_BRIDGE_BYTES) {
+    const error = new Error('GEPA bridge input exceeds the host-side size limit.');
+    error.code = 'GEPA_BRIDGE_INPUT_TOO_LARGE';
+    throw error;
+  }
+  return serialized;
+}
+
 function rejectUnsafeProposalShape(value, path = 'proposal') {
   if (Array.isArray(value)) {
     value.forEach((child, index) => rejectUnsafeProposalShape(child, `${path}[${index}]`));
@@ -189,62 +276,153 @@ export function validateGepaProposal(rawProposal, { basePromptBundle, allowedMut
   });
 }
 
-async function runPythonBridge({ inputPath, outputPath, provider, pythonExecutable, pythonWorkingDirectory, pythonTempRoot, timeoutMs }) {
-  if (!SAFE_PYTHON_EXECUTABLE.test(pythonExecutable)) throw new Error('Only the python/python3/py executables are allowed for the GEPA bridge.');
-  const baseArguments = ['-m', 'agent_evolution.cli', 'run', '--input', inputPath, '--output', outputPath, '--provider', provider];
-  const invocations = [{ executable: pythonExecutable, arguments: baseArguments }];
-  if (process.platform === 'win32' && pythonExecutable.toLowerCase() === 'python') {
-    invocations.push({ executable: 'py', arguments: ['-3', ...baseArguments] });
+function pathEquals(left, right, platform = process.platform) {
+  const pathApi = pathApiFor(platform);
+  const leftPath = pathApi.resolve(left);
+  const rightPath = pathApi.resolve(right);
+  return platform === 'win32' ? leftPath.toLowerCase() === rightPath.toLowerCase() : leftPath === rightPath;
+}
+
+function sameFileIdentity(left, right) {
+  if (left.size !== right.size || left.dev !== right.dev) return false;
+  if (left.ino && right.ino) return left.ino === right.ino;
+  return left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+
+export async function readBoundedGepaOutput({ outputPath, temporaryDirectory, maxBytes = MAX_BRIDGE_BYTES } = {}) {
+  const expectedOutputPath = resolve(temporaryDirectory, 'output.json');
+  if (!pathEquals(outputPath, expectedOutputPath)) throw new Error('GEPA output path is not the expected invocation output file.');
+
+  const rootInfo = await lstat(temporaryDirectory);
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error('GEPA invocation directory is not a private regular directory.');
+  const rootRealPath = await realpath(temporaryDirectory);
+  if (!pathEquals(rootRealPath, temporaryDirectory)) throw new Error('GEPA invocation directory identity changed.');
+
+  const outputInfo = await lstat(expectedOutputPath);
+  if (!outputInfo.isFile() || outputInfo.isSymbolicLink()) throw new Error('GEPA output must be a regular file.');
+  if (outputInfo.nlink > 1) throw new Error('GEPA output must not be hard-linked.');
+  if (outputInfo.size > maxBytes) throw new Error('GEPA output exceeds the host-side size limit.');
+
+  const outputRealPath = await realpath(expectedOutputPath);
+  if (!isWithinDirectory(rootRealPath, outputRealPath) || !pathEquals(outputRealPath, expectedOutputPath)) {
+    throw new Error('GEPA output resolved outside its invocation directory.');
   }
-  const executeInvocation = invocation => new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(invocation.executable, invocation.arguments, {
+
+  const noFollow = fsConstants.O_NOFOLLOW || 0;
+  const handle = await open(expectedOutputPath, fsConstants.O_RDONLY | noFollow);
+  try {
+    const openedInfo = await handle.stat();
+    if (!openedInfo.isFile() || openedInfo.size > maxBytes || !sameFileIdentity(outputInfo, openedInfo)) {
+      throw new Error('GEPA output changed before it could be read.');
+    }
+    const openedRealPath = await realpath(expectedOutputPath);
+    if (!pathEquals(openedRealPath, outputRealPath) || !isWithinDirectory(rootRealPath, openedRealPath)) {
+      throw new Error('GEPA output identity changed before it could be read.');
+    }
+
+    const contents = await handle.readFile();
+    if (contents.byteLength > maxBytes) throw new Error('GEPA output exceeds the host-side size limit.');
+
+    const afterInfo = await lstat(expectedOutputPath);
+    const afterRealPath = await realpath(expectedOutputPath);
+    if (!afterInfo.isFile() || afterInfo.isSymbolicLink() || !sameFileIdentity(outputInfo, afterInfo)
+        || !pathEquals(afterRealPath, outputRealPath) || !isWithinDirectory(rootRealPath, afterRealPath)) {
+      throw new Error('GEPA output changed while it was being read.');
+    }
+    return contents.toString('utf8');
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function terminateProcessTree(child) {
+  if (!child?.pid) return;
+  if (process.platform !== 'win32') {
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+    } catch (error) {
+      if (error?.code !== 'ESRCH') child.kill('SIGKILL');
+    }
+    return;
+  }
+
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+  const taskkillPath = join(systemRoot, 'System32', 'taskkill.exe');
+  await new Promise(resolvePromise => {
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      resolvePromise();
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish();
+    }, 5000);
+    const killer = spawn(taskkillPath, ['/PID', String(child.pid), '/T', '/F'], {
+      shell: false,
+      windowsHide: true,
+      stdio: 'ignore',
+      env: { SystemRoot: systemRoot, WINDIR: systemRoot, PATH: join(systemRoot, 'System32') },
+    });
+    killer.once('error', () => {
+      child.kill();
+      finish();
+    });
+    killer.once('close', code => {
+      if (code !== 0) child.kill();
+      finish();
+    });
+  });
+}
+
+async function runPythonBridge({ inputPath, outputPath, provider, pythonExecutable, pythonWorkingDirectory, pythonTempRoot, timeoutMs }) {
+  const baseArguments = ['-m', 'agent_evolution.cli', 'run', '--input', inputPath, '--output', outputPath, '--provider', provider];
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(pythonExecutable, baseArguments, {
       cwd: pythonWorkingDirectory,
       shell: false,
       windowsHide: true,
-      env: buildGepaSubprocessEnv({ provider, pythonWorkingDirectory, pythonTempRoot }),
+      detached: process.platform !== 'win32',
+      env: buildGepaSubprocessEnv({ provider, pythonWorkingDirectory, pythonTempRoot, pythonExecutable }),
     });
     let stdout = '';
     let stderr = '';
     let timedOut = false;
     let spawnError = null;
+    let terminationPromise = null;
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill();
+      terminationPromise = terminateProcessTree(child);
     }, timeoutMs);
     child.stdout.on('data', chunk => { stdout = `${stdout}${chunk}`.slice(-MAX_BRIDGE_BYTES); });
     child.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-MAX_BRIDGE_BYTES); });
     child.on('error', error => { spawnError = error; });
     child.on('close', code => {
       clearTimeout(timer);
-      if (timedOut) {
-        const error = new Error('GEPA bridge timed out and the child process has exited.');
-        error.code = 'GEPA_BRIDGE_TIMEOUT';
-        rejectPromise(error);
-        return;
-      }
-      if (spawnError) {
-        rejectPromise(spawnError);
-        return;
-      }
-      if (code !== 0) {
-        const error = new Error(`GEPA bridge failed with exit code ${code}.`);
-        error.code = 'GEPA_BRIDGE_FAILED';
-        error.stderr = stderr.slice(-4000);
-        rejectPromise(error);
-        return;
-      }
-      resolvePromise({ stdout, stderr });
+      Promise.resolve(terminationPromise).then(() => {
+        if (timedOut) {
+          const error = new Error('GEPA bridge timed out and the child process tree has exited.');
+          error.code = 'GEPA_BRIDGE_TIMEOUT';
+          rejectPromise(error);
+          return;
+        }
+        if (spawnError) {
+          rejectPromise(spawnError);
+          return;
+        }
+        if (code !== 0) {
+          const error = new Error(`GEPA bridge failed with exit code ${code}.`);
+          error.code = 'GEPA_BRIDGE_FAILED';
+          error.stderr = stderr.slice(-4000);
+          rejectPromise(error);
+          return;
+        }
+        resolvePromise({ stdout, stderr });
+      }, rejectPromise);
     });
   });
-  for (let index = 0; index < invocations.length; index += 1) {
-    try {
-      return await executeInvocation(invocations[index]);
-    } catch (error) {
-      if (error?.code === 'ENOENT' && index < invocations.length - 1) continue;
-      throw error;
-    }
-  }
-  throw new Error('No approved Python executable was available for the GEPA bridge.');
 }
 
 export async function runGepaProposalBridge({ basePromptBundle, allowedMutationSurfaces, trainCases = [], validationCases = [], failureFeedback = [], budget = {}, optimizerConfig = {}, pythonExecutable = 'python', pythonWorkingDirectory = TRUSTED_ML_SERVICE_DIRECTORY, timeoutMs = 60000 } = {}) {
@@ -262,14 +440,24 @@ export async function runGepaProposalBridge({ basePromptBundle, allowedMutationS
     throw error;
   }
   const input = createGepaBridgeInput({ basePromptBundle, allowedMutationSurfaces, trainCases, validationCases, failureFeedback, budget, optimizerConfig });
-  const pythonTempRoot = tmpdir();
-  const temporaryDirectory = await mkdtemp(join(pythonTempRoot, 'wealthgenie-gepa-'));
-  const inputPath = join(temporaryDirectory, 'input.json');
-  const outputPath = join(temporaryDirectory, 'output.json');
+  const serializedInput = serializeGepaBridgeInput(input);
+  const approvedPythonExecutable = await resolveApprovedPythonExecutable(pythonExecutable);
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), 'wealthgenie-gepa-'));
+  const privateTemporaryDirectory = await realpath(temporaryDirectory);
+  const inputPath = join(privateTemporaryDirectory, 'input.json');
+  const outputPath = join(privateTemporaryDirectory, 'output.json');
   try {
-    await writeFile(inputPath, JSON.stringify(input), { encoding: 'utf8', flag: 'wx' });
-    await runPythonBridge({ inputPath, outputPath, provider: input.optimizer.provider, pythonExecutable, pythonWorkingDirectory: resolvedPythonWorkingDirectory, pythonTempRoot, timeoutMs });
-    const output = JSON.parse(await readFile(outputPath, { encoding: 'utf8' }));
+    await writeFile(inputPath, serializedInput, { encoding: 'utf8', flag: 'wx' });
+    await runPythonBridge({
+      inputPath,
+      outputPath,
+      provider: input.optimizer.provider,
+      pythonExecutable: approvedPythonExecutable,
+      pythonWorkingDirectory: resolvedPythonWorkingDirectory,
+      pythonTempRoot: privateTemporaryDirectory,
+      timeoutMs,
+    });
+    const output = JSON.parse(await readBoundedGepaOutput({ outputPath, temporaryDirectory: privateTemporaryDirectory }));
     if (!Array.isArray(output) || output.length > input.budget.max_candidates) throw new Error('GEPA bridge output must be a bounded proposal array.');
     return Object.freeze(output.map(proposal => validateGepaProposal(proposal, input)));
   } finally {

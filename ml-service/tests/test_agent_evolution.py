@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -5,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_evolution.feedback import build_feedback
-from agent_evolution.cli import _safe_path
+from agent_evolution.cli import _open_input, _safe_path
 from agent_evolution.gepa_optimizer import DspyGepaOptimizer, GEPA_VERSION
 from agent_evolution.runner import FixtureGepaProposalProvider, _configure_gepa_cache, _load_live_dspy
 from agent_evolution.schemas import EvolutionBudget, validate_gepa_input, validate_optimizer_dataset, validate_proposal_output
@@ -20,15 +21,15 @@ def test_optimizer_dataset_rejects_private_and_holdout_fields():
 
 
 def test_gepa_cli_paths_are_confined_to_bridge_temp_directory(tmp_path, monkeypatch):
-    monkeypatch.setattr(tempfile, 'gettempdir', lambda: str(tmp_path))
     bridge_dir = tmp_path / 'wealthgenie-gepa-unit-test'
     bridge_dir.mkdir()
+    monkeypatch.setattr(tempfile, 'gettempdir', lambda: str(bridge_dir))
     input_path = bridge_dir / 'input.json'
     output_path = bridge_dir / 'output.json'
     input_path.write_text('{}', encoding='utf-8')
 
-    assert _safe_path(str(input_path), must_exist=True) == input_path.resolve()
-    assert _safe_path(str(output_path), must_exist=False) == output_path.resolve()
+    assert _safe_path(str(input_path), must_exist=True) == input_path.absolute()
+    assert _safe_path(str(output_path), must_exist=False) == output_path.absolute()
 
     outside_path = tmp_path / 'outside.json'
     outside_path.write_text('{}', encoding='utf-8')
@@ -43,6 +44,36 @@ def test_gepa_cli_paths_are_confined_to_bridge_temp_directory(tmp_path, monkeypa
     alternate_name.write_text('{}', encoding='utf-8')
     with pytest.raises(ValueError, match='approved sanitized workspace path'):
         _safe_path(str(alternate_name), must_exist=True)
+
+    oversized_input = bridge_dir / 'oversized.json'
+    oversized_input.write_bytes(b'x' * (2 * 1024 * 1024 + 1))
+    with pytest.raises(ValueError, match='bounded regular file'):
+        _open_input(oversized_input)
+
+
+def test_gepa_cli_rejects_junctioned_invocation_directory_without_touching_outside_sentinel(tmp_path, monkeypatch):
+    invocation_dir = tmp_path / 'wealthgenie-gepa-junction'
+    outside_dir = tmp_path / 'outside'
+    outside_dir.mkdir()
+    sentinel = outside_dir / 'output.json'
+    sentinel.write_text('outside-sentinel-untouched', encoding='utf-8')
+    invocation_dir.mkdir()
+    monkeypatch.setattr(tempfile, 'gettempdir', lambda: str(invocation_dir))
+
+    displaced = tmp_path / 'displaced-invocation'
+    invocation_dir.rename(displaced)
+    try:
+        os.symlink(outside_dir, invocation_dir, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip('The current Windows account cannot create the directory link required for the junction fixture')
+
+    try:
+        with pytest.raises(ValueError, match='regular private directory'):
+            _safe_path(str(invocation_dir / 'output.json'), must_exist=False)
+        assert sentinel.read_text(encoding='utf-8') == 'outside-sentinel-untouched'
+    finally:
+        if invocation_dir.is_symlink():
+            invocation_dir.unlink()
 
 
 def test_evolution_budget_cannot_exceed_immutable_maximum():

@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -12,23 +13,59 @@ from .schemas import validate_gepa_input, validate_proposal_output
 
 
 def _safe_path(value: str, *, must_exist: bool) -> Path:
-    path = Path(value).resolve()
-    temporary_root = Path(tempfile.gettempdir()).resolve()
+    temporary_root = Path(os.path.abspath(tempfile.gettempdir()))
+    path = Path(os.path.abspath(value))
     try:
         relative = path.relative_to(temporary_root)
     except ValueError as error:
         raise ValueError('GEPA CLI path is not an approved sanitized workspace path') from error
 
     expected_name = 'input.json' if must_exist else 'output.json'
-    if (len(relative.parts) != 2
-            or not relative.parts[0].startswith('wealthgenie-gepa-')
-            or path.name != expected_name):
+    if (len(relative.parts) != 1
+            or not temporary_root.name.startswith('wealthgenie-gepa-')
+            or relative.parts[0] != expected_name):
         raise ValueError('GEPA CLI path is not an approved sanitized workspace path')
-    if must_exist and not path.is_file():
-        raise FileNotFoundError(str(path))
-    if not must_exist and path.name in {'.', '..'}:
-        raise ValueError('GEPA output path is invalid')
+
+    root_stat = os.lstat(temporary_root)
+    if (not stat.S_ISDIR(root_stat.st_mode)
+            or stat.S_ISLNK(root_stat.st_mode)
+            or getattr(os.path, 'isjunction', lambda _path: False)(temporary_root)):
+        raise ValueError('GEPA invocation directory is not a regular private directory')
+    if os.path.normcase(os.path.realpath(temporary_root)) != os.path.normcase(str(temporary_root)):
+        raise ValueError('GEPA invocation directory identity changed')
+
+    try:
+        path_stat = os.lstat(path)
+    except FileNotFoundError:
+        if must_exist:
+            raise
+        return path
+
+    if (stat.S_ISLNK(path_stat.st_mode)
+            or getattr(os.path, 'isjunction', lambda _path: False)(path)
+            or (must_exist and not stat.S_ISREG(path_stat.st_mode))):
+        raise ValueError('GEPA CLI file is not a regular non-link file')
+    if not must_exist:
+        raise FileExistsError(str(path))
+    if os.path.normcase(os.path.realpath(path)) != os.path.normcase(str(path)):
+        raise ValueError('GEPA CLI file resolved outside its private directory')
     return path
+
+
+def _open_input(path: Path, *, max_bytes: int = 2 * 1024 * 1024):
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or before.st_size > max_bytes:
+        raise ValueError('GEPA input is not a bounded regular file')
+    no_follow = getattr(os, 'O_NOFOLLOW', 0)
+    descriptor = os.open(path, os.O_RDONLY | no_follow)
+    opened = os.fstat(descriptor)
+    if (not stat.S_ISREG(opened.st_mode)
+            or opened.st_size > max_bytes
+            or (before.st_ino and opened.st_ino and before.st_ino != opened.st_ino)
+            or before.st_dev != opened.st_dev):
+        os.close(descriptor)
+        raise ValueError('GEPA input identity changed before read')
+    return descriptor, before
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -40,10 +77,17 @@ def _run(args: argparse.Namespace) -> int:
         raise FileExistsError(str(output_path))
     if output_path == input_path:
         raise ValueError('GEPA input and output paths must be different')
-    if input_path.stat().st_size > 2 * 1024 * 1024:
-        raise ValueError('GEPA input exceeds the bridge size limit')
-    with input_path.open('r', encoding='utf-8') as handle:
-        document = json.load(handle)
+    descriptor, input_stat = _open_input(input_path)
+    try:
+        with os.fdopen(descriptor, 'r', encoding='utf-8') as handle:
+            document = json.load(handle)
+    finally:
+        after = os.lstat(input_path)
+        if (not stat.S_ISREG(after.st_mode)
+                or stat.S_ISLNK(after.st_mode)
+                or (input_stat.st_ino and after.st_ino and input_stat.st_ino != after.st_ino)
+                or input_stat.st_dev != after.st_dev):
+            raise ValueError('GEPA input identity changed while read')
     validate_gepa_input(document)
     if document['optimizer']['provider'] != args.provider:
         raise ValueError('GEPA provider does not match the bridge input')
@@ -52,7 +96,7 @@ def _run(args: argparse.Namespace) -> int:
     payload = json.dumps(proposals, ensure_ascii=False, separators=(',', ':'))
     if len(payload.encode('utf-8')) > 2 * 1024 * 1024:
         raise ValueError('GEPA output exceeds the bridge size limit')
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
     descriptor = os.open(output_path, flags)
     try:
         with os.fdopen(descriptor, 'w', encoding='utf-8') as handle:
