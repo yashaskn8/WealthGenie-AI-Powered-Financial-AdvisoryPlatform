@@ -69,6 +69,10 @@ test('official India Post parser preserves rate semantics and effective interval
   assert.equal(ppf.compoundingBasis, 'Annually');
   assert.equal(ppf.freshness.status, 'FRESH');
   assert.equal(ppf.source.provider, 'GOVERNMENT_OF_INDIA');
+  assert.deepEqual(
+    [...new Set(snapshot.facts.map(fact => fact.compoundingBasis).filter(Boolean))].sort(),
+    ['Annually', 'Monthly and paid', 'Quarterly', 'Quarterly and Paid'].sort(),
+  );
 });
 
 test('official India Post parser never converts negative or malformed rates into positive facts', () => {
@@ -109,6 +113,20 @@ test('official India Post parser never converts negative or malformed rates into
     assert.equal(invalidPpf.value, null, `${JSON.stringify(invalidRate)} must not be parsed as a usable rate`);
     assert.equal(invalidPpf.availabilityStatus, AVAILABILITY.UNAVAILABLE);
   }
+});
+
+test('official India Post parser does not expose unknown compounding metadata as verified', () => {
+  const rows = ROWS.map(row => row.instrument === 'Public Provident Fund Scheme'
+    ? { ...row, compoundingFrequency: 'annually, guaranteed forever' }
+    : row);
+  const snapshot = parseIndiaPostSavingsBundle(governmentBundle('01.07.2026', '30.09.2026', rows), {
+    fetchedAt: NOW.toISOString(), now: NOW,
+  });
+  const ppf = snapshot.facts.find(fact => fact.canonicalProductId.endsWith(':ppf'));
+
+  assert.equal(ppf.value, 7.1);
+  assert.equal(ppf.compoundingBasis, null);
+  assert.equal(ppf.availabilityStatus, AVAILABILITY.AVAILABLE);
 });
 
 test('multiple official intervals remain distinct and latest current fact is selected', () => {

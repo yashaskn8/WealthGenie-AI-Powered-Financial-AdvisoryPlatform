@@ -28,6 +28,17 @@ const SCHEME_IDENTITIES = Object.freeze({
   'Kisan Vikas Patra': { id: 'kvp', name: 'Kisan Vikas Patra' },
   'Sukanya Samriddhi Account Scheme': { id: 'sukanya', name: 'Sukanya Samriddhi Account' },
 });
+const COMPOUNDING_BASIS_LABELS = new Map([
+  ['annually', 'Annually'],
+  ['quarterly', 'Quarterly'],
+  ['quarterly and paid', 'Quarterly and Paid'],
+  ['monthly and paid', 'Monthly and paid'],
+]);
+
+function parseCompoundingBasis(value) {
+  if (typeof value !== 'string') return null;
+  return COMPOUNDING_BASIS_LABELS.get(value.trim().toLowerCase()) ?? null;
+}
 
 function parseIndianDate(value) {
   const match = String(value || '').match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
@@ -125,9 +136,7 @@ export function parseIndiaPostSavingsBundle(bundleText, {
       maxAgeSeconds: Math.floor((intervalEnd - intervalStart) / 1000),
     };
     fact.rateBasis = 'OFFICIAL_NOMINAL_RATE_PER_ANNUM';
-    fact.compoundingBasis = typeof row.compoundingFrequency === 'string'
-      ? row.compoundingFrequency.trim() || null
-      : null;
+    fact.compoundingBasis = parseCompoundingBasis(row.compoundingFrequency);
     products.push({
       schemaVersion: MARKET_DATA_SCHEMA_VERSION,
       canonicalProductId,
