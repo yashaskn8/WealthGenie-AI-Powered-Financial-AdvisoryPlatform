@@ -29,6 +29,7 @@ on:
       - 'ml-service/agent_evolution/**'
       - 'ml-service/tests/test_agent_evolution.py'
       - '.github/workflows/agent-evolution-ci.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read

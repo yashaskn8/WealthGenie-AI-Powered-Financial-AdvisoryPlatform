@@ -11,15 +11,24 @@ valid structured research brief and must not fabricate those unrelated outputs.
 The applicability request is tracked upstream at
 [a2aproject/a2a-tck#229](https://github.com/a2aproject/a2a-tck/issues/229).
 
+A sixth, separate `CORE-SEND-003` exception is tracked at
+[a2aproject/a2a-tck#202](https://github.com/a2aproject/a2a-tck/issues/202): the
+pinned test reports the expected unsupported-media-type response as a failure
+because it omits the corresponding expected-error assertion.
+
 The machine-readable allowlist is
 [`../.github/a2a-tck-known-blockers.json`](../.github/a2a-tck-known-blockers.json).
-Only the exact five pinned testcase identities, their specified requirement
-IDs, and their reviewed failure fragments may be accepted. Each must execute;
-skips, changed reasons, report incompleteness, checkout changes, errors, and
-every other failure fail CI. If one of the five starts passing, that is
-accepted; the exception is not tied to an exact failure count. The step summary
-continues to report the raw TCK result and explicitly forbids a claim of full
-100% A2A conformance.
+It contains exactly six reviewed testcase identities: the five issue-#229
+fixture cases and the separate issue-#202 assertion case. Only those identities,
+their specified requirement IDs, and their reviewed failure fragments may be
+accepted. Each must execute; skips of an exception case, changed reasons,
+report incompleteness, checkout changes, errors, and every other failure fail
+CI. For the pinned `--transport http_json --level must` invocation, the gate
+also requires the verified total of 178 skipped testcases; a changed skip count
+fails rather than silently broadening the accepted result. If a listed case
+starts passing, that is accepted; the exception is not tied to an exact failure
+count. The step summary continues to report the raw TCK result and explicitly
+forbids a claim of full 100% A2A conformance.
 
 No product code is changed to satisfy the fixtures. Authentication remains
 enabled, and the deterministic backend remains the sole financial authority.

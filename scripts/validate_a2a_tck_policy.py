@@ -161,7 +161,7 @@ def evaluate_report(
         outcome.violations.append(f"could not read valid A2A policy: {error}")
         return outcome, {}
 
-    if policy.get("policy_schema_version") != 2:
+    if policy.get("policy_schema_version") != 3:
         outcome.violations.append("unsupported A2A policy schema version")
     pinned_sha = policy.get("tck_sha")
     if not isinstance(pinned_sha, str) or tck_sha.lower() != pinned_sha.lower():
@@ -221,6 +221,9 @@ def evaluate_report(
         outcome.violations.append(
             f"JUnit report is incomplete: expected {expected_count!r} testcases, found {outcome.total}"
         )
+    expected_skipped = policy.get("skipped_test_case_count")
+    if not isinstance(expected_skipped, int) or expected_skipped < 0:
+        outcome.violations.append("policy must specify a non-negative pinned-TCK skipped testcase count")
 
     seen: set[tuple[str, str]] = set()
     known_seen: set[tuple[str, str]] = set()
@@ -267,6 +270,10 @@ def evaluate_report(
     missing_known = set(cases) - known_seen
     for identity in sorted(missing_known):
         outcome.violations.append(f"expected known testcase did not execute: {cases[identity]['node_id']}")
+    if isinstance(expected_skipped, int) and outcome.skipped != expected_skipped:
+        outcome.violations.append(
+            f"JUnit skipped testcase count changed: expected {expected_skipped}, found {outcome.skipped}"
+        )
 
     suites = [root] if root.tag == "testsuite" else [child for child in root if child.tag == "testsuite"]
     if not suites:

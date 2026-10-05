@@ -33,7 +33,8 @@ def git_runner(status: str = ""):
 
 def make_xml(failed_ids: set[int] = frozenset(), skipped_ids: set[int] = frozenset(), unknown_failure: bool = False,
              changed_reason: int | None = None, extra_error: bool = False,
-             failure_status: tuple[int, int] | None = None) -> str:
+             failure_status: tuple[int, int] | None = None,
+             generic_skipped_count: int = 178) -> str:
     failures = []
     skipped = []
     known_passes = []
@@ -63,7 +64,6 @@ def make_xml(failed_ids: set[int] = frozenset(), skipped_ids: set[int] = frozens
         failures.append('<testcase classname="tests.compatibility.other.TestOther" name="test_unexpected"><failure message="DM-ART-001 unexpected regression">failed</failure></testcase>')
     if extra_error:
         failures.append('<testcase classname="tests.compatibility.other.TestOther" name="test_error"><error message="runner error">error</error></testcase>')
-    generic_skipped_count = 178
     skipped.extend(
         f'<testcase classname="tests.compatibility.other.TestSkipped" name="test_skip_{index}"><skipped /></testcase>'
         for index in range(generic_skipped_count)
@@ -230,6 +230,16 @@ class A2ATckPolicyTests(unittest.TestCase):
         result = self.evaluate(make_xml(skipped_ids={0}), raw_exit=0)
         self.assertFalse(result.accepted)
         self.assertIn("was skipped instead of executed", " ".join(result.violations))
+
+    def test_unexpected_additional_skip_fails_even_when_known_cases_match(self):
+        result = self.evaluate(make_xml(failed_ids=set(range(6)), generic_skipped_count=179))
+        self.assertFalse(result.accepted)
+        self.assertIn("skipped testcase count changed: expected 178, found 179", " ".join(result.violations))
+
+    def test_missing_expected_skip_fails_closed(self):
+        result = self.evaluate(make_xml(failed_ids=set(range(6)), generic_skipped_count=177))
+        self.assertFalse(result.accepted)
+        self.assertIn("skipped testcase count changed: expected 178, found 177", " ".join(result.violations))
 
     def test_tck_sha_mismatch_fails(self):
         result = self.evaluate(make_xml(failed_ids=set(range(6))), sha="f" * 40)

@@ -1,9 +1,10 @@
 {
-  "policy_schema_version": 2,
+  "policy_schema_version": 3,
   "tck_repository": "a2aproject/a2a-tck",
   "tck_sha": "263b9cfaf16a554bdfb166a7ba5b67716e946349",
   "classification": "KNOWN_UPSTREAM_TCK_EXCEPTIONS",
   "test_case_count": 235,
+  "skipped_test_case_count": 178,
   "upstream_issues": [
     {
       "url": "https://github.com/a2aproject/a2a-tck/issues/229",
