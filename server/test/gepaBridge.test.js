@@ -32,6 +32,29 @@ const bridgeOptions = {
   pythonWorkingDirectory: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../ml-service'),
 };
 
+function linuxProcessIsAlive(pid, readProcStat = readFileSync) {
+  try {
+    const state = readProcStat(`/proc/${pid}/stat`, 'utf8').split(' ')[2];
+    return state !== 'Z';
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ESRCH') return false;
+    throw error;
+  }
+}
+
+test('GEPA procfs liveness treats vanished processes as exited and propagates other errors', () => {
+  assert.equal(linuxProcessIsAlive(123, () => '123 (node) S 1 2 3'), true);
+  assert.equal(linuxProcessIsAlive(123, () => '123 (node) Z 1 2 3'), false);
+
+  for (const code of ['ENOENT', 'ESRCH']) {
+    const error = Object.assign(new Error(`proc entry disappeared: ${code}`), { code });
+    assert.equal(linuxProcessIsAlive(123, () => { throw error; }), false);
+  }
+
+  const permissionError = Object.assign(new Error('proc entry cannot be read'), { code: 'EACCES' });
+  assert.throws(() => linuxProcessIsAlive(123, () => { throw permissionError; }), permissionError);
+});
+
 test('GEPA Node/Python bridge runs the deterministic provider and revalidates proposals', async () => {
   const input = createGepaBridgeInput(bridgeOptions);
   assert.equal(input.optimizer.provider, 'fixture');
@@ -170,13 +193,7 @@ test('GEPA timeout terminates the spawned process tree, including grandchildren'
     let alive = true;
     while (alive && Date.now() < exitDeadline) {
       if (process.platform !== 'win32') {
-        try {
-          const state = readFileSync(`/proc/${grandchildPid}/stat`, 'utf8').split(' ')[2];
-          alive = state !== 'Z';
-        } catch (error) {
-          if (error.code !== 'ENOENT') throw error;
-          alive = false;
-        }
+        alive = linuxProcessIsAlive(grandchildPid);
       } else {
         try {
           process.kill(grandchildPid, 0);
