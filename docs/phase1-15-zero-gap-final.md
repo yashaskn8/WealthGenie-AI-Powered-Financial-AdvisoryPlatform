@@ -25,6 +25,13 @@ This addendum is a scoped evidence snapshot for the audited source SHA below. It
 - Agent Evolution and demo checks above ran without changing application logic. A2A and Reliability workflows were manually dispatched against `main` only after confirming it resolved to `1392690...`.
 - All run conclusions above apply only to `1392690...`; they must not be attributed to a later commit. Record later commit evidence from its own exact-SHA GitHub runs.
 
+## Exact-SHA follow-up — `e865a39f74ead99cf9f74f696f684363dd9bd96d`
+
+- This commit was pushed to `main`. CI Test Matrix run `37250408967` and Agent Evolution run `37250408990` failed only at deployment-config validation of the updated A2A exception policy. The exact failing assertion was `deployment validator accepts the complete ordered Phase 2 through Phase 7 migration sequence`; the validator still required `policy_schema_version === 2` after the policy moved to schema 3 and gained the pinned skipped-test count. Mongo 6 and 7 each reported 1,281/1,282 passed, Windows reported 1,085/1,086 passed, and the Agent Evolution backend suite reported the same one failing test. No other failures were present in those job reports.
+- Exact-SHA CD run `37250409024` succeeded. Exact-SHA A2A run `37250556672` and Reliability run `37250558499` succeeded. The raw pinned A2A TCK result remains 51 passed, 6 failed, 178 skipped, 30 deselected; the gate accepted only the six reviewed upstream exceptions and exact skip count, not full conformance.
+- The follow-up change updates `server/scripts/validate-deployment-config.js` to require policy schema 3, 235 testcases, and 178 skipped testcases. On the local follow-up worktree, `node server/scripts/validate-deployment-config.js` passed and `node --test --test-concurrency=1 server/test/deploymentConfig.test.js` passed 8/8. The A2A policy validator suite passed 22/22.
+- These results apply to `e865a39...` and its specifically named follow-up; they are not exact-SHA evidence for any later commit. Phase 7 remains `INCOMPLETE` pending upstream TCK fixes, and Phase 15 live preflight remains **NOT RUN**.
+
 Classifications are restricted to `100% VERIFIED`, `CODE-COMPLETE — LIVE VERIFICATION PENDING`, and `INCOMPLETE`. No phase is labeled 100% verified by this implementation record.
 
 ## Phase 1 — Deterministic financial authority

@@ -261,8 +261,10 @@ if (!tckWorkflow.includes(`A2A_TCK_SHA: ${pinnedTckSha}`)
     || tckWorkflow.includes('continue-on-error: true')
     || tckPolicy.tck_sha !== pinnedTckSha
     || tckPolicy.tck_repository !== 'a2aproject/a2a-tck'
-    || tckPolicy.policy_schema_version !== 2
+    || tckPolicy.policy_schema_version !== 3
     || tckPolicy.classification !== 'KNOWN_UPSTREAM_TCK_EXCEPTIONS'
+    || tckPolicy.test_case_count !== 235
+    || tckPolicy.skipped_test_case_count !== 178
     || Object.keys(tckIssueClasses).length !== 2
     || Object.entries(expectedTckIssueClasses).some(([url, classification]) => tckIssueClasses[url] !== classification)
     || !Array.isArray(tckPolicy.known_failures)
