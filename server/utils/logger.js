@@ -22,10 +22,14 @@ function redactString(value) {
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
     .replace(/Basic\s+[A-Za-z0-9+/=]+/gi, 'Basic [REDACTED]')
     .replace(/\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[REDACTED_JWT]')
+    .replace(/\b[A-Z]{5}[0-9]{4}[A-Z]\b/gi, '[REDACTED_PAN]')
+    .replace(/(?<!\w)(?:\+?91[\s-]?)?[6-9][0-9]{9}(?!\w)/g, '[REDACTED_PHONE]')
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|AKIA[A-Z0-9]{16})\b/g, '[REDACTED_API_KEY]')
     .replace(/((?:mongodb(?:\+srv)?|rediss?):\/\/)[^\s/@]+(?::[^\s/@]*)?@/gi, '$1[REDACTED]@')
     .replace(/(https?:\/\/)[^/\s@]+@/gi, '$1[REDACTED]@')
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[REDACTED_EMAIL]')
     .replace(/([?&](?:password|secret|token|auth|auth[_-]?token|jwt|access[_-]?token|refresh[_-]?token|api[_-]?key|x[_-]?api[_-]?key|key|authorization|cookie|session|session[_-]?id|signature|sig|email|e[_-]?mail|pan|mobile|phone|account|account[_-]?number|profile[_-]?id|x-amz-[a-z0-9-]+|x-goog-[a-z0-9-]+|se|sp|sv|sr)=)[^&#\s]*/gi, '$1[REDACTED]')
-    .replace(/(^|[\s,{])(["']?(?:password|secret|token|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|api[_-]?key|authorization|cookie|credential|private[_-]?key|client[_-]?secret|signature|sig|jti|email|e[_-]?mail|pan|mobile|phone|account(?:[_-]?number)?|profile[_-]?id|financial[_-]?profile|tax[_-]?(?:details|payload)|monthly[_-]?(?:take[_-]?home|savings)|annual[_-]?(?:income|gross[_-]?income)|income|savings|expenses?|net[_-]?worth|portfolio|investment[_-]?(?:goals?|amount|value)|risk[_-]?tolerance|deductions?)["']?\s*[:=]\s*)(?!\[REDACTED\])(?:"[^"]*"|'[^']*'|[^\r\n,;&}\]]+)/gi, '$1$2"[REDACTED]"');
+    .replace(/(^|[\s,{])(["']?(?:password|secret|token|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|api[_-]?key|authorization|cookie|credential|private[_-]?key|client[_-]?secret|signature|sig|jti|email|e[_-]?mail|pan|mobile|phone|bank[_-]?account(?:[_-]?number)?|account(?:[_-]?number)?|profile[_-]?id|financial[_-]?profile|tax[_-]?(?:details|payload)|monthly[_-]?(?:take[_-]?home|savings)|annual[_-]?(?:income|gross[_-]?income)|income|salary|savings|expenses?|net[_-]?worth|portfolio|investment[_-]?(?:goals?|amount|value)|risk[_-]?tolerance|deductions?)["']?\s*(?::|=|\s)\s*)(?!\[REDACTED\])(?:"[^"]*"|'[^']*'|[^\r\n,;&}\]]+)/gi, '$1$2"[REDACTED]"');
 }
 
 function redactValue(value, seen, depth = 0) {

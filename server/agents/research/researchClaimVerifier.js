@@ -1,26 +1,16 @@
 import crypto from 'node:crypto';
 import { hashResearchBrief, verifyArtifactContentHash } from './researchArtifact.js';
+import {
+  lexicalTokens,
+  normalizeResearchFacts,
+  researchFactsMatch,
+  researchNegatedPhraseOverlapsClaim,
+  textHasNegation,
+} from './researchFactNormalization.js';
 import { validateResearchArtifact } from './researchSchemas.js';
 import { classifyResearchSource, isSourceTierAtLeast } from './sourceTrust.js';
 
 const UNSAFE_LANGUAGE = /\b(?:guaranteed?|risk[- ]free|certain(?:ly)?|will earn|buy|sell|rebalance|allocation|new weight|execute|transfer|trade|payment)\b/i;
-
-function tokens(value) {
-  return new Set(String(value || '').toLowerCase().split(/[^a-z0-9%]+/).filter(token => token.length > 2));
-}
-
-function overlap(left, right) {
-  const source = tokens(left);
-  const target = tokens(right);
-  if (!source.size || !target.size) return 0;
-  let matches = 0;
-  for (const token of source) if (target.has(token)) matches += 1;
-  return matches / source.size;
-}
-
-function numericValues(value) {
-  return String(value || '').match(/\b\d+(?:\.\d+)?%?\b/g) || [];
-}
 
 export function detectResearchContradictions(claims = [], evidenceUnits = []) {
   const evidenceById = new Map(evidenceUnits.map(item => [item.evidenceId, item]));
@@ -30,10 +20,10 @@ export function detectResearchContradictions(claims = [], evidenceUnits = []) {
       const left = claims[i];
       const right = claims[j];
       if (left.claimType !== right.claimType || left.text === right.text) continue;
-      const leftNumbers = numericValues(left.text);
-      const rightNumbers = numericValues(right.text);
-      const materiallyDifferent = leftNumbers.length > 0 && rightNumbers.length > 0
-        && leftNumbers.some(value => !rightNumbers.includes(value));
+      const leftFacts = normalizeResearchFacts(left.text);
+      const rightFacts = normalizeResearchFacts(right.text);
+      const materiallyDifferent = leftFacts.length > 0 && rightFacts.length > 0
+        && leftFacts.some(fact => !rightFacts.some(other => researchFactsMatch(fact, other)));
       const opposing = /\b(?:not|decrease|decreased|lower|falls?)\b/i.test(left.text)
         !== /\b(?:not|decrease|decreased|lower|falls?)\b/i.test(right.text);
       if (!materiallyDifferent && !opposing) continue;
@@ -119,8 +109,24 @@ export function verifyResearchArtifact(artifact, {
     if (claim.supportingEvidenceIds.length === 0 && claim.supportStatus === 'SUPPORTED') claimErrors.push('SUPPORTED_CLAIM_WITHOUT_EVIDENCE');
     if (evidence.length !== claim.supportingEvidenceIds.length) claimErrors.push('CLAIM_EVIDENCE_MISSING');
     if (UNSAFE_LANGUAGE.test(claim.text)) claimErrors.push('UNSAFE_CLAIM_LANGUAGE');
-    if (numericValues(claim.text).some(number => !evidence.some(item => item.supportingExcerpt.includes(number)))) claimErrors.push('CLAIM_NUMBER_NOT_IN_EVIDENCE');
-    if (evidence.length > 0 && Math.max(...evidence.map(item => overlap(claim.text, item.supportingExcerpt))) < 0.35) claimErrors.push('CLAIM_NOT_ENTAILED_BY_EVIDENCE');
+    const claimFacts = normalizeResearchFacts(claim.text);
+    const claimTokens = lexicalTokens(claim.text);
+    const evidenceChecks = evidence.map(item => {
+      const evidenceFacts = normalizeResearchFacts(item.supportingExcerpt);
+      const evidenceTokens = new Set(lexicalTokens(item.supportingExcerpt));
+      const factSupport = claimFacts.every(fact => evidenceFacts.some(candidate => researchFactsMatch(fact, candidate)));
+      const lexicalSupport = claimTokens.length === 0
+        ? claimFacts.length > 0 && factSupport
+        : claimTokens.every(token => evidenceTokens.has(token));
+      const negationConflict = textHasNegation(claim.text) !== textHasNegation(item.supportingExcerpt)
+        || researchNegatedPhraseOverlapsClaim(claim.text, item.supportingExcerpt);
+      return { factSupport, lexicalSupport, negationConflict };
+    });
+    const unsupportedFact = claimFacts.length > 0 && !evidenceChecks.some(item => item.factSupport);
+    if (unsupportedFact) claimErrors.push('CLAIM_FACT_NOT_IN_EVIDENCE');
+    if (evidence.length > 0 && !evidenceChecks.some(item => item.lexicalSupport)) claimErrors.push('CLAIM_NOT_ENTAILED_BY_EVIDENCE');
+    const negationConflict = evidenceChecks.some(item => item.negationConflict);
+    if (negationConflict) claimErrors.push('CLAIM_NEGATION_CONFLICT');
     if (evidence.some(item => item.factType !== claim.claimType)) claimErrors.push('CLAIM_FACT_TYPE_MISMATCH');
     if (evidence.some(item => classifyResearchSource({ url: item.canonicalUrl }) !== claim.sourceTrustTier)) claimErrors.push('CLAIM_SOURCE_TIER_MISMATCH');
     if (evidence.some(item => item.freshnessStatus !== claim.freshnessStatus)) claimErrors.push('CLAIM_FRESHNESS_MISMATCH');

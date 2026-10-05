@@ -19,6 +19,7 @@ import { invokePlanReviewGraph } from '../agents/planReview/planReviewGraph.js';
 import { classifyResearchSource } from '../agents/research/sourceTrust.js';
 import { verifyResearchArtifact } from '../agents/research/researchClaimVerifier.js';
 import { hashResearchArtifact } from '../agents/research/researchArtifact.js';
+import { normalizeResearchFacts, researchFactsMatch } from '../agents/research/researchFactNormalization.js';
 
 function nowIso() {
   return new Date().toISOString();
@@ -36,6 +37,55 @@ function brief(overrides = {}) {
     ...overrides,
   });
 }
+
+test('research fact normalization preserves numeric sign, units, qualifiers, dates, and statutory identifiers', () => {
+  const signed = normalizeResearchFacts('−5％ +5% 6.50% (5%)');
+  assert.deepEqual(signed.filter(fact => fact.kind === 'PERCENT').map(fact => [fact.value, fact.sign]), [
+    ['5', -1], ['5', 1], ['6.5', 1], ['5', -1],
+  ]);
+
+  const rupeeEvidence = normalizeResearchFacts('Rs 100000')[0];
+  for (const equivalentFormat of ['₹1,00,000', 'INR 100000']) {
+    assert.equal(researchFactsMatch(rupeeEvidence, normalizeResearchFacts(equivalentFormat)[0]), true);
+  }
+  assert.equal(researchFactsMatch(rupeeEvidence, normalizeResearchFacts('100000')[0]), false);
+
+  const magnitudes = normalizeResearchFacts('1 lakh, 1 crore, 1.2 crore');
+  assert.deepEqual(magnitudes.map(fact => [fact.value, fact.unit]), [
+    ['1', 'LAKH'], ['1', 'CRORE'], ['1.2', 'CRORE'],
+  ]);
+  const technicalFacts = normalizeResearchFacts('100 bps, ratio 3:2, multiplier 1.25x');
+  assert.deepEqual(technicalFacts.map(fact => [fact.kind, fact.value]), [
+    ['BASIS_POINTS', '100'], ['RATIO', '3:2'], ['MULTIPLIER', '1.25'],
+  ]);
+
+  const dates = normalizeResearchFacts('2026-10-05; 05-10-2026; 5 Oct 2026; FY 2026-27; Section 112A');
+  assert.deepEqual(dates.map(fact => [fact.kind, fact.value]), [
+    ['DATE', '2026-10-05'],
+    ['DATE', '2026-10-05'],
+    ['DATE', '2026-10-05'],
+    ['FINANCIAL_YEAR', 'FY2026-27'],
+    ['STATUTORY_IDENTIFIER', '112A'],
+  ]);
+
+  const qualifiers = normalizeResearchFacts('up to 7%; at least 8%; below 9%; not more than 10%');
+  assert.deepEqual(qualifiers.filter(fact => fact.kind === 'PERCENT').map(fact => [fact.value, fact.qualifier, fact.negated]), [
+    ['7', 'AT_MOST', false],
+    ['8', 'AT_LEAST', false],
+    ['9', 'BELOW', false],
+    ['10', 'NOT_MORE_THAN', false],
+  ]);
+
+  const timeScoped = normalizeResearchFacts('The rate was 7% in 2025 and is now 6% in 2026.')
+    .filter(fact => fact.kind === 'PERCENT');
+  assert.deepEqual(timeScoped.map(fact => [fact.value, fact.temporal, fact.period]), [
+    ['7', 'PAST', '2025'],
+    ['6', 'CURRENT', '2026'],
+  ]);
+  assert.deepEqual(normalizeResearchFacts('The range is 5%-7%.').map(fact => [fact.kind, fact.value]), [
+    ['RANGE', '5..7'],
+  ]);
+});
 
 async function freePort() {
   const server = net.createServer();
@@ -201,6 +251,158 @@ test('live/configured research results always pass through the safe document fet
   });
   assert.equal(fetchCount, 1);
   assert.equal(result.verification.valid, true);
+});
+
+test('research claim verification rejects sign, unit, qualifier, date, and negation contradictions after rehash', async () => {
+  const sourceBrief = brief();
+  const base = await runResearch({
+    brief: sourceBrief,
+    provider: {
+      name: 'configured',
+      search: async () => [{ url: 'https://rbi.org.in/press-releases/claim-fixture', factType: 'regulatory_context' }],
+    },
+    documentFetcher: {
+      fetchDocument: async url => ({
+        url,
+        body: 'The Reserve Bank of India current policy rate is 6.50% as of this public fixture date.',
+        contentType: 'text/plain',
+        retrievedAt: nowIso(),
+      }),
+    },
+  });
+  assert.equal(base.verification.valid, true);
+  assert.ok(base.artifact.claims.length > 0);
+
+  function verifyRewrite({ excerpt, claimText, candidate }) {
+    const artifact = structuredClone(base.artifact);
+    const evidence = artifact.evidenceUnits[0];
+    const claim = artifact.claims[0];
+    evidence.supportingExcerpt = excerpt;
+    evidence.claimCandidate = candidate;
+    evidence.supportingExcerptHash = crypto.createHash('sha256').update(excerpt).digest('hex');
+    evidence.publicationDate = sourceBrief.asOf;
+    evidence.freshnessStatus = 'FRESH';
+    const source = artifact.sources.find(item => item.sourceId === evidence.sourceId);
+    source.publicationDate = sourceBrief.asOf;
+    claim.text = claimText;
+    claim.supportingEvidenceIds = [evidence.evidenceId];
+    claim.contradictingEvidenceIds = [];
+    claim.claimType = evidence.factType;
+    claim.supportStatus = 'SUPPORTED';
+    claim.sourceTrustTier = evidence.sourceTrustTier;
+    claim.freshnessStatus = evidence.freshnessStatus;
+    claim.asOf = sourceBrief.asOf;
+    artifact.claims = [claim];
+    artifact.contradictions = [];
+    delete artifact.contentHash;
+    artifact.contentHash = hashResearchArtifact(artifact);
+    return verifyResearchArtifact(artifact, { brief: sourceBrief, now: new Date(nowIso()) });
+  }
+
+  const cases = [
+    {
+      label: 'opposite signed percentages',
+      excerpt: 'The measured historical return was -5% for the period.',
+      claimText: 'The measured historical return was +5% for the period.',
+      candidate: '-5%',
+    },
+    {
+      label: 'negated percentage claim',
+      excerpt: 'The rate does not provide 6.50% for this period.',
+      claimText: 'The rate does provide 6.50% for this period.',
+      candidate: '6.50%',
+    },
+    {
+      label: 'direct negated rate',
+      excerpt: 'The rate is not 6.50% for this period.',
+      claimText: 'The rate is 6.50% for this period.',
+      candidate: '6.50%',
+    },
+    {
+      label: 'Unicode minus and percent signs',
+      excerpt: 'The measured return was −5％ for the period.',
+      claimText: 'The measured return was +5% for the period.',
+      candidate: '−5％',
+    },
+    {
+      label: 'parenthesized negative versus positive',
+      excerpt: 'The measured return was (5%) for the period.',
+      claimText: 'The measured return was 5% for the period.',
+      candidate: '(5%)',
+    },
+    {
+      label: 'range quoted as point value',
+      excerpt: 'The rate ranged from 5% to 7% during the period.',
+      claimText: 'The rate was 6% during the period.',
+      candidate: '5% to 7%',
+    },
+    {
+      label: 'upper bound quoted as exact value',
+      excerpt: 'The return was up to 7% for this period.',
+      claimText: 'The return was 7% for this period.',
+      candidate: 'up to 7%',
+    },
+    {
+      label: 'lower bound quoted as exact value',
+      excerpt: 'The return was at least 7% for this period.',
+      claimText: 'The return was 7% for this period.',
+      candidate: 'at least 7%',
+    },
+    {
+      label: 'below threshold quoted as exact value',
+      excerpt: 'The return remained below 7% for this period.',
+      claimText: 'The return was 7% for this period.',
+      candidate: 'below 7%',
+    },
+    {
+      label: 'negated bound quoted as exact value',
+      excerpt: 'The return was not more than 7% for this period.',
+      claimText: 'The return was 7% for this period.',
+      candidate: 'not more than 7%',
+    },
+    {
+      label: 'past value claimed as current',
+      excerpt: 'The policy rate was 7% in 2025 and is now 6% in 2026.',
+      claimText: 'The policy rate is currently 7% in 2025.',
+      candidate: 'was 7%',
+    },
+    {
+      label: 'negated guarantee',
+      excerpt: 'The return is not guaranteed for this product.',
+      claimText: 'The return is guaranteed for this product.',
+      candidate: 'not guaranteed',
+    },
+    {
+      label: 'not guaranteed after a numeric value',
+      excerpt: 'The return is 7% and is NOT guaranteed for this product.',
+      claimText: 'The return is 7% and is guaranteed for this product.',
+      candidate: '7%',
+    },
+    {
+      label: 'different numeric units',
+      excerpt: 'The spread is 100 bps for this period.',
+      claimText: 'The spread is 1% for this period.',
+      candidate: '100 bps',
+    },
+  ];
+
+  for (const item of cases) {
+    const verification = verifyRewrite(item);
+    assert.notEqual(
+      verification.claimAudits[0]?.finalDecision,
+      'SUPPORTED',
+      `${item.label} must be left unverified, errors=${verification.errors.join(',')}`,
+    );
+    assert.equal(verification.verifiedClaims.length, 0, `${item.label} must not enter verified claims`);
+  }
+
+  const equivalentCurrency = verifyRewrite({
+    excerpt: 'The minimum balance is Rs 100000 for this account.',
+    claimText: 'The minimum balance is ₹1,00,000 for this account.',
+    candidate: 'Rs 100000',
+  });
+  assert.equal(equivalentCurrency.claimAudits[0]?.finalDecision, 'SUPPORTED');
+  assert.equal(equivalentCurrency.verifiedClaims.length, 1);
 });
 
 test('live search metadata cannot forge publisher identity or freshness', async () => {
