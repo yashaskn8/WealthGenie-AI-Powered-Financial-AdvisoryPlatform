@@ -2,7 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import { createServer } from 'node:http';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createHealthRouter } from '../routes/health.js';
+import { createBuildProvenance, loadBuildProvenance, serializeBuildProvenance } from '../services/buildProvenance.js';
 import { assertFetchResponseMatchesOpenApi } from './helpers/openapiRuntimeContract.js';
 
 const DEMO_ENVIRONMENT_ID = '11111111-1111-4111-8111-111111111111';
@@ -39,6 +44,7 @@ test('runtime verification reports only the running process build and connected 
     assert.deepEqual(body, {
       status: 'RUNTIME_VERIFIED',
       buildSha: 'a'.repeat(40),
+      buildProvenance: { status: 'UNAVAILABLE', provenanceSha256: null },
       mongo: { connected: true, transactionCapable: true, databaseIdentityVerified: false, environmentSentinelVerified: false },
       redis: { required: true, connected: true },
       marketProvider: 'NSE',
@@ -46,6 +52,49 @@ test('runtime verification reports only the running process build and connected 
     });
     assert.doesNotMatch(JSON.stringify(body), /mongodb|redis:\/\/|password|credential|secret/i);
   });
+});
+
+test('liveness exposes verified non-secret artifact provenance and rejects a tampered manifest', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'wealthgenie-health-provenance-'));
+  const artifacts = path.join(directory, 'artifacts');
+  const manifestPath = path.join(directory, 'provenance.json');
+  try {
+    await mkdir(artifacts);
+    await writeFile(path.join(artifacts, 'index.html'), '<html>verified</html>');
+    const manifest = await createBuildProvenance({
+      repositoryRoot: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..'),
+      frontendArtifactDirectory: artifacts,
+      gitCommitSha: 'a'.repeat(40),
+      gitTreeSha: 'b'.repeat(40),
+      serverImageIdentity: `sha256:${'1'.repeat(64)}`,
+      frontendImageIdentity: `sha256:${'2'.repeat(64)}`,
+      mlImageIdentity: `sha256:${'3'.repeat(64)}`,
+      workflowRunId: '12345',
+      workflowRunAttempt: '1',
+      buildTimestamp: '2026-10-05T00:00:00.000Z',
+    });
+    await writeFile(manifestPath, serializeBuildProvenance(manifest));
+
+    await withVerificationServer({ buildProvenance: loadBuildProvenance(manifestPath) }, async baseUrl => {
+      const response = await fetch(`${baseUrl}/health/live`);
+      const body = await response.json();
+      assert.equal(body.buildProvenance.status, 'VERIFIED');
+      assert.equal(body.buildProvenance.provenanceSha256, manifest.provenanceSha256);
+      assert.equal(body.buildProvenance.gitTreeSha, 'b'.repeat(40));
+      assert.equal(body.buildProvenance.frontendArtifactSetSha256, manifest.frontendArtifactSetSha256);
+      assert.equal(body.buildProvenance.serverImageIdentity, `sha256:${'1'.repeat(64)}`);
+      assert.doesNotMatch(JSON.stringify(body.buildProvenance), /password|secret|token|credential/i);
+    });
+
+    const tampered = { ...manifest, gitTreeSha: 'c'.repeat(40) };
+    await writeFile(manifestPath, serializeBuildProvenance(tampered));
+    await withVerificationServer({ buildProvenance: loadBuildProvenance(manifestPath) }, async baseUrl => {
+      const body = await (await fetch(`${baseUrl}/health/live`)).json();
+      assert.deepEqual(body.buildProvenance, { status: 'INVALID', provenanceSha256: null });
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('runtime verification fails closed when the connected Mongo or required Redis probe fails', async () => {

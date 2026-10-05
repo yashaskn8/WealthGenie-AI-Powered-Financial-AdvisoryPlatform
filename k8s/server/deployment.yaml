@@ -30,6 +30,8 @@ spec:
               value: "5000"
             - name: TRACE_LOG_PATH
               value: "/app/traces.jsonl"
+            - name: APP_BUILD_PROVENANCE_PATH
+              value: "/run/wealthgenie/build-provenance/provenance.json"
             - name: MONGODB_URI
               valueFrom:
                 secretKeyRef:
@@ -62,6 +64,10 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+          volumeMounts:
+            - name: build-provenance
+              mountPath: /run/wealthgenie/build-provenance
+              readOnly: true
           startupProbe:
             httpGet:
               path: /healthz
@@ -84,3 +90,8 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
+      volumes:
+        - name: build-provenance
+          configMap:
+            name: wealthgenie-build-provenance
+            optional: true

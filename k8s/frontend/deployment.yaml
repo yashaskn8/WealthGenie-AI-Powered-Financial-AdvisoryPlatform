@@ -22,6 +22,10 @@ spec:
           ports:
             - containerPort: 80
               name: http
+          volumeMounts:
+            - name: build-provenance
+              mountPath: /usr/share/nginx/html/build-provenance
+              readOnly: true
           resources:
             requests:
               cpu: 50m
@@ -45,3 +49,8 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
+      volumes:
+        - name: build-provenance
+          configMap:
+            name: wealthgenie-build-provenance
+            optional: true

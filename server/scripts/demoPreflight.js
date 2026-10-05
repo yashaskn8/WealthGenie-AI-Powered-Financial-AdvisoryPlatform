@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { matchesBuildSha } from '../../shared/buildIdentity.js';
+import { verifyBuildProvenance } from '../services/buildProvenance.js';
 import {
   NIFTYBEES_PRODUCT_TAX_EVIDENCE,
   PRODUCT_TAX_CLASSES,
@@ -88,7 +89,7 @@ export function isSafeDemoUrl(value, { api = false, remoteOrigins } = {}) {
   }
 }
 
-async function servedFrontendBuildMatches({ page, request, expectedBuildSha, origin }) {
+async function servedFrontendBuildMatches({ page, request, expectedBuildSha, expectedGitTreeSha, expectedProvenanceSha256, expectedFrontendArtifactSetSha256, origin }) {
   if (!matchesBuildSha(expectedBuildSha, expectedBuildSha)) return false;
   const runtime = await page.evaluate(() => ({
     buildSha: globalThis.document.documentElement.dataset.buildSha || null,
@@ -105,15 +106,38 @@ async function servedFrontendBuildMatches({ page, request, expectedBuildSha, ori
     }
   });
   if (firstPartyScripts.length === 0 || typeof request?.get !== 'function') return false;
+  let scriptMatches = false;
   for (const source of firstPartyScripts) {
     try {
       const response = await request.get(source, { timeout: LOGIN_BROWSER_TIMEOUT_MS });
-      if (responseOk(response) && (await response.text()).includes(expectedBuildSha.toLowerCase())) return true;
+      if (responseOk(response) && (await response.text()).includes(expectedBuildSha.toLowerCase())) {
+        scriptMatches = true;
+        break;
+      }
     } catch {
       // A served-asset fetch failure is a failed attestation, not a reason to authenticate.
     }
   }
-  return false;
+  if (!scriptMatches) return false;
+  if (!/^[a-f0-9]{64}$/.test(expectedProvenanceSha256 || '')
+      || !/^[a-f0-9]{64}$/.test(expectedFrontendArtifactSetSha256 || '')) return false;
+  try {
+    const response = await request.get(new URL('/build-provenance/provenance.json', origin).toString(), {
+      timeout: LOGIN_BROWSER_TIMEOUT_MS,
+    });
+    if (!responseOk(response)) return false;
+    const manifest = await response.json();
+    return ['serverImageIdentity', 'frontendImageIdentity', 'mlImageIdentity']
+      .every(field => /^sha256:[a-f0-9]{64}$/.test(manifest?.[field] || ''))
+      && verifyBuildProvenance(manifest, {
+      gitCommitSha: expectedBuildSha.toLowerCase(),
+      gitTreeSha: expectedGitTreeSha.toLowerCase(),
+      frontendArtifactSetSha256: expectedFrontendArtifactSetSha256.toLowerCase(),
+      provenanceSha256: expectedProvenanceSha256.toLowerCase(),
+      }).valid;
+  } catch {
+    return false;
+  }
 }
 
 const TRUSTED_TAX_SOURCE_HOSTS = Object.freeze([
@@ -621,6 +645,7 @@ export const EXPECTED_PREFLIGHT_CHECKS = Object.freeze([
   'Profile completion payload',
   'Tax input payload',
   'Backend',
+  'Build provenance',
   'Backend readiness',
   'Mongo/transaction support',
   'Redis if required',
@@ -984,6 +1009,9 @@ export async function checkBrowserAndFinancialFlow(reporter, {
   idempotencyKey = process.env.DEMO_COMPLETION_IDEMPOTENCY_KEY,
   parentInstrumentId = process.env.DEMO_NIFTY_ETF_PARENT_ID,
   expectedBuildSha = process.env.DEMO_EXPECTED_BUILD_SHA,
+  expectedGitTreeSha = process.env.DEMO_EXPECTED_BUILD_TREE_SHA,
+  expectedProvenanceSha256 = process.env.DEMO_EXPECTED_BUILD_PROVENANCE_SHA256,
+  expectedFrontendArtifactSetSha256 = process.env.DEMO_EXPECTED_FRONTEND_ARTIFACT_SET_SHA256,
   trustedRemoteOrigins = process.env.DEMO_TRUSTED_REMOTE_ORIGINS,
 }, { launchBrowser, onTiming } = {}) {
   if (!frontendUrl || !email || !password) {
@@ -1070,6 +1098,9 @@ export async function checkBrowserAndFinancialFlow(reporter, {
         page,
         request: context.request,
         expectedBuildSha,
+        expectedGitTreeSha,
+        expectedProvenanceSha256,
+        expectedFrontendArtifactSetSha256,
         origin: frontend.origin,
       });
       if (!frontendBuildVerified) {
@@ -1470,17 +1501,40 @@ export async function runDemoPreflight({
   const runtimeBody = runtimeVerification?.body;
   const backendBuildMatches = matchesBuildSha(environment.DEMO_EXPECTED_BUILD_SHA, health?.body?.buildSha)
     && matchesBuildSha(environment.DEMO_EXPECTED_BUILD_SHA, runtimeBody?.buildSha);
+  const expectedProvenanceSha256 = environment.DEMO_EXPECTED_BUILD_PROVENANCE_SHA256;
+  const expectedFrontendArtifactSetSha256 = environment.DEMO_EXPECTED_FRONTEND_ARTIFACT_SET_SHA256;
+  const expectedProvenanceFields = {
+    provenanceSha256: expectedProvenanceSha256?.toLowerCase(),
+    gitCommitSha: environment.DEMO_EXPECTED_BUILD_SHA?.toLowerCase(),
+    gitTreeSha: environment.DEMO_EXPECTED_BUILD_TREE_SHA?.toLowerCase(),
+    frontendArtifactSetSha256: expectedFrontendArtifactSetSha256?.toLowerCase(),
+  };
+  const verifyPublishedProvenance = value => {
+    if (value?.status !== 'VERIFIED') return false;
+    const manifest = Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'status'));
+    return ['serverImageIdentity', 'frontendImageIdentity', 'mlImageIdentity']
+      .every(field => /^sha256:[a-f0-9]{64}$/.test(manifest[field] || ''))
+      && verifyBuildProvenance(manifest, expectedProvenanceFields).valid;
+  };
+  const buildProvenanceMatches = /^[a-f0-9]{64}$/.test(expectedProvenanceSha256 || '')
+    && /^[a-f0-9]{64}$/.test(expectedFrontendArtifactSetSha256 || '')
+    && /^[a-f0-9]{40}$/.test(environment.DEMO_EXPECTED_BUILD_TREE_SHA || '')
+    && verifyPublishedProvenance(health?.body?.buildProvenance)
+    && verifyPublishedProvenance(runtimeBody?.buildProvenance);
   reporter.add('Backend', Boolean(health?.response.ok && health.body?.status === 'ALIVE' && backendBuildMatches),
     health?.response.ok && health.body?.status === 'ALIVE'
       ? backendBuildMatches ? 'backend liveness and explicit build identity verified' : 'backend build identity is missing, malformed, or differs from the expected build'
       : safeHttpDetail(health));
+  reporter.add('Build provenance', Boolean(buildProvenanceMatches), buildProvenanceMatches
+    ? 'backend liveness and runtime verification match the expected commit, tree, lock inputs, frontend artifact set, and container identities'
+    : 'expected provenance and frontend artifact hashes are missing or the running backend provenance does not match them');
   reporter.add('Backend readiness', Boolean(readiness?.response.ok && readiness.body?.status === 'READY'), safeHttpDetail(readiness));
 
   await verifyMongo(reporter, { environment, verification: runtimeBody });
   await verifyRedis(reporter, { environment, verification: runtimeBody });
 
   const prerequisiteChecks = reporter.checks.filter(check => [
-    'Profile completion payload', 'Tax input payload', 'Backend', 'Backend readiness',
+    'Profile completion payload', 'Tax input payload', 'Backend', 'Build provenance', 'Backend readiness',
     'Mongo/transaction support', 'Redis if required',
   ].includes(check.name));
   if (prerequisiteChecks.some(check => check.state !== 'PASS')) {
@@ -1571,6 +1625,9 @@ export async function runDemoPreflight({
       idempotencyKey: environment.DEMO_COMPLETION_IDEMPOTENCY_KEY,
       parentInstrumentId: environment.DEMO_NIFTY_ETF_PARENT_ID,
       expectedBuildSha: environment.DEMO_EXPECTED_BUILD_SHA,
+      expectedGitTreeSha: environment.DEMO_EXPECTED_BUILD_TREE_SHA,
+      expectedProvenanceSha256,
+      expectedFrontendArtifactSetSha256,
       trustedRemoteOrigins: environment.DEMO_TRUSTED_REMOTE_ORIGINS,
     }, dependencies.browserOptions);
   }

@@ -222,17 +222,24 @@ if (!(dbApply.index < secrets.index
     && cdPhase5Migration.index < cdPhase7Migration.index
     && cdPhase7Migration.index < appApply.index
     && appApply.index < appReady.index)
-    || !cdPhase2Migration.step.run?.includes('kubectl create -f k8s/phase2-index-migration/job.yaml')
+    || !cdPhase2Migration.step.run?.includes('k8s/phase2-index-migration/job.yaml')
+    || !cdPhase2Migration.step.run?.includes('| kubectl create -f -')
     || !cdPhase2Migration.step.run?.includes('kubectl wait --for=condition=complete')
-    || !cdPhase3Migration.step.run?.includes('kubectl create -f k8s/phase3-state-migration/job.yaml')
+    || !cdPhase3Migration.step.run?.includes('k8s/phase3-state-migration/job.yaml')
+    || !cdPhase3Migration.step.run?.includes('| kubectl create -f -')
     || !cdPhase3Migration.step.run?.includes('kubectl wait --for=condition=complete')
-    || !cdPhase4Migration.step.run?.includes('kubectl create -f k8s/phase4-plan-review-migration/job.yaml')
+    || !cdPhase4Migration.step.run?.includes('k8s/phase4-plan-review-migration/job.yaml')
+    || !cdPhase4Migration.step.run?.includes('| kubectl create -f -')
     || !cdPhase4Migration.step.run?.includes('kubectl wait --for=condition=complete')
-    || !cdPhase5Migration.step.run?.includes('kubectl create -f k8s/phase5-agent-runtime-migration/job.yaml')
+    || !cdPhase5Migration.step.run?.includes('k8s/phase5-agent-runtime-migration/job.yaml')
+    || !cdPhase5Migration.step.run?.includes('| kubectl create -f -')
     || !cdPhase5Migration.step.run?.includes('kubectl wait --for=condition=complete')
-    || !cdPhase7Migration.step.run?.includes('kubectl create -f k8s/phase7-research-task-migration.yaml')
+    || !cdPhase7Migration.step.run?.includes('k8s/phase7-research-task-migration.yaml')
+    || !cdPhase7Migration.step.run?.includes('| kubectl create -f -')
     || !cdPhase7Migration.step.run?.includes('kubectl wait --for=condition=complete')
-    || !appApply.step.run?.includes('kubectl apply -k k8s/')) {
+    || !appApply.step.run?.includes('kubectl kustomize k8s/')
+    || !appApply.step.run?.includes('kubectl apply -f build/k8s-pinned.yaml')
+    || !appApply.step.run?.includes('GITHUB_SHA')) {
   throw new Error('Kind CD must wait for all ordered one-shot database migrations before applying application workloads');
 }
 

@@ -125,11 +125,42 @@ test('Kind image builds use repository-root contexts for shared-module Dockerfil
   assert.ok(buildStep, 'CD Docker image build step is missing');
   const commands = buildStep.replace(/\\\r?\n\s*/g, ' ');
 
-  assert.match(commands, /docker build\s+--build-arg APP_BUILD_SHA=\$\{\{\s*github\.sha\s*\}\}\s+-f server\/Dockerfile\s+-t wealthgenie-server:latest\s+\./);
-  assert.match(commands, /docker build\s+-t wealthgenie-ml-service:latest\s+ml-service\//);
-  assert.match(commands, /docker build\s+--build-arg VITE_API_URL=\/api\s+--build-arg VITE_BUILD_SHA=\$\{\{\s*github\.sha\s*\}\}\s+-f reactapp\/Dockerfile\s+-t wealthgenie-frontend:latest\s+\./);
+  assert.match(commands, /docker build\s+--build-arg APP_BUILD_SHA="\$GITHUB_SHA"\s+-f server\/Dockerfile\s+-t "wealthgenie-server:\$IMAGE_TAG" -t wealthgenie-server:latest\s+\./);
+  assert.match(commands, /docker build\s+-f ml-service\/Dockerfile -t "wealthgenie-ml-service:\$IMAGE_TAG"\s+-t wealthgenie-ml-service:latest ml-service\//);
+  assert.match(commands, /docker build\s+--build-arg VITE_API_URL=\/api\s+--build-arg VITE_BUILD_SHA="\$GITHUB_SHA"\s+-f reactapp\/Dockerfile\s+-t "wealthgenie-frontend:\$IMAGE_TAG"/);
+  assert.match(commands, /docker image inspect --format '\{\{\.Id\}\}' "wealthgenie-server:\$IMAGE_TAG"/);
+  assert.match(commands, /docker cp "\$FRONTEND_CONTAINER:\/usr\/share\/nginx\/html\/\." build\/frontend-artifacts\//);
+  assert.match(commands, /server\/scripts\/createBuildProvenance\.js/);
   assert.doesNotMatch(commands, /docker build\s+-t wealthgenie-server:latest\s+server\//);
   assert.doesNotMatch(commands, /docker build\s+--build-arg VITE_API_URL=\/api\s+--build-arg VITE_BUILD_SHA=\$\{\{\s*github\.sha\s*\}\}\s+-t wealthgenie-frontend:latest\s+reactapp\//);
+  assert.match(cdWorkflow, /kind load docker-image "wealthgenie-server:\$IMAGE_TAG"/);
+  assert.match(cdWorkflow, /sed -E "s\/\(wealthgenie-\(server\|frontend\|ml-service\)\):latest/);
+  assert.match(cdWorkflow, /kubectl create configmap wealthgenie-build-provenance/);
+  assert.match(cdWorkflow, /verify_deployed_image_identity wealthgenie-server/);
+  assert.match(cdWorkflow, /verify_deployed_image_identity wealthgenie-agent-worker/);
+  assert.match(cdWorkflow, /verify_deployed_image_identity wealthgenie-frontend/);
+  assert.match(cdWorkflow, /verify_deployed_image_identity wealthgenie-ml-service/);
+  assert.match(cdWorkflow, /crictl inspecti/);
+  assert.match(cdWorkflow, /\.status\.repoDigests/);
+  assert.match(cdWorkflow, /\.status\.containerStatuses\[\]\?\.imageID/);
+});
+
+test('Kubernetes serves the same optional build provenance manifest from backend health and frontend static files', () => {
+  const rootDir = fs.existsSync(path.join(process.cwd(), 'docker-compose.yml'))
+    ? process.cwd()
+    : path.resolve(process.cwd(), '..');
+  const serverDeployment = fs.readFileSync(path.join(rootDir, 'k8s', 'server', 'deployment.yaml'), 'utf8');
+  const frontendDeployment = fs.readFileSync(path.join(rootDir, 'k8s', 'frontend', 'deployment.yaml'), 'utf8');
+  const healthRoute = fs.readFileSync(path.join(rootDir, 'server', 'routes', 'health.js'), 'utf8');
+  const demoPreflight = fs.readFileSync(path.join(rootDir, 'server', 'scripts', 'demoPreflight.js'), 'utf8');
+
+  assert.match(serverDeployment, /APP_BUILD_PROVENANCE_PATH[\s\S]*\/run\/wealthgenie\/build-provenance\/provenance\.json/);
+  assert.match(serverDeployment, /mountPath: \/run\/wealthgenie\/build-provenance/);
+  assert.match(frontendDeployment, /mountPath: \/usr\/share\/nginx\/html\/build-provenance/);
+  assert.match(serverDeployment, /name: wealthgenie-build-provenance[\s\S]*optional: true/);
+  assert.match(frontendDeployment, /name: wealthgenie-build-provenance[\s\S]*optional: true/);
+  assert.match(healthRoute, /buildProvenance: publicBuildProvenance\(buildProvenance\)/);
+  assert.match(demoPreflight, /build-provenance\/provenance\.json/);
 });
 
 test('Kubernetes supplies every production ML credential using the expected variable names', () => {

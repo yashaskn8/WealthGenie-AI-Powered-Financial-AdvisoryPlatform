@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -34,6 +35,32 @@ import { calculateProductPostTaxOutcome } from '../services/productPostTaxCalcul
 import { getProductTaxMetadata } from '../services/productTaxAuthority.js';
 import { indiaClockParts, isoDateInIndia } from '../services/marketData/indiaMarketTime.js';
 import { previousNseTradingDate } from '../services/marketData/nseTradingCalendar.js';
+import { BUILD_PROVENANCE_SCHEMA, canonicalJson } from '../services/buildProvenance.js';
+
+function makeTestBuildManifest(commitSha, overrides = {}) {
+  const manifest = {
+    schemaVersion: BUILD_PROVENANCE_SCHEMA,
+    gitCommitSha: commitSha,
+    gitTreeSha: 'f'.repeat(40),
+    serverLockSha256: 'a'.repeat(64),
+    frontendLockSha256: 'b'.repeat(64),
+    mlRequirementsSha256: 'c'.repeat(64),
+    frontendArtifactSetSha256: 'd'.repeat(64),
+    serverImageIdentity: `sha256:${'1'.repeat(64)}`,
+    frontendImageIdentity: `sha256:${'2'.repeat(64)}`,
+    mlImageIdentity: `sha256:${'3'.repeat(64)}`,
+    workflowRunId: null,
+    workflowRunAttempt: null,
+    buildTimestamp: null,
+    ...overrides,
+  };
+  manifest.provenanceSha256 = createHash('sha256').update(canonicalJson(manifest)).digest('hex');
+  return manifest;
+}
+
+function publishTestBuildManifest(manifest) {
+  return { status: 'VERIFIED', ...manifest };
+}
 
 const currentBinding = () => ({
   profileId: '64b000000000000000000001',
@@ -306,7 +333,13 @@ function browserFlowFixture(scenario = {}) {
         newPage: async () => page,
         ...(scenario.browserRouteMissing ? {} : { async route() {} }),
         request: {
-          async get() {
+          async get(url) {
+            if (url.endsWith('/build-provenance/provenance.json')) {
+              const manifest = scenario.frontendProvenanceMismatch
+                ? makeTestBuildManifest('c'.repeat(40), { frontendArtifactSetSha256: 'e'.repeat(64) })
+                : makeTestBuildManifest('c'.repeat(40));
+              return { ok: () => true, json: async () => manifest };
+            }
             const assetSha = scenario.frontendAssetShaMismatch ? 'd'.repeat(40) : 'c'.repeat(40);
             return { ok: () => true, text: async () => `const buildIdentity = '${assetSha}'` };
           },
@@ -333,6 +366,9 @@ async function runBrowserFlow(scenario = {}) {
     idempotencyKey: 'fixture-idempotency-key',
     parentInstrumentId: scenario.parentInstrumentId ?? 'nifty_etf',
     expectedBuildSha: 'c'.repeat(40),
+    expectedGitTreeSha: 'f'.repeat(40),
+    expectedProvenanceSha256: makeTestBuildManifest('c'.repeat(40)).provenanceSha256,
+    expectedFrontendArtifactSetSha256: 'd'.repeat(64),
   }, fixture);
   return { ...reporter.finish(), lines };
 }
@@ -808,7 +844,7 @@ test('runDemoPreflight accepts injected environment and output while preserving 
   assert.equal(result.checks.filter(check => check.state === 'NOT_EVALUATED').length, EXPECTED_PREFLIGHT_CHECKS.length - 1);
   assert.equal(result.checks.find(check => check.name === 'Explicit live-demo mode').state, 'FAIL');
   assert.equal(output.length, EXPECTED_PREFLIGHT_CHECKS.length + 2);
-  assert.match(output.at(-2), /Live-demo preflight: 0 PASS, 1 FAIL, 21 NOT_EVALUATED/);
+  assert.match(output.at(-2), /Live-demo preflight: 0 PASS, 1 FAIL, 22 NOT_EVALUATED/);
 });
 
 test('frontend build environment forwards only required non-secret runtime inputs', () => {
@@ -942,6 +978,11 @@ function injectedOrchestrationDependencies({
   failGate = null,
 } = {}) {
   const expectedSha = 'e'.repeat(40);
+  const expectedBuildManifest = makeTestBuildManifest(expectedSha);
+  const runningBuildManifest = failGate === 'Build provenance'
+    ? makeTestBuildManifest(expectedSha, { gitTreeSha: '0'.repeat(40) })
+    : expectedBuildManifest;
+  const publishedBuildManifest = publishTestBuildManifest(runningBuildManifest);
   const marketBody = structuredClone(marketBodyOverride || qualifiedMarketContext({
     snapshotStatus: failGate === 'Market context' ? 'LAST_AVAILABLE' : marketStatus,
   }).body);
@@ -966,6 +1007,9 @@ function injectedOrchestrationDependencies({
     DEMO_COMPLETION_IDEMPOTENCY_KEY: 'fixture-idempotency-key',
     DEMO_NIFTY_ETF_PARENT_ID: 'nifty_etf',
     DEMO_EXPECTED_BUILD_SHA: expectedSha,
+    DEMO_EXPECTED_BUILD_TREE_SHA: expectedBuildManifest.gitTreeSha,
+    DEMO_EXPECTED_BUILD_PROVENANCE_SHA256: expectedBuildManifest.provenanceSha256,
+    DEMO_EXPECTED_FRONTEND_ARTIFACT_SET_SHA256: expectedBuildManifest.frontendArtifactSetSha256,
     DEMO_EXPECTED_MONGODB_DATABASE: 'wealthgenie_demo',
     DEMO_EXPECTED_MONGODB_HOST: '127.0.0.1',
     DEMO_EXPECTED_MONGODB_PORT: '27017',
@@ -986,7 +1030,11 @@ function injectedOrchestrationDependencies({
       return label === 'Profile completion payload' ? { profile: true } : demoTaxContext();
     },
     async readHttp(url, options = {}) {
-      if (url.endsWith('/health/live')) return response(failGate === 'Backend' ? 503 : 200, { status: failGate === 'Backend' ? 'DOWN' : 'ALIVE', buildSha: backendSha });
+      if (url.endsWith('/health/live')) return response(failGate === 'Backend' ? 503 : 200, {
+        status: failGate === 'Backend' ? 'DOWN' : 'ALIVE',
+        buildSha: backendSha,
+        buildProvenance: publishedBuildManifest,
+      });
       if (url.endsWith('/health/ready')) return response(failGate === 'Backend readiness' ? 503 : 200, { status: failGate === 'Backend readiness' ? 'NOT_READY' : 'READY' });
       if (url.endsWith('/health/verification')) {
         assert.equal(Object.hasOwn(options.headers || {}, 'X-Demo-Expected-Mongodb-Database'), true);
@@ -998,6 +1046,7 @@ function injectedOrchestrationDependencies({
         return response(databaseVerified ? 200 : 503, {
         status: databaseVerified ? 'DEMO_DATABASE_VERIFIED' : 'NOT_VERIFIED',
         buildSha: expectedSha,
+        buildProvenance: publishedBuildManifest,
         mongo: { connected: true, transactionCapable: databaseVerified, databaseIdentityVerified: databaseVerified, environmentSentinelVerified: databaseVerified },
         redis: { required: failGate === 'Redis if required', connected: failGate !== 'Redis if required' },
         marketProvider: failGate === 'Market provider configuration' ? 'UNSUPPORTED' : 'NSE',
@@ -1047,13 +1096,13 @@ function injectedOrchestrationDependencies({
   return { environment, dependencies };
 }
 
-test('OFFLINE PREFLIGHT CONTRACT VERIFIED: a fully-qualified injected scenario passes all 22 gates', async () => {
+test('OFFLINE PREFLIGHT CONTRACT VERIFIED: a fully-qualified injected scenario passes all 23 gates', async () => {
   const fixture = injectedOrchestrationDependencies({ userPathPass: true, qualifiedProductTax: true });
   const result = await runDemoPreflight({ ...fixture, write: () => {} });
 
-  assert.equal(result.checks.length, 22);
+  assert.equal(result.checks.length, 23);
   assert.deepEqual(result.checks.map(check => check.name), EXPECTED_PREFLIGHT_CHECKS);
-  assert.equal(result.passed, 22, JSON.stringify(result.checks.filter(check => !check.passed)));
+  assert.equal(result.passed, 23, JSON.stringify(result.checks.filter(check => !check.passed)));
   assert.equal(result.failed, 0);
   assert.equal(result.notEvaluated, 0);
   assert.equal(result.exitCode, 0);
@@ -1065,10 +1114,10 @@ test('offline orchestration has a deterministic failure case for every named liv
     const result = await runDemoPreflight({ ...fixture, write: () => {} });
     const target = result.checks.find(check => check.name === gate);
 
-    assert.equal(result.checks.length, 22, `${gate}: gate count`);
+    assert.equal(result.checks.length, 23, `${gate}: gate count`);
     assert.equal(target.state, 'FAIL', `${gate}: injected fault must fail its gate`);
     assert.equal(result.exitCode, 1, `${gate}: failure must produce non-zero exit`);
-    assert.equal(result.passed + result.failed + result.notEvaluated, 22, `${gate}: terminal state accounting`);
+    assert.equal(result.passed + result.failed + result.notEvaluated, 23, `${gate}: terminal state accounting`);
   }
 });
 
@@ -1079,6 +1128,7 @@ test('preflight never enters the browser mutation boundary before live prerequis
     'Profile completion payload',
     'Tax input payload',
     'Backend',
+    'Build provenance',
     'Backend readiness',
     'Mongo/transaction support',
     'Redis if required',
@@ -1165,9 +1215,9 @@ test('live orchestration retains all checks and successful probes cannot overrid
   const fixture = injectedOrchestrationDependencies({ marketStatus: 'LAST_AVAILABLE', userPathPass: false });
   const result = await runDemoPreflight({ ...fixture, write: line => output.push(line) });
 
-  assert.equal(result.checks.length, 22);
+  assert.equal(result.checks.length, 23);
   assert.deepEqual(result.checks.map(check => check.name), EXPECTED_PREFLIGHT_CHECKS);
-  assert.equal(result.checks.filter(check => check.passed).length + result.failed + result.notEvaluated, 22);
+  assert.equal(result.checks.filter(check => check.passed).length + result.failed + result.notEvaluated, 23);
   assert.equal(result.exitCode, 1);
   assert.equal(result.checks.find(check => check.name === 'Mongo/transaction support').passed, true);
   assert.equal(result.checks.find(check => check.name === 'Redis if required').passed, true);
@@ -1176,7 +1226,7 @@ test('live orchestration retains all checks and successful probes cannot overrid
   assert.match(result.checks.find(check => check.name === 'Product tax workflow').detail, /TAX_CLASSIFICATION_UNAVAILABLE/);
   assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
   assert.equal(output.length, EXPECTED_PREFLIGHT_CHECKS.length + 2);
-  assert.match(output.at(-2), /19 PASS, 3 FAIL/);
+  assert.match(output.at(-2), /20 PASS, 3 FAIL/);
 });
 
 test('live orchestration rejects a backend process whose explicit SHA differs from the expected build', async () => {
@@ -1583,6 +1633,13 @@ test('critical browser path rejects a frontend runtime built from a different re
 
 test('a mismatched served frontend asset is rejected before demo credentials are submitted', async () => {
   const result = await runBrowserFlow({ frontendAssetShaMismatch: true });
+  assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
+  assert.match(result.checks.find(check => check.name === 'Critical browser path').detail, /FRONTEND_BUILD_IDENTITY_MISMATCH/);
+  assert.equal(result.checks.find(check => check.name === 'Profile completion/auth').state, 'NOT_EVALUATED');
+});
+
+test('a served frontend from a different valid provenance manifest is rejected before demo credentials are submitted', async () => {
+  const result = await runBrowserFlow({ frontendProvenanceMismatch: true });
   assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
   assert.match(result.checks.find(check => check.name === 'Critical browser path').detail, /FRONTEND_BUILD_IDENTITY_MISMATCH/);
   assert.equal(result.checks.find(check => check.name === 'Profile completion/auth').state, 'NOT_EVALUATED');

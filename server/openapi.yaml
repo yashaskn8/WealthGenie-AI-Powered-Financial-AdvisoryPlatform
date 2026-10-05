@@ -1510,10 +1510,30 @@ components:
     HealthStatus: { type: object, required: [status], properties: { status: { type: string }, timestamp: { type: string, format: date-time }, service: { type: string } }, additionalProperties: true }
     RuntimeDependencyVerification:
       type: object
-      required: [status, buildSha, mongo, redis, marketProvider, marketProviderTokenPresent]
+      required: [status, buildSha, buildProvenance, mongo, redis, marketProvider, marketProviderTokenPresent]
       properties:
         status: { type: string, enum: [RUNTIME_VERIFIED, DEMO_DATABASE_VERIFIED, NOT_VERIFIED] }
         buildSha: { type: [string, 'null'], pattern: '^[a-f0-9]{40}$' }
+        buildProvenance:
+          type: object
+          required: [status, provenanceSha256]
+          properties:
+            status: { type: string, enum: [VERIFIED, UNAVAILABLE, INVALID] }
+            provenanceSha256: { type: [string, 'null'], pattern: '^[a-f0-9]{64}$' }
+            schemaVersion: { type: string }
+            gitCommitSha: { type: string, pattern: '^[a-f0-9]{40}$' }
+            gitTreeSha: { type: string, pattern: '^[a-f0-9]{40}$' }
+            serverLockSha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+            frontendLockSha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+            mlRequirementsSha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+            frontendArtifactSetSha256: { type: string, pattern: '^[a-f0-9]{64}$' }
+            serverImageIdentity: { type: [string, 'null'], pattern: '^sha256:[a-f0-9]{64}$' }
+            frontendImageIdentity: { type: [string, 'null'], pattern: '^sha256:[a-f0-9]{64}$' }
+            mlImageIdentity: { type: [string, 'null'], pattern: '^sha256:[a-f0-9]{64}$' }
+            workflowRunId: { type: [string, 'null'] }
+            workflowRunAttempt: { type: [string, 'null'] }
+            buildTimestamp: { type: [string, 'null'], format: date-time }
+          additionalProperties: false
         mongo:
           type: object
           required: [connected, transactionCapable, databaseIdentityVerified, environmentSentinelVerified]

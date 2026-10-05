@@ -8,6 +8,7 @@ import { verifyPersistenceIndexes } from '../services/persistenceIndexReadiness.
 import { verifyAgentRuntimePersistence } from '../services/planHealthPersistence.js';
 import { normalizeBuildSha } from '../../shared/buildIdentity.js';
 import { REDIS_PROBE_TIMEOUT_MS } from '../../shared/demoPreflightContracts.js';
+import { loadBuildProvenance } from '../services/buildProvenance.js';
 import {
   isSafeDemoEnvironmentId,
   verifyDemoDatabaseIdentity,
@@ -36,6 +37,7 @@ export function createHealthRouter({
   verificationTimeoutMs = REDIS_PROBE_TIMEOUT_MS,
   verifyAgentRuntime = verifyAgentRuntimePersistence,
   buildSha = process.env.APP_BUILD_SHA,
+  buildProvenance = loadBuildProvenance(),
   expectedDemoDatabase = process.env.DEMO_EXPECTED_MONGODB_DATABASE,
   expectedDemoDatabaseHost = process.env.DEMO_EXPECTED_MONGODB_HOST,
   expectedDemoDatabasePort = process.env.DEMO_EXPECTED_MONGODB_PORT,
@@ -210,6 +212,7 @@ export function createHealthRouter({
     if (reasons.length > 0) {
       return res.status(503).json({
         status: 'NOT_READY',
+        buildProvenance: publicBuildProvenance(buildProvenance),
         reasons,
         lifecycle: runtimeState?.snapshot() || null,
         timestamp: new Date().toISOString(),
@@ -217,6 +220,7 @@ export function createHealthRouter({
     }
     return res.status(200).json({
       status: 'READY',
+      buildProvenance: publicBuildProvenance(buildProvenance),
       lifecycle: runtimeState?.snapshot() || null,
       timestamp: new Date().toISOString(),
     });
@@ -231,6 +235,7 @@ export function createHealthRouter({
   res.status(200).json({
     status: 'ALIVE',
     buildSha: normalizeBuildSha(buildSha),
+    buildProvenance: publicBuildProvenance(buildProvenance),
     uptime_seconds: Math.round(process.uptime()),
     timestamp: new Date().toISOString(),
   });
@@ -283,6 +288,7 @@ export function createHealthRouter({
     const body = {
       status: verified ? (identityRequired ? 'DEMO_DATABASE_VERIFIED' : 'RUNTIME_VERIFIED') : 'NOT_VERIFIED',
       buildSha: normalizeBuildSha(buildSha),
+      buildProvenance: publicBuildProvenance(buildProvenance),
       mongo: {
         connected: mongoConnected,
         transactionCapable: Boolean(mongoConnected && transactionCapable),
@@ -297,6 +303,45 @@ export function createHealthRouter({
   }));
 
   return router;
+}
+
+function publicBuildProvenance(value) {
+  if (value?.status !== 'VERIFIED' || !value.manifest) {
+    return { status: value?.status === 'INVALID' ? 'INVALID' : 'UNAVAILABLE', provenanceSha256: null };
+  }
+  const {
+    schemaVersion,
+    gitCommitSha,
+    gitTreeSha,
+    serverLockSha256,
+    frontendLockSha256,
+    mlRequirementsSha256,
+    frontendArtifactSetSha256,
+    serverImageIdentity,
+    frontendImageIdentity,
+    mlImageIdentity,
+    workflowRunId,
+    workflowRunAttempt,
+    buildTimestamp,
+    provenanceSha256,
+  } = value.manifest;
+  return {
+    status: 'VERIFIED',
+    schemaVersion,
+    gitCommitSha,
+    gitTreeSha,
+    serverLockSha256,
+    frontendLockSha256,
+    mlRequirementsSha256,
+    frontendArtifactSetSha256,
+    serverImageIdentity,
+    frontendImageIdentity,
+    mlImageIdentity,
+    workflowRunId,
+    workflowRunAttempt,
+    buildTimestamp,
+    provenanceSha256,
+  };
 }
 
 function normalizeExpectedEnvironmentId(requested, configured) {

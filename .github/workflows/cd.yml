@@ -55,30 +55,70 @@ jobs:
           kubectl rollout status deployment metrics-server -n kube-system --timeout=120s
 
       - name: Build Docker Container Images
+        id: build
         run: |
+          set -euo pipefail
+          IMAGE_TAG="$GITHUB_SHA"
           echo "Building wealthgenie-server image..."
-          docker build --build-arg APP_BUILD_SHA=${{ github.sha }} -f server/Dockerfile -t wealthgenie-server:latest .
+          docker build --build-arg APP_BUILD_SHA="$GITHUB_SHA" -f server/Dockerfile \
+            -t "wealthgenie-server:$IMAGE_TAG" -t wealthgenie-server:latest .
 
           echo "Building wealthgenie-ml-service image..."
-          docker build -t wealthgenie-ml-service:latest ml-service/
+          docker build -f ml-service/Dockerfile -t "wealthgenie-ml-service:$IMAGE_TAG" \
+            -t wealthgenie-ml-service:latest ml-service/
 
           echo "Building wealthgenie-frontend image..."
           docker build --build-arg VITE_API_URL=/api \
-            --build-arg VITE_BUILD_SHA=${{ github.sha }} \
+            --build-arg VITE_BUILD_SHA="$GITHUB_SHA" \
             -f reactapp/Dockerfile \
+            -t "wealthgenie-frontend:$IMAGE_TAG" \
             -t wealthgenie-frontend:latest \
             .
 
+          SERVER_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "wealthgenie-server:$IMAGE_TAG")
+          FRONTEND_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "wealthgenie-frontend:$IMAGE_TAG")
+          ML_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "wealthgenie-ml-service:$IMAGE_TAG")
+          FRONTEND_CONTAINER=$(docker create "wealthgenie-frontend:$IMAGE_TAG")
+          mkdir -p build/frontend-artifacts
+          docker cp "$FRONTEND_CONTAINER:/usr/share/nginx/html/." build/frontend-artifacts/
+          docker rm "$FRONTEND_CONTAINER"
+          BUILD_GIT_COMMIT_SHA="$GITHUB_SHA" \
+          BUILD_GIT_TREE_SHA="$(git rev-parse 'HEAD^{tree}')" \
+          BUILD_SERVER_IMAGE_ID="$SERVER_IMAGE_ID" \
+          BUILD_FRONTEND_IMAGE_ID="$FRONTEND_IMAGE_ID" \
+          BUILD_ML_IMAGE_ID="$ML_IMAGE_ID" \
+          BUILD_WORKFLOW_RUN_ID="$GITHUB_RUN_ID" \
+          BUILD_WORKFLOW_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+          BUILD_TIMESTAMP="$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')" \
+          BUILD_FRONTEND_ARTIFACT_DIRECTORY="$GITHUB_WORKSPACE/build/frontend-artifacts" \
+          BUILD_PROVENANCE_OUTPUT="$GITHUB_WORKSPACE/build/provenance.json" \
+            node server/scripts/createBuildProvenance.js
+          node -e 'const p = require("./build/provenance.json"); for (const [name, value] of Object.entries({provenance_sha256:p.provenanceSha256, frontend_artifact_set_sha256:p.frontendArtifactSetSha256, git_tree_sha:p.gitTreeSha, server_image_id:p.serverImageIdentity, frontend_image_id:p.frontendImageIdentity, ml_image_id:p.mlImageIdentity})) console.log(`${name}=${value}`)' >> "$GITHUB_OUTPUT"
+          {
+            echo '### Immutable build identities'
+            echo "- Commit: `$GITHUB_SHA`"
+            echo "- Tree: `$(git rev-parse 'HEAD^{tree}')`"
+            echo "- Provenance SHA-256: `$(node -p 'require("./build/provenance.json").provenanceSha256')`"
+            echo "- Frontend artifact set SHA-256: `$(node -p 'require("./build/provenance.json").frontendArtifactSetSha256')`"
+            echo "- Docker image IDs: server `$SERVER_IMAGE_ID`, frontend `$FRONTEND_IMAGE_ID`, ML `$ML_IMAGE_ID`"
+            echo '- Docker image IDs are local image identities; no registry digest is asserted.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Load Images into Kind Cluster
         run: |
+          set -euo pipefail
+          IMAGE_TAG="$GITHUB_SHA"
           echo "Loading container images into Kind cluster nodes..."
-          kind load docker-image wealthgenie-server:latest --name kind
-          kind load docker-image wealthgenie-ml-service:latest --name kind
-          kind load docker-image wealthgenie-frontend:latest --name kind
+          kind load docker-image "wealthgenie-server:$IMAGE_TAG" --name kind
+          kind load docker-image "wealthgenie-ml-service:$IMAGE_TAG" --name kind
+          kind load docker-image "wealthgenie-frontend:$IMAGE_TAG" --name kind
 
       - name: Apply database prerequisites
         run: |
           kubectl apply -f k8s/namespace.yaml
+          kubectl create configmap wealthgenie-build-provenance -n wealthgenie \
+            --from-file=provenance.json=build/provenance.json \
+            --dry-run=client -o yaml | kubectl apply -f -
           kubectl apply \
             -f k8s/configmap.yaml \
             -f k8s/mongodb/pvc.yaml \
@@ -113,7 +153,7 @@ jobs:
       - name: Run the one-shot Phase 2 index migration
         run: |
           set -euo pipefail
-          JOB_NAME=$(kubectl create -f k8s/phase2-index-migration/job.yaml -o jsonpath='{.metadata.name}')
+          JOB_NAME=$(sed -E "s/(wealthgenie-(server|ml-service)):latest/\1:${GITHUB_SHA}/g" k8s/phase2-index-migration/job.yaml | kubectl create -f - -o jsonpath='{.metadata.name}')
           echo "Waiting for migration Job ${JOB_NAME} to complete..."
           if kubectl wait --for=condition=complete "job/${JOB_NAME}" -n wealthgenie --timeout=300s; then
             kubectl logs "job/${JOB_NAME}" -n wealthgenie
@@ -126,7 +166,7 @@ jobs:
       - name: Run the one-shot Phase 3 ML/RAG state migration
         run: |
           set -euo pipefail
-          JOB_NAME=$(kubectl create -f k8s/phase3-state-migration/job.yaml -o jsonpath='{.metadata.name}')
+          JOB_NAME=$(sed -E "s/(wealthgenie-(server|ml-service)):latest/\1:${GITHUB_SHA}/g" k8s/phase3-state-migration/job.yaml | kubectl create -f - -o jsonpath='{.metadata.name}')
           echo "Waiting for migration Job ${JOB_NAME} to complete..."
           if kubectl wait --for=condition=complete "job/${JOB_NAME}" -n wealthgenie --timeout=300s; then
             kubectl logs "job/${JOB_NAME}" -n wealthgenie
@@ -139,7 +179,7 @@ jobs:
       - name: Run the one-shot Phase 4 PlanReview persistence migration
         run: |
           set -euo pipefail
-          JOB_NAME=$(kubectl create -f k8s/phase4-plan-review-migration/job.yaml -o jsonpath='{.metadata.name}')
+          JOB_NAME=$(sed -E "s/(wealthgenie-(server|ml-service)):latest/\1:${GITHUB_SHA}/g" k8s/phase4-plan-review-migration/job.yaml | kubectl create -f - -o jsonpath='{.metadata.name}')
           echo "Waiting for migration Job ${JOB_NAME} to complete..."
           if kubectl wait --for=condition=complete "job/${JOB_NAME}" -n wealthgenie --timeout=300s; then
             kubectl logs "job/${JOB_NAME}" -n wealthgenie
@@ -152,7 +192,7 @@ jobs:
       - name: Run the one-shot Phase 5 durable agent runtime migration
         run: |
           set -euo pipefail
-          JOB_NAME=$(kubectl create -f k8s/phase5-agent-runtime-migration/job.yaml -o jsonpath='{.metadata.name}')
+          JOB_NAME=$(sed -E "s/(wealthgenie-(server|ml-service)):latest/\1:${GITHUB_SHA}/g" k8s/phase5-agent-runtime-migration/job.yaml | kubectl create -f - -o jsonpath='{.metadata.name}')
           echo "Waiting for migration Job ${JOB_NAME} to complete..."
           if kubectl wait --for=condition=complete "job/${JOB_NAME}" -n wealthgenie --timeout=300s; then
             kubectl logs "job/${JOB_NAME}" -n wealthgenie
@@ -165,7 +205,7 @@ jobs:
       - name: Run the one-shot Phase 7 ResearchAgent task migration
         run: |
           set -euo pipefail
-          JOB_NAME=$(kubectl create -f k8s/phase7-research-task-migration.yaml -o jsonpath='{.metadata.name}')
+          JOB_NAME=$(sed -E "s/(wealthgenie-(server|ml-service)):latest/\1:${GITHUB_SHA}/g" k8s/phase7-research-task-migration.yaml | kubectl create -f - -o jsonpath='{.metadata.name}')
           echo "Waiting for ResearchAgent task migration Job ${JOB_NAME} to complete..."
           if kubectl wait --for=condition=complete "job/${JOB_NAME}" -n wealthgenie --timeout=300s; then
             kubectl logs "job/${JOB_NAME}" -n wealthgenie
@@ -178,7 +218,7 @@ jobs:
       - name: Bootstrap and verify the shared RAG corpus generation
         run: |
           set -euo pipefail
-          JOB_NAME=$(kubectl create -f k8s/phase3-rag-bootstrap/job.yaml -o jsonpath='{.metadata.name}')
+          JOB_NAME=$(sed -E "s/(wealthgenie-(server|ml-service)):latest/\1:${GITHUB_SHA}/g" k8s/phase3-rag-bootstrap/job.yaml | kubectl create -f - -o jsonpath='{.metadata.name}')
           echo "Waiting for RAG corpus bootstrap Job ${JOB_NAME} to complete..."
           if kubectl wait --for=condition=complete "job/${JOB_NAME}" -n wealthgenie --timeout=900s; then
             kubectl logs "job/${JOB_NAME}" -n wealthgenie
@@ -191,7 +231,7 @@ jobs:
       - name: Bootstrap trusted Phase 3 serving bundles
         run: |
           set -euo pipefail
-          JOB_NAME=$(kubectl create -f k8s/phase3-serving-bootstrap/job.yaml -o jsonpath='{.metadata.name}')
+          JOB_NAME=$(sed -E "s/(wealthgenie-(server|ml-service)):latest/\1:${GITHUB_SHA}/g" k8s/phase3-serving-bootstrap/job.yaml | kubectl create -f - -o jsonpath='{.metadata.name}')
           echo "Waiting for serving-bundle bootstrap Job ${JOB_NAME} to complete..."
           if kubectl wait --for=condition=complete "job/${JOB_NAME}" -n wealthgenie --timeout=360s; then
             kubectl logs "job/${JOB_NAME}" -n wealthgenie
@@ -202,7 +242,13 @@ jobs:
           fi
 
       - name: Apply application manifests after database migrations
-        run: kubectl apply -k k8s/
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          kubectl kustomize k8s/ \
+            | sed -E "s/(wealthgenie-(server|frontend|ml-service)):latest/\1:${GITHUB_SHA}/g" \
+            > build/k8s-pinned.yaml
+          kubectl apply -f build/k8s-pinned.yaml
 
       - name: Wait for Microservices to be Ready
         run: |
@@ -236,7 +282,62 @@ jobs:
           }
 
       - name: Verify Cluster State
+        env:
+          EXPECTED_SERVER_IMAGE_ID: ${{ steps.build.outputs.server_image_id }}
+          EXPECTED_FRONTEND_IMAGE_ID: ${{ steps.build.outputs.frontend_image_id }}
+          EXPECTED_ML_IMAGE_ID: ${{ steps.build.outputs.ml_image_id }}
         run: |
+          set -euo pipefail
+          for deployment in wealthgenie-server wealthgenie-agent-worker wealthgenie-frontend wealthgenie-ml-service; do
+            actual_image=$(kubectl get deployment "$deployment" -n wealthgenie -o jsonpath='{.spec.template.spec.containers[0].image}')
+            expected_image="${deployment/wealthgenie-agent-worker/wealthgenie-server}:$GITHUB_SHA"
+            if [[ "$actual_image" != "$expected_image" ]]; then
+              echo "ERROR: $deployment is not pinned to this workflow's immutable commit tag: $actual_image"
+              exit 1
+            fi
+          done
+
+          verify_deployed_image_identity() {
+            local workload="$1"
+            local image_ref="$2"
+            local expected_image_id="$3"
+            local kind_node
+            local image_info
+            local runtime_image_id
+            local allowed_image_ids
+            kind_node=$(kind get nodes --name kind | head -n 1)
+            if [[ -z "$kind_node" ]]; then
+              echo "ERROR: Kind node is unavailable while verifying $workload image identity"
+              exit 1
+            fi
+            image_info=$(docker exec "$kind_node" crictl inspecti "$image_ref")
+            runtime_image_id=$(jq -r '.status.id // empty' <<< "$image_info")
+            if [[ "$runtime_image_id" != "$expected_image_id" ]]; then
+              echo "ERROR: Kind runtime image identity for $image_ref differs from the Docker image ID recorded at build time"
+              echo "Expected: $expected_image_id"
+              echo "Runtime:  $runtime_image_id"
+              exit 1
+            fi
+            allowed_image_ids=$(jq -c '[.status.id, (.status.repoDigests[]?)] | map(select(type == "string") | split("@")[-1]) | unique' <<< "$image_info")
+            if ! kubectl get pods -n wealthgenie -l "app=$workload" -o json \
+              | jq -e --argjson allowed "$allowed_image_ids" '
+                [.items[] | .status.containerStatuses[]?.imageID
+                  | sub("^.*://"; "") | split("@")[-1]] as $imageIds
+                | ($imageIds | length) > 0
+                  and all($imageIds[]; . as $imageId | ($allowed | index($imageId)) != null)
+              ' > /dev/null; then
+              echo "ERROR: running $workload pods do not report an image identity for the exact Kind image built by this workflow: $expected_image_id"
+              kubectl get pods -n wealthgenie -l "app=$workload" -o json \
+                | jq -r '[.items[] | {name:.metadata.name, imageIds:[.status.containerStatuses[]?.imageID]}]'
+              exit 1
+            fi
+            echo "Verified runtime image identity for $workload: $expected_image_id"
+          }
+
+          verify_deployed_image_identity wealthgenie-server "wealthgenie-server:$GITHUB_SHA" "$EXPECTED_SERVER_IMAGE_ID"
+          verify_deployed_image_identity wealthgenie-agent-worker "wealthgenie-server:$GITHUB_SHA" "$EXPECTED_SERVER_IMAGE_ID"
+          verify_deployed_image_identity wealthgenie-frontend "wealthgenie-frontend:$GITHUB_SHA" "$EXPECTED_FRONTEND_IMAGE_ID"
+          verify_deployed_image_identity wealthgenie-ml-service "wealthgenie-ml-service:$GITHUB_SHA" "$EXPECTED_ML_IMAGE_ID"
           echo "### Kubernetes Pod & Service Status" >> $GITHUB_STEP_SUMMARY
           echo '```text' >> $GITHUB_STEP_SUMMARY
           kubectl get all,pvc,hpa,ingress -n wealthgenie >> $GITHUB_STEP_SUMMARY
@@ -244,6 +345,13 @@ jobs:
           kubectl get pods -n wealthgenie -o wide
 
       - name: Execute Live Smoke Tests & Prove Request Flow (Step 2)
+        env:
+          EXPECTED_PROVENANCE_SHA256: ${{ steps.build.outputs.provenance_sha256 }}
+          EXPECTED_FRONTEND_ARTIFACT_SHA256: ${{ steps.build.outputs.frontend_artifact_set_sha256 }}
+          EXPECTED_GIT_TREE_SHA: ${{ steps.build.outputs.git_tree_sha }}
+          EXPECTED_SERVER_IMAGE_ID: ${{ steps.build.outputs.server_image_id }}
+          EXPECTED_FRONTEND_IMAGE_ID: ${{ steps.build.outputs.frontend_image_id }}
+          EXPECTED_ML_IMAGE_ID: ${{ steps.build.outputs.ml_image_id }}
         run: |
           set -euo pipefail
           echo "### Live Endpoint Smoke Test Verification (Step 2)" >> $GITHUB_STEP_SUMMARY
@@ -251,7 +359,9 @@ jobs:
           echo "Starting scoped port-forward from Service to runner localhost:5000..."
           kubectl port-forward --address=127.0.0.1 -n wealthgenie svc/wealthgenie-server 5000:5000 > port-forward.log 2>&1 &
           PORT_FORWARD_PID=$!
-          trap 'kill "$PORT_FORWARD_PID" 2>/dev/null || true' EXIT
+          kubectl port-forward --address=127.0.0.1 -n wealthgenie svc/wealthgenie-frontend 8080:80 > frontend-port-forward.log 2>&1 &
+          FRONTEND_PORT_FORWARD_PID=$!
+          trap 'kill "$PORT_FORWARD_PID" "$FRONTEND_PORT_FORWARD_PID" 2>/dev/null || true' EXIT
 
           print_server_diagnostics() {
             echo "--- port-forward log ---"
@@ -300,8 +410,48 @@ jobs:
             print_server_diagnostics
             exit 1
           fi
+          if ! jq -e \
+            --arg commit "$GITHUB_SHA" \
+            --arg tree "$EXPECTED_GIT_TREE_SHA" \
+            --arg provenance "$EXPECTED_PROVENANCE_SHA256" \
+            --arg artifacts "$EXPECTED_FRONTEND_ARTIFACT_SHA256" \
+            --arg server "$EXPECTED_SERVER_IMAGE_ID" \
+            --arg frontend "$EXPECTED_FRONTEND_IMAGE_ID" \
+            --arg ml "$EXPECTED_ML_IMAGE_ID" \
+            '.buildProvenance.status == "VERIFIED" and .buildProvenance.gitCommitSha == $commit and .buildProvenance.gitTreeSha == $tree and .buildProvenance.provenanceSha256 == $provenance and .buildProvenance.frontendArtifactSetSha256 == $artifacts and .buildProvenance.serverImageIdentity == $server and .buildProvenance.frontendImageIdentity == $frontend and .buildProvenance.mlImageIdentity == $ml' \
+            <<< "$LIVE_RES" > /dev/null; then
+            echo "ERROR: backend health did not return the expected verified artifact provenance"
+            print_server_diagnostics
+            exit 1
+          fi
           echo "Live Response: $LIVE_RES"
           echo "- **Liveness Probe (/health/live)**: \`$LIVE_RES\`" >> $GITHUB_STEP_SUMMARY
+
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --connect-timeout 5 --max-time 10 http://127.0.0.1:8080/build-provenance/provenance.json > frontend-provenance.json; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              echo "ERROR: frontend provenance endpoint did not become available"
+              cat frontend-port-forward.log || true
+              exit 1
+            fi
+            sleep 2
+          done
+          if ! jq -e \
+            --arg commit "$GITHUB_SHA" \
+            --arg tree "$EXPECTED_GIT_TREE_SHA" \
+            --arg provenance "$EXPECTED_PROVENANCE_SHA256" \
+            --arg artifacts "$EXPECTED_FRONTEND_ARTIFACT_SHA256" \
+            --arg server "$EXPECTED_SERVER_IMAGE_ID" \
+            --arg frontend "$EXPECTED_FRONTEND_IMAGE_ID" \
+            --arg ml "$EXPECTED_ML_IMAGE_ID" \
+            '.gitCommitSha == $commit and .gitTreeSha == $tree and .provenanceSha256 == $provenance and .frontendArtifactSetSha256 == $artifacts and .serverImageIdentity == $server and .frontendImageIdentity == $frontend and .mlImageIdentity == $ml' \
+            frontend-provenance.json > /dev/null; then
+            echo "ERROR: served frontend and backend do not share the expected provenance manifest"
+            exit 1
+          fi
+          echo "- **Shared build provenance**: backend and frontend both match \`$EXPECTED_PROVENANCE_SHA256\`" >> $GITHUB_STEP_SUMMARY
 
           echo "2. Testing /health/ready..."
           if ! wait_for_http_2xx http://127.0.0.1:5000/health/ready 30 2 > /dev/null; then
