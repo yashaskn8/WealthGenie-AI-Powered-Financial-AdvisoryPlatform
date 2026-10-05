@@ -107,6 +107,8 @@ test('GEPA output is size-checked and a junction escape is rejected before readi
       readBoundedGepaOutput({ outputPath, temporaryDirectory: directory }),
       /host-side size limit/i,
     );
+    await writeFile(outputPath, '{"verified":true}', 'utf8');
+    assert.equal(await readBoundedGepaOutput({ outputPath, temporaryDirectory: directory }), '{"verified":true}');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -131,7 +133,7 @@ test('GEPA output is size-checked and a junction escape is rejected before readi
     assert.equal(await readFile(escapedPath, 'utf8'), 'outside-sentinel-untouched', 'raw path following reproduces the outside-directory escape');
     await assert.rejects(
       readBoundedGepaOutput({ outputPath: escapedPath, temporaryDirectory: invocationDirectory }),
-      /private regular directory/i,
+      /private regular directory|identity changed/i,
     );
     assert.equal(await readFile(sentinelPath, 'utf8'), 'outside-sentinel-untouched');
   } finally {

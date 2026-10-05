@@ -289,6 +289,20 @@ function sameFileIdentity(left, right) {
   return left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
 }
 
+async function samePrivateDirectoryIdentity(directoryPath, initialInfo, initialRealPath) {
+  try {
+    const currentInfo = await lstat(directoryPath);
+    if (!currentInfo.isDirectory() || currentInfo.isSymbolicLink() || !sameFileIdentity(initialInfo, currentInfo)) {
+      return false;
+    }
+    const currentRealPath = await realpath(directoryPath);
+    if (!pathEquals(currentRealPath, initialRealPath)) return false;
+    return sameFileIdentity(initialInfo, await lstat(currentRealPath));
+  } catch {
+    return false;
+  }
+}
+
 export async function readBoundedGepaOutput({ outputPath, temporaryDirectory, maxBytes = MAX_BRIDGE_BYTES } = {}) {
   const expectedOutputPath = resolve(temporaryDirectory, 'output.json');
   if (!pathEquals(outputPath, expectedOutputPath)) throw new Error('GEPA output path is not the expected invocation output file.');
@@ -296,7 +310,7 @@ export async function readBoundedGepaOutput({ outputPath, temporaryDirectory, ma
   const rootInfo = await lstat(temporaryDirectory);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error('GEPA invocation directory is not a private regular directory.');
   const rootRealPath = await realpath(temporaryDirectory);
-  if (!pathEquals(rootRealPath, temporaryDirectory)) throw new Error('GEPA invocation directory identity changed.');
+  if (!sameFileIdentity(rootInfo, await lstat(rootRealPath))) throw new Error('GEPA invocation directory identity changed.');
 
   const outputInfo = await lstat(expectedOutputPath);
   if (!outputInfo.isFile() || outputInfo.isSymbolicLink()) throw new Error('GEPA output must be a regular file.');
@@ -304,7 +318,9 @@ export async function readBoundedGepaOutput({ outputPath, temporaryDirectory, ma
   if (outputInfo.size > maxBytes) throw new Error('GEPA output exceeds the host-side size limit.');
 
   const outputRealPath = await realpath(expectedOutputPath);
-  if (!isWithinDirectory(rootRealPath, outputRealPath) || !pathEquals(outputRealPath, expectedOutputPath)) {
+  if (!isWithinDirectory(rootRealPath, outputRealPath)
+      || !pathEquals(outputRealPath, join(rootRealPath, 'output.json'))
+      || !await samePrivateDirectoryIdentity(temporaryDirectory, rootInfo, rootRealPath)) {
     throw new Error('GEPA output resolved outside its invocation directory.');
   }
 
@@ -316,7 +332,9 @@ export async function readBoundedGepaOutput({ outputPath, temporaryDirectory, ma
       throw new Error('GEPA output changed before it could be read.');
     }
     const openedRealPath = await realpath(expectedOutputPath);
-    if (!pathEquals(openedRealPath, outputRealPath) || !isWithinDirectory(rootRealPath, openedRealPath)) {
+    if (!pathEquals(openedRealPath, outputRealPath)
+        || !isWithinDirectory(rootRealPath, openedRealPath)
+        || !await samePrivateDirectoryIdentity(temporaryDirectory, rootInfo, rootRealPath)) {
       throw new Error('GEPA output identity changed before it could be read.');
     }
 
@@ -326,7 +344,8 @@ export async function readBoundedGepaOutput({ outputPath, temporaryDirectory, ma
     const afterInfo = await lstat(expectedOutputPath);
     const afterRealPath = await realpath(expectedOutputPath);
     if (!afterInfo.isFile() || afterInfo.isSymbolicLink() || !sameFileIdentity(outputInfo, afterInfo)
-        || !pathEquals(afterRealPath, outputRealPath) || !isWithinDirectory(rootRealPath, afterRealPath)) {
+        || !pathEquals(afterRealPath, outputRealPath) || !isWithinDirectory(rootRealPath, afterRealPath)
+        || !await samePrivateDirectoryIdentity(temporaryDirectory, rootInfo, rootRealPath)) {
       throw new Error('GEPA output changed while it was being read.');
     }
     return contents.toString('utf8');
