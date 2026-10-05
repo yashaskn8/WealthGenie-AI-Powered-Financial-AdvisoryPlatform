@@ -53,11 +53,81 @@ let authToken = null;
 let csrfToken = readCookie('wg_csrf');
 let authRevision = 0;
 const authListeners = new Set();
+const activeAuthenticatedRequests = new Set();
+const authTabId = generateUUID();
+const remoteAuthRevisions = new Map();
+let authBroadcastRevision = 0;
+let authBroadcastChannel = null;
+const AUTH_CHANNEL_NAME = 'wealthgenie-auth-state';
+const AUTH_STORAGE_KEY = '__wealthgenie_auth_signal__';
 
 // Track the current authenticated user
 let currentUser = null;
 
 purgeSensitiveBrowserStorage();
+
+function readAuthSignal(value) {
+  if (!value || typeof value !== 'object') return null;
+  const { source, revision, type } = value;
+  if (typeof source !== 'string' || source === authTabId || !Number.isSafeInteger(revision)
+      || revision < 1 || !['SESSION_CHANGED', 'AUTH_INVALIDATED'].includes(type)) return null;
+  if (revision <= (remoteAuthRevisions.get(source) || 0)) return null;
+  remoteAuthRevisions.set(source, revision);
+  return type;
+}
+
+function broadcastAuthSignal(type) {
+  if (typeof window === 'undefined') return;
+  const message = { source: authTabId, revision: ++authBroadcastRevision, type };
+  try {
+    if (authBroadcastChannel) authBroadcastChannel.postMessage(message);
+    else {
+      window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(message));
+      window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    }
+  } catch {
+    // Auth remains server-authorized when browser messaging or storage is unavailable.
+  }
+}
+
+function abortAuthenticatedRequests() {
+  for (const controller of activeAuthenticatedRequests) {
+    controller.abort(new ApiError('Authentication changed in another request.', { code: 'REQUEST_ABORTED' }));
+  }
+  activeAuthenticatedRequests.clear();
+}
+
+function clearLocalAuthState({ includeChatSession = false } = {}) {
+  authToken = null;
+  csrfToken = null;
+  currentUser = null;
+  abortAuthenticatedRequests();
+  purgeSensitiveBrowserStorage({ includeChatSession });
+  notifyAuthChange();
+}
+
+async function receiveAuthSignal(value) {
+  const type = readAuthSignal(value);
+  if (!type) return;
+  clearLocalAuthState({ includeChatSession: true });
+  try {
+    await restoreSession({ suppressAuthBroadcast: true });
+  } catch {
+    // The server session may have ended before this tab could restore it.
+  }
+}
+
+if (typeof window !== 'undefined') {
+  if (typeof window.BroadcastChannel === 'function') {
+    authBroadcastChannel = new window.BroadcastChannel(AUTH_CHANNEL_NAME);
+    authBroadcastChannel.addEventListener('message', event => { void receiveAuthSignal(event.data); });
+  } else {
+    window.addEventListener('storage', event => {
+      if (event.key !== AUTH_STORAGE_KEY || !event.newValue) return;
+      try { void receiveAuthSignal(JSON.parse(event.newValue)); } catch { /* Ignore malformed signals. */ }
+    });
+  }
+}
 
 function notifyAuthChange() {
   authRevision += 1;
@@ -73,18 +143,20 @@ export function getAuthSnapshot() {
   return authRevision;
 }
 
-export function setUserInfo(user) {
+export function setUserInfo(user, { broadcast = true } = {}) {
   currentUser = user;
   notifyAuthChange();
+  if (broadcast) broadcastAuthSignal(user ? 'SESSION_CHANGED' : 'AUTH_INVALIDATED');
 }
 
 export function getUserInfo() {
   return currentUser;
 }
 
-export function setAuthToken(token) {
+export function setAuthToken(token, { broadcast = true } = {}) {
   authToken = BEARER_AUTH_ENABLED ? token : null;
   notifyAuthChange();
+  if (broadcast) broadcastAuthSignal(token ? 'SESSION_CHANGED' : 'AUTH_INVALIDATED');
 }
 
 export function getAuthToken() {
@@ -92,16 +164,13 @@ export function getAuthToken() {
 }
 
 export function clearAuthToken() {
-  authToken = null;
-  csrfToken = null;
-  currentUser = null;
-  purgeSensitiveBrowserStorage();
-  notifyAuthChange();
+  clearLocalAuthState();
+  broadcastAuthSignal('AUTH_INVALIDATED');
 }
 
 export function clearUserSession() {
-  clearAuthToken();
-  purgeSensitiveBrowserStorage({ includeChatSession: true });
+  clearLocalAuthState({ includeChatSession: true });
+  broadcastAuthSignal('AUTH_INVALIDATED');
 }
 
 function generateUUID() {
@@ -172,6 +241,7 @@ function wait(milliseconds, signal) {
 
 async function request(method, path, data = null, options = {}) {
   const requestAuthRevision = authRevision;
+  const requestWasAuthenticated = Boolean(authToken || currentUser);
   const url = `${API_BASE}${path}`;
   const upperMethod = method.toUpperCase();
   const isMutating = ['POST', 'PUT', 'DELETE', 'PATCH'].includes(upperMethod);
@@ -180,6 +250,7 @@ async function request(method, path, data = null, options = {}) {
     timeoutMs = DEFAULT_TIMEOUT_MS,
     retries = isMutating ? 0 : 1,
     signal: externalSignal,
+    suppressAuthBroadcast = false,
     ...fetchOptions
   } = options;
   const headers = { Accept: 'application/json', ...optionHeaders };
@@ -209,8 +280,12 @@ async function request(method, path, data = null, options = {}) {
     if (externalSignal?.aborted) {
       throw new ApiError('Request cancelled.', { code: 'REQUEST_ABORTED' });
     }
+    if (requestWasAuthenticated && authRevision !== requestAuthRevision) {
+      throw new ApiError('Request cancelled because authentication changed.', { code: 'REQUEST_ABORTED' });
+    }
 
     const controller = new AbortController();
+    if (requestWasAuthenticated) activeAuthenticatedRequests.add(controller);
     let timedOut = false;
     const abortFromCaller = () => controller.abort(externalSignal?.reason);
     externalSignal?.addEventListener('abort', abortFromCaller, { once: true });
@@ -240,7 +315,8 @@ async function request(method, path, data = null, options = {}) {
       const requestId = res.headers?.get?.('x-correlation-id') || json?.request_id || headers['X-Correlation-ID'];
       if (!res.ok) {
         if (res.status === 401 && authRevision === requestAuthRevision) {
-          clearUserSession();
+          clearLocalAuthState({ includeChatSession: true });
+          if (!suppressAuthBroadcast) broadcastAuthSignal('AUTH_INVALIDATED');
           if (typeof window !== 'undefined' && window.location.pathname !== '/' && window.location.pathname !== '/login') {
             window.location.href = '/login';
           }
@@ -262,6 +338,9 @@ async function request(method, path, data = null, options = {}) {
           }
         );
       }
+      if (requestWasAuthenticated && authRevision !== requestAuthRevision) {
+        throw new ApiError('Request cancelled because authentication changed.', { code: 'REQUEST_ABORTED' });
+      }
       return json;
     } catch (error) {
       let apiError = error;
@@ -272,6 +351,8 @@ async function request(method, path, data = null, options = {}) {
           });
         } else if (externalSignal?.aborted) {
           apiError = new ApiError('Request cancelled.', { code: 'REQUEST_ABORTED', cause: error });
+        } else if (controller.signal.aborted && authRevision !== requestAuthRevision) {
+          apiError = new ApiError('Request cancelled because authentication changed.', { code: 'REQUEST_ABORTED', cause: error });
         } else {
           apiError = new ApiError('Unable to reach the server. Check your connection and try again.', {
             code: 'NETWORK_ERROR', retryable: true, cause: error,
@@ -287,6 +368,7 @@ async function request(method, path, data = null, options = {}) {
     } finally {
       clearTimeout(timeoutId);
       externalSignal?.removeEventListener('abort', abortFromCaller);
+      activeAuthenticatedRequests.delete(controller);
     }
   }
 
@@ -297,16 +379,18 @@ async function request(method, path, data = null, options = {}) {
 export async function register(name, email, password, mobile) {
   const data = await request('POST', '/auth/register', { name, email, password, mobile });
   csrfToken = data.csrfToken || readCookie('wg_csrf');
-  setAuthToken(data.token || null);
-  if (data.user) setUserInfo(data.user);
+  setAuthToken(data.token || null, { broadcast: false });
+  if (data.user) setUserInfo(data.user, { broadcast: false });
+  broadcastAuthSignal('SESSION_CHANGED');
   return data;
 }
 
 export async function login(email, password) {
   const data = await request('POST', '/auth/login', { email, password });
   csrfToken = data.csrfToken || readCookie('wg_csrf');
-  setAuthToken(data.token || null);
-  if (data.user) setUserInfo(data.user);
+  setAuthToken(data.token || null, { broadcast: false });
+  if (data.user) setUserInfo(data.user, { broadcast: false });
+  broadcastAuthSignal('SESSION_CHANGED');
   return data;
 }
 
@@ -323,10 +407,14 @@ export async function logout() {
 
 export async function restoreSession(options = {}) {
   const requestAuthRevision = authRevision;
-  const data = await request('GET', '/auth/session', null, { retries: 0, ...options });
+  const data = await request('GET', '/auth/session', null, {
+    retries: 0,
+    suppressAuthBroadcast: true,
+    ...options,
+  });
   if (authRevision !== requestAuthRevision) return data;
   csrfToken = data?.csrfToken || readCookie('wg_csrf');
-  if (data?.user) setUserInfo(data.user);
+  if (data?.user) setUserInfo(data.user, { broadcast: false });
   return data;
 }
 
