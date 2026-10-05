@@ -1,457 +1,185 @@
-# WealthGenie — AI-Powered Financial Advisory & Portfolio Optimization Platform
+# WealthGenie
 
-> A full-stack financial decision-support engine with backend-owned suitability and allocation, source-backed investment data, deterministic market context, shadow ML evaluation, grounded LLM explanations, and versioned Indian tax calculations.
+WealthGenie is an Indian retail-investor financial decision-support platform. It combines a React application with a Node.js financial API, MongoDB persistence, provider adapters, and a Python ML/retrieval service.
 
-[![CI Test Matrix](https://github.com/yashaskn8/WealthGenie-Architecture-Restoration/actions/workflows/ci.yml/badge.svg)](https://github.com/yashaskn8/WealthGenie-Architecture-Restoration/actions/workflows/ci.yml)
+[![CI Test Matrix](https://github.com/yashaskn8/WealthGenie-AI-Powered-Financial-AdvisoryPlatform/actions/workflows/ci.yml/badge.svg)](https://github.com/yashaskn8/WealthGenie-AI-Powered-Financial-AdvisoryPlatform/actions/workflows/ci.yml)
 [![Node.js](https://img.shields.io/badge/Node.js-v22.x-339933?logo=node.js)](https://nodejs.org/)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-v19.x-61DAFB?logo=react)](https://react.dev/)
-[![MongoDB](https://img.shields.io/badge/MongoDB-v7.0-47A248?logo=mongodb)](https://www.mongodb.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-<!-- TODO (WG-035): Insert live deployment URL here when Vercel/Render ships -->
+## Capabilities
 
-`Python 3.12` • `FastAPI` • `Node.js / Express` • `MongoDB` • `Redis` • `React 19` • `Vite` • `PyTorch` • `SentenceTransformers` • `Docker`
+- Personalized recommendations with server-side eligibility, suitability, allocation, concentration, and current-state checks.
+- Source-qualified product and market evidence from supported adapters, including AMFI, NSE, India Post/Department of Posts, and SBI. Upstox is optional.
+- Fiscal-year-versioned tax calculations, projections, and simulations with explicit assumptions and unavailable states.
+- Session and ownership controls, durable idempotency, transactional persistence, and a tamper-evident audit chain.
+- Grounded explanations and bounded research/agent features that remain separate from financial decision-making.
+- React dashboards for recommendations, goals, market context, tax comparisons, and financial evidence.
 
----
+## Financial authority and architecture
 
-## Technical Overview & Recruiter Summary
+Express is the authoritative boundary for profile facts, eligibility, suitability, instrument ranking, allocation, tax, concentration, projections, and current financial state. The React client presents server results and collects user input; it does not calculate or override financial decisions.
 
-**WealthGenie** is a financial engineering platform designed to automate portfolio construction, tax-optimized wealth planning, and AI advisory for retail investors in India.
+The deterministic market-context policy remains the recommendation champion; the HMM market model is shadow-only. ML confidence and LLM output cannot change eligibility, suitability, ranking, allocation, tax, or product inclusion. NVIDIA NIM is used only for grounded explanation; Gemini and Groq are optional explanation providers, with a deterministic evidence-bound fallback.
 
-### Core Engineering Capabilities Demonstrated
+The main request flow is:
 
-* **5-Stage Mathematical Portfolio Optimization**: Combines mean-variance quadratic optimization (`numeric` solver), rule-based heuristic fallback, policy concentration caps (`CONCENTRATION_CAPS`), and emergency fund floor protection.
-* **Source-Backed Product and Market Data**: Normalized provider-neutral facts from NSE, AMFI, India Post/Department of Posts, and SBI, with timestamps, freshness, caching, request coalescing, and explicit unavailable states.
-* **OpenTelemetry Distributed Tracing**: Full W3C `traceparent` and `X-Correlation-ID` context propagation across Express and FastAPI; local runs use the repository `traces.jsonl`, while containers use writable `/app/traces.jsonl`.
-* **Tamper-Evident Advisory Audit Chain**: Transactional SHA-256 hash chaining binds advisory inputs, outputs, model/rule versions, provenance, timestamps, and correlation data. MongoDB records are not described as immutable.
-* **ML evaluation boundary**: Tracked model-bundle reports measure agreement with a deterministic synthetic suitability-policy label set only. These shadow/diagnostic metrics are not investor outcomes, financial performance, or recommendation authority; the Node backend remains the sole financial decision-maker.
-* **Grounded Explanation Boundary**: NVIDIA NIM is preferred only for explaining a minimal read-only backend evidence packet. Gemini and Groq are optional fallback providers; every model response is validated, and a deterministic grounded template remains available without changing financial decisions.
-* **Market Context Evaluation**: The deterministic market-context policy is the recommendation champion. A CPU-friendly HMM is loaded and evaluated in shadow mode only; it cannot change allocations or suitability.
-* **Fiscal-year-versioned Tax Engine**: Backend-owned Indian tax calculations preserve historical FY2025-26 law and use Income-tax Act, 2025 authority for FY2026-27. Legacy deduction field names remain compatibility inputs, not current statutory labels.
-* **Tax API benchmark (historical)**: `GET /api/tax/compare` reached **5,537.7 req/s** in one single-host `autocannon` v8.0.0 run at concurrency 200. This is endpoint- and environment-specific, not Express-gateway or production capacity evidence ([benchmark](load_test_report.md)).
+    React client
+      -> authenticated Express API
+      -> canonical profile and financial-state checks
+      -> deterministic suitability and recommendation services
+      -> qualified provider adapters and transactional persistence
+      -> response with source, freshness, and policy provenance
+      -> React presentation
 
----
+![System architecture showing the React client, Express API, MongoDB, Redis, and FastAPI service](docs/architecture/system_architecture.png)
 
-## Feature Matrix
+Provider data is normalized server-side. Observation time, fetch time, effective date, source, freshness, and unavailable status remain distinct. Stale or unverified inputs do not silently become current facts.
 
-| Capability | Implementation Mechanism | Verification / Benchmark Source |
-| :--- | :--- | :--- |
-| **Portfolio Recommendation** | 5-stage pipeline: Risk scoring → Asset allocation → Quadratic solver / Heuristic fallback → Policy caps → Rebalancing | [`server/services/RecommendationPipeline.js`](server/services/RecommendationPipeline.js), [`server/test/recommendationPipeline.test.js`](server/test/recommendationPipeline.test.js) |
-| **RAG Research Subsystem** | Standalone FastAPI hybrid retrieval evaluation with tenant isolation; it is not the active financial authority for chat | Document Hit Rate: **98.7%**, Precision@4: **0.7367**, MRR: **0.9022** ([`real_corpus_evaluation_report.json`](ml-service/reports/real_corpus_evaluation_report.json), [`test_rag_tenant_isolation.py`](ml-service/tests/test_rag_tenant_isolation.py)) |
-| **Distributed Tracing** | OpenTelemetry SDK with W3C `traceparent` propagation across Express <-> FastAPI; `TRACE_LOG_PATH` is configurable and container deployments use `/app/traces.jsonl` | [`server/config/tracing.js`](server/config/tracing.js), [`ml-service/tracing.py`](ml-service/tracing.py), [`scripts/verify_distributed_tracing.js`](scripts/verify_distributed_tracing.js) |
-| **Tamper-Evident Advisory Audit Chain** | Transactional canonical SHA-256 record chain with fail-loudly guarantees and verification endpoint | [`server/models/AuditRecord.js`](server/models/AuditRecord.js), [`server/test/auditChain.test.js`](server/test/auditChain.test.js) |
-| **Playwright Full-Lifecycle E2E Suite** | Real-service user lifecycle against replica-set MongoDB, Redis, FastAPI, Express, and Vite | [`reactapp/e2e/full-flow.spec.ts`](reactapp/e2e/full-flow.spec.ts), [`.github/workflows/ci.yml`](.github/workflows/ci.yml) |
-| **ML suitability-policy diagnostics** | Random Forest, PyTorch MLP, and FT-Transformer verified model bundles | Synthetic policy-label test accuracy only: RF **99.00%**, MLP **94.67%**, FT-Transformer **98.00%**. Not investor-outcome or financial-performance metrics; ML cannot determine financial results ([RF report](ml-service/model/bundles/random_forest/evaluation_report.json), [MLP report](ml-service/model/bundles/pytorch_mlp/evaluation_report.json), [FT report](ml-service/model/bundles/ft_transformer/evaluation_report.json)) |
-| **Grounded Advisory Explanation** | Backend evidence packet → provider adapter → strict grounding validator → React provenance rendering; LLM tool allowlist is empty | [`server/services/groundedExplanationService.js`](server/services/groundedExplanationService.js), [`server/services/groundingValidator.js`](server/services/groundingValidator.js) |
-| **Tax Regime Computation** | Fiscal-year-versioned Old vs New regime calculator with statute metadata, rule provenance and explicit unavailable states | Historical single-host `GET /api/tax/compare` throughput: **3,736.7–5,537.7 req/s** across reported concurrency levels; not a current or production capacity guarantee ([`load_test_report.md`](load_test_report.md)) |
-| **Where-to-Invest Product Evidence** | AMFI-backed mutual-fund universe and official India Post/SBI fixed-income facts; 0–5 truthful results with unavailable/comparable states | [`server/services/mutualFundProductRanking.js`](server/services/mutualFundProductRanking.js), [`server/services/fixedIncomeProductRanking.js`](server/services/fixedIncomeProductRanking.js) |
-| **Security Controls** | Fail-closed API key verification, prompt injection defense pipeline, Joi validation | [`test_fail_closed_auth_when_api_key_unset`](ml-service/tests/test_ml_validation.py) |
-| **Distributed Systems Failure-Mode Testing** | Real-failure chaos tests (MongoDB disconnect, Redis disconnect, ML ECONNREFUSED), mid-transaction partial-write proof, Redis fail-closed audit | [`chaos.test.js`](server/test/chaos.test.js), [`midTransaction.test.js`](server/test/midTransaction.test.js), [`redisFailClosed.test.js`](server/test/redisFailClosed.test.js) |
-| **Testing & CI/CD** | Backend, ML, frontend, dependency-audit, API-contract, and real-service browser gates | GitHub Actions workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) |
+### ML, retrieval, and agents
 
----
+- ML models are evaluated as diagnostics/shadow predictions, not as investor-outcome forecasts or financial authorities.
+- The FastAPI RAG subsystem provides tenant-scoped, trust-gated extractive retrieval and abstention. Its active corpus is controlled by the machine-readable manifest at ml-service/rag/data/corpus/manifest.json; the current trusted manifest includes the official Income-tax Rules 2026 commencement source, not a complete tax-law corpus.
+- Plan Review is a bounded, read-only review of the authenticated user’s saved plan. A separate authoritative backend flow handles recomputation.
+- ResearchMesh/A2A returns supplemental public-source evidence. It cannot write financial state or repair missing authoritative evidence. The pinned A2A MUST workflow records a reviewed upstream fixture-applicability exception; a green workflow is not a claim of zero raw TCK failures or full upstream conformance.
+- MCP exposes an explicit allowlist of calculators as NON_AUTHORITATIVE simulations. It cannot update profiles, recommendations, allocations, goals, or authorization records.
+- Prompt/scaffold evolution and live provider evaluations are controlled, offline/manual or operator-gated workflows. No agent or model can self-promote into financial authority.
 
-## System Architecture
+The deterministic Express API, provider adapters, tax engine, and market-context policy are the financial authorities. LLMs, ML, RAG, A2A, MCP, and agents are constrained supporting systems.
 
-The platform splits workload across an authoritative Express API (Node.js), a FastAPI ML and research-retrieval service (Python 3.12), MongoDB, Redis, and a React 19 presentation client. Provider-specific payloads stop at server adapters and are normalized before feature or policy code consumes them.
+## Technology
 
-![System Architecture Diagram showing the React SPA, Express API Gateway, MongoDB, Redis, FastAPI ML microservice, and LLMs](docs/architecture/system_architecture.png)
-> **System architecture.** End-to-end request pathways across the React client, Express REST API Gateway, MongoDB document datastore, Redis cache, and Python FastAPI ML microservice.
+| Area | Main technologies |
+| --- | --- |
+| Web client | React 19, Vite, React Router, Recharts |
+| API | Node.js 22, Express, Mongoose, Joi |
+| ML and retrieval | Python 3.12, FastAPI, scikit-learn, PyTorch, Sentence Transformers, FAISS |
+| Persistence | Transaction-capable MongoDB; Redis for shared cache, sessions, and distributed coordination |
+| Delivery | GitHub Actions, Docker/Compose, Kubernetes manifests, Terraform infrastructure scaffolding |
 
-### Request Flow
-1. **Profile and recommendation**: React submits validated facts to Express. Express constructs the canonical Financial Profile, applies hard suitability, creates the eligible universe and allocation, and persists recommendation/audit records transactionally.
-2. **Market and product facts**: Server-side adapters fetch only required NSE, AMFI, India Post, and SBI facts. The normalized contracts preserve source, observation time, fetch time, freshness, and unavailable states; Redis provides bounded caching and request coalescing.
-3. **Market context and adjustment**: The deterministic feature engine feeds the deterministic market-context policy champion. Hysteresis/state persistence and bounded profile-safe adjustment run before post-adjustment suitability and concentration validation. The HMM remains shadow-only.
-4. **Explanation**: Express creates a minimal evidence packet from already-authoritative facts. NVIDIA NIM, Gemini, or Groq may explain that packet without tools. The grounding validator rejects unsupported output; deterministic template fallback is grounded on the same packet.
-5. **Presentation**: React renders authoritative response data and provenance and never calls financial-data or LLM providers directly.
+## Repository layout
 
-Express is the authoritative boundary for personalized recommendations, product suitability and ordering, allocation policy, eligibility, and tax decisions. React supplies validated inputs and renders returned decisions; it does not silently substitute local financial-policy calculations when a backend decision is unavailable.
+    .github/workflows/       CI, deployment, conformance, and reliability workflows
+    reactapp/                React application, unit tests, and Playwright tests
+    server/                  Express API, financial services, migrations, and tests
+    ml-service/              FastAPI, model bundles, RAG, and Python tests
+    ml-service/rag/data/     Manifest-controlled retrieval corpus
+    scripts/                 Repository and documentation verification utilities
+    docs/                    CI-consumed reliability contract and image assets
+    k8s/                     Kubernetes base and production overlays
+    terraform/               Infrastructure scaffolding; not an automatic deploy
 
-The public Express contract is defined by [`server/openapi.yaml`](server/openapi.yaml) and checked against the registered routes. Express-to-FastAPI prediction payloads use shared fixtures plus strict Node and Pydantic validators. The FastAPI RAG subsystem remains available for isolated retrieval research, not as a bypass around Express financial authority. Public errors use the stable `{ error, message, code, request_id, details? }` envelope.
+README.md is the primary project overview. Subsystem operation files remain only where an explicit test, workflow, generator, or runtime input consumes them.
 
----
+## Local development
 
-## AI & Machine Learning Architecture
+### Requirements
 
-### 1. Tabular Deep Learning Suitability Benchmark (Phase 3)
-The tracked model bundles report evaluation on **2,000 synthetic suitability-policy examples**, with 19 input features and a stratified 70/15/15 train/validation/test split (1,400/300/300). This is policy-label imitation evidence only: it does not measure investor outcomes, investment performance, or suitability quality for real clients. These models are diagnostic/shadow components and cannot affect eligibility, suitability, ranking, allocation, tax, or product inclusion.
+- Node.js 22.x
+- Python 3.12
+- MongoDB configured as a transaction-capable replica set for transactional financial flows; a typical local URI uses replicaSet=rs0.
+- Redis is optional for explicitly configured lightweight local development. Production shared-state and security policies may require healthy Redis.
+- Docker is not required for ordinary local development. CI provisions real MongoDB, Redis, browser, and Kubernetes dependencies for integration gates.
 
-| Model Architecture | Test Accuracy | Macro F1 | Balanced Accuracy | Evidence |
-| :--- | :---: | :---: | :---: | :--- |
-| **Random Forest** | **99.00%** | **0.9839** | **0.9769** | [Tracked bundle evaluation](ml-service/model/bundles/random_forest/evaluation_report.json) |
-| **PyTorch MLP** | **94.67%** | **0.9352** | **0.9521** | [Tracked bundle evaluation](ml-service/model/bundles/pytorch_mlp/evaluation_report.json) |
-| **FT-Transformer** | **98.00%** | **0.9638** | **0.9699** | [Tracked bundle evaluation](ml-service/model/bundles/ft_transformer/evaluation_report.json) |
+Do not use a standalone MongoDB instance for flows that require transactions. Do not enable automatic index creation as a substitute for the explicit migration process.
 
-These scores describe agreement with synthetic rule-generated labels for the held-out test split only; they are not evidence that the models predict suitable real-world investments.
+### Install and configure
 
-### 2. Retrieval-Augmented Generation (RAG) Subsystem (Phase 2 & 5)
-The FastAPI microservice implements a dense vector search pipeline indexing vectorized chunks of SEBI regulations, RBI circulars, and the Indian Income Tax Act.
+Install backend and frontend dependencies, then create local environment files from the checked-in templates:
 
-![RAG Retrieval Pipeline Diagram showing document ingestion, SentenceTransformer dense vector embedding, PersistentVectorStore search, and citation verification](docs/architecture/rag_pipeline.png)
-> **RAG retrieval pipeline.** Ingestion of vectorized regulatory/tax chunks, SentenceTransformer 384D dense vector embedding, vector similarity search, and context grounding with citation validation.
+    npm ci --prefix server
+    npm ci --prefix reactapp
+    python -m venv ml-service/venv
+    python -m pip install -r ml-service/requirements.txt
 
-* **Embedder**: `SentenceTransformerEmbeddingProvider` using `all-MiniLM-L6-v2` (384D dense vectors).
-* **Vector Store**: `PersistentVectorStore` in `ml-service/rag/vector_store/memory_vector_store.py`.
+Use the root, server, ML-service, and React .env.example files as the variable-name reference. Provide secret values through a local secret-aware environment mechanism; never commit real .env files or put provider keys in VITE_* variables.
 
-#### Legacy RAG Evaluation Snapshot
-The figures in the August 2026 report (75 queries, 508 chunks) are historical and are not current-corpus quality evidence. Its two out-of-domain controls still received source-hit credit against an FY2025-26 tax source, so those results do not establish correct abstention. The current answerability-aware evaluation set contains five cases; abstention controls have no relevant source and cannot earn source-hit credit. See the current evaluator and corpus manifest before relying on any metric. Citation-ID validity is not factual entailment.
+For a fresh or upgraded Mongo database, run the explicit migrations before starting services. The Phase-2 index migration requires MONGODB_MIGRATION_URI to point at the intended transaction-capable database:
 
-#### Embedding Provider Ablation Study (Dense Transformer vs Hash-Based):
-An ablation study ([`ml-service/reports/embedding_ablation.json`](ml-service/reports/embedding_ablation.json)) compared 128D character n-gram feature hashing against 384D transformer embeddings:
+    npm run migrate:phase2-indexes --prefix server
 
-| Metric | Hash Provider (`DenseVectorEmbeddingProvider`) | Dense Transformer (`all-MiniLM-L6-v2`) | Empirical Uplift |
-| :--- | :---: | :---: | :---: |
-| **Vector Dimension** | 128D (n-gram hash) | 384D (transformer vector) | +256 dimensions |
-| **In-Domain Recall@4** | 98.0% | **100.0%** | **+2.0%** |
-| **Mean Reciprocal Rank (MRR)** | 0.8833 | **0.9733** | **+0.0900** |
-| **Mean NDCG@4** | 0.8975 | **0.9800** | **+0.0825** |
+The deployment workflow orders the shared ML/RAG state migration, Plan Review indexes, agent-runtime state, and ResearchAgent task indexes before application replicas. Run those migrations/bootstrap commands only when deploying or enabling the corresponding subsystem; production application startup verifies state and does not perform schema DDL.
 
-### 3. Base LLM Evaluation Harness (Phase 4)
-Base `Qwen/Qwen2.5-0.5B-Instruct` was evaluated across 25 financial prompts against gold reference answers ([`ml-service/reports/llm_eval_report.json`](ml-service/reports/llm_eval_report.json)):
-* **Mean Lexical Overlap**: 0.4998
-* **Dense Semantic Embedding Similarity**: **0.6660** (SentenceTransformer cosine similarity)
-* **Mean lexical grounding-overlap heuristic**: 0.5608. This token-overlap measure is not a faithfulness, entailment, factual-support, or hallucination test.
-
----
-
-## Grounded Explanation Architecture
-
-Chat is an explanation layer, not a recommendation engine. [`geminiChatService.js`](server/services/geminiChatService.js) loads the user's saved profile and a recommendation only when its profile hash is current, then asks [`groundedExplanationService.js`](server/services/groundedExplanationService.js) to build and explain a minimal evidence packet.
-
-### Authority and Failure Boundaries
-
-* **Read-only evidence**: Profile suitability, recommendation, market context, official fixed-income rates, and projection assumptions enter the packet only through canonical backend services.
-* **Provider abstraction**: [`providerAbstraction.js`](server/services/providerAbstraction.js) offers NVIDIA NIM as the preferred grounded explanation provider, with optional Gemini and Groq fallbacks. React never calls any provider directly.
-* **No financial tools**: `GROUNDED_LLM_TOOL_ALLOWLIST` is empty. The model cannot change profiles, select products, compute returns, set allocations, or bypass suitability.
-* **Validation**: [`groundingValidator.js`](server/services/groundingValidator.js) rejects unknown evidence IDs, unsupported numbers/dates/URLs, and uncontrolled financial or authority claims.
-* **Fail-safe response**: Missing credentials, provider errors, invalid JSON, or grounding failures produce a validated deterministic template from the same evidence packet. They do not silently invent facts or change financial decisions.
-* **Audit metadata**: Responses expose provider/model, prompt and grounding versions, evidence IDs, unavailable facts, citations, validation status, timestamps, and whether fallback was used.
-
----
-
-## Software Engineering & System Design
-
-### 5-Stage Recommendation Pipeline
-The core recommendation engine ([`RecommendationPipeline.js`](server/services/RecommendationPipeline.js)) generates asset allocations through five deterministic stages:
-
-![5-Stage Portfolio Optimization Engine Diagram showing risk profiling, allocation matrix, quadratic mean-variance optimizer, policy concentration caps, and execution candidate ranking](docs/architecture/portfolio_pipeline.png)
-> **5-Stage portfolio optimization engine.** Quantitative pipeline progressing from multi-factor risk profiling through quadratic solver optimization, policy concentration caps, and candidate product ranking.
-
-1. **Stage 1 — Risk & Capacity Profiling**: Computes composite risk score (1–10) combining age, savings rate, dependents, emergency fund status, and debt EMI ratio (`riskProfiler.js`).
-2. **Stage 2 — Target Allocation Matrix**: Maps composite risk score to asset class targets (Equity, Debt, Gold, Liquid).
-3. **Stage 3 — Mathematical Optimization**: Executes mean-variance quadratic optimization via `numeric` package to maximize return for target volatility. If optimizer fails or encounters invalid boundaries, falls back to deterministic heuristic solver.
-4. **Stage 4 — Policy Concentration Caps**: Enforces `CONCENTRATION_CAPS` (e.g. Smallcap ≤15%, Direct Equity ≤20%, SGB ≤10%, NPS ≤25%) with iterative excess redistribution.
-5. **Stage 5 — Execution Pathway Selection**: Produces deterministic eligible parent instruments with versioned model assumptions and concentration validation. Product-level Where-to-Invest ranking is a separate source-backed path; the legacy catalog is reference metadata only and never supplies product order or live financial values.
-
-### Security Controls
-* **Fail-Closed API Key Authentication**: [`verify_api_key()`](ml-service/main.py#L231) in the ML microservice returns HTTP 500 (misconfiguration error) if `ML_SERVICE_API_KEY` is unset in non-local environments, preventing unauthorized access.
-* **Multi-Layer Prompt Injection Defense**: Two-tier pipeline shared between Node.js ([`promptSecurity.js`](server/services/promptSecurity.js)) and Python ([`prompt_sanitizer.py`](ml-service/rag/security/prompt_sanitizer.py)):
-  1. **Regex blacklist** — fast pattern-match against known injection phrases, loaded from [`config/security_patterns.json`](config/security_patterns.json).
-  2. **Semantic heuristic guard** — detects paraphrased injection attempts and Base64-encoded payloads that evade literal pattern matching. Verified by 9 red-team tests.
-* **Ingestion Trust Tiering**: [`pipeline.py`](ml-service/rag/ingestion/pipeline.py) accepts only verified government sources into advisory retrieval. Direct user input is rejected; explicit internal administrative overrides are tagged and quarantined from advisory evidence.
-* **Per-User Token Budget**: [`tokenBudget.js`](server/middleware/tokenBudget.js) enforces a rolling-window cumulative token budget on `POST /api/chat/message`, independent of the request-count rate limiter. Prevents cost spikes from long prompts or automated abuse. Verified by 5 integration tests.
-* **Input Validation**: Joi schemas validate incoming API request bodies on Express routes (`profile.js`, `recommend.js`, `tax.js`).
----
-
-## Performance Benchmarks & Capacity Load Testing
-
-Empirical load testing was conducted using `autocannon` (v8.0.0) across 30-second benchmark scenarios on a single host (Intel Core i7-10870H @ 2.20GHz, 16GB RAM, local MongoDB v7.0 & Redis 7.2):
-
-| Scenario | Concurrency | p50 Latency | p95 Latency | p99 Latency | Throughput (req/s) | Error Rate | Status Codes |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-| **Tax Comparison (Compute-Heavy)** | 10 | 2.0 ms | 4.0 ms | 5.0 ms | **3,606.5 req/s** | **0.00%** | 108,174x HTTP 200 |
-| **Tax Comparison (Compute-Heavy)** | 50 | 12.0 ms | 19.0 ms | 21.0 ms | **3,809.4 req/s** | **0.00%** | 114,264x HTTP 200 |
-| **Tax Comparison (Compute-Heavy)** | 100 | 25.0 ms | 36.0 ms | 41.0 ms | **3,736.7 req/s** | **0.00%** | 112,088x HTTP 200 |
-| **Stress Ceiling (Tax Compare)** | 200 | 35.0 ms | 43.0 ms | 54.0 ms | **5,537.7 req/s** | **0.00%** | 166,115x HTTP 200 |
-| **Instruments DB (Read-Heavy)** | 10 | 48.0 ms | 66.0 ms | 73.0 ms | **199.0 req/s** | **0.00%** | 5,969x HTTP 200 |
-| **Instruments DB (Read-Heavy)** | 100 | 79.0 ms | 244.0 ms | 267.0 ms | **973.7 req/s** | **0.00%** | 29,212x HTTP 200 |
-| **Historical Chat Endpoint Benchmark** | 10 | 90.0 ms | 155.0 ms | 245.0 ms | **105.7 req/s** | **0.00%** | 3,170x HTTP 200 |
-| **Historical Chat Endpoint Benchmark** | 100 | 506.0 ms | 844.0 ms | 874.0 ms | **193.6 req/s** | **0.00%** | 5,807x HTTP 200 |
-
-*Full benchmark report*: [`load_test_report.md`](load_test_report.md) with committed raw outputs in `server/reports/loadtest/`.
-
----
-
-## Tech Stack
-
-| Layer | Technologies |
-| :--- | :--- |
-| **Frontend** | React 19, Vite, Framer Motion, Recharts, Lucide React, CSS3 (Vanilla Glassmorphism) |
-| **Backend Gateway** | Node.js v22.x, Express.js, Mongoose ODM, Joi Validation, Numeric.js, Autocannon |
-| **ML Microservice** | Python 3.12, FastAPI, PyTorch, scikit-learn, SentenceTransformers, NumPy, pandas, Uvicorn |
-| **Database & Cache** | MongoDB v7.0 (Document Store & Vector Chunk Persistence), Redis 7.2 (Streams DAG Persistence, Cache & HybridStore) |
-| **AI / LLM / RAG** | NVIDIA NIM (preferred grounded explanation only), optional Gemini/Groq fallbacks, `all-MiniLM-L6-v2` retrieval research |
-| **Containerization & CI** | Docker, Docker Compose, GitHub Actions (Multi-OS Node + Python matrix) |
-
----
-
-## Installation & Setup
-
-### Prerequisites
-* **Node.js**: `v22.x` or higher
-* **Python**: `v3.12`
-* **MongoDB**: `v7.0` (local instance or MongoDB Atlas)
-* **Redis**: `v7.x` (optional only for explicitly configured lightweight development; required and fail-closed for production shared state)
-
-### 1. Clone Repository
-```bash
-git clone https://github.com/yashaskn8/WealthGenie-Architecture-Restoration.git
-cd WealthGenie-Architecture-Restoration
-```
-
-### 2. Environment Configuration
-Copy environment variable templates:
-```bash
-cp server/.env.example server/.env
-cp ml-service/.env.example ml-service/.env
-cp reactapp/.env.example reactapp/.env
-```
-
-Key environment variables to configure in `server/.env`:
-```ini
-PORT=5000
-MONGODB_URI=mongodb://127.0.0.1:27017/wealthgenie?replicaSet=rs0
-REDIS_URL=redis://127.0.0.1:6379
-JWT_SECRET=your_secure_jwt_secret_key_min_32_chars
-ML_SERVICE_URL=http://127.0.0.1:8000
-ML_SERVICE_API_KEY=use_the_same_private_value_as_the_ml_service
-# Optional explanation providers; the deterministic grounded fallback needs none.
-NVIDIA_API_KEY=your_rotated_nvidia_key
-# GEMINI_API_KEY=optional_fallback_key
-# GROQ_API_KEY=optional_fallback_key
-# Optional authenticated market-data fallback; NSE remains the public primary source.
-# UPSTOX_ANALYTICS_TOKEN=optional_upstox_token
-```
-
-In `ml-service/.env`:
-```ini
-PORT=8000
-ENVIRONMENT=local
-ML_SERVICE_API_KEY=your_ml_service_key
-```
-
-NSE, AMFI, India Post/Department of Posts, and SBI public data do not require browser-visible API keys. All provider access is server-side. Never place an LLM or market-provider secret in a `VITE_*` variable or commit a real `.env` file.
-
-### 3. Start Backend Services Locally
-
-#### Express Server (Node.js)
-```bash
-cd server
-npm install
-npm start
-```
-
-#### ML Microservice (Python)
-```bash
-cd ml-service
-python -m venv venv
-# On Windows: venv\Scripts\activate | On Linux/macOS: source venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --port 8000 --reload
-```
-
-#### Frontend Client (React)
-```bash
-cd reactapp
-npm install
-npm run dev
-```
-
-The application client runs at `http://localhost:5173`.
-
-### Direct production processes (without Docker)
-
-Run MongoDB and Redis as managed services or operating-system services, set
-`NODE_ENV=production`, use strong secrets, and configure the public frontend origin in
-`CORS_ORIGINS` using HTTPS. Set a unique `METRICS_TOKEN`; Redis is a required production
-dependency by default because session revocation fails closed. Build the frontend once
-and run the API as a supervised Node process:
-
-```bash
-cd reactapp
-npm ci
-npm run build
-
-cd ../server
-npm ci --omit=dev
-npm start
-```
-
-The API separates Express construction from process startup, maintains explicit
-starting/ready/draining/stopped lifecycle state, validates HTTP and MongoDB pool bounds,
-and shuts down HTTP traffic, MongoDB, Redis, tracing, and scheduled jobs cleanly. Cookie
-sessions are HttpOnly and bound to mutating requests with a double-submit CSRF token plus
-an exact production-origin check. Readiness fails when critical dependencies are down,
-admission control rejects excess concurrency before saturation, and HTTP metrics use
-bounded method/status labels to avoid high-cardinality telemetry.
-
-Production MongoDB must be replica-set capable because recommendation/audit and goal/profile
-writes use transactions. The SPA restores session and financial state from the backend;
-tokens, profiles, recommendations, and goals are not persisted in browser local or session
-storage. The production Nginx configuration applies CSP, HSTS, frame denial, referrer and
-permissions policies, MIME sniffing protection, and cross-origin isolation headers.
-
-Expose `GET /api/metrics` only to an administrator or send the dedicated secret in the
-`X-Metrics-Token` header from the monitoring agent. Do not reuse the JWT or ML service
-secrets for metrics collection.
-
----
-
-## Docker Deployment
-
-To spin up the full multi-container application stack (MongoDB, Redis, Express backend, FastAPI ML service, React frontend):
-
-```bash
-cp .env.example .env
-# Replace the CHANGE_ME values for JWT_SECRET, ML_SERVICE_API_KEY, and ML_OPERATOR_KEY.
-docker compose up --build -d
-```
-
-This Compose file is a local/integration HTTP topology: it intentionally uses
-`NODE_ENV=development`, non-secure cookies, and same-origin HTTP through the
-frontend Nginx container. It is not a production TLS termination setup. To run
-the production-edge browser check against this stack, use the Nginx port rather
-than the Vite dev server:
-
-```bash
-PLAYWRIGHT_BASE_URL=http://127.0.0.1:80 npm run test:e2e --prefix reactapp -- production-edge.spec.ts
-```
-
-Production requires HTTPS termination, an HTTPS `CORS_ORIGINS` value, and
-secure cookies. The Terraform directory provisions network, DocumentDB, ALB,
-and DNS scaffolding only; application compute/runtime attachment is a separate
-deployment step. Provide `documentdb_engine_version`, an application workload
-security group, and production snapshot/deletion settings explicitly before any
-plan or apply. This repository does not run `terraform apply`.
-
-Docker Compose reads the root `.env` file for secret substitution. The frontend
-serves `/api/*` through its Nginx reverse proxy to the Express container.
-
-Service mapping:
-* **Frontend**: `http://localhost:80`
-* **Express Gateway**: `http://localhost:5000`
-* **FastAPI ML Service**: `http://localhost:8000`
-* **MongoDB**: `localhost:27017`
-* **Redis**: `localhost:6379`
-
----
-
-## Testing & Quality Assurance
-
-### Node.js / Express Backend Test Suite
-```bash
-cd server
-npm test               # Run the unit and integration test suite
-npm run test:coverage  # Run test suite with coverage report
-```
-
-> **Offline-Resilient Test Database**: All server integration tests use a unified 4-tier database provisioning helper ([`server/test/helpers/mongoTestHelper.js`](server/test/helpers/mongoTestHelper.js)) that auto-selects the best available MongoDB mechanism:
-> 1. **`MONGODB_URI` env variable** — Pre-started MongoDB (CI services, local `mongod`). Zero startup latency.
-> 2. **Testcontainers** (`@testcontainers/mongodb`) — Spins up a `mongo:7.0` Docker container automatically.
-> 3. **MongoMemoryServer** — In-memory binary fallback for environments with internet/cached binary.
-> 4. **Fail-Fast Diagnostics** — Immediate actionable error message when no mechanism is available.
-
-### Python ML Microservice Test Suite
-```bash
-cd ml-service
-pytest                 # Run the full ML and RAG test suite
-```
-
-### Frontend Client Unit & Accessibility Suite (Vitest + axe-core)
-```bash
-cd reactapp
-npm test               # Run the Vitest unit and accessibility suite
-npm run lint           # Run ESLint
-npm run typecheck      # Run TypeScript type safety checks
-npm run build          # Build the production bundle
-```
-
-### Playwright End-to-End Suite (Full User Lifecycle)
-```bash
-cd reactapp
-npm run test:e2e       # Run Playwright E2E full user journey against live local stack
-```
-> **CI integration:** The required browser job provisions a real replica-set-capable MongoDB, Redis, FastAPI, Express, and Vite before running Playwright. A local run needs the same dependencies; a standalone MongoDB cannot prove the transactional lifecycle.
-
-### Explicit Live-Demo Readiness Gate
-For an operator-run, non-mocked check of current provider evidence, authenticated profile completion, current financial-state binding, product/tax workflow, service readiness, and the production frontend build, see [`docs/demo-readiness-preflight.md`](docs/demo-readiness-preflight.md). The gate requires an explicit opt-in and a disposable demo identity/database; it fails closed when exact source-qualified NIFTY ETF evidence is unavailable.
-
-### Static Docs-vs-Code Sync Check
-To verify that documentation claims match code imports and API routes:
-```bash
-node scripts/docs/check_docs_sync.js
-```
-
----
-
-## Project Structure
-
-```text
-WealthGenie-Architecture-Restoration/
-├── .github/
-│   └── workflows/
-│       └── ci.yml                 # Quality, security, contract, and real-service browser gates
-├── docs/
-│   └── architecture/              # Technical architecture & pipeline visual diagrams
-│       ├── system_architecture.png
-│       ├── agent_workflow.png
-│       ├── rag_pipeline.png
-│       └── portfolio_pipeline.png
-├── docker-compose.yml             # Full-stack container orchestration
-├── RESEARCH_LOG.md                # Empirical research & engineering audit log
-├── PROJECT_STATUS.md              # Feature status & architectural disclosure matrix
-├── load_test_report.md            # Autocannon load testing benchmark report
-├── reactapp/                      # React 19 Single-Page Application & Design System
-│   ├── e2e/                       # Playwright E2E full user lifecycle test suite (full-flow.spec.ts)
-│   ├── src/
-│   │   ├── components/            # UI Components (ProfilePage, TaxScreen, Rebalancer, etc.)
-│   │   ├── styles/                # CSS Design Tokens System (tokens.css, components.css)
-│   │   ├── services/              # API client bridge
-│   │   ├── utils/                 # Presentation and formatting utilities
-│   │   ├── __tests__/             # Vitest unit, privacy, authority, and accessibility tests
-│   │   └── App.jsx                # Main entry & router
-│   ├── playwright.config.js       # Playwright E2E configuration
-│   └── package.json
-├── server/                        # Express.js REST API Gateway
-│   ├── config/                    # DB, Redis & OpenTelemetry tracing config (tracing.js)
-│   ├── middleware/                # Auth, rate-limiter, correlation/traceparent, idempotency
-│   ├── models/                    # Mongoose Schemas (User, Profile, Recommendation, AuditRecord)
-│   ├── routes/                    # REST Endpoints (recommend, tax, profile, chat, etc.)
-│   ├── services/                  # Recommendation, tax, market-data and grounded-explanation authority
-│   └── test/                      # Node.js unit, integration, transaction, and contract tests
-├── ml-service/                    # FastAPI Machine Learning Microservice
-│   ├── main.py                    # FastAPI routes (/predict, /rag/query, /health)
-│   ├── tracing.py                 # OpenTelemetry instrumentation & FileSpanExporter
-│   ├── model/bundles/             # Per-architecture manifests, metadata, and evaluation reports
-│   ├── rag/                       # Multi-tenant vector store, SentenceTransformer 384D embedder
-│   ├── reports/                   # Committed JSON evaluation reports
-│   └── tests/                     # Pytest ML, registry, persistence, RAG, and contract tests
-└── scripts/                       # Orchestration, tracing verification & CSS migration scripts
-    ├── run_e2e_stack.ps1          # Automated 5-service Playwright stack orchestrator
-    └── verify_distributed_tracing.js # Distributed tracing cross-service assertion script
-```
-
----
-
-## Limitations, Regulatory Disclosures & Jurisdictional Scope
-
-1. **Jurisdiction & Tax Scope**: Scoped strictly to Indian individual personal income tax with explicit statute-versioned policy metadata: historical FY2025-26 treatment under the Income-tax Act, 1961 and FY2026-27 onward under the Income-tax Act, 2025 (effective 1 April 2026). Retail instruments include PPF, SCSS, SSY, NPS, SGB, Mutual Funds, ETFs and FD. Does not support corporate taxation, HUF, NRI/DTAA provisions, crypto (VDA), or derivative trading (F&O).
-2. **"Compliance-Inspired Controls" vs. Regulatory Registration**: WealthGenie applies algorithmic principles inspired by SEBI (Investment Advisers) Regulations, 2013 (risk capacity reconciliation, multi-instrument concentration caps, tamper-evident SHA-256 audit chains) and AMFI risk-o-meter classifications. WealthGenie is an educational research and decision-support platform, **NOT a SEBI-registered Investment Adviser (RIA)**. All outputs are educational projections, not certified investment advice.
-3. **Fiscal-year-versioned tax policy**: The tax engine exposes verified policy identifiers such as `tax-policy-FY2025-26-v2` and `tax-policy-FY2026-27-v2`, selected by the explicit fiscal year. New audit writes call `getCurrentRegulatoryRuleVersion()` at request time so a long-lived process crosses the April 1 India fiscal-year boundary safely; the legacy `REGULATORY_RULE_VERSION` export is only a compatibility snapshot. At this baseline, the current identifier is `tax-policy-FY2026-27-v2`, distinct from the suitability `recommendation_policy_version`. When a new budget is enacted, add a verified fiscal-year policy entry and official source references in `server/services/taxEngine.js`, then update its boundary tests and documentation.
-4. **Local Load Test Disclosure**: Load test benchmarks were conducted on a single host (`localhost:5000` / `127.0.0.1:8000`). They measure single-node event loop throughput and microservice latency, not multi-region cloud network conditions.
-5. **Fine-Tuning Scope**: LoRA/QLoRA LLM fine-tuning pipelines are defined in code interfaces but were deferred due to CPU compute constraints during evaluation. Base `Qwen/Qwen2.5-0.5B-Instruct` was used for LLM evaluation.
-6. **Computer Vision**: The platform intentionally focuses on tabular ML, text RAG, and financial tax algorithms. Computer vision (VLM) is explicitly out of scope.
-7. **WTI Authority Boundary**: The API client exposes a helper for protected `POST /api/instruments/rank-wti`; a production React component call site was not found in the inspected tree. The route preserves the parent-category hard-suitability boundary. For explicitly mapped mutual-fund categories, the product universe comes from AMFI; ranking uses a versioned one-year historical NAV-return rule only when complete Growth-option evidence exists. Historical return is never presented as expected return. Missing evidence produces comparable or unavailable results, and the legacy WTI catalog supplies non-financial reference text only.
-8. **ML evaluation scope**: The tracked model-bundle test metrics represent agreement with synthetic deterministic-policy labels only. The repository does not claim independent CFP validation or real-world investor-outcome accuracy from those numbers.
-9. **In-Memory Vector Search**: MongoDB 7.0 Community Edition does not support Atlas Vector Search. Chunks and embeddings are persisted in MongoDB for cross-replica sharing, but vector similarity search executes in-memory via FAISS/NumPy after loading vectors from Mongo on startup.
-10. **Per-Replica Memory Scaling**: Because vector search runs in-memory, each ML service replica loads the complete embedding matrix into local RAM. Memory consumption scales linearly with $N_{\text{replicas}} \times N_{\text{chunks}}$.
-11. **DAG Crash Resume Scope**: Redis Streams step persistence allows resuming a deterministic multi-step agent DAG from the last completed step index. External non-deterministic side-effects without compensating transactions are not managed by a distributed saga orchestrator.
-12. **Rate Limiter Degrade Behavior**: `authLimiter` strictly fails closed (`passOnStoreError: false`), but `apiLimiter` falls back to in-memory `Map` counters if Redis disconnects, multiplying effective rate limits across independent replicas during an outage.
-
----
+Start the services in separate terminals after configuring their required environment:
+
+    npm start --prefix server
+    cd ml-service
+    python -m uvicorn main:app --port 8000
+    npm run dev --prefix reactapp
+
+The React development server is normally available at localhost:5173. The API and ML service default ports are documented in the corresponding environment templates.
+
+### Environment variable names
+
+The following names cover common local and operator workflows; the .env.example files document subsystem-specific settings. No credential values are included here.
+
+| Purpose | Variable names |
+| --- | --- |
+| API and persistence | MONGODB_URI, MONGODB_MIGRATION_URI, REDIS_URL, JWT_SECRET, CORS_ORIGINS, REQUIRE_REDIS |
+| API-to-ML service | ML_SERVICE_URL, ML_SERVICE_API_KEY, ML_OPERATOR_KEY |
+| Observability | METRICS_TOKEN, TRACE_LOG_PATH |
+| Optional explanation providers | NVIDIA_API_KEY, GEMINI_API_KEY, GROQ_API_KEY |
+| Optional authenticated market-data provider | UPSTOX_ACCESS_TOKEN, UPSTOX_ANALYTICS_TOKEN |
+| Web client | VITE_API_URL, VITE_DEV_API_TARGET |
+| Optional agent/MCP deployment | AGENT_WORKER_MODE, AGENT_WORKER_ENABLED, MCP_ENABLED, MCP_REMOTE_ENABLED, MCP_JWT_AUDIENCE, MCP_REQUIRED_SCOPE, MCP_ALLOWED_HOSTS, MCP_ALLOWED_ORIGINS |
+
+### Optional full-stack Compose environment
+
+Docker Compose is available for local integration testing, but its HTTP topology is not the production TLS topology:
+
+    docker compose up --build
+
+Production requires HTTPS termination, secure cookies, explicit origins, a transaction-capable Mongo-compatible deployment, and the required shared Redis policy. CI/CD runs one-shot migrations before application deployment and blocks rollout if migration or readiness checks fail. Terraform is infrastructure scaffolding; this repository does not run terraform apply.
+
+## Live demo preflight
+
+The live preflight is an explicit operator action, not a mocked test:
+
+    npm run demo:doctor --prefix server
+    npm run demo:preflight --prefix server
+
+It is inert unless DEMO_LIVE_PREFLIGHT is enabled. It may create a profile and recommendation, so use only a disposable demo account and isolated demo database. The live backend must prove the expected database, host, port, and operator-provisioned environment sentinel before authenticated mutations. Never use production customer data or credentials.
+
+The demo uses external JSON files named through DEMO_PROFILE_COMPLETION_FILE and DEMO_TAX_CONTEXT_FILE, kept outside the repository, plus DEMO_EMAIL, DEMO_PASSWORD, DEMO_COMPLETION_IDEMPOTENCY_KEY, DEMO_NIFTY_ETF_PARENT_ID, and DEMO_EXPECTED_BUILD_SHA. Environment identity is specified by DEMO_EXPECTED_MONGODB_DATABASE, DEMO_EXPECTED_MONGODB_HOST, DEMO_EXPECTED_MONGODB_PORT, and DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID. DEMO_API_BASE_URL, DEMO_FRONTEND_URL, DEMO_TRUSTED_REMOTE_ORIGINS, DEMO_REQUIRE_REDIS, MONGODB_URI, and REDIS_URL apply according to the local/remote deployment.
+
+The gate requires current source-qualified market evidence, matching financial-state provenance, exact product identity, and validated tax input. It does not substitute stale data or infer missing tax facts. Provider/session conditions can make the live check unavailable; a result applies only to that configured environment and observation window.
+
+## Tests and verification
+
+    npm test --prefix server
+    npm run lint --prefix server
+    npm run typecheck --prefix server
+    npm test --prefix reactapp
+    npm run lint --prefix reactapp
+    npm run typecheck --prefix reactapp
+    npm run build --prefix reactapp
+    python -m pytest ml-service
+    node scripts/docs/check_docs_sync.js
+
+The Playwright lifecycle suite requires the real service dependencies used by CI. The CI workflow provisions MongoDB replica-set behavior, Redis, the ML service, Express, Vite, and Chromium; local Docker is not mandatory if equivalent services are available.
+
+## Security and regulatory scope
+
+- The product is educational financial decision support, not a SEBI-registered Investment Adviser and not certified investment advice.
+- The supported tax logic is Indian individual personal income tax with explicit fiscal-year policy. It does not cover corporate taxation, HUF, NRI/DTAA, crypto, or derivatives.
+- Financial profile and tax data are sensitive. Logs, metrics, URLs, and external model prompts must not contain unnecessary private facts or credentials.
+- Authentication, ownership, validation, CSRF/origin checks, request limits, and persistence fences are enforced server-side. Frontend types and hidden inputs are not trusted.
+- Current provider facts, historical observations, assumptions, projections, and simulation outputs remain separately labelled. Historical performance is not a forecast.
+
+## Known limitations
+
+- The live demo preflight is opt-in and environment-specific; ordinary CI does not establish live provider availability or prove an operator’s demo environment.
+- The current trusted RAG manifest is intentionally narrow and does not establish broad coverage of tax rates, deductions, or product tax treatment. Retrieval must abstain when the manifest lacks applicable evidence.
+- The pinned A2A MUST workflow has an explicitly reviewed upstream fixture-applicability exception. Its workflow result must not be presented as full raw-TCK conformance.
+- Market-data sources can be unavailable, stale, or outside a trading session. Such evidence remains unavailable rather than being replaced by a fabricated current value.
+
+## Supporting operational files
+
+- [Production Kubernetes overlay instructions](k8s/overlays/production/README.md)
+- [RAG subsystem, migration, and readiness notes](ml-service/rag/README.md)
+- The trusted retrieval source content and identity are controlled by the manifest in ml-service/rag/data/corpus/.
 
 ## License
 
-This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
+MIT. See [LICENSE](LICENSE).

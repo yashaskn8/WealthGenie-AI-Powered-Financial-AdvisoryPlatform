@@ -1,10 +1,9 @@
 AGENTS.md — WealthGenie Engineering Constitution
 
-Repository: yashaskn8/WealthGenie-Architecture-Restoration
+Repository: yashaskn8/WealthGenie-AI-Powered-Financial-AdvisoryPlatform
 Authoritative branch: main
 Purpose: Make every coding agent inspect first, avoid hallucination, preserve financial correctness, and finish each assigned task end-to-end.
-Snapshot reference at time of writing: b53080a1ed071d79e80b29d83204728dae523070 (feat: add beginner-first verified post-tax product comparison)
-Important: The snapshot SHA is only a reference. Never assume HEAD still equals it. Inspect the real repository before every task.
+No snapshot SHA is authoritative. Inspect the current repository and HEAD before every task.
 
 1. NON-NEGOTIABLE OPERATING MODE
 
@@ -112,15 +111,14 @@ Installed skills never outrank the project’s financial, security, or architect
 
 Use only:
 
+https://github.com/yashaskn8/WealthGenie-AI-Powered-Financial-AdvisoryPlatform
+
+These repositories are archival/reference-only unless the user explicitly says otherwise:
+
 https://github.com/yashaskn8/WealthGenie-Architecture-Restoration
-
-The older repository:
-
 https://github.com/yashaskn8/WealthGenie-AI-Powered-Financial-Advisory-Platform
 
-is archival/reference-only unless the user explicitly says otherwise.
-
-Never push new WealthGenie work to the old repository.
+Never push new WealthGenie work to an archival repository.
 
 3.2 Before every code-changing task
 
