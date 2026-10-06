@@ -184,6 +184,38 @@ test('Mongo ResearchTaskStore scopes task IDs to verified agent identity and pre
   assert.equal(await store.isCanceled('task-1', callerA), true);
 });
 
+test('saveClaimed reports whether its terminal write committed or lost to cancellation', async () => {
+  const lease = { token: 'lease-token', fence: 7 };
+  const working = task(TaskState.TASK_STATE_WORKING, new Date().toISOString(), { id: 'task-save-claim' });
+  const completed = task(TaskState.TASK_STATE_COMPLETED, new Date().toISOString(), { id: 'task-save-claim' });
+  const existing = {
+    _id: 'task-row',
+    taskId: working.id,
+    ownerKey: 'a'.repeat(64),
+    revision: 3,
+    statusState: TaskState.TASK_STATE_WORKING,
+    task: working,
+    executionCapacityToken: lease.token,
+    executionLeaseToken: lease.token,
+    executionFence: lease.fence,
+    executionLeaseExpiresAt: new Date(Date.now() + 30_000),
+  };
+  const model = {
+    findOne: () => ({ lean: async () => structuredClone(existing) }),
+    collection: {
+      findOneAndUpdate: async () => ({ value: { _id: existing._id }, ok: 1 }),
+    },
+  };
+  const store = new MongoResearchTaskStore({ model, capacityModel: {}, env: { NODE_ENV: 'test' } });
+  store.capacity.release = async () => {};
+
+  assert.equal(await store.saveClaimed(completed, lease), true);
+
+  existing.statusState = TaskState.TASK_STATE_CANCELED;
+  existing.task = task(TaskState.TASK_STATE_CANCELED, new Date().toISOString(), { id: 'task-save-claim' });
+  assert.equal(await store.saveClaimed(completed, lease), false);
+});
+
 test('concurrent task updates merge message and artifact IDs without rewriting task identity', () => {
   const before = task(TaskState.TASK_STATE_WORKING, '2026-09-27T10:00:00.000Z', {
     history: [{ messageId: 'input', parts: [] }],

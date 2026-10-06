@@ -16,6 +16,8 @@ from typing import Any
 
 
 REQUIREMENT_ID = re.compile(r"\b(?:DM|CORE)-[A-Z]+-\d{3}\b")
+PINNED_TEST_CASE_COUNT = 235
+PINNED_SKIPPED_TEST_CASE_COUNT = 178
 EXPECTED_UPSTREAM_ISSUES = {
     "https://github.com/a2aproject/a2a-tck/issues/229": "FIXTURE_APPLICABILITY",
     "https://github.com/a2aproject/a2a-tck/issues/202": "MISSING_EXPECTED_ERROR_ASSERTION",
@@ -60,7 +62,7 @@ def _policy_cases(policy: dict[str, Any], outcome: Outcome) -> dict[tuple[str, s
             continue
         required = (
             "node_id", "junit_classname", "junit_name", "requirement_id",
-            "failure_fragment", "upstream_issue", "classification",
+            "failure_signature", "failure_body", "upstream_issue", "classification",
         )
         if any(not isinstance(case.get(key), str) or not case[key] for key in required):
             outcome.violations.append("policy known-failure entry is missing required identity or failure metadata")
@@ -107,6 +109,10 @@ def _failure_text(element: ET.Element) -> str:
     return "\n".join(part for part in (element.attrib.get("message", ""), "".join(element.itertext())) if part)
 
 
+def _failure_body_matches(element: ET.Element, case: dict[str, str]) -> bool:
+    return "".join(element.itertext()) == case["failure_body"]
+
+
 def _validate_checkout(
     tck_dir: Path,
     expected_sha: str,
@@ -133,12 +139,7 @@ def _validate_checkout(
         code, raw_path = line[:2], line[3:]
         if code == "??":
             path = PurePosixPath(raw_path.replace("\\", "/"))
-            allowed = any(
-                path.parts
-                and path.parts[0] == prefix.rstrip("/")
-                and ".." not in path.parts
-                for prefix in allowed_untracked
-            )
+            allowed = path.as_posix() in allowed_untracked and ".." not in path.parts
             if allowed:
                 continue
         outcome.violations.append(f"TCK checkout has unexpected modified/untracked content: {raw_path}")
@@ -161,8 +162,12 @@ def evaluate_report(
         outcome.violations.append(f"could not read valid A2A policy: {error}")
         return outcome, {}
 
-    if policy.get("policy_schema_version") != 3:
+    if policy.get("policy_schema_version") != 4:
         outcome.violations.append("unsupported A2A policy schema version")
+    if policy.get("test_case_count") != PINNED_TEST_CASE_COUNT:
+        outcome.violations.append(f"policy test_case_count must equal pinned test_case_count {PINNED_TEST_CASE_COUNT}")
+    if policy.get("skipped_test_case_count") != PINNED_SKIPPED_TEST_CASE_COUNT:
+        outcome.violations.append(f"policy skipped_test_case_count must equal pinned skipped_test_case_count {PINNED_SKIPPED_TEST_CASE_COUNT}")
     pinned_sha = policy.get("tck_sha")
     if not isinstance(pinned_sha, str) or tck_sha.lower() != pinned_sha.lower():
         outcome.violations.append("supplied TCK SHA does not match the policy pin")
@@ -192,7 +197,12 @@ def evaluate_report(
         "allow_unknown_failures": False,
         "allow_test_errors": False,
         "allow_tracked_tck_changes": False,
-        "allow_untracked_tck_paths": ["reports/"],
+        "allow_untracked_tck_paths": [
+            "reports/compatibility.html",
+            "reports/compatibility.json",
+            "reports/junitreport.xml",
+            "reports/tck_report.html",
+        ],
     }:
         outcome.violations.append("policy acceptance rules differ from the fail-closed gate contract")
 
@@ -216,14 +226,12 @@ def evaluate_report(
         outcome.violations.append("JUnit report root is not testsuite/testsuites")
     testcases = list(root.iter("testcase"))
     outcome.total = len(testcases)
-    expected_count = policy.get("test_case_count")
-    if not isinstance(expected_count, int) or expected_count < 1 or outcome.total != expected_count:
+    expected_count = PINNED_TEST_CASE_COUNT
+    if outcome.total != expected_count:
         outcome.violations.append(
             f"JUnit report is incomplete: expected {expected_count!r} testcases, found {outcome.total}"
         )
-    expected_skipped = policy.get("skipped_test_case_count")
-    if not isinstance(expected_skipped, int) or expected_skipped < 0:
-        outcome.violations.append("policy must specify a non-negative pinned-TCK skipped testcase count")
+    expected_skipped = PINNED_SKIPPED_TEST_CASE_COUNT
 
     seen: set[tuple[str, str]] = set()
     known_seen: set[tuple[str, str]] = set()
@@ -239,6 +247,9 @@ def evaluate_report(
             outcome.violations.append(f"JUnit report contains duplicate testcase identity: {display_id}")
             continue
         seen.add(identity)
+        allowed_children = {"failure", "error", "skipped", "system-out", "system-err"}
+        if any(child.tag not in allowed_children or len(child) for child in case):
+            outcome.violations.append(f"JUnit testcase has nested or unexpected result elements: {display_id}")
         status, failures, errors, skipped = _status(case)
         known = cases.get(identity)
         if known:
@@ -261,7 +272,13 @@ def evaluate_report(
                 outcome.unknown_failures.append(display_id)
                 continue
             requirements = set(REQUIREMENT_ID.findall(text))
-            if len(failures) != 1 or requirements != {known["requirement_id"]} or known["failure_fragment"] not in text:
+            if (
+                len(failures) != 1
+                or set(failures[0].attrib) != {"message"}
+                or requirements != {known["requirement_id"]}
+                or failures[0].attrib.get("message") != known["failure_signature"]
+                or not _failure_body_matches(failures[0], known)
+            ):
                 outcome.unknown_failures.append(display_id)
                 outcome.violations.append(f"known testcase failed for an unapproved reason: {known['node_id']}")
                 continue
@@ -275,7 +292,7 @@ def evaluate_report(
             f"JUnit skipped testcase count changed: expected {expected_skipped}, found {outcome.skipped}"
         )
 
-    suites = [root] if root.tag == "testsuite" else [child for child in root if child.tag == "testsuite"]
+    suites = list(root.iter("testsuite"))
     if not suites:
         outcome.violations.append("JUnit report contains no testsuite summary")
     for suite in suites:

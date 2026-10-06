@@ -61,12 +61,15 @@ export function createA2ATckAuthProxy({ token, upstreamHost = '127.0.0.1', upstr
     });
 
     upstream.on('error', () => {
-      if (response.headersSent) {
-        response.destroy();
+      if (response.destroyed || response.headersSent) {
+        if (!response.destroyed) response.destroy();
         return;
       }
       response.writeHead(502, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       response.end('{"error":"A2A_UPSTREAM_UNAVAILABLE"}');
+    });
+    response.on('close', () => {
+      if (!response.writableFinished) upstream.destroy();
     });
     request.on('aborted', () => upstream.destroy());
     request.pipe(upstream);

@@ -108,7 +108,7 @@ test('recovery execution persists one deterministic artifact and completes the d
       return { task: structuredClone(task), taskId: task.id, lease: { token: 'recovery-token', fence: 2, messageId: 'message-recovery' } };
     },
     renewClaimedExecutionLease: async () => true,
-    saveClaimed: async updated => { persisted = structuredClone(updated); },
+    saveClaimed: async updated => { persisted = structuredClone(updated); return true; },
   };
   const executor = new ResearchAgentExecutor({
     run: async input => ({ artifact: { artifactId: input.artifactId, taskId: input.taskId, financialAuthorityDelta: 0 } }),
@@ -156,6 +156,7 @@ test('durable execution persists the lease-fenced terminal result before publish
       assert.equal(committed.artifacts.length, 1);
       terminalCommitObserved = true;
       persistedTask = structuredClone(committed);
+      return true;
     },
     forgetExecutionLease: () => {},
   };
@@ -179,6 +180,257 @@ test('durable execution persists the lease-fenced terminal result before publish
   assert.ok(events.slice(2).length >= 2, 'artifact and completion events are emitted');
   assert.ok(events.slice(2).every(item => item.afterTerminalCommit), 'no client-visible success precedes the durable terminal commit');
   assert.equal(events.length, 4, 'one lifecycle pair and one persisted result pair are emitted');
+});
+
+test('cancellation that wins during terminal persistence suppresses artifact and completion events', async () => {
+  const task = {
+    id: 'task-cancel-during-save',
+    contextId: 'context-cancel-during-save',
+    status: { state: TaskState.TASK_STATE_SUBMITTED, timestamp: new Date().toISOString() },
+    history: [],
+    artifacts: [],
+    metadata: { agentType: 'FINANCIAL_RESEARCH' },
+  };
+  const userMessage = {
+    messageId: 'message-cancel-during-save',
+    role: Role.ROLE_USER,
+    contextId: task.contextId,
+    taskId: task.id,
+    parts: [{ content: { $case: 'data', value: { researchBriefId: 'brief-cancel-during-save' } } }],
+  };
+  task.history.push(userMessage);
+  let markSaveStarted;
+  const saveStarted = new Promise(resolve => { markSaveStarted = resolve; });
+  let releaseSave;
+  const saveGate = new Promise(resolve => { releaseSave = resolve; });
+  const lease = { token: 'cancel-race-token', fence: 1, messageId: userMessage.messageId };
+  const events = [];
+  let persistedTask = { ...structuredClone(task), status: { state: TaskState.TASK_STATE_WORKING, timestamp: new Date().toISOString() } };
+  const store = {
+    durable: true,
+    leaseMs: 3_000,
+    prepareAndClaim: async () => ({ task: structuredClone(task), lease }),
+    load: async () => structuredClone(persistedTask),
+    save: async canceled => { persistedTask = structuredClone(canceled); },
+    saveClaimed: async committed => {
+      assert.equal(committed.status.state, TaskState.TASK_STATE_COMPLETED);
+      markSaveStarted();
+      await saveGate;
+      return false; // The canonical store observed CANCELED before this completion commit.
+    },
+    forgetExecutionLease: () => {},
+  };
+  const executor = new ResearchAgentExecutor({
+    run: async input => ({ artifact: { artifactId: input.artifactId, taskId: input.taskId, financialAuthorityDelta: 0 } }),
+    provider: {},
+    documentFetcher: {},
+    taskStore: store,
+  });
+  const eventBus = { publish: event => events.push(event) };
+
+  const execution = executor.execute({
+    taskId: task.id,
+    contextId: task.contextId,
+    task: structuredClone(task),
+    context: { user: { identity: { agentType: 'PLAN_REVIEW' } } },
+    userMessage,
+  }, eventBus);
+  await saveStarted;
+  await executor.cancelTask(task.id, eventBus);
+  releaseSave();
+  await execution;
+
+  assert.equal(events.length, 3, 'only submitted, working, and canceled events should be visible');
+  assert.equal(events.at(-1).data.status.state, TaskState.TASK_STATE_CANCELED);
+});
+
+test('completion that wins the terminal store race is not reported as canceled', async () => {
+  const task = {
+    id: 'task-completion-wins-cancel-race',
+    contextId: 'context-completion-wins-cancel-race',
+    status: { state: TaskState.TASK_STATE_SUBMITTED, timestamp: new Date().toISOString() },
+    history: [],
+    artifacts: [],
+    metadata: { agentType: 'FINANCIAL_RESEARCH' },
+  };
+  const userMessage = {
+    messageId: 'message-completion-wins-cancel-race',
+    role: Role.ROLE_USER,
+    contextId: task.contextId,
+    taskId: task.id,
+    parts: [{ content: { $case: 'data', value: { researchBriefId: 'brief-completion-wins-cancel-race' } } }],
+  };
+  task.history.push(userMessage);
+  let markSaveStarted;
+  const saveStarted = new Promise(resolve => { markSaveStarted = resolve; });
+  let releaseSave;
+  const saveGate = new Promise(resolve => { releaseSave = resolve; });
+  const lease = { token: 'completion-wins-cancel-token', fence: 1, messageId: userMessage.messageId };
+  const events = [];
+  let persistedTask = { ...structuredClone(task), status: { state: TaskState.TASK_STATE_WORKING, timestamp: new Date().toISOString() } };
+  const store = {
+    durable: true,
+    leaseMs: 3_000,
+    prepareAndClaim: async () => ({ task: structuredClone(task), lease }),
+    load: async () => structuredClone(persistedTask),
+    save: async () => assert.fail('cancel must not rewrite a task after completion commits'),
+    saveClaimed: async completed => {
+      assert.equal(completed.status.state, TaskState.TASK_STATE_COMPLETED);
+      persistedTask = structuredClone(completed);
+      markSaveStarted();
+      await saveGate;
+      return true;
+    },
+    forgetExecutionLease: () => {},
+  };
+  const executor = new ResearchAgentExecutor({
+    run: async input => ({ artifact: { artifactId: input.artifactId, taskId: input.taskId, financialAuthorityDelta: 0 } }),
+    provider: {},
+    documentFetcher: {},
+    taskStore: store,
+  });
+  const eventBus = { publish: event => events.push(event) };
+
+  const execution = executor.execute({
+    taskId: task.id,
+    contextId: task.contextId,
+    task: structuredClone(task),
+    context: { user: { identity: { agentType: 'PLAN_REVIEW' } } },
+    userMessage,
+  }, eventBus);
+  await saveStarted;
+  await executor.cancelTask(task.id, eventBus);
+  releaseSave();
+  await execution;
+
+  assert.equal(persistedTask.status.state, TaskState.TASK_STATE_COMPLETED);
+  assert.equal(events.length, 4, 'the original request receives one artifact and one completed event');
+  assert.equal(events.at(-1).data.status.state, TaskState.TASK_STATE_COMPLETED);
+  assert.equal(events.some(event => event.data?.status?.state === TaskState.TASK_STATE_CANCELED), false);
+});
+
+test('lease loss after cancellation suppresses stale completion and failure events', async () => {
+  const task = {
+    id: 'task-lease-lost-after-cancel',
+    contextId: 'context-lease-lost-after-cancel',
+    status: { state: TaskState.TASK_STATE_SUBMITTED, timestamp: new Date().toISOString() },
+    history: [],
+    artifacts: [],
+    metadata: { agentType: 'FINANCIAL_RESEARCH' },
+  };
+  const userMessage = {
+    messageId: 'message-lease-lost-after-cancel',
+    role: Role.ROLE_USER,
+    contextId: task.contextId,
+    taskId: task.id,
+    parts: [{ content: { $case: 'data', value: { researchBriefId: 'brief-lease-lost-after-cancel' } } }],
+  };
+  task.history.push(userMessage);
+  let markSaveStarted;
+  const saveStarted = new Promise(resolve => { markSaveStarted = resolve; });
+  let releaseSave;
+  const saveGate = new Promise(resolve => { releaseSave = resolve; });
+  const lease = { token: 'lease-lost-after-cancel-token', fence: 1, messageId: userMessage.messageId };
+  const events = [];
+  let persistedTask = { ...structuredClone(task), status: { state: TaskState.TASK_STATE_WORKING, timestamp: new Date().toISOString() } };
+  const store = {
+    durable: true,
+    leaseMs: 3_000,
+    prepareAndClaim: async () => ({ task: structuredClone(task), lease }),
+    load: async () => structuredClone(persistedTask),
+    save: async canceled => { persistedTask = structuredClone(canceled); },
+    saveClaimed: async committed => {
+      assert.equal(committed.status.state, TaskState.TASK_STATE_COMPLETED);
+      markSaveStarted();
+      await saveGate;
+      throw Object.assign(new Error('execution lease no longer exists'), { code: 'A2A_TASK_EXECUTION_LEASE_LOST' });
+    },
+    forgetExecutionLease: () => {},
+  };
+  const executor = new ResearchAgentExecutor({
+    run: async input => ({ artifact: { artifactId: input.artifactId, taskId: input.taskId, financialAuthorityDelta: 0 } }),
+    provider: {},
+    documentFetcher: {},
+    taskStore: store,
+  });
+  const eventBus = { publish: event => events.push(event) };
+
+  const execution = executor.execute({
+    taskId: task.id,
+    contextId: task.contextId,
+    task: structuredClone(task),
+    context: { user: { identity: { agentType: 'PLAN_REVIEW' } } },
+    userMessage,
+  }, eventBus);
+  await saveStarted;
+  await executor.cancelTask(task.id, eventBus);
+  releaseSave();
+  await execution;
+
+  assert.equal(events.length, 3, 'only submitted, working, and canceled events should be visible');
+  assert.equal(events.at(-1).data.status.state, TaskState.TASK_STATE_CANCELED);
+});
+
+test('cancellation that wins during failure persistence suppresses a stale failed event', async () => {
+  const task = {
+    id: 'task-cancel-during-failure-save',
+    contextId: 'context-cancel-during-failure-save',
+    status: { state: TaskState.TASK_STATE_SUBMITTED, timestamp: new Date().toISOString() },
+    history: [],
+    artifacts: [],
+    metadata: { agentType: 'FINANCIAL_RESEARCH' },
+  };
+  const userMessage = {
+    messageId: 'message-cancel-during-failure-save',
+    role: Role.ROLE_USER,
+    contextId: task.contextId,
+    taskId: task.id,
+    parts: [{ content: { $case: 'data', value: { researchBriefId: 'brief-cancel-during-failure-save' } } }],
+  };
+  task.history.push(userMessage);
+  let markSaveStarted;
+  const saveStarted = new Promise(resolve => { markSaveStarted = resolve; });
+  let releaseSave;
+  const saveGate = new Promise(resolve => { releaseSave = resolve; });
+  const lease = { token: 'cancel-during-failure-token', fence: 1, messageId: userMessage.messageId };
+  const events = [];
+  let persistedTask = { ...structuredClone(task), status: { state: TaskState.TASK_STATE_WORKING, timestamp: new Date().toISOString() } };
+  const store = {
+    durable: true,
+    leaseMs: 3_000,
+    prepareAndClaim: async () => ({ task: structuredClone(task), lease }),
+    load: async () => structuredClone(persistedTask),
+    save: async canceled => { persistedTask = structuredClone(canceled); },
+    saveClaimed: async failed => {
+      assert.equal(failed.status.state, TaskState.TASK_STATE_FAILED);
+      markSaveStarted();
+      await saveGate;
+      return false;
+    },
+    forgetExecutionLease: () => {},
+  };
+  const executor = new ResearchAgentExecutor({
+    run: async () => { throw Object.assign(new Error('research provider unavailable'), { code: 'RESEARCH_PROVIDER_UNAVAILABLE' }); },
+    provider: {},
+    documentFetcher: {},
+    taskStore: store,
+  });
+  const eventBus = { publish: event => events.push(event) };
+
+  const execution = executor.execute({
+    taskId: task.id,
+    contextId: task.contextId,
+    task: structuredClone(task),
+    context: { user: { identity: { agentType: 'PLAN_REVIEW' } } },
+    userMessage,
+  }, eventBus);
+  await saveStarted;
+  await executor.cancelTask(task.id, eventBus);
+  releaseSave();
+  await execution;
+
+  assert.equal(events.length, 3, 'only submitted, working, and canceled events should be visible');
+  assert.equal(events.at(-1).data.status.state, TaskState.TASK_STATE_CANCELED);
 });
 
 test('semantic replay creates a new task-bound verified artifact without running research again', async () => {
@@ -271,6 +523,9 @@ test('distributed capacity saturation returns a durable submitted task without s
   assert.equal(events.length, 2);
   assert.equal(events[0].data.id, task.id);
   assert.equal(events[1].data.status.state, TaskState.TASK_STATE_SUBMITTED);
+
+  assert.equal(executor.taskIdentityContexts.has(task.id), false,
+    'capacity queuing must not retain request identity context beyond the SDK EventBus lifecycle');
 });
 
 test('recovery batches are deterministically bounded', async () => {

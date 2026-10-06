@@ -95,7 +95,7 @@ async function freePort() {
   return port;
 }
 
-test('A2A REST maps unsupported-media semantics to HTTP 415 without mutating the SDK payload', () => {
+test('A2A REST preserves HTTP 400 for unsupported Part media without mutating the SDK payload', () => {
   const sdkBody = {
     error: {
       code: 400,
@@ -106,10 +106,13 @@ test('A2A REST maps unsupported-media semantics to HTTP 415 without mutating the
   };
   const mapped = mapA2AHttpErrorResponse(sdkBody);
 
-  assert.equal(mapped.status, 415);
-  assert.equal(mapped.body.error.code, 415);
+  assert.equal(mapped.status, 400);
+  assert.equal(mapped.body.error.code, 400);
   assert.equal(sdkBody.error.code, 400, 'the SDK-owned response object is not mutated');
   assert.equal(mapA2AHttpErrorResponse({ error: { code: 400, details: [{ reason: 'INVALID_PARAMS' }] } }), null);
+  assert.equal(mapA2AHttpErrorResponse({
+    error: { code: 415, details: [{ reason: 'CONTENT_TYPE_NOT_SUPPORTED' }] },
+  }), null, 'an unsupported outer HTTP Content-Type remains HTTP 415');
 });
 
 test('generated ResearchBrief IDs cannot accidentally resemble private numbers', t => {
@@ -592,6 +595,127 @@ test('Plan Review invokes ResearchMesh only through a sanitized brief and merges
   assert.ok(result.evidencePacket.entries.some(entry => entry.id.startsWith('E_RESEARCH_')));
 });
 
+test('prescriptive investment advice from a public source is not verified research evidence', async () => {
+  const adviceStatements = [
+    'You should invest in the XYZ fund.',
+    'Invest your savings in XYZ.',
+    'Invest 5000 monthly.',
+    'Avoid risky debt products.',
+    'Choose XYZ.',
+    'Recommendation: invest in XYZ.',
+    'The report says: invest in XYZ.',
+    'We recommend the XYZ fund.',
+    'The report recommends investors invest in XYZ.',
+    'This official page advises readers to avoid risky debt products.',
+    'Investors should invest in XYZ.',
+    'Readers ought to avoid this fund.',
+    'The regulator says investors should avoid risky debt products.',
+    'You might want to avoid this fund.',
+    'Everyone should avoid risky debt products.',
+    'The report advises all investors to avoid XYZ.',
+    'Please choose the Nifty 50 index.',
+    'Consider investing in XYZ.',
+  ];
+  let adviceProvider;
+  for (const [index, content] of adviceStatements.entries()) {
+    adviceProvider = new FixtureResearchSearchProvider({ documents: [{
+      url: `https://rbi.org.in/press-releases/advice-fixture-${index}`,
+      title: 'Public advice fixture',
+      publicationDate: nowIso(),
+      factType: 'public_market_context',
+      content,
+    }] });
+    await assert.rejects(() => runResearch({
+      brief: brief({ requestedFactTypes: ['public_market_context'] }),
+      provider: adviceProvider,
+      documentFetcher: { fetchDocument: async () => { throw new Error('fixture content should not fetch'); } },
+    }), error => error.code === 'RESEARCH_ARTIFACT_REJECTED'
+      && error.verification?.errors.some(code => code.startsWith('UNSAFE_CLAIM_LANGUAGE_')),
+    `must reject prescriptive statement: ${content}`);
+  }
+
+  const factualProvider = new FixtureResearchSearchProvider({ documents: [{
+    url: 'https://rbi.org.in/press-releases/factual-fixture',
+    title: 'Public facts fixture',
+    publicationDate: nowIso(),
+    factType: 'public_market_context',
+    content: 'The Reserve Bank of India policy rate is 6.50% as of this public fixture date.',
+  }] });
+  const factualResult = await runResearch({
+    brief: brief({ requestedFactTypes: ['public_market_context'] }),
+    provider: factualProvider,
+    documentFetcher: { fetchDocument: async () => { throw new Error('fixture content should not fetch'); } },
+  });
+  assert.equal(factualResult.artifact.claims.some(claim => claim.supportStatus === 'SUPPORTED'), true);
+
+  const factualLookalikes = [
+    'Trade finance supports small businesses.',
+    'Buy orders outnumbered sell orders today.',
+    'Transfer pricing rules apply to related-party transactions.',
+    'Investors can invest a minimum of ₹500 in this scheme.',
+    'Investors may buy units through the monthly SIP facility.',
+    'Retail customers can purchase government bonds through the portal.',
+  ];
+  for (const [index, content] of factualLookalikes.entries()) {
+    const provider = new FixtureResearchSearchProvider({ documents: [{
+      url: `https://rbi.org.in/press-releases/factual-lookalike-${index}`,
+      title: 'Public facts fixture',
+      publicationDate: nowIso(),
+      factType: 'public_market_context',
+      content,
+    }] });
+    const result = await runResearch({
+      brief: brief({ requestedFactTypes: ['public_market_context'] }),
+      provider,
+      documentFetcher: { fetchDocument: async () => { throw new Error('fixture content should not fetch'); } },
+    });
+    assert.equal(result.artifact.claims.some(claim => claim.supportStatus === 'SUPPORTED'), true,
+      `factual statement should remain eligible as evidence: ${content}`);
+  }
+
+  const allocationFactProvider = new FixtureResearchSearchProvider({ documents: [{
+    url: 'https://rbi.org.in/press-releases/allocation-fixture',
+    title: 'Public allocation fact fixture',
+    publicationDate: nowIso(),
+    factType: 'public_market_context',
+    content: 'The monthly allocation is 60%.',
+  }] });
+  const allocationFact = await runResearch({
+    brief: brief({ requestedFactTypes: ['public_market_context'] }),
+    provider: allocationFactProvider,
+    documentFetcher: { fetchDocument: async () => { throw new Error('fixture content should not fetch'); } },
+  });
+  assert.equal(allocationFact.artifact.claims.some(claim => claim.supportStatus === 'SUPPORTED'), true);
+
+  const profile = { _id: 'profile-research-advice', version: 1, monthlyTakeHome: 100000, monthlySavings: 30000, age: 32, riskTolerance: 'Moderate', investmentGoals: ['Wealth Growth'], investmentHorizonYears: 10 };
+  const planResult = await invokePlanReviewGraph({
+    userId: 'user-research-advice',
+    profileId: 'profile-research-advice',
+    dependencies: {
+      profileModel: { findOne: () => ({ lean: async () => profile }) },
+      recommendationModel: { findOne: () => ({ sort: () => ({ lean: async () => null }) }) },
+      auditModel: { findOne: () => ({ select: () => ({ lean: async () => null }) }) },
+      goalModel: { find: () => ({ sort: () => ({ lean: async () => [] }) }) },
+      getCurrentRegulatoryRuleVersion: () => 'FY2025-26',
+      explanationProviders: [],
+      timeoutMs: 2000,
+      toolTimeoutMs: 100,
+      persistAgentRun: async () => undefined,
+      researchAdaptiveEnabled: true,
+      researchDeepEnabled: true,
+      researchMeshClient: {
+        sendResearch: async ({ brief: suppliedBrief }) => runResearch({
+          brief: suppliedBrief,
+          provider: adviceProvider,
+          documentFetcher: { fetchDocument: async () => { throw new Error('fixture content should not fetch'); } },
+        }),
+      },
+    },
+  });
+  assert.equal(planResult.researchFailure, 'RESEARCH_ARTIFACT_REJECTED');
+  assert.equal(planResult.evidencePacket.entries.some(entry => entry.id.startsWith('E_RESEARCH_')), false);
+});
+
 test('official A2A client/server boundary resolves card, returns artifact, and cancels a task', async () => {
   const port = await freePort();
   const env = {
@@ -613,6 +737,11 @@ test('official A2A client/server boundary resolves card, returns artifact, and c
   }] });
   const started = await startResearchAgentServer({ env, port, dependencies: { provider } });
   try {
+    assert.equal(
+      started.card.provider.url,
+      'https://github.com/yashaskn8/WealthGenie-AI-Powered-Financial-AdvisoryPlatform',
+      'Agent Card provider metadata must identify the authoritative WealthGenie repository',
+    );
   const observedAuthorization = [];
   const client = new ResearchMeshClient({
     baseUrl: env.AGENT_A2A_PUBLIC_URL,
@@ -695,10 +824,10 @@ test('official A2A client/server boundary resolves card, returns artifact, and c
         },
       }),
     });
-    assert.equal(unsupportedInputMediaType.status, 415);
+    assert.equal(unsupportedInputMediaType.status, 400);
     assert.match(unsupportedInputMediaType.headers.get('content-type') || '', /^application\/json\b/i);
     const unsupportedInputBody = await unsupportedInputMediaType.json();
-    assert.equal(unsupportedInputBody.error.code, 415);
+    assert.equal(unsupportedInputBody.error.code, 400);
     assert.equal(unsupportedInputBody.error.status, 'INVALID_ARGUMENT');
     assert.match(unsupportedInputBody.error.message, /Unsupported input media type/);
     assert.equal(unsupportedInputBody.error.details[0]['@type'], 'type.googleapis.com/google.rpc.ErrorInfo');
@@ -801,9 +930,9 @@ test('A2A rejects unsupported part media and returns failed Tasks for unstructur
         body: JSON.stringify({ message: { messageId: `unsupported-media-${index}`, role: 'ROLE_USER', parts: [part] } }),
       });
       const body = await response.json();
-      assert.equal(response.status, 415, JSON.stringify(body));
+      assert.equal(response.status, 400, JSON.stringify(body));
       assert.match(response.headers.get('content-type') || '', /^application\/json\b/i);
-      assert.equal(body.error.code, 415, JSON.stringify(body));
+      assert.equal(body.error.code, 400, JSON.stringify(body));
       assert.equal(body.error.status, 'INVALID_ARGUMENT', JSON.stringify(body));
       assert.equal(body.error.details[0].reason, 'CONTENT_TYPE_NOT_SUPPORTED');
     }
@@ -835,6 +964,63 @@ test('A2A rejects unsupported part media and returns failed Tasks for unstructur
     }
     assert.equal(researchRuns, 0);
   } finally { await started.close(); }
+});
+
+test('capacity-queued A2A tasks cancel through the authenticated SDK task-store fallback', async () => {
+  const port = await freePort();
+  const env = {
+    NODE_ENV: 'test',
+    AGENT_A2A_V1_ENABLED: 'true',
+    AGENT_A2A_PUBLIC_URL: `http://127.0.0.1:${port}`,
+    AGENT_A2A_DEV_TOKEN: 'research-capacity-cancel-token',
+    AGENT_A2A_CARD_SIGNING_ENABLED: 'true',
+    AGENT_IDENTITY_PROVIDER: 'development',
+    RESEARCH_SEARCH_PROVIDER: 'fixture',
+  };
+  let storedTask = null;
+  let researchRuns = 0;
+  let executorCancelCalls = 0;
+  const taskStore = {
+    durable: true,
+    prepareAndClaim: async task => {
+      storedTask = structuredClone(task);
+      return { capacityUnavailable: true, task: structuredClone(task) };
+    },
+    load: async (taskId, context) => {
+      assert.equal(context.user.identity.agentType, 'PLAN_REVIEW');
+      return storedTask?.id === taskId ? structuredClone(storedTask) : undefined;
+    },
+    save: async (task, context) => {
+      assert.equal(context.user.identity.agentType, 'PLAN_REVIEW');
+      storedTask = structuredClone(task);
+    },
+  };
+  const started = await startResearchAgentServer({ env, port, dependencies: {
+    taskStore,
+    run: async () => { researchRuns += 1; throw new Error('capacity-queued work must not run locally'); },
+  } });
+  started.executor.cancelTask = async () => {
+    executorCancelCalls += 1;
+    throw new Error('submitted EventBus should already be settled for a queued task');
+  };
+  try {
+    const client = new ResearchMeshClient({
+      baseUrl: env.AGENT_A2A_PUBLIC_URL,
+      token: env.AGENT_A2A_DEV_TOKEN,
+      configuredJwk: started.jwks.keys[0],
+    });
+    const result = await client.submitForCancellation({
+      brief: brief({ researchBriefId: 'brief-capacity-cancel' }),
+    });
+    assert.equal(result.task.status.state, TaskState.TASK_STATE_SUBMITTED);
+    assert.equal(result.canceled.status.state, TaskState.TASK_STATE_CANCELED);
+    assert.equal(storedTask.status.state, TaskState.TASK_STATE_CANCELED);
+    assert.equal(executorCancelCalls, 0, 'the SDK used its authenticated TaskStore fallback after settling the submitted bus');
+    assert.equal(started.executor.taskIdentityContexts.size, 0, 'queued cancellation creates no retained request-context entry');
+    assert.equal(researchRuns, 0);
+  } finally {
+    await started.close();
+  }
 });
 
 test('ResearchMesh cancellation reaches Agent Card resolution and fences late card responses', async () => {

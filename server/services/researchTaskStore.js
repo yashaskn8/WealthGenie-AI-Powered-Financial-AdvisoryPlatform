@@ -616,7 +616,7 @@ export class MongoResearchTaskStore {
         throw taskStoreError('A2A_TASK_STORE_UNAVAILABLE', 'Research task storage is unavailable.');
       }
       if (!existing) throw taskStoreError('A2A_TASK_EXECUTION_LEASE_LOST', 'Research task execution lease is no longer current.');
-      if (TERMINAL_STATES.has(existing.statusState)) return;
+      if (TERMINAL_STATES.has(existing.statusState)) return false;
       const merged = mergeResearchTask(existing.task, task);
       const update = {
         $set: { task: merged, statusState: merged.status.state, statusTimestamp: statusTimestamp(merged), updatedAt: new Date() },
@@ -650,7 +650,7 @@ export class MongoResearchTaskStore {
             this.activeLeases.delete(task.id);
             await this.capacity.release({ taskId: task.id, ownerKey: lease.ownerKey || existing.ownerKey, token: lease.token, fence: lease.fence }).catch(() => {});
           }
-          return;
+          return true;
         }
       } catch {
         throw taskStoreError('A2A_TASK_STORE_UNAVAILABLE', 'Research task storage is unavailable.');

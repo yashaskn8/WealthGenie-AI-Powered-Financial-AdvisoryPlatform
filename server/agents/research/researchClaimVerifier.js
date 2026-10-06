@@ -10,7 +10,24 @@ import {
 import { validateResearchArtifact } from './researchSchemas.js';
 import { classifyResearchSource, isSourceTierAtLeast } from './sourceTrust.js';
 
-const UNSAFE_LANGUAGE = /\b(?:guaranteed?|risk[- ]free|certain(?:ly)?|will earn|buy|sell|rebalance|allocation|new weight|execute|transfer|trade|payment)\b/i;
+const UNSAFE_LANGUAGE = /\b(?:guaranteed?|risk[- ]free|certain(?:ly)?|will earn)\b/i;
+const PRESCRIPTIVE_SUBJECT = '(?:you|your|everyone|anyone|all\\s+investors?|investors?|readers?|users?|customers?|people|individuals?|savers?|borrowers?|traders?|households?|one)';
+const ACTION_VERB = '(?:invest|buy|sell|choose|avoid|switch|allocate|rebalance|trade|purchase|exit|execute|transfer|pay)';
+const MODAL_PRESCRIPTIVE_ADVICE = new RegExp(`\\b${PRESCRIPTIVE_SUBJECT}\\s+(?:should|ought\\s+to|must|need\\s+to|have\\s+to|may want to|might want to|are advised to|are recommended to)\\s+${ACTION_VERB}\\b`, 'i');
+const ATTRIBUTED_PRESCRIPTIVE_ADVICE = /\b(?:recommend(?:s|ed)?|advise(?:s|d)?|suggest(?:s|ed)?)\s+(?:(?:that)\s+)?(?:(?:all\s+)?(?:you|your|everyone|anyone|investors?|readers?|users?|customers?|people|individuals?|savers?|borrowers?|traders?|households?)\s+)?(?:(?:should|ought\s+to|must|need\s+to|have\s+to|may want to|might want to|are advised to|are recommended to|to)\s+)?(?:invest|buy|sell|choose|avoid|switch|allocate|rebalance|trade|purchase|exit|execute|transfer|pay|consider)\b/i;
+const DIRECT_PRESCRIPTIVE_ADVICE = /(?:^|[.!?;:]\s*|["'“”‘’]\s*)(?:please\s+)?(?:invest|buy|sell|choose|avoid|switch|allocate|rebalance|trade|purchase|exit|execute|transfer|pay)\b\s+(?:your\b|my\b|our\b|their\b|this\b|that\b|(?:in|into|to|from|between|among|for)\s+\w|(?:risky|unsafe|high[- ]risk|unsuitable)\s+|(?:the|a|an)\s+(?:fund|stock|share|bond|unit|portfolio|position|product|scheme|investment|trade|transaction|savings|money|index)\b|(?:₹|INR\b|Rs\.?\s*)\s*\d|\d)/i;
+const DIRECT_NAMED_PRODUCT_ADVICE = /(?:^|[.!?;:]\s*|["'“”‘’]\s*)(?:[Pp]lease\s+)?(?:[Ii]nvest|[Bb]uy|[Ss]ell|[Cc]hoose|[Aa]void|[Ss]witch|[Aa]llocate|[Rr]ebalance|[Tt]rade|[Pp]urchase|[Ee]xit|[Ee]xecute|[Tt]ransfer|[Pp]ay)\s+(?:(?:the|a|an)\s+)?(?:[A-Z]{2,}|[A-Z][A-Za-z0-9._-]*\s+(?:\d{1,2}\s+)?(?:fund|stock|share|bond|unit|portfolio|position|product|scheme|investment|index))\b/;
+const CONSIDER_INVESTMENT_ADVICE = /(?:^|[.!?;:]\s*|["'“”‘’]\s*)(?:please\s+)?consider\s+(?:investing|buying|selling|choosing|avoiding|switching|allocating|rebalancing|trading|purchasing|exiting|executing|transferring|paying)\b/i;
+const FIRST_PERSON_PRESCRIPTIVE_ADVICE = /\b(?:we|i)\s+(?:recommend|advise|suggest)(?:s|ed)?\b/i;
+
+function containsPrescriptiveAdvice(text) {
+  return MODAL_PRESCRIPTIVE_ADVICE.test(text)
+    || ATTRIBUTED_PRESCRIPTIVE_ADVICE.test(text)
+    || DIRECT_PRESCRIPTIVE_ADVICE.test(text)
+    || DIRECT_NAMED_PRODUCT_ADVICE.test(text)
+    || CONSIDER_INVESTMENT_ADVICE.test(text)
+    || FIRST_PERSON_PRESCRIPTIVE_ADVICE.test(text);
+}
 
 export function detectResearchContradictions(claims = [], evidenceUnits = []) {
   const evidenceById = new Map(evidenceUnits.map(item => [item.evidenceId, item]));
@@ -108,7 +125,7 @@ export function verifyResearchArtifact(artifact, {
     const evidence = claim.supportingEvidenceIds.map(evidenceId => evidenceById.get(evidenceId)).filter(Boolean);
     if (claim.supportingEvidenceIds.length === 0 && claim.supportStatus === 'SUPPORTED') claimErrors.push('SUPPORTED_CLAIM_WITHOUT_EVIDENCE');
     if (evidence.length !== claim.supportingEvidenceIds.length) claimErrors.push('CLAIM_EVIDENCE_MISSING');
-    if (UNSAFE_LANGUAGE.test(claim.text)) claimErrors.push('UNSAFE_CLAIM_LANGUAGE');
+    if (UNSAFE_LANGUAGE.test(claim.text) || containsPrescriptiveAdvice(claim.text)) claimErrors.push('UNSAFE_CLAIM_LANGUAGE');
     const claimFacts = normalizeResearchFacts(claim.text);
     const claimTokens = lexicalTokens(claim.text);
     const evidenceChecks = evidence.map(item => {

@@ -250,6 +250,12 @@ if (!(dbApply.index < secrets.index
 const tckWorkflow = read('.github/workflows/a2a-tck.yml');
 const pinnedTckSha = '263b9cfaf16a554bdfb166a7ba5b67716e946349';
 const tckPolicy = JSON.parse(read('.github/a2a-tck-known-blockers.json'));
+const expectedTckUntrackedPaths = [
+  'reports/compatibility.html',
+  'reports/compatibility.json',
+  'reports/junitreport.xml',
+  'reports/tck_report.html',
+];
 const expectedTckIssueClasses = {
   'https://github.com/a2aproject/a2a-tck/issues/202': 'MISSING_EXPECTED_ERROR_ASSERTION',
   'https://github.com/a2aproject/a2a-tck/issues/229': 'FIXTURE_APPLICABILITY',
@@ -272,7 +278,7 @@ if (!tckWorkflow.includes(`A2A_TCK_SHA: ${pinnedTckSha}`)
     || tckWorkflow.includes('continue-on-error: true')
     || tckPolicy.tck_sha !== pinnedTckSha
     || tckPolicy.tck_repository !== 'a2aproject/a2a-tck'
-    || tckPolicy.policy_schema_version !== 3
+    || tckPolicy.policy_schema_version !== 4
     || tckPolicy.classification !== 'KNOWN_UPSTREAM_TCK_EXCEPTIONS'
     || tckPolicy.test_case_count !== 235
     || tckPolicy.skipped_test_case_count !== 178
@@ -283,7 +289,10 @@ if (!tckWorkflow.includes(`A2A_TCK_SHA: ${pinnedTckSha}`)
     || tckPolicy.known_failures.filter(testCase => testCase?.upstream_issue === 'https://github.com/a2aproject/a2a-tck/issues/229').length !== 5
     || tckCoreSendException?.node_id !== 'tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-SEND-003-http_json]'
     || tckCoreSendException?.upstream_issue !== 'https://github.com/a2aproject/a2a-tck/issues/202'
-    || !tckCoreSendException?.failure_fragment?.includes('Operation failed: [415] Unsupported input media type "application/x-unsupported-tck-type"')
+    || !tckCoreSendException?.failure_signature?.includes('Operation failed: [400] Unsupported input media type "application/x-unsupported-tck-type"')
+    || JSON.stringify(tckPolicy.acceptance?.allow_untracked_tck_paths) !== JSON.stringify(expectedTckUntrackedPaths)
+    || tckPolicy.acceptance?.allow_test_errors !== false
+    || tckPolicy.acceptance?.allow_tracked_tck_changes !== false
     || tckPolicy.acceptance?.allow_unknown_failures !== false
     || tckPolicy.acceptance?.allow_skipped_known_tests !== false) {
   throw new Error('A2A TCK workflow must run the pinned upstream suite through the exact fail-closed exception policy');

@@ -1,5 +1,5 @@
 {
-  "policy_schema_version": 3,
+  "policy_schema_version": 4,
   "tck_repository": "a2aproject/a2a-tck",
   "tck_sha": "263b9cfaf16a554bdfb166a7ba5b67716e946349",
   "classification": "KNOWN_UPSTREAM_TCK_EXCEPTIONS",
@@ -24,7 +24,8 @@
       "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestTextArtifact",
       "junit_name": "test_task_has_text_artifact[http_json]",
       "requirement_id": "DM-ART-001",
-      "failure_fragment": "Response contains no artifacts",
+      "failure_signature": "AssertionError: DM-ART-001 [Artifact contains required fields] failed on http_json: Response contains no artifacts (see specification/specification.md#417-artifact)",
+      "failure_body": "tests/compatibility/core_operations/test_artifacts.py:107: in test_task_has_text_artifact\n    assert_and_record(compatibility_collector, req, transport, errors)\ntests/compatibility/_test_helpers.py:71: in assert_and_record\n    assert passed, fail_msg(req, transport, \"; \".join(errors))\n           ^^^^^^\nE   AssertionError: DM-ART-001 [Artifact contains required fields] failed on http_json: Response contains no artifacts (see specification/specification.md#417-artifact)",
       "upstream_issue": "https://github.com/a2aproject/a2a-tck/issues/229",
       "classification": "FIXTURE_APPLICABILITY"
     },
@@ -33,7 +34,8 @@
       "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestFileArtifact",
       "junit_name": "test_task_has_file_artifact[http_json]",
       "requirement_id": "DM-ART-001",
-      "failure_fragment": "Response contains no artifacts",
+      "failure_signature": "AssertionError: DM-ART-001 [Artifact contains required fields] failed on http_json: Response contains no artifacts (see specification/specification.md#417-artifact)",
+      "failure_body": "tests/compatibility/core_operations/test_artifacts.py:162: in test_task_has_file_artifact\n    assert_and_record(compatibility_collector, req, transport, errors)\ntests/compatibility/_test_helpers.py:71: in assert_and_record\n    assert passed, fail_msg(req, transport, \"; \".join(errors))\n           ^^^^^^\nE   AssertionError: DM-ART-001 [Artifact contains required fields] failed on http_json: Response contains no artifacts (see specification/specification.md#417-artifact)",
       "upstream_issue": "https://github.com/a2aproject/a2a-tck/issues/229",
       "classification": "FIXTURE_APPLICABILITY"
     },
@@ -42,7 +44,8 @@
       "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestFileUrlArtifact",
       "junit_name": "test_task_has_file_url_artifact[http_json]",
       "requirement_id": "DM-ART-001",
-      "failure_fragment": "Response contains no artifacts",
+      "failure_signature": "AssertionError: DM-ART-001 [Artifact contains required fields] failed on http_json: Response contains no artifacts (see specification/specification.md#417-artifact)",
+      "failure_body": "tests/compatibility/core_operations/test_artifacts.py:216: in test_task_has_file_url_artifact\n    assert_and_record(compatibility_collector, req, transport, errors)\ntests/compatibility/_test_helpers.py:71: in assert_and_record\n    assert passed, fail_msg(req, transport, \"; \".join(errors))\n           ^^^^^^\nE   AssertionError: DM-ART-001 [Artifact contains required fields] failed on http_json: Response contains no artifacts (see specification/specification.md#417-artifact)",
       "upstream_issue": "https://github.com/a2aproject/a2a-tck/issues/229",
       "classification": "FIXTURE_APPLICABILITY"
     },
@@ -51,7 +54,8 @@
       "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestDataArtifact",
       "junit_name": "test_task_has_data_artifact[http_json]",
       "requirement_id": "DM-ART-001",
-      "failure_fragment": "Response contains no artifacts",
+      "failure_signature": "AssertionError: DM-ART-001 [Artifact contains required fields] failed on http_json: Response contains no artifacts (see specification/specification.md#417-artifact)",
+      "failure_body": "tests/compatibility/core_operations/test_artifacts.py:248: in test_task_has_data_artifact\n    assert_and_record(compatibility_collector, req, transport, errors)\ntests/compatibility/_test_helpers.py:71: in assert_and_record\n    assert passed, fail_msg(req, transport, \"; \".join(errors))\n           ^^^^^^\nE   AssertionError: DM-ART-001 [Artifact contains required fields] failed on http_json: Response contains no artifacts (see specification/specification.md#417-artifact)",
       "upstream_issue": "https://github.com/a2aproject/a2a-tck/issues/229",
       "classification": "FIXTURE_APPLICABILITY"
     },
@@ -60,7 +64,8 @@
       "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestMessageResponse",
       "junit_name": "test_returns_message_with_text_part[http_json]",
       "requirement_id": "DM-MSG-001",
-      "failure_fragment": "Expected a Message response, but got a Task or no payload",
+      "failure_signature": "AssertionError: DM-MSG-001 [Message contains required fields] failed on http_json: Expected a Message response, but got a Task or no payload (see specification/specification.md#414-message)",
+      "failure_body": "tests/compatibility/core_operations/test_artifacts.py:295: in test_returns_message_with_text_part\n    assert_and_record(compatibility_collector, req, transport, errors)\ntests/compatibility/_test_helpers.py:71: in assert_and_record\n    assert passed, fail_msg(req, transport, \"; \".join(errors))\n           ^^^^^^\nE   AssertionError: DM-MSG-001 [Message contains required fields] failed on http_json: Expected a Message response, but got a Task or no payload (see specification/specification.md#414-message)",
       "upstream_issue": "https://github.com/a2aproject/a2a-tck/issues/229",
       "classification": "FIXTURE_APPLICABILITY"
     },
@@ -69,7 +74,8 @@
       "junit_classname": "tests.compatibility.core_operations.test_requirements",
       "junit_name": "test_must_requirement[CORE-SEND-003-http_json]",
       "requirement_id": "CORE-SEND-003",
-      "failure_fragment": "Operation failed: [415] Unsupported input media type \"application/x-unsupported-tck-type\"",
+      "failure_signature": "AssertionError: CORE-SEND-003 [SendMessage returns ContentTypeNotSupportedError for unsupported media] failed on http_json: Operation failed: [400] Unsupported input media type \"application/x-unsupported-tck-type\"; supported input media types are application/json and text/plain. (see specification/specification.md#311-send-message)\nassert not ['Operation failed: [400] Unsupported input media type \"application/x-unsupported-tck-type\"; supported input media types are application/json and text/plain.']",
+      "failure_body": "tests/compatibility/core_operations/test_requirements.py:190: in test_must_requirement\n    assert not errors, _format_failure(requirement, transport, errors)\nE   AssertionError: CORE-SEND-003 [SendMessage returns ContentTypeNotSupportedError for unsupported media] failed on http_json: Operation failed: [400] Unsupported input media type \"application/x-unsupported-tck-type\"; supported input media types are application/json and text/plain. (see specification/specification.md#311-send-message)\nE   assert not ['Operation failed: [400] Unsupported input media type \"application/x-unsupported-tck-type\"; supported input media types are application/json and text/plain.']",
       "upstream_issue": "https://github.com/a2aproject/a2a-tck/issues/202",
       "classification": "MISSING_EXPECTED_ERROR_ASSERTION"
     }
@@ -79,6 +85,11 @@
     "allow_unknown_failures": false,
     "allow_test_errors": false,
     "allow_tracked_tck_changes": false,
-    "allow_untracked_tck_paths": ["reports/"]
+    "allow_untracked_tck_paths": [
+      "reports/compatibility.html",
+      "reports/compatibility.json",
+      "reports/junitreport.xml",
+      "reports/tck_report.html"
+    ]
   }
 }

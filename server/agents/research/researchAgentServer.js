@@ -32,6 +32,11 @@ import { researchAgentMaxActiveTasks } from '../../services/researchTaskCapacity
 const RESEARCH_AGENT_TYPE = 'FINANCIAL_RESEARCH';
 const REQUIRED_CALLER_TYPE = 'PLAN_REVIEW';
 const RESEARCH_INPUT_MEDIA_TYPES = new Set(['application/json', 'text/plain']);
+const TERMINAL_RESEARCH_TASK_STATES = new Set([
+  TaskState.TASK_STATE_CANCELED,
+  TaskState.TASK_STATE_FAILED,
+  TaskState.TASK_STATE_COMPLETED,
+]);
 
 function configError(message) {
   const error = new Error(message);
@@ -127,7 +132,7 @@ function createAgentCard({ baseUrl }) {
       protocolBinding: 'HTTP+JSON',
       protocolVersion: '1.0',
     }],
-    provider: { organization: 'WealthGenie', url: 'https://github.com/yashaskn8/WealthGenie-Architecture-Restoration' },
+    provider: { organization: 'WealthGenie', url: 'https://github.com/yashaskn8/WealthGenie-AI-Powered-Financial-AdvisoryPlatform' },
     version: '1.0.0',
     documentationUrl: `${baseUrl.replace(/\/$/, '')}/.well-known/agent-card.json`,
     capabilities: { streaming: false, pushNotifications: false, extensions: [] },
@@ -269,11 +274,14 @@ function buildSemanticReplayArtifact({ sourceTask, targetTask }) {
 export function mapA2AHttpErrorResponse(body) {
   const details = body?.error?.details;
   if (!Array.isArray(details) || !details.some(detail => detail?.reason === 'CONTENT_TYPE_NOT_SUPPORTED')) return null;
+  // An unsupported A2A Part media type is ContentTypeNotSupportedError and
+  // maps to 400 in A2A v1.0. Keep an outer HTTP Content-Type rejection at 415.
+  if (body.error.code === 415) return null;
   return {
-    status: 415,
+    status: 400,
     body: {
       ...body,
-      error: { ...body.error, code: 415 },
+      error: { ...body.error, code: 400 },
     },
   };
 }
@@ -331,7 +339,7 @@ class ResearchAgentRequestHandler extends DefaultRequestHandler {
 }
 
 export class ResearchAgentExecutor {
-  constructor({ run, provider, documentFetcher, taskStore, budget, activeTasks = new Map(), taskContexts = new Map() } = {}) {
+  constructor({ run, provider, documentFetcher, taskStore, budget, activeTasks = new Map(), taskContexts = new Map(), taskIdentityContexts = new Map() } = {}) {
     this.run = run;
     this.provider = provider;
     this.documentFetcher = documentFetcher;
@@ -339,6 +347,7 @@ export class ResearchAgentExecutor {
     this.budget = budget;
     this.activeTasks = activeTasks;
     this.taskContexts = taskContexts;
+    this.taskIdentityContexts = taskIdentityContexts;
     this.canceledTasks = new Set();
     this.inFlight = new Map();
     this.recoveryTimer = null;
@@ -454,6 +463,7 @@ export class ResearchAgentExecutor {
     const controller = new AbortController();
     this.activeTasks.set(taskId, controller);
     this.taskContexts.set(taskId, contextId);
+    if (context) this.taskIdentityContexts.set(taskId, context);
     let heartbeat = null;
     let heartbeatRunning = false;
     const durableLease = Boolean(lease && this.taskStore?.durable);
@@ -472,7 +482,8 @@ export class ResearchAgentExecutor {
       const workingStatus = statusEvent(taskId, contextId, TaskState.TASK_STATE_WORKING, 'Research is running within the configured safety budget.').data.status;
       if (recovery) {
         task.status = workingStatus;
-        await this.taskStore.saveClaimed(task, lease);
+        const committed = await this.taskStore.saveClaimed(task, lease);
+        if (!committed) return;
       } else {
         eventBus.publish(AgentEvent.statusUpdate({ taskId, contextId, status: workingStatus, metadata: undefined }));
       }
@@ -520,7 +531,8 @@ export class ResearchAgentExecutor {
         // Persist the lease-fenced terminal state before sending success to the
         // A2A caller. A worker whose lease expired must not publish a completion
         // that the canonical task store rejected.
-        await this.taskStore.saveClaimed(task, lease);
+        const committed = await this.taskStore.saveClaimed(task, lease);
+        if (!committed) return;
       }
       if (recovery) {
         return;
@@ -534,14 +546,20 @@ export class ResearchAgentExecutor {
       const failedStatus = statusEvent(taskId, contextId, TaskState.TASK_STATE_FAILED, `Research failed closed: ${error?.code || 'RESEARCH_FAILED'}.`).data.status;
       if (recovery) {
         task.status = failedStatus;
-        try { await this.taskStore.saveClaimed(task, lease); } catch {
+        try {
+          const committed = await this.taskStore.saveClaimed(task, lease);
+          if (!committed) this.taskStore.forgetExecutionLease?.(taskId, lease);
+        } catch {
           this.taskStore.forgetExecutionLease?.(taskId, lease);
         }
       } else if (durableLease) {
         task.status = failedStatus;
         try {
-          await this.taskStore.saveClaimed(task, lease);
-          eventBus.publish(AgentEvent.statusUpdate({ taskId, contextId, status: failedStatus, metadata: undefined }));
+          const committed = await this.taskStore.saveClaimed(task, lease);
+          if (!committed) this.taskStore.forgetExecutionLease?.(taskId, lease);
+          if (committed) {
+            eventBus.publish(AgentEvent.statusUpdate({ taskId, contextId, status: failedStatus, metadata: undefined }));
+          }
         } catch {
           // A failure is user-visible only after the canonical store accepts it.
           // Otherwise recovery owns the durable task and will publish its state
@@ -555,6 +573,7 @@ export class ResearchAgentExecutor {
       if (heartbeat) clearInterval(heartbeat);
       this.activeTasks.delete(taskId);
       this.taskContexts.delete(taskId);
+      this.taskIdentityContexts.delete(taskId);
       this.canceledTasks.delete(taskId);
     }
   }
@@ -620,10 +639,37 @@ export class ResearchAgentExecutor {
   }
 
   async cancelTask(taskId, eventBus) {
+    const context = this.taskIdentityContexts.get(taskId);
+    if (!context || typeof this.taskStore?.load !== 'function' || typeof this.taskStore?.save !== 'function') return;
+
+    const task = await this.taskStore.load(taskId, context);
+    if (!task || TERMINAL_RESEARCH_TASK_STATES.has(task.status?.state)) {
+      this.taskIdentityContexts.delete(taskId);
+      return;
+    }
+
+    const cancellation = statusEvent(taskId, task.contextId, TaskState.TASK_STATE_CANCELED, 'Research cancellation acknowledged.').data.status;
+    const canceledTask = structuredClone(task);
+    canceledTask.status = cancellation;
+    try {
+      await this.taskStore.save(canceledTask, context);
+    } catch (error) {
+      const latest = await this.taskStore.load(taskId, context).catch(() => null);
+      if (latest?.status?.state !== TaskState.TASK_STATE_CANCELED) throw error;
+    }
+
+    const latest = await this.taskStore.load(taskId, context);
+    if (latest?.status?.state !== TaskState.TASK_STATE_CANCELED) return;
+
     this.canceledTasks.add(taskId);
-    const controller = this.activeTasks.get(taskId);
-    controller?.abort();
-    eventBus.publish(statusEvent(taskId, this.taskContexts.get(taskId) || '', TaskState.TASK_STATE_CANCELED, 'Research cancellation acknowledged.'));
+    this.activeTasks.get(taskId)?.abort();
+    eventBus.publish(AgentEvent.statusUpdate({
+      taskId,
+      contextId: latest.contextId,
+      status: latest.status,
+      metadata: undefined,
+    }));
+    this.taskIdentityContexts.delete(taskId);
   }
 
   async drain({ graceMs = 5000 } = {}) {

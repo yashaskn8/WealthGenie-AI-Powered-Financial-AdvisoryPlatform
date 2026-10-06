@@ -59,3 +59,56 @@ test('TCK auth adapter rejects non-loopback upstream configuration', () => {
     /loopback-only/,
   );
 });
+
+test('TCK auth adapter tears down upstream when caller disconnects during a response', async t => {
+  let markRequestReceived;
+  const requestReceived = new Promise(resolve => { markRequestReceived = resolve; });
+  let upstreamSocketClosed = false;
+  let markUpstreamSocketClosed;
+  const upstreamClosed = new Promise(resolve => { markUpstreamSocketClosed = resolve; });
+  let responseTimer;
+  const upstream = http.createServer((request, response) => {
+    request.resume();
+    request.on('end', () => {
+      markRequestReceived();
+      responseTimer = setTimeout(() => response.end('late response'), 1000);
+    });
+  });
+  upstream.on('connection', socket => {
+    socket.on('close', () => {
+      upstreamSocketClosed = true;
+      clearTimeout(responseTimer);
+      markUpstreamSocketClosed();
+    });
+  });
+  const upstreamPort = await listen(upstream);
+  const proxy = createA2ATckAuthProxy({ token: 'ci-only-token-value-1234', upstreamPort });
+  const proxyPort = await listen(proxy);
+  const caller = http.request({
+    hostname: '127.0.0.1',
+    port: proxyPort,
+    path: '/a2a/message:send',
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+  });
+  caller.on('error', () => {});
+  t.after(async () => {
+    caller.destroy();
+    proxy.close();
+    upstream.close();
+    await Promise.all([once(proxy, 'close'), once(upstream, 'close')]);
+  });
+
+  caller.end('{}');
+  await requestReceived;
+  caller.destroy();
+
+  let timeout;
+  const closed = await Promise.race([
+    upstreamClosed.then(() => true),
+    new Promise(resolve => { timeout = setTimeout(() => resolve(false), 1000); }),
+  ]);
+  clearTimeout(timeout);
+  assert.equal(closed, true, 'caller disconnect should close the upstream socket promptly');
+  assert.equal(upstreamSocketClosed, true, 'caller disconnect left the loopback upstream request open');
+});
