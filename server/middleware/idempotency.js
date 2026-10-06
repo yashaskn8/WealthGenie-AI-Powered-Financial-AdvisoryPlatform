@@ -288,14 +288,24 @@ function advisoryIdentity({ operation, userId, key }) {
   return `advisory:${canonicalSha256({ operation, userId: String(userId), key })}`;
 }
 
-function advisoryRequestHash({ operation, userId, profileId, payload }) {
+const PROFILE_UPDATE_OPERATION = 'profile.update_and_recommendation';
+
+function advisoryRequestHash({ operation, method, userId, profileId, payload }) {
   return canonicalSha256({
     operation,
-    method: 'POST',
+    method,
     userId: String(userId),
     profileId: profileId === null || profileId === undefined ? null : String(profileId),
     payload,
   });
+}
+
+function isLegacyProfileUpdateState(state, { operation, legacyRequestHash }) {
+  return operation === PROFILE_UPDATE_OPERATION
+    && Boolean(legacyRequestHash)
+    && state?.operation === operation
+    && state.method === 'POST'
+    && state.requestHash === legacyRequestHash;
 }
 
 async function completedResponseFromRecommendation(recommendation) {
@@ -316,15 +326,20 @@ async function completedResponseFromRecommendation(recommendation) {
   };
 }
 
-async function findCompletedAdvisory(operationId, requestHash) {
+async function findCompletedAdvisory(operationId, requestHash, compatibility = {}) {
   const recommendation = await Recommendation.findOne({ idempotencyOperationId: operationId }).lean();
   if (!recommendation) return null;
   if (recommendation.idempotencyRequestHash !== requestHash) {
-    throw idempotencyError(
-      409,
-      'This Idempotency-Key was already used with a different advisory request.',
-      'IDEMPOTENCY_PAYLOAD_CONFLICT',
-    );
+    const legacyState = recommendation.idempotencyRequestHash === compatibility.legacyRequestHash
+      ? await IdempotencyKey.findById(operationId).lean()
+      : null;
+    if (!isLegacyProfileUpdateState(legacyState, compatibility)) {
+      throw idempotencyError(
+        409,
+        'This Idempotency-Key was already used with a different advisory request.',
+        'IDEMPOTENCY_PAYLOAD_CONFLICT',
+      );
+    }
   }
   const response = await completedResponseFromRecommendation(recommendation);
   if (!response) {
@@ -333,16 +348,16 @@ async function findCompletedAdvisory(operationId, requestHash) {
   return response;
 }
 
-async function waitForAdvisory(operationId, requestHash, waitMs) {
+async function waitForAdvisory(operationId, requestHash, waitMs, compatibility = {}) {
   const deadline = Date.now() + waitMs;
   let committedWithoutReconciliation = false;
   while (Date.now() < deadline) {
-    const completed = await findCompletedAdvisory(operationId, requestHash);
+    const completed = await findCompletedAdvisory(operationId, requestHash, compatibility);
     if (completed) return completed;
 
     const state = await IdempotencyKey.findById(operationId).lean();
     if (!state) return null;
-    if (state.requestHash !== requestHash) {
+    if (state.requestHash !== requestHash && !isLegacyProfileUpdateState(state, compatibility)) {
       throw idempotencyError(
         409,
         'This Idempotency-Key is already bound to a different advisory request.',
@@ -359,7 +374,7 @@ async function waitForAdvisory(operationId, requestHash, waitMs) {
         const committed = await Recommendation.findOne({
           _id: recommendationId,
           idempotencyOperationId: operationId,
-          idempotencyRequestHash: requestHash,
+          idempotencyRequestHash: state.requestHash,
         }).lean();
         if (committed) {
           const response = await completedResponseFromRecommendation(committed);
@@ -392,13 +407,19 @@ export async function claimAdvisoryIdempotency({
   profileId,
   payload,
   operation = ADVISORY_OPERATION,
+  method = 'POST',
   waitMs = DEFAULT_WAIT_MS,
 }) {
   validateAdvisoryKey(key);
   const operationId = advisoryIdentity({ operation, userId, key });
-  const requestHash = advisoryRequestHash({ operation, userId, profileId, payload });
+  const normalizedMethod = String(method || 'POST').toUpperCase();
+  const requestHash = advisoryRequestHash({ operation, method: normalizedMethod, userId, profileId, payload });
+  const legacyRequestHash = operation === PROFILE_UPDATE_OPERATION && normalizedMethod === 'PUT'
+    ? advisoryRequestHash({ operation, method: 'POST', userId, profileId, payload })
+    : null;
+  const compatibility = { operation, legacyRequestHash };
 
-  const completed = await findCompletedAdvisory(operationId, requestHash);
+  const completed = await findCompletedAdvisory(operationId, requestHash, compatibility);
   if (completed) return { state: 'REPLAY', operationId, requestHash, response: completed };
 
   const ownerToken = randomUUID();
@@ -407,7 +428,7 @@ export async function claimAdvisoryIdempotency({
       _id: operationId,
       status: 'LOCK',
       operation,
-      method: 'POST',
+      method: normalizedMethod,
       userId,
       profileId: profileId || null,
       requestHash,
@@ -418,23 +439,26 @@ export async function claimAdvisoryIdempotency({
   } catch (error) {
     if (error.code !== 11000) throw error;
     const state = await IdempotencyKey.findById(operationId).lean();
-    if (state?.requestHash && state.requestHash !== requestHash) {
+    const legacyState = isLegacyProfileUpdateState(state, compatibility);
+    if (state?.requestHash && state.requestHash !== requestHash && !legacyState) {
       throw idempotencyError(409, 'This Idempotency-Key is already bound to a different operation payload.', 'IDEMPOTENCY_PAYLOAD_CONFLICT');
     }
-    const response = await waitForAdvisory(operationId, requestHash, waitMs);
+    const response = await waitForAdvisory(operationId, requestHash, waitMs, compatibility);
     if (response) return { state: 'REPLAY', operationId, requestHash, response };
     const reclaimedOwner = randomUUID();
     const now = new Date();
+    const storedRequestHash = legacyState ? state.requestHash : requestHash;
     const reclaimed = await IdempotencyKey.findOneAndUpdate({
       _id: operationId,
       status: 'LOCK',
-      requestHash,
+      requestHash: storedRequestHash,
       lockOwnerId: state?.lockOwnerId ?? null,
       leaseExpiresAt: { $lte: now },
     }, {
-      $set: { operation, method: 'POST', userId, profileId: profileId || null, lockOwnerId: reclaimedOwner, leaseExpiresAt: new Date(now.getTime() + MUTATION_LEASE_MS) },
+      // Identity fields are immutable; a matching existing lock already has the right values.
+      $set: { lockOwnerId: reclaimedOwner, leaseExpiresAt: new Date(now.getTime() + MUTATION_LEASE_MS) },
     }, { new: true, runValidators: true }).lean();
-    if (reclaimed) return startAdvisoryHeartbeat({ state: 'CLAIMED', operationId, operation, requestHash, ownerToken: reclaimedOwner, lost: false });
+    if (reclaimed) return startAdvisoryHeartbeat({ state: 'CLAIMED', operationId, operation, requestHash: storedRequestHash, ownerToken: reclaimedOwner, lost: false });
     throw idempotencyError(409, 'The matching advisory request is still in progress. Retry with the same Idempotency-Key.', 'IDEMPOTENCY_IN_PROGRESS');
   }
 }

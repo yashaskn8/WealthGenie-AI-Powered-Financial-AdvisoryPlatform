@@ -198,7 +198,8 @@ export async function runGovernedEvolution({
       });
     }
     const authorityMeasurementComplete = evaluation.scoreCards.length > 0
-      && evaluation.scoreCards.every(card => card.hardGates.authorityMeasurementComplete === true);
+      && evaluation.scoreCards.every(card => card.hardGates.authorityMeasurementComplete === true
+        && Number.isFinite(card.hardGates.financialAuthorityDelta));
     const authorityDelta = authorityMeasurementComplete
       ? evaluation.scoreCards.reduce((sum, card) => sum + Number(card.hardGates.financialAuthorityDelta), 0)
       : null;
@@ -275,6 +276,7 @@ export async function runGovernedEvolution({
       sandbox,
       feedback,
       hardGatePassed,
+      authorityMeasurementComplete,
       financialAuthorityDelta: authorityDelta,
       authorityMeasurementState: authorityMeasurementComplete ? 'MEASURED' : 'INCOMPLETE',
       metrics,
@@ -296,6 +298,7 @@ export async function runGovernedEvolution({
         reliabilityMetrics: record.reliability,
         holdoutSummary: record.holdout,
         shadowMetrics: null,
+        authorityMeasurementComplete: record.authorityMeasurementComplete,
         financialAuthorityDelta: record.financialAuthorityDelta,
       });
     }
@@ -308,8 +311,12 @@ export async function runGovernedEvolution({
     metricCalls,
     holdoutPassed: records.filter(record => record.holdout?.passed === true).length,
     reliabilityRejections: records.filter(record => record.reliability.passed !== true).length,
-    authorityRejections: records.filter(record => record.financialAuthorityDelta !== 0).length,
+    authorityRejections: records.filter(record => record.authorityMeasurementComplete !== true
+      || record.financialAuthorityDelta !== 0).length,
   });
+  const financialAuthorityMeasurementComplete = records.length > 0
+    && records.every(record => record.authorityMeasurementComplete === true
+      && Number.isFinite(record.financialAuthorityDelta));
   const report = {
     status: 'COMPLETED',
     version: GOVERNED_EVOLUTION_VERSION,
@@ -320,7 +327,8 @@ export async function runGovernedEvolution({
     championCandidateId: null,
     shadowOnly: true,
     promotionRequired: true,
-    financialAuthorityDelta: records.every(record => record.authorityMeasurementState === 'MEASURED')
+    financialAuthorityMeasurementComplete,
+    financialAuthorityDelta: financialAuthorityMeasurementComplete
       ? records.reduce((sum, record) => sum + record.financialAuthorityDelta, 0)
       : null,
     authorityMeasurementState: records.length > 0 && records.every(record => record.authorityMeasurementState === 'MEASURED')
@@ -338,6 +346,7 @@ export async function runGovernedEvolution({
       datasetHash: manifest.datasetHash,
       holdoutHash: manifest.holdoutHash,
       financialAuthorityDelta: report.financialAuthorityDelta,
+      authorityMeasurementComplete: report.financialAuthorityMeasurementComplete,
       optimizerType: 'DSPY_GEPA',
       optimizerVersion: 'dspy-3.3.1-gepa-0.1.4',
       candidateCount: records.length,

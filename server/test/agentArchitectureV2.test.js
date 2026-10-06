@@ -75,7 +75,35 @@ test('evaluation v2 keeps holdout out of optimizer projection and enforces finan
     result: { recommendedAction: 'NONE', financialAuthorityDelta: 0 },
   });
   assert.equal(unmeasured.hardGates.authorityMeasurementComplete, false);
+  assert.equal(unmeasured.hardGates.financialAuthorityDelta, null);
   assert.equal(unmeasured.passed, false);
+  const explicitNullMeasurement = buildCandidateScoreCard({
+    candidateId: 'candidate-explicit-null-authority',
+    partition: 'validation',
+    caseDefinition: cases[1],
+    result: { recommendedAction: 'NONE', financialAuthorityDelta: null, recommendationDelta: 0, authorityMeasurementState: 'MEASURED' },
+  });
+  assert.equal(explicitNullMeasurement.hardGates.authorityMeasurementComplete, false);
+  assert.equal(explicitNullMeasurement.hardGates.financialAuthorityDelta, null);
+  const legacyAliasMeasurement = buildCandidateScoreCard({
+    candidateId: 'candidate-legacy-alias-authority',
+    partition: 'validation',
+    caseDefinition: cases[1],
+    result: { recommendedAction: 'NONE', recommendationDelta: 0, authorityMeasurementState: 'MEASURED' },
+  });
+  assert.equal(legacyAliasMeasurement.hardGates.authorityMeasurementComplete, true);
+  assert.equal(legacyAliasMeasurement.hardGates.financialAuthorityDelta, 0);
+  for (const malformedDelta of ['', '   ', false]) {
+    const malformedMeasurement = buildCandidateScoreCard({
+      candidateId: 'candidate-malformed-authority',
+      partition: 'validation',
+      caseDefinition: cases[1],
+      result: { recommendedAction: 'NONE', financialAuthorityDelta: malformedDelta, authorityMeasurementState: 'MEASURED' },
+    });
+    assert.equal(malformedMeasurement.hardGates.authorityMeasurementComplete, false);
+    assert.equal(malformedMeasurement.hardGates.financialAuthorityDelta, null);
+    assert.equal(malformedMeasurement.passed, false);
+  }
   const rejectedAttempt = buildCandidateScoreCard({
     candidateId: 'candidate-forbidden-attempt',
     partition: 'validation',

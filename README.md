@@ -23,6 +23,8 @@ Express is the authoritative boundary for profile facts, eligibility, suitabilit
 
 The deterministic market-context policy remains the recommendation champion; the HMM market model is shadow-only. ML confidence and LLM output cannot change eligibility, suitability, ranking, allocation, tax, or product inclusion. NVIDIA NIM is used only for grounded explanation; Gemini and Groq are optional explanation providers, with a deterministic evidence-bound fallback.
 
+A profile `PUT` computes its replacement recommendation before opening the MongoDB transaction. One transaction commits the profile version, recommendation generation, initial allocation revision, canonical pointer, audit-chain entry, and idempotency completion; if computation or a transactional write fails, neither the profile update nor its replacement recommendation commits. Same-key retries replay or reconcile against canonical current state, and the frontend uses the returned recommendation without immediately starting a second generation.
+
 The main request flow is:
 
     React client

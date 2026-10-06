@@ -99,6 +99,13 @@ test('GEPA rejects arbitrary or forged failure feedback instead of treating it a
   }), /governed evaluation builder/i);
 });
 
+test('GEPA feedback preserves unavailable authority evidence without converting it to zero', () => {
+  const unmeasured = buildGepaFeedback({ candidateId: 'candidate-fixture', authorityDelta: null });
+  const measuredZero = buildGepaFeedback({ candidateId: 'candidate-fixture', authorityDelta: 0 });
+  assert.match(unmeasured.text, /financial authority delta: unmeasured/);
+  assert.notEqual(unmeasured.evaluationHash, measuredZero.evaluationHash);
+});
+
 test('GEPA feedback does not disclose candidate identifiers or exact financial authority deltas', () => {
   const identifierCanary = 'phase16-private-candidate@example.invalid';
   const deltaCanary = '731234.56';

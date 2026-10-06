@@ -10,6 +10,8 @@ import { createEvolutionBudget } from '../agents/evolution/evolutionBudget.js';
 import { scanPromptBundleSecurity } from '../agents/evolution/candidateSecurity.js';
 import { selectParetoFrontier } from '../agents/evolution/pareto.js';
 import { runGovernedEvolution } from '../agents/evolution/governedEvolution.js';
+import EvolutionCandidate from '../models/EvolutionCandidate.js';
+import EvolutionRun from '../models/EvolutionRun.js';
 import { buildHoldoutAttestationSigningPayload, holdoutPublicKeyId, HOLDOUT_BUNDLE_SCHEMA_VERSION } from '../agents/evals/holdoutVerifier.js';
 import { createPlanReviewScaffoldRunner } from '../agents/evolution/scaffoldEvolution.js';
 import { runCandidateReliabilitySuite, CANDIDATE_RELIABILITY_SCENARIOS } from '../agents/reliability/index.js';
@@ -251,6 +253,69 @@ test('externally signed matching holdout can reach SHADOW_READY only after every
   assert.equal(record.reliability.passed, true);
   assert.equal(result.championCandidateId, null);
   assert.equal(result.shadowOnly, true);
+});
+
+test('persisted evolution authority measurements default to unavailable, never zero', () => {
+  for (const Model of [EvolutionCandidate, EvolutionRun]) {
+    const record = new Model();
+    assert.equal(record.authorityMeasurementComplete, false);
+    assert.equal(record.financialAuthorityDelta, null);
+  }
+});
+
+test('missing financial-authority measurements remain unavailable in candidate and run evidence', async () => {
+  const cases = ['train', 'validation'].map(partition => ({
+    id: `missing-authority-${partition}`,
+    partition,
+    fixture: { userId, profileId, context },
+  }));
+  let persistedCandidate;
+  let persistedRun;
+  const result = await runGovernedEvolution({
+    baseSpec: createScaffoldSpec({ version: 'missing-authority-base' }),
+    cases,
+    enabled: true,
+    runner: async () => ({ result: {}, trajectory: [], authorityMeasurementState: 'MISSING' }),
+    reliabilityScenarios: [],
+    proposals: [{
+      mutationSurface: ['promptBundle.plannerInstruction'],
+      mutationReason: 'measurement completeness test',
+      promptBundle: createPromptBundle({ plannerInstruction: 'candidate used to verify missing authority evidence.' }),
+    }],
+    persistCandidate: async record => { persistedCandidate = record; },
+    persistEvolutionRun: async record => { persistedRun = record; },
+  });
+
+  const candidate = result.candidateRecords[0];
+  assert.equal(candidate.authorityMeasurementComplete, false);
+  assert.equal(candidate.financialAuthorityDelta, null);
+  assert.equal(candidate.hardGatePassed, false);
+  assert.equal(candidate.status, 'REJECTED');
+  assert.match(candidate.feedback.text, /unmeasured/);
+  assert.equal(result.financialAuthorityMeasurementComplete, false);
+  assert.equal(result.financialAuthorityDelta, null);
+  assert.equal(persistedCandidate.authorityMeasurementComplete, false);
+  assert.equal(persistedCandidate.financialAuthorityDelta, null);
+  assert.equal(persistedRun.authorityMeasurementComplete, false);
+  assert.equal(persistedRun.financialAuthorityDelta, null);
+});
+
+test('an empty evolution run does not claim measured zero authority delta', async () => {
+  let persistedRun;
+  const result = await runGovernedEvolution({
+    baseSpec: createScaffoldSpec({ version: 'no-candidates-base' }),
+    cases: [],
+    enabled: true,
+    runner: async () => ({ result: {}, trajectory: [] }),
+    proposals: [],
+    persistEvolutionRun: async record => { persistedRun = record; },
+  });
+
+  assert.deepEqual(result.candidateRecords, []);
+  assert.equal(result.financialAuthorityMeasurementComplete, false);
+  assert.equal(result.financialAuthorityDelta, null);
+  assert.equal(persistedRun.authorityMeasurementComplete, false);
+  assert.equal(persistedRun.financialAuthorityDelta, null);
 });
 
 test('candidate-bound reliability executes and binds the actual candidate, with A/B sensitivity', async () => {

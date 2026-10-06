@@ -17,7 +17,7 @@ const SAFE_GATE_NAMES = new Set([
   'candidateReliabilityCoverageComplete',
 ]);
 
-export function buildGepaFeedback({ candidateId, evaluation = null, reliability = null, authorityDelta = 0, failures = [], sandbox = null } = {}) {
+export function buildGepaFeedback({ candidateId, evaluation = null, reliability = null, authorityDelta = null, failures = [], sandbox = null } = {}) {
   const cards = Array.isArray(evaluation?.scoreCards)
     ? evaluation.scoreCards.filter(card => card?.partition === 'train' || card?.partition === 'validation')
     : [];
@@ -54,7 +54,9 @@ export function buildGepaFeedback({ candidateId, evaluation = null, reliability 
       candidateId: candidateId || null,
       scoreCards: cards,
       reliabilityPassed: reliability?.passed === true,
-      authorityDelta: Number.isFinite(Number(authorityDelta)) ? Number(authorityDelta) : null,
+      authorityDelta: authorityDelta !== null && authorityDelta !== undefined && Number.isFinite(Number(authorityDelta))
+        ? Number(authorityDelta)
+        : null,
       sandboxManifestHash: sandbox?.manifestHash || null,
       failureLabels,
     }),

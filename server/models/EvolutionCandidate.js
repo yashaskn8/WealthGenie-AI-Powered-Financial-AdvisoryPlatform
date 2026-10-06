@@ -15,7 +15,8 @@ const schema = new mongoose.Schema({
   reliabilityMetrics: { type: mongoose.Schema.Types.Mixed, default: null, immutable: true },
   holdoutSummary: { type: mongoose.Schema.Types.Mixed, default: null, immutable: true },
   shadowMetrics: { type: mongoose.Schema.Types.Mixed, default: null, immutable: true },
-  financialAuthorityDelta: { type: Number, min: 0, max: 0, default: 0, immutable: true },
+  authorityMeasurementComplete: { type: Boolean, default: false, immutable: true },
+  financialAuthorityDelta: { type: Number, min: 0, max: 0, default: null, immutable: true },
 }, { strict: 'throw', timestamps: true });
 
 export default mongoose.model('EvolutionCandidate', schema);

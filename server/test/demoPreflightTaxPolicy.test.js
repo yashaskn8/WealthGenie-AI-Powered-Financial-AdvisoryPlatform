@@ -31,6 +31,16 @@ test('tax-policy preflight accepts only verified metadata for the actual current
   assert.equal(qualifiesTaxPolicyMetadata(unverified, { now: NOW }), false);
 });
 
+test('tax-policy preflight also requires a supplied fiscal year to match the verified current year', () => {
+  const valid = response({
+    currentFiscalYear: 'FY2026-27',
+    currentFiscalYearVerified: true,
+  });
+  assert.equal(qualifiesTaxPolicyMetadata(valid, { now: NOW, requiredFiscalYear: 'FY2026-27' }), true);
+  assert.equal(qualifiesTaxPolicyMetadata(valid, { now: NOW, requiredFiscalYear: 'FY2025-26' }), false);
+  assert.equal(qualifiesTaxPolicyMetadata(valid, { now: NOW, requiredFiscalYear: '' }), false);
+});
+
 test('tax-policy preflight fails closed for missing, malformed, or unsuccessful metadata', () => {
   const cases = [
     null,

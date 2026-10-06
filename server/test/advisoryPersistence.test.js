@@ -156,6 +156,78 @@ test.after(async () => {
   await teardownTestDatabase();
 });
 
+test('advisory idempotency binds the HTTP method to the durable request identity', async () => {
+  const request = {
+    key: 'profile-method-binding-001',
+    userId,
+    profileId,
+    operation: 'profile.update_and_recommendation',
+    payload: { version: 1, monthly_savings: 25000 },
+  };
+  const claim = await claimAdvisoryIdempotency({ ...request, method: 'put' });
+  try {
+    const persisted = await IdempotencyKey.findById(claim.operationId).lean();
+    assert.equal(persisted.method, 'PUT');
+    await assert.rejects(
+      claimAdvisoryIdempotency({ ...request, method: 'POST' }),
+      error => error.status === 409 && error.code === 'IDEMPOTENCY_PAYLOAD_CONFLICT',
+    );
+  } finally {
+    await releaseAdvisoryIdempotency(claim);
+  }
+});
+
+test('profile PUT can reclaim a legacy POST-bound advisory lock without changing its durable hash', async () => {
+  const request = {
+    key: 'profile-method-binding-legacy-001',
+    userId,
+    profileId,
+    operation: 'profile.update_and_recommendation',
+    payload: { version: 2, monthly_savings: 30000 },
+  };
+  const legacyClaim = await claimAdvisoryIdempotency({ ...request, method: 'POST' });
+  clearInterval(legacyClaim.heartbeat);
+  await IdempotencyKey.updateOne({ _id: legacyClaim.operationId, status: 'LOCK' }, {
+    $set: { leaseExpiresAt: new Date(Date.now() - 1000) },
+  });
+
+  let claim;
+  try {
+    claim = await claimAdvisoryIdempotency({ ...request, method: 'PUT', waitMs: 100 });
+    assert.equal(claim.state, 'CLAIMED');
+    assert.equal(claim.requestHash, legacyClaim.requestHash);
+    const persisted = await IdempotencyKey.findById(claim.operationId).lean();
+    assert.equal(persisted.method, 'POST');
+    assert.equal(persisted.requestHash, legacyClaim.requestHash);
+  } finally {
+    if (claim) await releaseAdvisoryIdempotency(claim);
+    else await IdempotencyKey.deleteOne({ _id: legacyClaim.operationId, status: 'LOCK' });
+  }
+});
+
+test('completed legacy profile PUT operation replays without creating duplicate effects', async () => {
+  const request = {
+    key: 'profile-method-binding-legacy-complete-001',
+    userId,
+    profileId,
+    operation: 'profile.update_and_recommendation',
+    payload: { version: 3, monthly_savings: 35000 },
+  };
+  const legacyClaim = await claimAdvisoryIdempotency({ ...request, method: 'POST' });
+  const operation = makeOperation(legacyClaim, 'legacy-profile-put-replay');
+  await persistAdvisoryAtomically(operation);
+
+  const replay = await claimAdvisoryIdempotency({ ...request, method: 'PUT' });
+  assert.equal(replay.state, 'REPLAY');
+  assert.equal(replay.response.status, 200);
+  assert.ok(replay.response.body);
+  assert.equal(await Recommendation.countDocuments({ userId }), 1);
+  assert.equal(await AuditRecord.countDocuments({ userId }), 1);
+  const persistedKey = await IdempotencyKey.findById(legacyClaim.operationId).lean();
+  assert.equal(persistedKey.method, 'POST');
+  assert.equal(persistedKey.status, 'DONE');
+});
+
 test('failure after recommendation creation rolls back recommendation and audit', async () => {
   const operationClaim = await claim('atomic-after-rec-001');
   await assert.rejects(

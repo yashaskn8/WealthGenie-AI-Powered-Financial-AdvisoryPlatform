@@ -1423,16 +1423,21 @@ export async function checkBrowserAndFinancialFlow(reporter, {
   }
 }
 
-export function qualifiesTaxPolicyMetadata(policies, { now = new Date() } = {}) {
+export function qualifiesTaxPolicyMetadata(policies, { now = new Date(), requiredFiscalYear } = {}) {
   let expectedFiscalYear;
   try {
     expectedFiscalYear = getCurrentFiscalYear(now);
   } catch {
     return false;
   }
+  const requestedYearMatches = requiredFiscalYear === undefined
+    || (typeof requiredFiscalYear === 'string'
+      && requiredFiscalYear.length > 0
+      && policies?.body?.currentFiscalYear === requiredFiscalYear);
   return Boolean(policies?.response?.ok === true
     && policies?.body?.currentFiscalYearVerified === true
-    && policies?.body?.currentFiscalYear === expectedFiscalYear);
+    && policies?.body?.currentFiscalYear === expectedFiscalYear
+    && requestedYearMatches);
 }
 
 export async function runDemoPreflight({
@@ -1595,10 +1600,12 @@ export async function runDemoPreflight({
       : 'running backend did not report a supported market provider');
 
   const policies = await readHttp(`${apiBase}/tax/policies`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null);
-  const taxVerified = qualifiesTaxPolicyMetadata(policies);
+  const requiredFiscalYear = taxContext?.fiscalYear;
+  const taxVerified = typeof requiredFiscalYear === 'string' && requiredFiscalYear.length > 0
+    && qualifiesTaxPolicyMetadata(policies, { requiredFiscalYear });
   reporter.add('Tax-policy metadata', taxVerified, taxVerified
     ? `current policy ${policies.body.currentFiscalYear} is server-verified`
-    : 'current fiscal-year policy metadata is missing, stale, malformed, or unverified');
+    : 'current fiscal-year policy metadata is missing, stale, malformed, unverified, or does not match the tax input fiscal year');
 
   const productionBuildVerified = await recordProductionBuildCheck(reporter, environment, verifyBuild, dependencies.spawnBuild, getSourceBuildIdentity);
   const browserConfigPresent = productionBuildVerified && Boolean(frontendUrl && environment.DEMO_EMAIL && environment.DEMO_PASSWORD

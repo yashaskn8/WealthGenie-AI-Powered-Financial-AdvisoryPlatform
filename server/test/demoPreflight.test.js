@@ -720,6 +720,12 @@ test('preflight accepts Sunday and an ordinary Saturday using the calendar-deriv
       expectedLatest: '2026-10-09',
       label: 'Saturday after normal Friday trading',
     },
+    {
+      now: new Date('2026-10-11T10:30:00.000Z'),
+      holidayDates: [],
+      expectedLatest: '2026-10-09',
+      label: 'Sunday after normal Friday trading',
+    },
   ];
 
   for (const { now, holidayDates, expectedLatest, label } of cases) {
@@ -744,6 +750,10 @@ test('preflight rejects stale, incoherent, recovered, or fabricated weekend quot
   const cases = [
     ['stale weekend quote', result => {
       result.body.marketSnapshot.provenance.sources[0].freshness.status = 'STALE';
+    }],
+    ['stale weekend VIX', result => {
+      result.body.marketSnapshot.provenance.sources[1].freshness.status = 'STALE';
+      result.body.marketSnapshot.observedFacts[1].freshness.status = 'STALE';
     }],
     ['NIFTY and VIX date mismatch', result => {
       result.body.marketSnapshot.provenance.sources[1].effectiveTradingDate = '2026-09-30';
@@ -975,6 +985,7 @@ function injectedOrchestrationDependencies({
   backendSha = 'e'.repeat(40),
   userPathPass = false,
   qualifiedProductTax = false,
+  taxContext = demoTaxContext(),
   failGate = null,
 } = {}) {
   const expectedSha = 'e'.repeat(40);
@@ -1027,7 +1038,7 @@ function injectedOrchestrationDependencies({
         || (failGate === 'Tax input payload' && label === 'Tax input payload');
       reporter.add(label, !failed, failed ? 'fixture rejected by deterministic offline scenario' : 'fixture JSON validated');
       if (failed) return null;
-      return label === 'Profile completion payload' ? { profile: true } : demoTaxContext();
+      return label === 'Profile completion payload' ? { profile: true } : taxContext;
     },
     async readHttp(url, options = {}) {
       if (url.endsWith('/health/live')) return response(failGate === 'Backend' ? 503 : 200, {
@@ -1106,6 +1117,16 @@ test('OFFLINE PREFLIGHT CONTRACT VERIFIED: a fully-qualified injected scenario p
   assert.equal(result.failed, 0);
   assert.equal(result.notEvaluated, 0);
   assert.equal(result.exitCode, 0);
+});
+
+test('tax-policy metadata fails when the verified current year differs from the supplied tax input', async () => {
+  for (const taxContext of [demoTaxContext({ fiscalYear: 'FY2025-26' }), null]) {
+    const fixture = injectedOrchestrationDependencies({ taxContext, userPathPass: true });
+    const result = await runDemoPreflight({ ...fixture, write: () => {} });
+    const check = result.checks.find(item => item.name === 'Tax-policy metadata');
+    assert.equal(check.passed, false);
+    assert.equal(check.state, 'FAIL');
+  }
 });
 
 test('offline orchestration has a deterministic failure case for every named live gate', async () => {
