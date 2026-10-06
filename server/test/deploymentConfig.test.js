@@ -16,6 +16,7 @@ function withDeploymentFixture(run) {
   try {
     fs.cpSync(path.join(repositoryRoot, '.github/workflows'), path.join(root, '.github/workflows'), { recursive: true });
     fs.cpSync(path.join(repositoryRoot, 'k8s'), path.join(root, 'k8s'), { recursive: true });
+    fs.cpSync(path.join(repositoryRoot, 'deploy'), path.join(root, 'deploy'), { recursive: true });
     fs.copyFileSync(path.join(repositoryRoot, 'docker-compose.yml'), path.join(root, 'docker-compose.yml'));
     return run(root);
   } finally {
@@ -236,7 +237,7 @@ test('deployment validator accepts the complete ordered Phase 2 through Phase 7 
 });
 
 test('production overlay substitutes every image with an unusable digest-required sentinel', () => {
-  const overlay = readYaml(repositoryRoot, 'k8s/overlays/production/kustomization.yaml');
+  const overlay = readYaml(repositoryRoot, 'deploy/production/kustomization.yaml');
   const images = new Map((overlay.images || []).map(image => [image.name, image]));
   const expectedImages = [
     ['wealthgenie-server', 'SERVER'],
@@ -255,9 +256,22 @@ test('production overlay substitutes every image with an unusable digest-require
   }
 });
 
+test('Kind CD renders the external production overlay with Kustomize before validating its template', () => {
+  const workflow = readYaml(repositoryRoot, '.github/workflows/cd.yml');
+  const render = workflow.jobs['deploy-and-verify-kind'].steps
+    .find(step => step.name === 'Render and validate fail-closed production image template');
+  const overlay = readYaml(repositoryRoot, 'deploy/production/kustomization.yaml');
+
+  assert.deepEqual(overlay.resources, ['../../k8s'], 'the overlay must reference the base without containing it');
+  assert.match(render.run, /kubectl kustomize deploy\/production > build\/production-template\.yaml/);
+  assert.match(render.run, /node server\/scripts\/validateProductionImageManifest\.js --template < build\/production-template\.yaml/);
+  assert.ok(fs.existsSync(path.join(repositoryRoot, 'k8s/kustomization.yaml')));
+  assert.equal(fs.existsSync(path.join(repositoryRoot, 'k8s/overlays/production')), false);
+});
+
 test('deployment validator rejects a production overlay that replaces a digest marker with a mutable tag', () => {
   withDeploymentFixture(root => {
-    const file = 'k8s/overlays/production/kustomization.yaml';
+    const file = 'deploy/production/kustomization.yaml';
     const overlay = readYaml(root, file);
     overlay.images[0].newTag = 'latest';
     delete overlay.images[0].digest;
@@ -271,7 +285,7 @@ test('deployment validator rejects a production overlay that replaces a digest m
 
 test('deployment validator rejects a production overlay missing database or cache image markers', () => {
   withDeploymentFixture(root => {
-    const file = 'k8s/overlays/production/kustomization.yaml';
+    const file = 'deploy/production/kustomization.yaml';
     const overlay = readYaml(root, file);
     overlay.images = overlay.images.filter(image => image.name !== 'mongo');
     writeYaml(root, file, overlay);

@@ -41,8 +41,8 @@ test('MCP is stateless, bearer-authenticated, and rejects legacy session transpo
 });
 
 test('production overlay requires HTTPS host and pre-created TLS/DocumentDB CA secrets', () => {
-  const overlay = read('k8s/overlays/production/ingress-patch.yaml');
-  const overlayReadme = read('k8s/overlays/production/README.md');
+  const overlay = read('deploy/production/ingress-patch.yaml');
+  const overlayReadme = read('deploy/production/README.md');
   assert.match(overlay, /ssl-redirect.*true|value: "true"/);
   assert.match(overlay, /WEALTHGENIE_PRODUCTION_HOST/);
   assert.match(overlay, /WEALTHGENIE_PRODUCTION_TLS_SECRET/);

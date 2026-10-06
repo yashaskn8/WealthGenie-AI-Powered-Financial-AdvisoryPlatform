@@ -14,7 +14,7 @@ Before apply, pipe the rendered overlay through the fail-closed image filter:
 
 ```sh
 set -o pipefail
-kubectl kustomize k8s/overlays/production \
+kubectl kustomize deploy/production \
   | node server/scripts/validateProductionImageManifest.js \
   | kubectl apply -f -
 ```

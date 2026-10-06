@@ -125,7 +125,7 @@ if (kustomization.resources?.some(resource => resource.includes('phase2-index-mi
   throw new Error('One-shot database migration Jobs must only be created by ordered deployment steps');
 }
 
-const productionKustomization = parse(read('k8s/overlays/production/kustomization.yaml'));
+const productionKustomization = parse(read('deploy/production/kustomization.yaml'));
 const requiredProductionImages = new Map([
   ['wealthgenie-server', 'sha256:WEALTHGENIE_SERVER_IMAGE_DIGEST_REQUIRED'],
   ['wealthgenie-frontend', 'sha256:WEALTHGENIE_FRONTEND_IMAGE_DIGEST_REQUIRED'],
@@ -231,7 +231,7 @@ if (kindCluster.step.with?.version !== 'v0.24.0'
   throw new Error('Kind CD must pin a Metrics Server release compatible with the Kubernetes 1.31 test cluster');
 }
 const productionRenderValidation = namedStep(cdSteps, 'Render and validate fail-closed production image template');
-if (!productionRenderValidation.step.run?.includes('kubectl kustomize k8s/overlays/production')
+if (!productionRenderValidation.step.run?.includes('kubectl kustomize deploy/production')
     || !productionRenderValidation.step.run?.includes('node server/scripts/validateProductionImageManifest.js --template')) {
   throw new Error('Kind CD must render and validate the non-deployable production image template');
 }

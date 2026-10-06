@@ -4,7 +4,7 @@ kind: Kustomization
 namespace: wealthgenie
 
 resources:
-  - ../../
+  - ../../k8s
 
 # Deliberately non-deployable until a release overlay supplies real registry
 # digests. The deployment filter rejects these sentinels and all tag refs.

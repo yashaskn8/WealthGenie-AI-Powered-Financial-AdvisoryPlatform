@@ -67,7 +67,8 @@ The deterministic Express API, provider adapters, tax engine, and market-context
     ml-service/rag/data/     Manifest-controlled retrieval corpus
     scripts/                 Repository and documentation verification utilities
     docs/                    CI-consumed reliability contract and image assets
-    k8s/                     Kubernetes base and production overlays
+    k8s/                     Kubernetes base manifests
+    deploy/production/       Fail-closed production Kustomize overlay
     terraform/               Infrastructure scaffolding; not an automatic deploy
 
 README.md is the primary project overview. Subsystem operation files remain only where an explicit test, workflow, generator, or runtime input consumes them.
@@ -176,7 +177,7 @@ The Playwright lifecycle suite requires the real service dependencies used by CI
 
 ## Supporting operational files
 
-- [Production Kubernetes overlay instructions](k8s/overlays/production/README.md)
+- [Production Kubernetes overlay instructions](deploy/production/README.md)
 - [RAG subsystem, migration, and readiness notes](ml-service/rag/README.md)
 - The trusted retrieval source content and identity are controlled by the manifest in ml-service/rag/data/corpus/.
 
