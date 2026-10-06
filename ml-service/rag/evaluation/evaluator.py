@@ -95,7 +95,6 @@ class RAGEvaluator:
         )
 
         eval_results = {
-            "query": query,
             "metrics": {
                 f"recall_at_{k}": round(recall_k, 4),
                 f"precision_at_{k}": round(precision_k, 4),
@@ -162,7 +161,6 @@ class RAGEvaluator:
                 summaries.append({
                     "eval_id": data.get("eval_id"),
                     "timestamp": data.get("timestamp_utc"),
-                    "query": data.get("query"),
                     "lexical_support": data.get("metrics", {}).get("lexical_support"),
                     "mrr": data.get("metrics", {}).get("mrr"),
                     "file_path": str(path),

@@ -7,7 +7,7 @@ import { getCurrentRegulatoryRuleVersion } from '../../services/taxEngine.js';
 import { assessRecommendationFreshness } from '../../services/recommendationFreshness.js';
 import { assessGoalCalculationFreshness } from '../../services/recommendationState.js';
 import { buildGroundedEvidencePacket, makeEvidenceEntry } from '../../services/groundedEvidence.js';
-import { SAFE_PLAN_REVIEW_TOOLS } from './planReviewSchemas.js';
+import { isSafePlanReviewCapability, PLAN_REVIEW_TOOL_CAPABILITIES, SAFE_PLAN_REVIEW_TOOLS } from './planReviewSchemas.js';
 import { buildPlanReviewSnapshotBinding, hashPlanReviewSnapshot } from './planReviewRuntime.js';
 import { resolvePlanReviewSnapshot } from './planReviewSnapshot.js';
 
@@ -263,14 +263,24 @@ export const PLAN_REVIEW_TOOL_CATALOG = Object.freeze({
 });
 
 export function getPlanReviewToolDefinitions() {
-  return SAFE_PLAN_REVIEW_TOOLS.map(name => ({ name, description: PLAN_REVIEW_TOOL_CATALOG[name].description }));
+  return SAFE_PLAN_REVIEW_TOOLS.map(name => ({
+    name,
+    description: PLAN_REVIEW_TOOL_CATALOG[name].description,
+    capability: PLAN_REVIEW_TOOL_CAPABILITIES[name],
+  }));
 }
 
 export async function executePlanReviewTool(toolName, context) {
   const tool = PLAN_REVIEW_TOOL_CATALOG[toolName];
+  const capability = PLAN_REVIEW_TOOL_CAPABILITIES[toolName];
   if (!tool || !SAFE_PLAN_REVIEW_TOOLS.includes(toolName)) {
     const error = new Error(`Unknown plan review tool: ${toolName}`);
     error.code = 'UNKNOWN_TOOL';
+    throw error;
+  }
+  if (!isSafePlanReviewCapability(toolName, capability)) {
+    const error = new Error('PlanReview tool capability violates the read-only policy.');
+    error.code = 'TOOL_CAPABILITY_POLICY_INVALID';
     throw error;
   }
   const override = context?.dependencies?.toolOverrides?.[toolName];

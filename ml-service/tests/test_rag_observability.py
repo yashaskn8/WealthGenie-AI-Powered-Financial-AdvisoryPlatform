@@ -15,8 +15,6 @@ def test_observability_trace_recording(tmp_path):
     collector = RAGObservabilityCollector(telemetry_dir=tmp_path)
 
     trace = collector.record_query_trace(
-        query="What is Section 87A?",
-        search_query="What is Section 87A? Indian Income Tax",
         retrieval_strategy="hybrid_rrf",
         reranker_strategy="no_op",
         stage_latencies_ms={
@@ -36,6 +34,8 @@ def test_observability_trace_recording(tmp_path):
     )
 
     assert trace["retrieval_strategy"] == "hybrid_rrf"
+    assert "query" not in trace
+    assert "search_query" not in trace
     assert trace["latencies_ms"]["total"] == 6.1
     assert trace["cache"]["hit_rate"] == round(2 / 3, 4)
 
@@ -48,8 +48,6 @@ def test_telemetry_snapshot_persistence(tmp_path):
     collector = RAGObservabilityCollector(telemetry_dir=tmp_path)
 
     collector.record_query_trace(
-        query="Test query",
-        search_query="Test query",
         retrieval_strategy="dense",
         reranker_strategy="no_op",
         stage_latencies_ms={"retrieval": 2.0},
@@ -63,17 +61,23 @@ def test_telemetry_snapshot_persistence(tmp_path):
     snapshot_file = collector.persist_telemetry_snapshot()
     assert snapshot_file.exists()
     assert "telemetry_" in snapshot_file.name
+    assert "Test query" not in snapshot_file.read_text(encoding="utf-8")
 
 
-def test_rag_pipeline_telemetry_integration(tmp_path):
+def test_rag_pipeline_telemetry_integration(tmp_path, caplog):
     config = RAGConfig(vector_store_path=tmp_path / "obs_index.json", embedding_dim=64)
     embedder = DenseVectorEmbeddingProvider(dimension=64, enable_cache=False)
     vector_store = PersistentVectorStore(index_path=tmp_path / "obs_index.json")
     collector = RAGObservabilityCollector(telemetry_dir=tmp_path)
 
     pipeline = RAGPipeline(embedder=embedder, vector_store=vector_store, telemetry=collector, config=config)
-    res = pipeline.query(RAGQueryRequest(question="How much can I deduct under Section 80C?"))
+    request = RAGQueryRequest(question="PRIVATE_QUERY_SENTINEL How much can I deduct under Section 80C?")
+    res = pipeline.query(request)
+    pipeline.query(request)
 
     assert res.metrics["response_mode"] == "abstention"
     assert res.metrics["abstention_reason"] == "empty_evidence"
     assert len(collector._trace_records) == 1
+    assert "question" not in collector._trace_records[0]
+    assert "search_query" not in collector._trace_records[0]
+    assert "PRIVATE_QUERY_SENTINEL" not in caplog.text

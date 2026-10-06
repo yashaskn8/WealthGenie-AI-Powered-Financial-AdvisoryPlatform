@@ -3,7 +3,7 @@ import { canonicalSha256 } from '../../utils/canonicalJson.js';
 export const PLAN_REVIEW_AGENT_VERSION = 'plan-review-agent-2.0.0';
 export const PLAN_REVIEW_GRAPH_VERSION = 'plan-review-graph-1.1.0';
 export const PLAN_REVIEW_GROUNDING_VERSION = 'grounded-financial-evidence-1.0.0';
-export const PLAN_REVIEW_TOOL_CATALOG_VERSION = 'plan-review-tools-1.0.0';
+export const PLAN_REVIEW_TOOL_CATALOG_VERSION = 'plan-review-tools-1.1.0';
 
 // PlanHealth runs in its own bounded scheduler, not in the AgentRun queue.
 // The numeric values are explicit persisted scheduling policy, not lexical enum ordering.

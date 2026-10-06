@@ -17,6 +17,40 @@ export const SAFE_PLAN_REVIEW_TOOLS = Object.freeze([
   'get_goal_status_summary',
 ]);
 
+const PLAN_REVIEW_TOOL_SCOPES = Object.freeze({
+  get_current_profile_context: 'PROFILE',
+  get_current_recommendation_summary: 'CURRENT_RECOMMENDATION',
+  check_recommendation_freshness: 'CURRENT_RECOMMENDATION',
+  get_plan_evidence_snapshot: 'CURRENT_EVIDENCE',
+  get_goal_status_summary: 'PROFILE_GOALS',
+});
+
+export const PLAN_REVIEW_TOOL_CAPABILITIES = Object.freeze(Object.fromEntries(
+  SAFE_PLAN_REVIEW_TOOLS.map(toolName => [toolName, Object.freeze({
+    capabilityId: `plan-review.${toolName}.read.v1`,
+    capabilityVersion: '1.0.0',
+    effect: 'READ',
+    resourceScope: PLAN_REVIEW_TOOL_SCOPES[toolName],
+    ownerScoped: true,
+    writesFinancialAuthority: false,
+    networkAccess: 'NONE',
+    shadowAllowed: true,
+  })]),
+));
+
+export function isSafePlanReviewCapability(toolName, capability = PLAN_REVIEW_TOOL_CAPABILITIES[toolName]) {
+  const expected = PLAN_REVIEW_TOOL_CAPABILITIES[toolName];
+  return Boolean(expected && capability
+    && capability.capabilityId === expected.capabilityId
+    && capability.capabilityVersion === expected.capabilityVersion
+    && capability.effect === 'READ'
+    && capability.resourceScope === expected.resourceScope
+    && capability.ownerScoped === true
+    && capability.writesFinancialAuthority === false
+    && capability.networkAccess === 'NONE'
+    && capability.shadowAllowed === true);
+}
+
 export const PLAN_REVIEW_ACTIONS = Object.freeze([
   'NONE',
   'REVIEW_PROFILE',

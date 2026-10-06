@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -212,6 +213,11 @@ def test_gepa_bridge_schema_is_holdout_and_surface_safe():
         'trainCases': [{'id': 'train-1', 'partition': 'train', 'question': 'bounded'}],
         'validationCases': [{'id': 'validation-1', 'partition': 'validation', 'question': 'bounded'}],
         'failureFeedback': ['grounding passed'],
+        'failureFeedbackProvenance': [{
+            'source': 'GOVERNED_EVALUATION',
+            'evaluationHash': 'b' * 64,
+            'contentHash': hashlib.sha256(b'grounding passed').hexdigest(),
+        }],
         'budget': {
             'max_generations': 3, 'max_candidates': 1, 'max_reflection_calls': 1,
             'max_metric_calls': 1, 'max_sandbox_runs': 1, 'max_sandbox_minutes': 1,
@@ -220,6 +226,19 @@ def test_gepa_bridge_schema_is_holdout_and_surface_safe():
         'optimizer': {'provider': 'fixture', 'reflectionModel': None, 'taskModel': None},
     }
     validate_gepa_input(document)
+    with pytest.raises(ValueError, match='content hash mismatch'):
+        validate_gepa_input({
+            **document,
+            'failureFeedback': ['tampered feedback'],
+        })
+    with pytest.raises(ValueError, match='approved evaluation'):
+        validate_gepa_input({
+            **document,
+            'failureFeedbackProvenance': [{
+                **document['failureFeedbackProvenance'][0],
+                'source': 'OPERATOR_TEXT',
+            }],
+        })
     proposals = FixtureGepaProposalProvider().propose(document)
     assert validate_proposal_output(proposals, document)[0]['proposalId']
     with pytest.raises(ValueError):
@@ -238,7 +257,7 @@ def test_gepa_proposal_rejects_mutable_field_outside_declared_surface():
             'metadata': {}, 'contentHash': 'a' * 64,
         },
         'allowedMutationSurfaces': ['promptBundle.plannerInstruction', 'safeModelRoleRouting'],
-        'trainCases': [], 'validationCases': [], 'failureFeedback': [],
+        'trainCases': [], 'validationCases': [], 'failureFeedback': [], 'failureFeedbackProvenance': [],
         'budget': {
             'max_generations': 3, 'max_candidates': 1, 'max_reflection_calls': 1,
             'max_metric_calls': 1, 'max_sandbox_runs': 1, 'max_sandbox_minutes': 1,

@@ -15,6 +15,7 @@ import {
   MAX_AGENT_STEPS,
   MAX_TOOL_CALLS,
   MAX_TOOL_CALLS_PER_TOOL,
+  PLAN_REVIEW_TOOL_CAPABILITIES,
   SAFE_PLAN_REVIEW_TOOLS,
   validatePlannerPlan,
 } from './planReviewSchemas.js';
@@ -153,9 +154,23 @@ export async function planWithProvider({ freshness, profileContext, provider, to
   if (!response?.text) return null;
   const parsed = parseGroundedModelJson(response.text);
   const validation = validatePlannerPlan(parsed);
+  const requestedChecks = Array.isArray(parsed?.checks) ? parsed.checks : [];
+  const rejectedToolRequestCount = requestedChecks
+    .filter(tool => typeof tool !== 'string' || !tools.includes(tool)).length;
   if (validation.error) {
     const error = new Error('INVALID_PLANNER_OUTPUT');
+    error.code = rejectedToolRequestCount > 0 ? 'FORBIDDEN_TOOL_REQUEST' : 'INVALID_PLANNER_OUTPUT';
+    error.rejectedToolRequestCount = Math.min(rejectedToolRequestCount, MAX_TOOL_CALLS);
     error.details = validation.error.details.map(detail => detail.type);
+    throw error;
+  }
+  // A tool can be globally safe yet outside this run's capability grant. Do
+  // not silently filter that attempted request into a clean-looking plan.
+  const ungrantedChecks = validation.value.checks.filter(tool => !tools.includes(tool));
+  if (ungrantedChecks.length) {
+    const error = new Error('FORBIDDEN_TOOL_REQUEST');
+    error.code = 'FORBIDDEN_TOOL_REQUEST';
+    error.rejectedToolRequestCount = Math.min(ungrantedChecks.length, MAX_TOOL_CALLS);
     throw error;
   }
   return { ...validation.value, provider: response.provider || provider.name, model: response.model || null, fallback: false };
@@ -241,6 +256,8 @@ async function determineChecksNode(state, dependencies) {
   let planner = { provider: 'DETERMINISTIC', model: null, fallback: true };
   let requestedChecks = required;
   let modelCallCount = Number(state.modelCallCount || 0);
+  let plannerRejectionCode = null;
+  let rejectedToolRequestCount = 0;
   const promptBundle = resolvePromptBundle({ dependencies, scaffoldSpec: dependencies.scaffoldSpec });
   const plannerRole = dependencies.scaffoldSpec?.safeModelRoleRouting?.planner || 'PLANNER';
   const plannerProvider = dependencies.plannerProvider
@@ -276,6 +293,10 @@ async function determineChecksNode(state, dependencies) {
     } catch (error) {
       if (dependencies.signal?.aborted || error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') throw error;
       if (error?.code === 'AGENT_BUDGET_EXCEEDED' || error?.code === 'AGENT_BUDGET_PERSISTENCE_UNAVAILABLE') throw error;
+      if (error?.code === 'FORBIDDEN_TOOL_REQUEST' || error?.code === 'INVALID_PLANNER_OUTPUT') {
+        plannerRejectionCode = error.code;
+        rejectedToolRequestCount = Math.min(MAX_TOOL_CALLS, Math.max(0, Number(error.rejectedToolRequestCount) || 0));
+      }
       planner = { provider: 'DETERMINISTIC', model: null, fallback: true };
       modelCallCount = dependencies.modelBudget?.modelCalls ?? modelCallCount + 1;
     }
@@ -284,6 +305,8 @@ async function determineChecksNode(state, dependencies) {
     stepCount: state.stepCount,
     requestedChecks,
     planner,
+    plannerRejectionCode,
+    rejectedToolRequestCount,
     modelCallCount,
     tokenUsage: dependencies.modelBudget?.accountedTokens ?? Number(state.tokenUsage || 0),
   };
@@ -327,6 +350,29 @@ async function executeSafeToolsNode(state, dependencies) {
     }
     toolCallCount += 1;
     toolCallCounts[toolName] = (toolCallCounts[toolName] || 0) + 1;
+    const toolStartedAt = new Date().toISOString();
+    const toolCallId = uuid();
+    const capability = PLAN_REVIEW_TOOL_CAPABILITIES[toolName];
+    const toolInputHash = canonicalSha256({
+      tool: toolName,
+      toolCallId,
+      capabilityId: capability?.capabilityId || null,
+      capabilityVersion: capability?.capabilityVersion || null,
+      planReviewSnapshotHash: state.planReviewSnapshotHash || null,
+    });
+    // Persist selection before execution. If evidence publication fails, the
+    // read-only operation is not started and cannot disappear from the ledger.
+    await reportProgress(dependencies, {
+      node: 'execute_safe_tools',
+      state: { ...state, toolCallCounts, toolCallCount, repeatedRequests },
+      event: trajectoryEvent('TOOL_SELECTED', {
+        tool: toolName,
+        toolCallId,
+        ...capability,
+        inputHash: toolInputHash,
+        startedAt: toolStartedAt,
+      }),
+    });
     try {
       const timeoutMs = Number(dependencies.toolTimeoutMs) || 5000;
       const toolAbortController = new AbortController();
@@ -357,7 +403,14 @@ async function executeSafeToolsNode(state, dependencies) {
       await reportProgress(dependencies, {
         node: 'execute_safe_tools',
         state: { ...state, toolResults, toolCallCounts, toolCallCount, repeatedRequests },
-        event: trajectoryEvent('TOOL_SUCCEEDED', { tool: toolName }),
+        event: trajectoryEvent('TOOL_SUCCEEDED', {
+          tool: toolName,
+          toolCallId,
+          ...capability,
+          inputHash: toolInputHash,
+          outputHash: canonicalSha256(result === undefined ? null : result),
+          startedAt: toolStartedAt,
+        }),
       });
     } catch (error) {
       if (dependencies.signal?.aborted) throw dependencies.signal.reason || error;
@@ -367,7 +420,14 @@ async function executeSafeToolsNode(state, dependencies) {
       await reportProgress(dependencies, {
         node: 'execute_safe_tools',
         state: { ...state, toolResults, toolCallCounts, toolCallCount, repeatedRequests },
-        event: trajectoryEvent('TOOL_FAILED', { tool: toolName, code: error.code || 'TOOL_FAILED' }),
+        event: trajectoryEvent('TOOL_FAILED', {
+          tool: toolName,
+          toolCallId,
+          ...capability,
+          code: error.code || 'TOOL_FAILED',
+          inputHash: toolInputHash,
+          startedAt: toolStartedAt,
+        }),
       });
     }
   }
@@ -674,7 +734,14 @@ export function createPlanReviewGraph(dependencies = {}) {
     })
     .addNode('determine_required_checks', async state => {
       const next = await determineChecksNode({ ...state, stepCount: advancePlanReviewStep(state, runtimeDependencies) }, runtimeDependencies);
-      await reportProgress(runtimeDependencies, { node: 'determine_required_checks', state: { ...state, ...next }, event: trajectoryEvent('NODE_ENTERED', { node: 'determine_required_checks' }) });
+      const event = next.plannerRejectionCode
+        ? trajectoryEvent('POLICY_REJECTED', {
+          node: 'determine_required_checks',
+          code: next.plannerRejectionCode,
+          rejectedToolRequestCount: next.rejectedToolRequestCount,
+        })
+        : trajectoryEvent('NODE_ENTERED', { node: 'determine_required_checks' });
+      await reportProgress(runtimeDependencies, { node: 'determine_required_checks', state: { ...state, ...next }, event });
       return next;
     })
     .addNode('execute_safe_tools', async state => executeSafeToolsNode({ ...state, stepCount: advancePlanReviewStep(state, runtimeDependencies) }, runtimeDependencies))

@@ -181,7 +181,7 @@ class RAGPipeline:
         # Check Response Cache
         cached_response = self.cache_manager.get_response(response_cache_key, tenant_id=effective_scope)
         if cached_response is not None:
-            logger.info(f"Serving cached RAG query response for '{request.question[:30]}...' (scope: {effective_scope})")
+            logger.info("Serving cached RAG query response (scope: %s)", effective_scope)
             return cached_response
 
         start_time = time.perf_counter()
@@ -259,8 +259,6 @@ class RAGPipeline:
         cache_misses = getattr(self.embedder.cache, "misses", 0) if getattr(self.embedder, "cache", None) else 0
 
         self.telemetry.record_query_trace(
-            query=request.question,
-            search_query=search_query,
             retrieval_strategy=self.retriever.strategy_name,
             reranker_strategy=self.reranker.reranker_name,
             stage_latencies_ms={
@@ -392,8 +390,6 @@ class RAGPipeline:
         top_score: float = 0.0,
     ) -> RAGQueryResponse:
         self.telemetry.record_query_trace(
-            query=qu_result["raw_query"],
-            search_query=qu_result["search_query"],
             retrieval_strategy=self.retriever.strategy_name,
             reranker_strategy=self.reranker.reranker_name,
             stage_latencies_ms={

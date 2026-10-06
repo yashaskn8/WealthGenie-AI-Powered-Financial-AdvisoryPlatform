@@ -9,6 +9,7 @@ import { parse, stringify } from 'yaml';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const validatorPath = path.join(repositoryRoot, 'server/scripts/validate-deployment-config.js');
+const productionImageValidatorPath = path.join(repositoryRoot, 'server/scripts/validateProductionImageManifest.js');
 
 function withDeploymentFixture(run) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wealthgenie-deployment-contract-'));
@@ -38,10 +39,247 @@ function writeYaml(root, relativePath, value) {
   fs.writeFileSync(path.join(root, relativePath), stringify(value), 'utf8');
 }
 
+test('production rendered manifests reject mutable WealthGenie application image references', () => {
+  const manifest = [
+    'apiVersion: apps/v1',
+    'kind: Deployment',
+    'metadata: { name: wealthgenie-server }',
+    'spec:',
+    '  template:',
+    '    spec:',
+    '      containers:',
+    '        - name: server',
+    '          image: wealthgenie-server:latest',
+    '---',
+    'apiVersion: apps/v1',
+    'kind: Deployment',
+    'metadata: { name: wealthgenie-frontend }',
+    'spec:',
+    '  template:',
+    '    spec:',
+    '      containers:',
+    '        - name: frontend',
+    '          image: wealthgenie-frontend:latest',
+    '---',
+    'apiVersion: apps/v1',
+    'kind: Deployment',
+    'metadata: { name: wealthgenie-ml-service }',
+    'spec:',
+    '  template:',
+    '    spec:',
+    '      containers:',
+    '        - name: ml-service',
+    '          image: wealthgenie-ml-service:latest',
+  ].join('\n');
+  const result = spawnSync(process.execPath, [productionImageValidatorPath], {
+    encoding: 'utf8',
+    input: manifest,
+    timeout: 15000,
+  });
+
+  assert.notEqual(result.status, 0, 'mutable app references must never pass production render validation');
+  assert.match(result.stderr, /IMMUTABLE_REGISTRY_DIGEST/i);
+  assert.equal(result.stdout, '', 'invalid manifests must not be emitted to an apply pipeline');
+});
+
+test('production image filter accepts fully qualified registry digests for every rendered image', () => {
+  const images = [
+    ['wealthgenie-server', 'ghcr.io/yashaskn8/wealthgenie-server'],
+    ['wealthgenie-frontend', 'ghcr.io/yashaskn8/wealthgenie-frontend'],
+    ['wealthgenie-ml-service', 'ghcr.io/yashaskn8/wealthgenie-ml-service'],
+    ['mongo', 'docker.io/library/mongo'],
+    ['redis', 'docker.io/library/redis'],
+  ];
+  const manifest = images.map(([name, repository], index) => {
+    const digest = String(index + 1).repeat(64);
+    return [
+      'apiVersion: apps/v1',
+      'kind: Deployment',
+      `metadata: { name: ${name} }`,
+      'spec:',
+      '  template:',
+      '    spec:',
+      '      containers:',
+      `        - { name: app, image: ${repository}@sha256:${digest} }`,
+    ].join('\n');
+  }).join('\n---\n');
+  const result = spawnSync(process.execPath, [productionImageValidatorPath], {
+    encoding: 'utf8',
+    input: manifest,
+    timeout: 15000,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, manifest);
+});
+
+test('production image filter rejects each missing application or infrastructure image', () => {
+  const images = [
+    ['wealthgenie-server', 'ghcr.io/yashaskn8/wealthgenie-server'],
+    ['wealthgenie-frontend', 'ghcr.io/yashaskn8/wealthgenie-frontend'],
+    ['wealthgenie-ml-service', 'ghcr.io/yashaskn8/wealthgenie-ml-service'],
+    ['mongo', 'docker.io/library/mongo'],
+    ['redis', 'docker.io/library/redis'],
+  ];
+
+  for (const [missingName] of images) {
+    const manifest = images
+      .filter(([name]) => name !== missingName)
+      .map(([, repository], index) => {
+        const digest = String(index + 1).repeat(64);
+        return `apiVersion: apps/v1\nkind: Deployment\nspec:\n  template:\n    spec:\n      containers:\n        - { name: app, image: ${repository}@sha256:${digest} }\n`;
+      })
+      .join('---\n');
+    const result = spawnSync(process.execPath, [productionImageValidatorPath], {
+      encoding: 'utf8',
+      input: manifest,
+      timeout: 15000,
+    });
+
+    assert.notEqual(result.status, 0, `${missingName} must be required in a production render`);
+    assert.match(result.stderr, new RegExp(`(?:APPLICATION|INFRASTRUCTURE)_IMAGE_MISSING:${missingName}`));
+    assert.equal(result.stdout, '', 'invalid manifests must not be emitted to an apply pipeline');
+  }
+});
+
+test('production image filter also rejects mutable database and cache image references', () => {
+  const manifest = [
+    ...['server', 'frontend', 'ml-service'].map((component, index) => {
+      const image = `wealthgenie-${component}`;
+      const digest = String(index + 1).repeat(64);
+      return `apiVersion: apps/v1\nkind: Deployment\nspec:\n  template:\n    spec:\n      containers:\n        - { name: app, image: ghcr.io/yashaskn8/${image}@sha256:${digest} }\n`;
+    }),
+    'apiVersion: apps/v1\nkind: Deployment\nspec:\n  template:\n    spec:\n      containers:\n        - { name: redis, image: redis:7.2-alpine }\n',
+  ].join('---\n');
+  const result = spawnSync(process.execPath, [productionImageValidatorPath], {
+    encoding: 'utf8',
+    input: manifest,
+    timeout: 15000,
+  });
+
+  assert.notEqual(result.status, 0, 'every production container image must be pinned by registry digest');
+  assert.match(result.stderr, /IMMUTABLE_REGISTRY_DIGEST/i);
+  assert.equal(result.stdout, '', 'invalid manifests must not be emitted to an apply pipeline');
+});
+
+test('production template filter accepts only the checked-in non-deployable image markers', () => {
+  const images = [
+    ['wealthgenie-server', 'SERVER'],
+    ['wealthgenie-frontend', 'FRONTEND'],
+    ['wealthgenie-ml-service', 'ML_SERVICE'],
+    ['mongo', 'MONGODB'],
+    ['redis', 'REDIS'],
+  ];
+  const manifest = images.map(([name, markerName]) => {
+    const marker = `WEALTHGENIE_${markerName}_IMAGE_DIGEST_REQUIRED`;
+    return `apiVersion: apps/v1\nkind: Deployment\nspec:\n  template:\n    spec:\n      containers:\n        - { name: app, image: registry-required.invalid/${name}@sha256:${marker} }\n`;
+  }).join('---\n');
+  const result = spawnSync(process.execPath, [productionImageValidatorPath, '--template'], {
+    encoding: 'utf8',
+    input: manifest,
+    timeout: 15000,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, manifest);
+});
+
+test('Kind CD installs a fixed Metrics Server release compatible with its Kubernetes 1.31 node image', () => {
+  const workflow = fs.readFileSync(path.join(repositoryRoot, '.github/workflows/cd.yml'), 'utf8');
+  assert.match(workflow, /version:\s*v0\.24\.0/);
+  assert.match(workflow, /releases\/download\/v0\.8\.1\/components\.yaml/);
+  assert.doesNotMatch(workflow, /metrics-server\/releases\/latest\//);
+});
+
+test('deployment validator rejects mutable Metrics Server latest downloads', () => {
+  withDeploymentFixture(root => {
+    const workflowPath = '.github/workflows/cd.yml';
+    const workflow = readYaml(root, workflowPath);
+    const install = workflow.jobs['deploy-and-verify-kind'].steps
+      .find(step => step.name === 'Install Metrics Server for HPA');
+    install.run = install.run.replace(
+      'releases/download/v0.8.1/components.yaml',
+      'releases/latest/download/components.yaml',
+    );
+    writeYaml(root, workflowPath, workflow);
+
+    const result = validate(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /pin a Metrics Server release compatible/);
+  });
+});
+
+test('production image filter rejects local image IDs, tags, and loopback registries in migration manifests', () => {
+  for (const image of [
+    'sha256:' + 'a'.repeat(64),
+    'wealthgenie-server:15454b98',
+    `localhost:5000/org/wealthgenie-server@sha256:${'a'.repeat(64)}`,
+    `127.0.0.1:5000/org/wealthgenie-server@sha256:${'a'.repeat(64)}`,
+    `registry-required.invalid/wealthgenie-server@sha256:${'a'.repeat(64)}`,
+  ]) {
+    const manifest = `apiVersion: batch/v1\nkind: Job\nspec:\n  template:\n    spec:\n      containers:\n        - { name: migration, image: ${image} }\n      restartPolicy: Never\n`;
+    const result = spawnSync(process.execPath, [productionImageValidatorPath, '--fragment'], {
+      encoding: 'utf8',
+      input: manifest,
+      timeout: 15000,
+    });
+    assert.notEqual(result.status, 0, `${image} must not count as a production registry digest`);
+    assert.match(result.stderr, /IMMUTABLE_REGISTRY_DIGEST|DOCKER_IMAGE_ID_IS_NOT_A_REGISTRY_REFERENCE/i);
+    assert.equal(result.stdout, '');
+  }
+});
+
 test('deployment validator accepts the complete ordered Phase 2 through Phase 7 migration sequence', () => {
   const result = validate(repositoryRoot);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /ordered Phase 2\/3\/4\/5\/7 migrations/);
+});
+
+test('production overlay substitutes every image with an unusable digest-required sentinel', () => {
+  const overlay = readYaml(repositoryRoot, 'k8s/overlays/production/kustomization.yaml');
+  const images = new Map((overlay.images || []).map(image => [image.name, image]));
+  const expectedImages = [
+    ['wealthgenie-server', 'SERVER'],
+    ['wealthgenie-frontend', 'FRONTEND'],
+    ['wealthgenie-ml-service', 'ML_SERVICE'],
+    ['mongo', 'MONGODB'],
+    ['redis', 'REDIS'],
+  ];
+  assert.equal(images.size, expectedImages.length);
+  for (const [name, markerName] of expectedImages) {
+    const image = images.get(name);
+    assert.ok(image, `production overlay must transform ${name}`);
+    assert.equal(image.newName, `registry-required.invalid/${name}`);
+    assert.equal(image.digest, `sha256:WEALTHGENIE_${markerName}_IMAGE_DIGEST_REQUIRED`);
+    assert.equal(image.newTag, undefined, 'a tag is not an immutable production identity');
+  }
+});
+
+test('deployment validator rejects a production overlay that replaces a digest marker with a mutable tag', () => {
+  withDeploymentFixture(root => {
+    const file = 'k8s/overlays/production/kustomization.yaml';
+    const overlay = readYaml(root, file);
+    overlay.images[0].newTag = 'latest';
+    delete overlay.images[0].digest;
+    writeYaml(root, file, overlay);
+
+    const result = validate(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /digest-required fail-closed marker/);
+  });
+});
+
+test('deployment validator rejects a production overlay missing database or cache image markers', () => {
+  withDeploymentFixture(root => {
+    const file = 'k8s/overlays/production/kustomization.yaml';
+    const overlay = readYaml(root, file);
+    overlay.images = overlay.images.filter(image => image.name !== 'mongo');
+    writeYaml(root, file, overlay);
+
+    const result = validate(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /every application image with an explicit digest-required fail-closed marker/);
+  });
 });
 
 test('deployment validator requires the agent-worker to use its explicit non-root image UID', () => {

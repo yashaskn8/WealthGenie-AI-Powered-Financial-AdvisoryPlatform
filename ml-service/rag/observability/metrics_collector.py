@@ -27,8 +27,6 @@ class RAGObservabilityCollector:
 
     def record_query_trace(
         self,
-        query: str,
-        search_query: str,
         retrieval_strategy: str,
         reranker_strategy: str,
         stage_latencies_ms: Dict[str, float],
@@ -46,8 +44,6 @@ class RAGObservabilityCollector:
 
         trace = {
             "timestamp_utc": timestamp_str,
-            "query": query,
-            "search_query": search_query,
             "retrieval_strategy": retrieval_strategy,
             "reranker_strategy": reranker_strategy,
             "latencies_ms": {

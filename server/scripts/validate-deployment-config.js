@@ -125,6 +125,25 @@ if (kustomization.resources?.some(resource => resource.includes('phase2-index-mi
   throw new Error('One-shot database migration Jobs must only be created by ordered deployment steps');
 }
 
+const productionKustomization = parse(read('k8s/overlays/production/kustomization.yaml'));
+const requiredProductionImages = new Map([
+  ['wealthgenie-server', 'sha256:WEALTHGENIE_SERVER_IMAGE_DIGEST_REQUIRED'],
+  ['wealthgenie-frontend', 'sha256:WEALTHGENIE_FRONTEND_IMAGE_DIGEST_REQUIRED'],
+  ['wealthgenie-ml-service', 'sha256:WEALTHGENIE_ML_SERVICE_IMAGE_DIGEST_REQUIRED'],
+  ['mongo', 'sha256:WEALTHGENIE_MONGODB_IMAGE_DIGEST_REQUIRED'],
+  ['redis', 'sha256:WEALTHGENIE_REDIS_IMAGE_DIGEST_REQUIRED'],
+]);
+const configuredProductionImages = new Map((productionKustomization.images || []).map(image => [image.name, image]));
+if (requiredProductionImages.size !== configuredProductionImages.size
+    || [...requiredProductionImages].some(([name, digest]) => {
+      const image = configuredProductionImages.get(name);
+      return image?.newName !== `registry-required.invalid/${name}`
+        || image?.digest !== digest
+        || Object.hasOwn(image || {}, 'newTag');
+    })) {
+  throw new Error('Production overlay must replace every application image with an explicit digest-required fail-closed marker');
+}
+
 function namedStep(steps, name) {
   const index = steps.findIndex(step => step.name === name);
   if (index < 0) throw new Error(`Required deployment step is missing: ${name}`);
@@ -204,6 +223,18 @@ if (!(edgeMongo.index < edgeMongoReady.index
 
 const cd = parse(read('.github/workflows/cd.yml'));
 const cdSteps = cd.jobs?.['deploy-and-verify-kind']?.steps || [];
+const kindCluster = namedStep(cdSteps, 'Create Kind Kubernetes Cluster');
+const metricsServerInstall = namedStep(cdSteps, 'Install Metrics Server for HPA');
+if (kindCluster.step.with?.version !== 'v0.24.0'
+    || !metricsServerInstall.step.run?.includes('releases/download/v0.8.1/components.yaml')
+    || metricsServerInstall.step.run?.includes('metrics-server/releases/latest/')) {
+  throw new Error('Kind CD must pin a Metrics Server release compatible with the Kubernetes 1.31 test cluster');
+}
+const productionRenderValidation = namedStep(cdSteps, 'Render and validate fail-closed production image template');
+if (!productionRenderValidation.step.run?.includes('kubectl kustomize k8s/overlays/production')
+    || !productionRenderValidation.step.run?.includes('node server/scripts/validateProductionImageManifest.js --template')) {
+  throw new Error('Kind CD must render and validate the non-deployable production image template');
+}
 if (cdSteps.filter(step => step.name === 'Run the one-shot Phase 7 ResearchAgent task migration').length !== 1) {
   throw new Error('Kind CD must run exactly one Phase 7 ResearchAgent task migration');
 }
@@ -297,4 +328,4 @@ if (!tckWorkflow.includes(`A2A_TCK_SHA: ${pinnedTckSha}`)
     || tckPolicy.acceptance?.allow_skipped_known_tests !== false) {
   throw new Error('A2A TCK workflow must run the pinned upstream suite through the exact fail-closed exception policy');
 }
-console.log(`Validated ${deploymentFiles.length} deployment YAML files, ordered Phase 2/3/4/5/7 migrations in Browser CI, production-edge E2E and Kind CD, Compose API/worker separation, and worker probes.`);
+console.log(`Validated ${deploymentFiles.length} deployment YAML files, fail-closed production image markers, ordered Phase 2/3/4/5/7 migrations in Browser CI, production-edge E2E and Kind CD, Compose API/worker separation, and worker probes.`);

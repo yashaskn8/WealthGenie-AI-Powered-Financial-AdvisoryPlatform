@@ -179,6 +179,18 @@ test('50 workers use explicit numeric queue priority and exactly one claims one 
 });
 
 test('concurrent checkpoint writers serialize sequence allocation and store only tool payload hashes', async () => {
+  const toolCallId = 'a3950c0b-0ed9-44ed-b20b-89998027de40';
+  const capability = {
+    capabilityId: 'plan-review.get_current_profile_context.read.v1',
+    capabilityVersion: '1.0.0',
+    effect: 'READ',
+    resourceScope: 'CURRENT_USER_PROFILE',
+    ownerScoped: true,
+    writesFinancialAuthority: false,
+    networkAccess: 'NONE',
+    shadowAllowed: true,
+  };
+  const toolInputHash = 'a'.repeat(64);
   const run = {
     runId: 'run-checkpoint-sequence',
     userId,
@@ -235,15 +247,38 @@ test('concurrent checkpoint writers serialize sequence allocation and store only
     worker.updateProgress(run, {
       node: 'execute_safe_tools',
       state: {},
-      event: { type: 'TOOL_SUCCEEDED', tool: 'get_current_profile_context', input: { limit: 1 }, output: { status: 'AVAILABLE' } },
+      event: { type: 'TOOL_SELECTED', tool: 'get_current_profile_context', toolCallId, ...capability, inputHash: toolInputHash, startedAt: new Date().toISOString() },
+    }),
+    worker.updateProgress(run, {
+      node: 'execute_safe_tools',
+      state: {},
+      event: { type: 'TOOL_SUCCEEDED', tool: 'get_current_profile_context', toolCallId, ...capability, inputHash: toolInputHash, input: { limit: 1 }, output: { status: 'AVAILABLE' } },
     }),
   ]);
 
-  assert.equal(run.checkpointSequence, 2);
-  assert.deepEqual([...checkpoints.keys()].sort(), [1, 2]);
-  const ledger = run.toolExecutionLedger.find(item => item.tool === 'get_current_profile_context');
+  assert.equal(run.checkpointSequence, 3);
+  assert.deepEqual([...checkpoints.keys()].sort(), [1, 2, 3]);
+  const ledger = run.toolExecutionLedger.find(item => item.tool === 'get_current_profile_context' && item.stage === 'SUCCEEDED');
   assert.match(ledger.inputHash, /^[a-f0-9]{64}$/);
   assert.match(ledger.outputHash, /^[a-f0-9]{64}$/);
+  const selection = run.toolExecutionLedger.find(item => item.tool === 'get_current_profile_context' && item.stage === 'SELECTED');
+  assert.match(selection.inputHash, /^[a-f0-9]{64}$/);
+  assert.equal(selection.outputHash, null);
+  assert.equal(selection.completedAt, null);
+  assert.equal(selection.toolCallId, toolCallId);
+  assert.equal(ledger.toolCallId, toolCallId);
+  assert.equal(selection.capabilityId, capability.capabilityId);
+  assert.equal(ledger.capabilityId, capability.capabilityId);
+  assert.equal(selection.capabilityEffect, 'READ');
+  assert.equal(ledger.capabilityEffect, 'READ');
+  assert.equal(selection.ownerScoped, true);
+  assert.equal(ledger.writesFinancialAuthority, false);
+  const trajectorySelection = run.trajectory.find(item => item.type === 'TOOL_SELECTED');
+  const trajectoryResult = run.trajectory.find(item => item.type === 'TOOL_SUCCEEDED');
+  assert.equal(trajectorySelection.toolCallId, toolCallId);
+  assert.equal(trajectoryResult.toolCallId, toolCallId);
+  assert.equal(trajectorySelection.capabilityId, capability.capabilityId);
+  assert.equal(trajectoryResult.capabilityId, capability.capabilityId);
   assert.equal('input' in ledger, false);
   assert.equal('output' in ledger, false);
 });

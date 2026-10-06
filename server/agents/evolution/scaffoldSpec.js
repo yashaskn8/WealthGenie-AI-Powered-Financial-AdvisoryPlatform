@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { SAFE_PLAN_REVIEW_TOOLS } from '../planReview/planReviewSchemas.js';
-import { isVerifiedPromotionAuthorization, verifyPromotionAuthorization } from './promotionAuthorization.js';
+import { assertPromotionEvaluation, isVerifiedPromotionAuthorization, verifyPromotionAuthorization } from './promotionAuthorization.js';
 import { CURRENT_PROMPT_BUNDLE, verifyPromptBundleHash } from './promptBundle.js';
 
 export const SCAFFOLD_SPEC_VERSION = 'scaffold-spec-1.0.0';
@@ -158,12 +158,13 @@ export class ScaffoldRegistry {
   }
 
   promote(scaffoldId, version, { authorization, evaluation } = {}) {
-    if (!evaluation?.passed || evaluation?.scoreCards?.some(card => card.hardGatePassed !== true)) {
-      throw new Error('Only a passed, financially inert evaluation can be promoted.');
-    }
     const record = this.get(scaffoldId, version);
     if (!record) throw new Error('Scaffold version is not registered.');
-    verifyPromotionAuthorization({ authorization, candidate: record.spec, evaluation });
+    assertPromotionEvaluation({ candidate: record.spec, evaluation });
+    if (!this.champion || record === this.champion || record.spec.parentVersion !== this.champion.spec.version) {
+      throw new Error('Candidate does not target the current active baseline.');
+    }
+    verifyPromotionAuthorization({ authorization, candidate: record.spec, baselineHash: this.champion.spec.contentHash, evaluation });
     this.champion = record;
     this.history.push({ action: 'PROMOTE', scaffoldId, version, reviewerId: authorization.reviewerId, approvalId: authorization.approvalId, at: new Date().toISOString() });
     return record;

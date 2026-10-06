@@ -40,6 +40,8 @@ export const PlanReviewState = Annotation.Root({
   explanation: replace(),
   review: replace(),
   planner: replace({ provider: 'DETERMINISTIC', model: null, fallback: true }),
+  plannerRejectionCode: replace(null),
+  rejectedToolRequestCount: replace(0),
   validation: replace({ valid: false, errors: [] }),
   evidenceVerification: replace({ valid: false, unknownEvidenceIds: [], injectionDetected: false }),
   policy: replace({ allowed: false, reasonCodes: [] }),

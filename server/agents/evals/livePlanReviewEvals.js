@@ -54,7 +54,14 @@ export async function runLivePlanReviewEvaluations({ dataset, provider, maxCases
     results.push({
       caseId: caseDefinition.id,
       toolChoices: planner?.checks || [],
-      forbiddenToolRequests: actualTrajectory.filter(event => event?.type === 'TOOL_SUCCEEDED' && caseDefinition.forbiddenTools.includes(event.tool)).map(event => event.tool),
+      forbiddenToolRequests: [
+        ...actualTrajectory
+          .filter(event => event?.type === 'TOOL_SELECTED' && caseDefinition.forbiddenTools.includes(event.tool))
+          .map(event => event.tool),
+        ...actualTrajectory
+          .filter(event => event?.type === 'POLICY_REJECTED' && event?.code === 'FORBIDDEN_TOOL_REQUEST')
+          .map(() => 'FORBIDDEN_TOOL_REQUEST'),
+      ],
       finalAction: actualAction,
       grounding: actual?.result?.validation?.valid === true || explanation.validation?.status === 'PASS',
       unsupportedNumericalClaims: actual?.result?.validation?.valid === false,

@@ -8,6 +8,7 @@ import { advancePlanReviewStep } from '../agents/planReview/planReviewGraph.js';
 import { createModelGateway } from '../agents/modelGateway.js';
 import { loadPlanReviewContext } from '../agents/planReview/planReviewTools.js';
 import { buildPlanReviewSnapshotBinding, hashPlanReviewSnapshot } from '../agents/planReview/planReviewRuntime.js';
+import { PLAN_REVIEW_TOOL_CAPABILITIES } from '../agents/planReview/planReviewSchemas.js';
 
 const profileId = '64b000000000000000000001';
 const userId = '64b000000000000000000010';
@@ -351,10 +352,16 @@ test('queued PlanReview source snapshot mismatch is terminal supersession, not s
 });
 
 test('unknown or write planner tools are rejected before execution', async () => {
+  const progressEvents = [];
+  let forbiddenToolExecutions = 0;
   const result = await invokePlanReviewGraph({
     userId,
     profileId,
     dependencies: dependencies({
+      onNodeProgress: async payload => { if (payload.event) progressEvents.push(payload.event); },
+      toolOverrides: {
+        rebalance_portfolio: async () => { forbiddenToolExecutions += 1; return { status: 'SHOULD_NOT_RUN' }; },
+      },
       plannerProvider: {
         name: 'test-provider',
         configuredModel: () => 'test-model',
@@ -364,7 +371,64 @@ test('unknown or write planner tools are rejected before execution', async () =>
   });
   assert.equal(result.planner.provider, 'DETERMINISTIC');
   assert.equal(result.toolResults.rebalance_portfolio, undefined);
+  assert.equal(forbiddenToolExecutions, 0);
+  assert.ok(progressEvents.some(event => event.type === 'POLICY_REJECTED'
+    && event.code === 'FORBIDDEN_TOOL_REQUEST'
+    && event.rejectedToolRequestCount === 1));
   assert.ok(result.toolCallCount <= 8);
+});
+
+test('globally safe but run-ungranted planner tools are rejected and audited before fallback', async () => {
+  const progressEvents = [];
+  const result = await invokePlanReviewGraph({
+    userId,
+    profileId,
+    dependencies: dependencies({
+      scaffoldSpec: { tools: ['get_current_profile_context'] },
+      onNodeProgress: async payload => { if (payload.event) progressEvents.push(payload.event); },
+      plannerProvider: {
+        name: 'test-provider',
+        configuredModel: () => 'test-model',
+        generate: async () => ({ text: JSON.stringify({ checks: ['get_goal_status_summary'] }) }),
+      },
+    }),
+  });
+
+  assert.deepEqual(result.requestedChecks, ['get_current_profile_context']);
+  assert.equal(result.toolResults.get_goal_status_summary, undefined);
+  assert.ok(progressEvents.some(event => event.type === 'POLICY_REJECTED'
+    && event.code === 'FORBIDDEN_TOOL_REQUEST'
+    && event.rejectedToolRequestCount === 1));
+});
+
+test('read-only tool selection is recorded before its result event', async () => {
+  const progressEvents = [];
+  await invokePlanReviewGraph({
+    userId,
+    profileId,
+    dependencies: dependencies({
+      onNodeProgress: async payload => { if (payload.event) progressEvents.push(payload.event); },
+    }),
+  });
+  const selected = progressEvents.findIndex(event => event.type === 'TOOL_SELECTED');
+  const succeeded = progressEvents.findIndex(event => event.type === 'TOOL_SUCCEEDED');
+  assert.ok(selected >= 0);
+  assert.ok(succeeded > selected);
+  const selectedEvent = progressEvents[selected];
+  const succeededEvent = progressEvents[succeeded];
+  const expectedCapability = PLAN_REVIEW_TOOL_CAPABILITIES[selectedEvent.tool];
+  assert.match(selectedEvent.toolCallId, /^[0-9a-f-]{36}$/i);
+  assert.equal(succeededEvent.toolCallId, selectedEvent.toolCallId);
+  assert.equal(selectedEvent.capabilityId, expectedCapability.capabilityId);
+  assert.equal(succeededEvent.capabilityId, expectedCapability.capabilityId);
+  assert.equal(selectedEvent.capabilityVersion, expectedCapability.capabilityVersion);
+  assert.equal(selectedEvent.effect, 'READ');
+  assert.equal(selectedEvent.ownerScoped, true);
+  assert.equal(selectedEvent.writesFinancialAuthority, false);
+  assert.equal(selectedEvent.networkAccess, 'NONE');
+  assert.match(progressEvents[selected].inputHash, /^[a-f0-9]{64}$/);
+  assert.equal(progressEvents[succeeded].inputHash, progressEvents[selected].inputHash);
+  assert.match(progressEvents[succeeded].outputHash, /^[a-f0-9]{64}$/);
 });
 
 test('malformed planner JSON uses deterministic routing and never calls an unknown tool', async () => {

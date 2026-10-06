@@ -1,6 +1,7 @@
 """Strict optimizer-side schemas. Holdout and private user data never enter this module."""
 
 from dataclasses import dataclass, field
+import hashlib
 import re
 from typing import Any
 
@@ -40,7 +41,7 @@ ALLOWED_EVOLUTION_SURFACES = frozenset({
 })
 GEPA_INPUT_KEYS = frozenset({
     'schemaVersion', 'basePromptBundle', 'allowedMutationSurfaces',
-    'trainCases', 'validationCases', 'failureFeedback', 'budget', 'optimizer',
+    'trainCases', 'validationCases', 'failureFeedback', 'failureFeedbackProvenance', 'budget', 'optimizer',
 })
 GEPA_PROPOSAL_KEYS = frozenset({
     'proposalId', 'parentPromptBundleHash', 'mutationSurface', 'mutationReason',
@@ -137,8 +138,24 @@ def validate_gepa_input(data: dict[str, Any]) -> dict[str, Any]:
     for item in data.get('trainCases', []) + data.get('validationCases', []):
         if item.get('partition') not in {'train', 'validation'}:
             raise ValueError('holdout cases are sealed from GEPA')
-    if not isinstance(data.get('failureFeedback', []), list) or any(not isinstance(item, str) or len(item) > 4000 for item in data['failureFeedback']):
+    feedback = data.get('failureFeedback', [])
+    provenance = data.get('failureFeedbackProvenance', [])
+    if not isinstance(feedback, list) or any(not isinstance(item, str) or len(item) > 4000 for item in feedback):
         raise ValueError('failureFeedback must be bounded text')
+    if not isinstance(provenance, list) or len(provenance) != len(feedback):
+        raise ValueError('failureFeedback provenance must match every feedback record')
+    for item, source in zip(feedback, provenance):
+        if not isinstance(source, dict):
+            raise ValueError('failureFeedback provenance entries must be objects')
+        _assert_keys(source, frozenset({'source', 'evaluationHash', 'contentHash'}), 'failureFeedback provenance')
+        if source.get('source') != 'GOVERNED_EVALUATION':
+            raise ValueError('failureFeedback source is not an approved evaluation')
+        if not re.fullmatch(r'[a-f0-9]{64}', str(source.get('evaluationHash', ''))):
+            raise ValueError('failureFeedback evaluation hash is invalid')
+        if not re.fullmatch(r'[a-f0-9]{64}', str(source.get('contentHash', ''))):
+            raise ValueError('failureFeedback content hash is invalid')
+        if hashlib.sha256(item.encode('utf-8')).hexdigest() != source['contentHash']:
+            raise ValueError('failureFeedback content hash mismatch')
     budget = data.get('budget')
     if not isinstance(budget, dict):
         raise ValueError('GEPA budget is required')

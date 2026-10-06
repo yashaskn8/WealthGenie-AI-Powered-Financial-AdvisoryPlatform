@@ -6,6 +6,25 @@ namespace: wealthgenie
 resources:
   - ../../
 
+# Deliberately non-deployable until a release overlay supplies real registry
+# digests. The deployment filter rejects these sentinels and all tag refs.
+images:
+  - name: wealthgenie-server
+    newName: registry-required.invalid/wealthgenie-server
+    digest: sha256:WEALTHGENIE_SERVER_IMAGE_DIGEST_REQUIRED
+  - name: wealthgenie-frontend
+    newName: registry-required.invalid/wealthgenie-frontend
+    digest: sha256:WEALTHGENIE_FRONTEND_IMAGE_DIGEST_REQUIRED
+  - name: wealthgenie-ml-service
+    newName: registry-required.invalid/wealthgenie-ml-service
+    digest: sha256:WEALTHGENIE_ML_SERVICE_IMAGE_DIGEST_REQUIRED
+  - name: mongo
+    newName: registry-required.invalid/mongo
+    digest: sha256:WEALTHGENIE_MONGODB_IMAGE_DIGEST_REQUIRED
+  - name: redis
+    newName: registry-required.invalid/redis
+    digest: sha256:WEALTHGENIE_REDIS_IMAGE_DIGEST_REQUIRED
+
 patches:
   - path: ingress-patch.yaml
     target:

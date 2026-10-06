@@ -8,6 +8,7 @@ import { createPromptBundle, verifyPromptBundleHash } from './promptBundle.js';
 import { scanPromptBundleSecurity } from './candidateSecurity.js';
 import { validateMutationSurfaces } from './evolutionSurfaceRegistry.js';
 import { createEvolutionBudget } from './evolutionBudget.js';
+import { assertGepaFeedbackSafe } from './feedback.js';
 
 const MAX_BRIDGE_BYTES = 2 * 1024 * 1024;
 const PRIVATE_DATA_PATTERN = /email|phone|income|salary|monthlytakehome|bankaccount|password|jwt|rawprofile|userid|user_id|holdout|answerkey|secret|privatekey/i;
@@ -171,11 +172,20 @@ export function createGepaBridgeInput({ basePromptBundle, allowedMutationSurface
   const surfaces = validateMutationSurfaces(allowedMutationSurfaces);
   const safeTrainCases = trainCases.map((item, index) => sanitizeCase(item, index, 'train'));
   const safeValidationCases = validationCases.map((item, index) => sanitizeCase(item, index, 'validation'));
-  const safeFeedback = failureFeedback.map((item, index) => {
-    const value = typeof item === 'string' ? item : JSON.stringify(item);
-    assertSafeJsonValue(value, `failureFeedback[${index}]`);
-    return value.slice(0, 4000);
-  }).slice(0, 100);
+  if (!Array.isArray(failureFeedback) || failureFeedback.length > 100) {
+    throw new TypeError('GEPA feedback must be a bounded list of governed evaluation records.');
+  }
+  const feedbackRecords = failureFeedback.slice(0, 12).map(item => {
+    assertGepaFeedbackSafe(item);
+    if (item.text.length > 4000) throw new TypeError('Governed GEPA feedback exceeds the bounded text size.');
+    return {
+      source: item.source,
+      evaluationHash: item.evaluationHash,
+      contentHash: item.contentHash,
+      text: item.text,
+    };
+  });
+  const safeFeedback = feedbackRecords.map(record => record.text);
   const safeOptimizer = {
     provider: optimizerConfig.provider === 'dspy' ? 'dspy' : 'fixture',
     reflectionModel: typeof optimizerConfig.reflectionModel === 'string' ? optimizerConfig.reflectionModel.slice(0, 160) : null,
@@ -189,6 +199,7 @@ export function createGepaBridgeInput({ basePromptBundle, allowedMutationSurface
     trainCases: safeTrainCases,
     validationCases: safeValidationCases,
     failureFeedback: safeFeedback,
+    failureFeedbackProvenance: feedbackRecords.map(({ source, evaluationHash, contentHash }) => ({ source, evaluationHash, contentHash })),
     budget: {
       max_generations: hostBudget.maxGenerations,
       max_candidates: hostBudget.maxCandidates,

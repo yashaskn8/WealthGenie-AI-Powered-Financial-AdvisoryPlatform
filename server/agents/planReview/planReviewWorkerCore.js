@@ -120,7 +120,22 @@ function addTrajectory(existing, event, node) {
     type: event.type,
     node,
     tool: event.tool || null,
+    toolCallId: /^[0-9a-f-]{36}$/i.test(event.toolCallId || '') ? event.toolCallId : null,
+    capabilityId: typeof event.capabilityId === 'string' ? event.capabilityId.slice(0, 120) : null,
+    capabilityVersion: typeof event.capabilityVersion === 'string' ? event.capabilityVersion.slice(0, 40) : null,
+    capabilityEffect: typeof event.effect === 'string' ? event.effect.slice(0, 20) : null,
+    resourceScope: typeof event.resourceScope === 'string' ? event.resourceScope.slice(0, 60) : null,
+    ownerScoped: typeof event.ownerScoped === 'boolean' ? event.ownerScoped : null,
+    writesFinancialAuthority: typeof event.writesFinancialAuthority === 'boolean' ? event.writesFinancialAuthority : null,
+    networkAccess: typeof event.networkAccess === 'string' ? event.networkAccess.slice(0, 20) : null,
+    shadowAllowed: typeof event.shadowAllowed === 'boolean' ? event.shadowAllowed : null,
     code: event.code || null,
+    inputHash: /^[a-f0-9]{64}$/.test(event.inputHash || '') ? event.inputHash : null,
+    outputHash: /^[a-f0-9]{64}$/.test(event.outputHash || '') ? event.outputHash : null,
+    startedAt: event.startedAt || null,
+    rejectedToolRequestCount: Number.isInteger(event.rejectedToolRequestCount)
+      ? Math.min(8, Math.max(0, event.rejectedToolRequestCount))
+      : null,
     at: event.at || now().toISOString(),
   }].slice(-100);
 }
@@ -460,17 +475,32 @@ class PlanReviewWorker {
           progress: progressFor(payload.node, completedNodes),
         };
         if (payload.event) set.trajectory = addTrajectory(current.trajectory, payload.event, payload.node);
-        if (payload.event?.type === 'TOOL_SUCCEEDED' || payload.event?.type === 'TOOL_FAILED') {
+        if (['TOOL_SELECTED', 'TOOL_SUCCEEDED', 'TOOL_FAILED'].includes(payload.event?.type)) {
           const has = key => Object.prototype.hasOwnProperty.call(payload.event, key);
+          const selected = payload.event.type === 'TOOL_SELECTED';
           const ledger = {
             sequence,
             tool: payload.event.tool || null,
-            success: payload.event.type === 'TOOL_SUCCEEDED',
+            toolCallId: /^[0-9a-f-]{36}$/i.test(payload.event.toolCallId || '') ? payload.event.toolCallId : null,
+            capabilityId: typeof payload.event.capabilityId === 'string' ? payload.event.capabilityId.slice(0, 120) : null,
+            capabilityVersion: typeof payload.event.capabilityVersion === 'string' ? payload.event.capabilityVersion.slice(0, 40) : null,
+            capabilityEffect: typeof payload.event.effect === 'string' ? payload.event.effect.slice(0, 20) : null,
+            resourceScope: typeof payload.event.resourceScope === 'string' ? payload.event.resourceScope.slice(0, 60) : null,
+            ownerScoped: typeof payload.event.ownerScoped === 'boolean' ? payload.event.ownerScoped : null,
+            writesFinancialAuthority: typeof payload.event.writesFinancialAuthority === 'boolean' ? payload.event.writesFinancialAuthority : null,
+            networkAccess: typeof payload.event.networkAccess === 'string' ? payload.event.networkAccess.slice(0, 20) : null,
+            shadowAllowed: typeof payload.event.shadowAllowed === 'boolean' ? payload.event.shadowAllowed : null,
+            stage: selected ? 'SELECTED' : (payload.event.type === 'TOOL_SUCCEEDED' ? 'SUCCEEDED' : 'FAILED'),
+            success: selected ? null : payload.event.type === 'TOOL_SUCCEEDED',
             code: payload.event.code || null,
-            inputHash: has('input') ? canonicalSha256(payload.event.input) : null,
-            outputHash: has('output') ? canonicalSha256(payload.event.output) : null,
-            startedAt: payload.event.at || now().toISOString(),
-            completedAt: now().toISOString(),
+            inputHash: /^[a-f0-9]{64}$/.test(payload.event.inputHash || '')
+              ? payload.event.inputHash
+              : (has('input') ? canonicalSha256(payload.event.input) : null),
+            outputHash: /^[a-f0-9]{64}$/.test(payload.event.outputHash || '')
+              ? payload.event.outputHash
+              : (has('output') ? canonicalSha256(payload.event.output) : null),
+            startedAt: payload.event.startedAt || payload.event.at || now().toISOString(),
+            completedAt: selected ? null : now().toISOString(),
           };
           set.toolExecutionLedger = [...(current.toolExecutionLedger || []), ledger].slice(-50);
         }
@@ -584,7 +614,22 @@ class PlanReviewWorker {
             type: event.type,
             node: node || null,
             tool: event.tool || null,
+            toolCallId: /^[0-9a-f-]{36}$/i.test(event.toolCallId || '') ? event.toolCallId : null,
+            capabilityId: typeof event.capabilityId === 'string' ? event.capabilityId.slice(0, 120) : null,
+            capabilityVersion: typeof event.capabilityVersion === 'string' ? event.capabilityVersion.slice(0, 40) : null,
+            capabilityEffect: typeof event.effect === 'string' ? event.effect.slice(0, 20) : null,
+            resourceScope: typeof event.resourceScope === 'string' ? event.resourceScope.slice(0, 60) : null,
+            ownerScoped: typeof event.ownerScoped === 'boolean' ? event.ownerScoped : null,
+            writesFinancialAuthority: typeof event.writesFinancialAuthority === 'boolean' ? event.writesFinancialAuthority : null,
+            networkAccess: typeof event.networkAccess === 'string' ? event.networkAccess.slice(0, 20) : null,
+            shadowAllowed: typeof event.shadowAllowed === 'boolean' ? event.shadowAllowed : null,
             code: event.code || null,
+            inputHash: /^[a-f0-9]{64}$/.test(event.inputHash || '') ? event.inputHash : null,
+            outputHash: /^[a-f0-9]{64}$/.test(event.outputHash || '') ? event.outputHash : null,
+            startedAt: event.startedAt || null,
+            rejectedToolRequestCount: Number.isInteger(event.rejectedToolRequestCount)
+              ? Math.min(8, Math.max(0, event.rejectedToolRequestCount))
+              : null,
             at: event.at || now().toISOString(),
           },
         }], { session });

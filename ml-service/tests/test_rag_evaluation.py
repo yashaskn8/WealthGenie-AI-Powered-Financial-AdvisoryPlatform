@@ -136,7 +136,7 @@ def test_rag_evaluator_persistence(tmp_path):
     )
 
     eval_file = evaluator.evaluate_and_persist(
-        query="What is Section 87A?",
+        query="PRIVATE_QUERY_SENTINEL What is Section 87A?",
         response=response,
         ground_truth_chunk_ids={"doc1#0000"},
         k=2,
@@ -145,7 +145,8 @@ def test_rag_evaluator_persistence(tmp_path):
     assert eval_file.exists()
     reports = evaluator.list_evaluation_reports()
     assert len(reports) == 1
-    assert reports[0]["query"] == "What is Section 87A?"
+    assert "query" not in reports[0]
+    assert "PRIVATE_QUERY_SENTINEL" not in eval_file.read_text(encoding="utf-8")
 
 
 def test_evaluator_distinguishes_abstention_from_retrieval_metrics(tmp_path):

@@ -1,17 +1,33 @@
+import crypto from 'node:crypto';
 import { canonicalSha256 } from '../../utils/canonicalJson.js';
 
-function safeText(value, max = 500) {
-  return String(value || '').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, max);
-}
+const VERIFIED_FEEDBACK = new WeakSet();
+const SAFE_FAILURE_LABELS = Object.freeze({
+  EVOLUTION_BUDGET_EXCEEDED: 'evolution budget exceeded',
+  RELIABILITY_SUITE_EMPTY: 'reliability suite was empty',
+  SANDBOX_ATTESTATION_MISSING: 'sandbox attestation missing',
+});
+const SAFE_GATE_NAMES = new Set([
+  'noForbiddenTools',
+  'allowedToolsOnly',
+  'authorityMeasurementComplete',
+  'financialAuthorityUnchanged',
+  'noSensitiveDataLeak',
+  'withinBudget',
+  'candidateReliabilityCoverageComplete',
+]);
 
 export function buildGepaFeedback({ candidateId, evaluation = null, reliability = null, authorityDelta = 0, failures = [], sandbox = null } = {}) {
-  const cards = evaluation?.scoreCards || [];
+  const cards = Array.isArray(evaluation?.scoreCards)
+    ? evaluation.scoreCards.filter(card => card?.partition === 'train' || card?.partition === 'validation')
+    : [];
   const passed = cards.filter(card => card.passed).length;
   const authorityDeltaLabel = authorityDelta !== null && authorityDelta !== undefined && Number.isFinite(Number(authorityDelta))
-    ? (Number(authorityDelta) === 0 ? '0' : safeText(authorityDelta, 20))
+    ? (Number(authorityDelta) === 0 ? 'unchanged' : 'changed')
     : 'unmeasured';
+  const candidateIdentityHash = canonicalSha256(String(candidateId || 'unknown'));
   const lines = [
-    `Candidate: ${safeText(candidateId, 120)}`,
+    `Candidate identity hash: ${candidateIdentityHash}`,
     `Result: ${cards.length ? (passed / cards.length).toFixed(3) : '0.000'}`,
     `Feedback:`,
     `- train/validation scorecards passed: ${passed}/${cards.length}`,
@@ -20,22 +36,48 @@ export function buildGepaFeedback({ candidateId, evaluation = null, reliability 
     `- sandbox attestation: ${sandbox?.manifestHash ? 'present' : 'missing'}`,
   ];
   for (const card of cards.slice(0, 12)) {
-    const failedGates = Object.entries(card.hardGates || {}).filter(([key, value]) => !['forbiddenTools', 'unsupportedTools', 'financialAuthorityDelta', 'authorityMeasurementState'].includes(key) && value === false).map(([key]) => key);
-    if (failedGates.length) lines.push(`- ${card.partition} case failed gates: ${failedGates.join(', ')}`);
-    if (card.scores?.actionCorrect === false) lines.push(`- ${card.partition} action mismatch`);
-    if (card.scores?.grounded === false) lines.push(`- ${card.partition} grounding coverage failed`);
+    const partition = card.partition === 'train' ? 'train' : 'validation';
+    const failedGateCount = Object.entries(card.hardGates || {}).filter(([key, value]) => SAFE_GATE_NAMES.has(key) && value === false).length;
+    if (failedGateCount) lines.push(`- ${partition} case failed ${failedGateCount} approved hard gate(s)`);
+    if (card.scores?.actionCorrect === false) lines.push(`- ${partition} action mismatch`);
+    if (card.scores?.grounded === false) lines.push(`- ${partition} grounding coverage failed`);
   }
-  for (const failure of failures.slice(0, 12)) lines.push(`- failure: ${safeText(failure, 300)}`);
-  return Object.freeze({ text: lines.join('\n'), contentHash: canonicalSha256(lines.join('\n')) });
+  const failureLabels = [...new Set(failures.map(failure => {
+    const code = typeof failure === 'string' ? failure : failure?.code;
+    return SAFE_FAILURE_LABELS[code] || null;
+  }).filter(Boolean))].slice(0, 12);
+  for (const label of failureLabels) lines.push(`- failure: ${label}`);
+  const text = lines.join('\n');
+  const feedback = Object.freeze({
+    source: 'GOVERNED_EVALUATION',
+    evaluationHash: canonicalSha256({
+      candidateId: candidateId || null,
+      scoreCards: cards,
+      reliabilityPassed: reliability?.passed === true,
+      authorityDelta: Number.isFinite(Number(authorityDelta)) ? Number(authorityDelta) : null,
+      sandboxManifestHash: sandbox?.manifestHash || null,
+      failureLabels,
+    }),
+    text,
+    contentHash: crypto.createHash('sha256').update(text, 'utf8').digest('hex'),
+  });
+  VERIFIED_FEEDBACK.add(feedback);
+  return feedback;
 }
 
 export function assertGepaFeedbackSafe(feedback) {
-  if (!feedback || typeof feedback.text !== 'string' || !feedback.contentHash) throw new Error('Structured GEPA feedback is required.');
+  if (!feedback || !VERIFIED_FEEDBACK.has(feedback)
+      || feedback.source !== 'GOVERNED_EVALUATION'
+      || !/^[a-f0-9]{64}$/.test(feedback.evaluationHash || '')
+      || typeof feedback.text !== 'string'
+      || !/^[a-f0-9]{64}$/.test(feedback.contentHash || '')) {
+    throw new Error('Feedback must come from the governed evaluation builder.');
+  }
   if (/email|phone|income|jwt|password|monthlyTakeHome|userId/i.test(feedback.text)) {
     const error = new Error('GEPA feedback contains sensitive data.');
     error.code = 'GEPA_FEEDBACK_PRIVACY_VIOLATION';
     throw error;
   }
-  if (canonicalSha256(feedback.text) !== feedback.contentHash) throw new Error('GEPA feedback hash mismatch.');
+  if (crypto.createHash('sha256').update(feedback.text, 'utf8').digest('hex') !== feedback.contentHash) throw new Error('GEPA feedback hash mismatch.');
   return true;
 }

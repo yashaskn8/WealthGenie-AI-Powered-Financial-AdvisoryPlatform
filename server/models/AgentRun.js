@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import {
   PLAN_REVIEW_AGENT_VERSION,
   PLAN_REVIEW_GRAPH_VERSION,
+  PLAN_REVIEW_TOOL_CATALOG_VERSION,
   PLAN_REVIEW_RUN_STATES,
 } from '../agents/planReview/planReviewRuntime.js';
 
@@ -29,7 +30,7 @@ const agentRunSchema = new mongoose.Schema({
   groundingVersion: { type: String, default: null },
   agentVersion: { type: String, default: PLAN_REVIEW_AGENT_VERSION, immutable: true },
   graphVersion: { type: String, default: PLAN_REVIEW_GRAPH_VERSION, immutable: true },
-  toolCatalogVersion: { type: String, default: 'plan-review-tools-1.0.0', immutable: true },
+  toolCatalogVersion: { type: String, default: PLAN_REVIEW_TOOL_CATALOG_VERSION, immutable: true },
   traceId: { type: String, default: null },
   correlationId: { type: String, default: null },
   stepCount: { type: Number, min: 0, max: 6, default: 0 },
