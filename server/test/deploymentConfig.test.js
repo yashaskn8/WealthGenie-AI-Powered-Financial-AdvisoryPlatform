@@ -258,10 +258,16 @@ test('production overlay substitutes every image with an unusable digest-require
 
 test('Kind CD renders the external production overlay with Kustomize before validating its template', () => {
   const workflow = readYaml(repositoryRoot, '.github/workflows/cd.yml');
-  const render = workflow.jobs['deploy-and-verify-kind'].steps
+  const steps = workflow.jobs['deploy-and-verify-kind'].steps;
+  const dependencies = steps
+    .find(step => step.name === 'Install production manifest validator dependencies');
+  const render = steps
     .find(step => step.name === 'Render and validate fail-closed production image template');
   const overlay = readYaml(repositoryRoot, 'deploy/production/kustomization.yaml');
 
+  assert.ok(dependencies, 'the clean CD runner must install the validator package dependencies');
+  assert.ok(steps.indexOf(dependencies) < steps.indexOf(render), 'dependency installation must precede validator execution');
+  assert.match(dependencies.run, /^npm ci --prefix server$/);
   assert.deepEqual(overlay.resources, ['../../k8s'], 'the overlay must reference the base without containing it');
   assert.match(render.run, /kubectl kustomize deploy\/production > build\/production-template\.yaml/);
   assert.match(render.run, /node server\/scripts\/validateProductionImageManifest\.js --template < build\/production-template\.yaml/);

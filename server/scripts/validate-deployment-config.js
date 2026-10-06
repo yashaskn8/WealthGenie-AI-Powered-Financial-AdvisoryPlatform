@@ -224,6 +224,7 @@ if (!(edgeMongo.index < edgeMongoReady.index
 const cd = parse(read('.github/workflows/cd.yml'));
 const cdSteps = cd.jobs?.['deploy-and-verify-kind']?.steps || [];
 const kindCluster = namedStep(cdSteps, 'Create Kind Kubernetes Cluster');
+const productionValidatorDependencies = namedStep(cdSteps, 'Install production manifest validator dependencies');
 const metricsServerInstall = namedStep(cdSteps, 'Install Metrics Server for HPA');
 if (kindCluster.step.with?.version !== 'v0.24.0'
     || !metricsServerInstall.step.run?.includes('releases/download/v0.8.1/components.yaml')
@@ -231,9 +232,11 @@ if (kindCluster.step.with?.version !== 'v0.24.0'
   throw new Error('Kind CD must pin a Metrics Server release compatible with the Kubernetes 1.31 test cluster');
 }
 const productionRenderValidation = namedStep(cdSteps, 'Render and validate fail-closed production image template');
-if (!productionRenderValidation.step.run?.includes('kubectl kustomize deploy/production')
+if (!(productionValidatorDependencies.index < productionRenderValidation.index)
+    || !productionValidatorDependencies.step.run?.includes('npm ci --prefix server')
+    || !productionRenderValidation.step.run?.includes('kubectl kustomize deploy/production')
     || !productionRenderValidation.step.run?.includes('node server/scripts/validateProductionImageManifest.js --template')) {
-  throw new Error('Kind CD must render and validate the non-deployable production image template');
+  throw new Error('Kind CD must install the locked Node dependencies before rendering and validating the non-deployable production image template');
 }
 if (cdSteps.filter(step => step.name === 'Run the one-shot Phase 7 ResearchAgent task migration').length !== 1) {
   throw new Error('Kind CD must run exactly one Phase 7 ResearchAgent task migration');
