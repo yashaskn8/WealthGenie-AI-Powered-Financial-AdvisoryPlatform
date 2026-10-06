@@ -7,6 +7,7 @@ import { planReviewActionSchema } from '../agents/planReview/planReviewSchemas.j
 import { enqueuePlanReviewRun, getCurrentPlanReviewRun, getPlanReviewRun } from '../agents/planReview/planReviewService.js';
 import { persistPlanReviewAction } from '../agents/planReview/planReviewApproval.js';
 import { completePlanReviewMandateAction } from '../agents/planReview/planReviewApproval.js';
+import { terminalizePlanReviewRun } from '../agents/planReview/planReviewTerminal.js';
 import AgentRunModel from '../models/AgentRun.js';
 import { buildApprovalAction } from '../agents/planReview/planReviewRuntime.js';
 import { acknowledgePlanHealthEvent, inspectPlanHealth, listPlanHealthEvents } from '../services/planHealthMonitor.js';
@@ -26,10 +27,12 @@ import {
 } from '../agents/authorization/mandateService.js';
 import { createAuthorizedActionExecutor } from '../agents/authorization/authorizedActionExecutor.js';
 import { createPasskeyRegistrationOptions, verifyPasskeyRegistration } from '../agents/authorization/passkeyService.js';
+import { hasRecentSessionAuthentication } from '../agents/authorization/recentAuthentication.js';
 import ExecutionReceipt from '../models/ExecutionReceipt.js';
 import { appendAuthorizationEvent } from '../agents/authorization/authorizationEvents.js';
 import { PrometheusMetrics } from '../services/metricsCollector.js';
 import { verifyExecutionReceiptForUser } from '../agents/authorization/receiptVerification.js';
+import { getProductionAgentEvaluationForUser } from '../agents/evals/productionEvaluator.js';
 import logger from '../utils/logger.js';
 
 const router = Router();
@@ -44,6 +47,12 @@ function featureUnavailable() {
 
 function authorizationEnabled(req) {
   return req.app.locals.runtimeConfig?.authorization?.verifiableActionsEnabled === true;
+}
+
+function requireRecentAuthentication(req) {
+  if (!hasRecentSessionAuthentication(req.user)) {
+    throw createError(403, 'Recent sign-in required.', 'Please sign in again before enrolling a passkey.', { code: 'AUTH_REAUTH_REQUIRED' });
+  }
 }
 
 function authorizationConfig(req) {
@@ -77,6 +86,27 @@ router.get('/plan-review/current', verifyJWT, validateQuery(agentProfileQuerySch
   const run = await getCurrentPlanReviewRun({ userId: req.user.userId, profileId: req.query.profileId });
   if (!run) throw createError(404, 'No plan review run found.', 'No plan review run found.');
   return res.json(run);
+}));
+
+router.get('/production-evaluations/:evaluationId', verifyJWT, asyncHandler(async (req, res) => {
+  if (!isEnabled(req)) return featureUnavailable();
+  if (!/^[0-9a-f]{64}$/i.test(req.params.evaluationId)) {
+    throw createError(400, 'Invalid production evaluation ID.', 'Invalid production evaluation ID.');
+  }
+  let evaluation;
+  try {
+    evaluation = await getProductionAgentEvaluationForUser({
+      evaluationId: req.params.evaluationId,
+      userId: req.user.userId,
+    });
+  } catch (error) {
+    if (error?.code !== 'PRODUCTION_EVALUATION_INTEGRITY_FAILURE') throw error;
+    throw createError(503, 'Production evaluation integrity verification failed.', 'Evaluation evidence is temporarily unavailable.', {
+      code: 'PRODUCTION_EVALUATION_INTEGRITY_FAILURE',
+    });
+  }
+  if (!evaluation) throw createError(404, 'Production evaluation not found or access denied.', 'Production evaluation not found.');
+  return res.json(evaluation);
 }));
 
 router.get('/cards', verifyJWT, asyncHandler(async (req, res) => {
@@ -161,11 +191,14 @@ router.post('/plan-review/:runId/cancel', verifyJWT, asyncHandler(async (req, re
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.runId)) {
     throw createError(400, 'Invalid plan review run ID.', 'Invalid plan review run ID.');
   }
-  const run = await AgentRunModel.findOneAndUpdate(
-    { userId: req.user.userId, runId: req.params.runId, status: { $in: ['QUEUED', 'RUNNING', 'WAITING_FOR_APPROVAL'] } },
-    { $set: { cancellationRequested: true, status: 'CANCELLED', completedAt: new Date(), leaseUntil: null }, $unset: { activeDedupeKey: 1 } },
-    { new: true },
-  ).lean();
+  const run = await terminalizePlanReviewRun({
+    model: AgentRunModel,
+    userId: req.user.userId,
+    runId: req.params.runId,
+    expectedStatuses: ['QUEUED', 'RUNNING', 'WAITING_FOR_APPROVAL'],
+    status: 'CANCELLED',
+    reasonCode: 'USER_REQUESTED_CANCELLATION',
+  });
   if (!run) throw createError(404, 'Plan review run not found or cannot be cancelled.', 'Plan review run not found.');
   return res.json({ runId: run.runId, status: run.status, mutationPerformed: false });
 }));
@@ -224,11 +257,13 @@ router.get('/mandates', verifyJWT, validateQuery(mandateListQuerySchema), asyncH
 
 router.post('/passkeys/registration/options', verifyJWT, asyncHandler(async (req, res) => {
   if (!authorizationEnabled(req)) return featureUnavailable();
+  requireRecentAuthentication(req);
   return res.json(await createPasskeyRegistrationOptions({ userId: req.user.userId, runtimeConfig: authorizationConfig(req) }));
 }));
 
 router.post('/passkeys/registration/verify', verifyJWT, validateStrict(passkeyRegistrationResponseSchema), asyncHandler(async (req, res) => {
   if (!authorizationEnabled(req)) return featureUnavailable();
+  requireRecentAuthentication(req);
   return res.status(201).json(await verifyPasskeyRegistration({ userId: req.user.userId, response: req.body, runtimeConfig: authorizationConfig(req) }));
 }));
 

@@ -66,6 +66,19 @@ export function sanitizeTelemetryAttributes(attributes = {}) {
   return safe;
 }
 
+const SAFE_SPAN_NAMES = new Set([
+  'agent.operation',
+  'internal.operation',
+  'http.request',
+]);
+
+export function sanitizeTelemetrySpanName(name) {
+  if (typeof name !== 'string') return 'internal.operation';
+  if (SAFE_SPAN_NAMES.has(name)) return name;
+  const method = /^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\b/.exec(name)?.[1];
+  return method ? `http.request.${method}` : 'internal.operation';
+}
+
 export function sanitizeTelemetryException(error) {
   let redacted;
   try {
@@ -87,4 +100,26 @@ export function sanitizeTelemetryException(error) {
     errorType,
     ...(stack ? { stack } : {}),
   };
+}
+
+export function sanitizeTelemetrySpanEvents(events = []) {
+  if (!Array.isArray(events)) return [];
+  return events.slice(0, 32).flatMap(event => {
+    if (event?.name !== 'exception') return [];
+    const attributes = event.attributes || {};
+    const safeAttributes = {};
+    for (const key of ['exception.type', 'exception.message']) {
+      const value = sanitizeTelemetryValue(attributes[key]);
+      if (value !== undefined) safeAttributes[key] = value;
+    }
+    const time = event.time ?? event.timestamp;
+    let timestamp = null;
+    try {
+      if (Array.isArray(time) && time.length === 2) timestamp = new Date(Number(time[0]) * 1000 + Number(time[1]) / 1e6).toISOString();
+      else if (Number.isFinite(Number(time))) timestamp = new Date(Number(time) / 1e6).toISOString();
+    } catch {
+      timestamp = null;
+    }
+    return [{ name: 'exception', timestamp, attributes: safeAttributes }];
+  });
 }

@@ -38,6 +38,36 @@ test('logger redacts credentials embedded in URL query strings and serialized me
   assert.equal(malformedSignedQuery, 'https://example.invalid/file?X-Amz-Algorithm=[REDACTED]&X-Amz-Credential=[REDACTED]&X-Amz-Signature=[REDACTED]&X-Amz-Date=[REDACTED]');
 });
 
+test('logger redacts numeric financial fields in nested structured objects', () => {
+  const redacted = redactLogValue({
+    userId: '64b000000000000000000010',
+    profileId: '64b000000000000000000011',
+    accountId: '64b000000000000000000012',
+    profile: {
+      monthly_take_home: 180000,
+      salary: 2400000,
+      monthlySavings: 32000,
+      riskTolerance: 'HIGH',
+      taxAmount: 120000,
+      safeCounter: 2,
+    },
+  });
+  assert.equal(redacted.userId, '[REDACTED]');
+  assert.equal(redacted.profileId, '[REDACTED]');
+  assert.equal(redacted.accountId, '[REDACTED]');
+  assert.equal(redacted.profile.monthly_take_home, '[REDACTED]');
+  assert.equal(redacted.profile.salary, '[REDACTED]');
+  assert.equal(redacted.profile.monthlySavings, '[REDACTED]');
+  assert.equal(redacted.profile.riskTolerance, '[REDACTED]');
+  assert.equal(redacted.profile.taxAmount, '[REDACTED]');
+  assert.equal(redacted.profile.safeCounter, 2);
+});
+
+test('logger redacts Aadhaar and unlabeled long account numbers in exception text', () => {
+  const redacted = redactLogValue('Aadhaar 1234 5678 9012; account 123456789012; profile 64b000000000000000000010');
+  assert.doesNotMatch(redacted, /1234 5678 9012|123456789012|64b000000000000000000010/);
+});
+
 test('logger redacts token identifiers and circular structures without changing safe fields', () => {
   const value = {
     request_id: 'req-safe',

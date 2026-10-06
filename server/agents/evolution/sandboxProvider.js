@@ -113,7 +113,7 @@ export class E2BEvolutionSandboxProvider {
         result: {
           stdout: execution?.stdout || execution?.output || '',
           stderr: execution?.stderr || '',
-          testResults: { exitCode: Number(execution?.exitCode ?? 0) },
+          testResults: { exitCode: Number.isInteger(execution?.exitCode) ? execution.exitCode : null },
           startedAt,
           completedAt: new Date().toISOString(),
         },
@@ -122,6 +122,14 @@ export class E2BEvolutionSandboxProvider {
       if (sandbox && typeof sandbox.kill === 'function') await sandbox.kill().catch(() => undefined);
     }
   }
+}
+
+export function sandboxExecutionPassed(result) {
+  if (result?.provider === 'e2b') {
+    return Number.isInteger(result?.testResults?.exitCode) && result.testResults.exitCode === 0;
+  }
+  if (result?.provider === 'fixture') return result?.testResults?.passed === true;
+  return false;
 }
 
 export function createSandboxProvider({ enabled = false, allowedRoots = [], production = false } = {}) {

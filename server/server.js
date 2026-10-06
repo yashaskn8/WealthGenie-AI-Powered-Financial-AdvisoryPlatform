@@ -18,6 +18,7 @@ import { verifyMarketDataPersistenceIndexes } from './services/persistenceIndexR
 import { verifyPlanReviewPersistenceIndexes } from './services/planReviewPersistence.js';
 import { verifyAgentRuntimePersistence } from './services/planHealthPersistence.js';
 import AgentRunEvent from './models/AgentRunEvent.js';
+import ProductionAgentEvaluation from './models/ProductionAgentEvaluation.js';
 import { warmAuthorizationPersistence } from './services/authorizationPersistence.js';
 import { reconcileAuthorizedExecutions } from './agents/authorization/executionRecovery.js';
 import { createMcpRuntime } from './mcp/mcpRuntime.js';
@@ -131,7 +132,7 @@ export async function startServer({ env = process.env } = {}) {
     });
     startMarketDataRefreshJobs();
     if (config.agentWorkerEnabled && config.agentWorkerMode === 'embedded') {
-      startPlanReviewWorker({ runtimeConfig: config, eventModel: AgentRunEvent });
+      startPlanReviewWorker({ runtimeConfig: config, eventModel: AgentRunEvent, productionEvaluationModel: ProductionAgentEvaluation });
     }
     if (config.authorization.verifiableActionsEnabled) {
       authorizedRecoveryTimer = setInterval(() => {

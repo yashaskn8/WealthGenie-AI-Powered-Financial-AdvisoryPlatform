@@ -13,6 +13,24 @@ export const INDIA_POST_SAVINGS_URL = 'https://www.indiapost.gov.in/banking-serv
 export const GOVERNMENT_SAVINGS_CACHE_KEY = `market:government:small-savings:${MARKET_DATA_SCHEMA_VERSION}`;
 export const GOVERNMENT_SAVINGS_CACHE_TTL_SECONDS = 12 * 60 * 60;
 export const GOVERNMENT_RATE_DATA_CLASS = 'QUARTERLY_OFFICIAL_RATE';
+const INDIA_TIME_ZONE = 'Asia/Kolkata';
+
+function indiaCalendarParts(referenceDate) {
+  const date = referenceDate instanceof Date ? referenceDate : new Date(referenceDate);
+  if (Number.isNaN(date.getTime())) throw new TypeError('Invalid Indian government-rate cache date.');
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: INDIA_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+  }).formatToParts(date);
+  return Object.fromEntries(parts.filter(part => part.type !== 'literal').map(part => [part.type, part.value]));
+}
+
+export function governmentSavingsCacheKeyAt(referenceDate) {
+  const { year, month } = indiaCalendarParts(referenceDate);
+  const quarter = Math.ceil(Number(month) / 3);
+  return `${GOVERNMENT_SAVINGS_CACHE_KEY}:${year}-Q${quarter}`;
+}
 
 const SCHEME_IDENTITIES = Object.freeze({
   'Post Office Savings Account': { id: 'post-office-savings', name: 'Post Office Savings Account' },
@@ -92,8 +110,8 @@ export function parseIndiaPostSavingsBundle(bundleText, {
   if (!Array.isArray(rows)) throw new Error('INDIA_POST_SCHEMA_MISMATCH:rate_rows');
 
   const fetchedDate = new Date(fetchedAt);
-  const intervalEnd = new Date(`${effectiveTo}T23:59:59.999Z`);
-  const intervalStart = new Date(`${effectiveFrom}T00:00:00.000Z`);
+  const intervalEnd = new Date(`${effectiveTo}T23:59:59.999+05:30`);
+  const intervalStart = new Date(`${effectiveFrom}T00:00:00.000+05:30`);
   const nowDate = now instanceof Date ? new Date(now.getTime()) : new Date(now);
   if (!Number.isFinite(fetchedDate.getTime())
       || !Number.isFinite(nowDate.getTime())
@@ -179,7 +197,7 @@ export default class GovernmentSmallSavingsProvider extends MarketDataProvider {
 
   async getSnapshot({ forceRefresh = false } = {}) {
     return readThroughMarketCache({
-      cacheKey: GOVERNMENT_SAVINGS_CACHE_KEY,
+      cacheKey: governmentSavingsCacheKeyAt(this.clock()),
       ttlSeconds: GOVERNMENT_SAVINGS_CACHE_TTL_SECONDS,
       forceRefresh,
       loader: async () => {

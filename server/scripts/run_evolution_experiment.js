@@ -6,6 +6,10 @@ import { createEvolutionSandboxProvider } from '../agents/evolution/sandboxProvi
 import { runGepaProposalBridge } from '../agents/evolution/gepaBridge.js';
 import { runGovernedEvolution } from '../agents/evolution/governedEvolution.js';
 import { createPlanReviewScaffoldRunner } from '../agents/evolution/scaffoldEvolution.js';
+import { buildLiveGepaProposalOptions, buildLiveOptimizerCases } from '../agents/evolution/liveExperimentCases.js';
+import { createLiveCandidatePlanner } from '../agents/evolution/liveCandidatePlanner.js';
+import { createModelGateway } from '../agents/modelGateway.js';
+import { ProviderManager } from '../services/providerAbstraction.js';
 import { canonicalSha256 } from '../utils/canonicalJson.js';
 import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
 
@@ -52,12 +56,13 @@ const context = {
 };
 
 function parseArgs(argv) {
-  const args = { gepaProvider: 'dspy', sandboxMode: 'auto', outputDir: 'evolution-report' };
+  const args = { gepaProvider: 'dspy', sandboxMode: 'auto', outputDir: 'evolution-report', requireQualifiedLiveEvidence: false };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     if (flag === '--gepa-provider') args.gepaProvider = argv[++index];
     else if (flag === '--sandbox-mode') args.sandboxMode = argv[++index];
     else if (flag === '--output-dir') args.outputDir = argv[++index];
+    else if (flag === '--require-qualified-live-evidence') args.requireQualifiedLiveEvidence = true;
     else throw new Error(`Unknown experiment argument: ${flag}`);
   }
   if (!['dspy', 'fixture'].includes(args.gepaProvider)) throw new Error('GEPA provider must be dspy or fixture.');
@@ -105,24 +110,20 @@ function getSandbox(args) {
     error.code = 'E2B_FEATURE_FLAG_REQUIRED';
     throw error;
   }
-  if (useE2b) return { provider: createEvolutionSandboxProvider({ provider: 'e2b', enabled: true }), liveE2BExecuted: true, sandboxMode: 'e2b', sandboxNotice: null };
+  if (useE2b) return {
+    provider: createEvolutionSandboxProvider({ provider: 'e2b', enabled: true }),
+    e2bManifestBindingCheckExecuted: true,
+    candidateEvaluationLocation: 'HOST_PROCESS; E2B_ONLY_CHECKS_MANIFEST_BINDING',
+    sandboxMode: 'e2b',
+    sandboxNotice: 'E2B verifies the candidate manifest binding; PlanReview candidate execution remains in the host process.',
+  };
   return {
     provider: createEvolutionSandboxProvider({ provider: 'fixture', execute: async () => ({ stdout: 'fixture-candidate-sandbox', testResults: { passed: true } }) }),
-    liveE2BExecuted: false,
+    e2bManifestBindingCheckExecuted: false,
+    candidateEvaluationLocation: 'HOST_PROCESS; FIXTURE_SANDBOX_CHECKS_MANIFEST_BINDING',
     sandboxMode: 'fixture',
     sandboxNotice: 'LIVE E2B NOT EXECUTED',
   };
-}
-
-function buildCases() {
-  return ['train', 'validation', 'holdout'].map(partition => ({
-    id: `${partition}-researchmesh-fixture`,
-    partition,
-    expectedAction: 'NONE',
-    groundingRequired: false,
-    maxTrajectoryEvents: 100,
-    fixture: { userId, profileId, context },
-  }));
 }
 
 async function loadSignedHoldoutBundle(bundlePath) {
@@ -149,8 +150,10 @@ function markdownReport(report) {
     `- Status: ${report.status}`,
     `- GEPA provider: ${report.gepaProvider}`,
     `- Live GEPA executed: ${report.liveGepaExecuted}`,
+    `- Candidate planner model calls: ${report.candidatePlannerModelCalls}`,
     `- Sandbox mode: ${report.sandboxMode}`,
-    `- Live E2B executed: ${report.liveE2BExecuted}`,
+    `- E2B manifest-binding check executed: ${report.e2bManifestBindingCheckExecuted}`,
+    `- Candidate evaluation location: ${report.candidateEvaluationLocation}`,
     `- Candidate count: ${report.candidateCount}`,
     `- Financial authority delta: ${report.financialAuthorityDelta}`,
     `- Financial authority measurement: ${report.authorityMeasurementState}`,
@@ -178,27 +181,57 @@ async function run() {
   }
   const args = parseArgs(process.argv.slice(2));
   assertManualFlags();
+  const cases = buildLiveOptimizerCases({ userId, profileId, context });
+  if (!cases.some(item => item.partition === 'validation')) {
+    const report = {
+      status: 'UNQUALIFIED_DATASET',
+      experimentEvidenceState: 'UNQUALIFIED_SINGLE_FIXTURE; TRAIN_VALIDATION_INDEPENDENCE_NOT_ESTABLISHED',
+      generatedAt: new Date().toISOString(),
+      experimentHash: canonicalSha256({ caseIds: cases.map(item => item.id) }),
+      gepaProvider: args.gepaProvider,
+      liveGepaExecuted: false,
+      sandboxMode: 'NOT_STARTED',
+      e2bManifestBindingCheckExecuted: false,
+      candidateEvaluationLocation: 'NOT_RUN_NO_INDEPENDENT_VALIDATION',
+      candidatePlannerModelCalls: 0,
+      sandboxNotice: 'Candidate optimization and execution were not started because an independent validation fixture is unavailable.',
+      candidateCount: 0,
+      paretoCandidateIds: [],
+      financialAuthorityDelta: null,
+      authorityMeasurementState: 'NOT_MEASURED',
+      candidates: [],
+    };
+    await writeReport(args.outputDir, report);
+    if (args.requireQualifiedLiveEvidence) {
+      const error = new Error('The live experiment report remains unqualified: an independent validation fixture is unavailable.');
+      error.code = 'LIVE_EXPERIMENT_NOT_QUALIFIED';
+      throw error;
+    }
+    return report;
+  }
   const liveModels = args.gepaProvider === 'dspy' ? requireLiveGepaCredentials() : { model: null, reflectionModel: null };
+  if (!ProviderManager.nvidia.isConfigured()) {
+    const error = new Error('Live candidate evaluation requires NVIDIA_API_KEY; canned or deterministic planner output is not a live experiment.');
+    error.code = 'LIVE_CANDIDATE_PLANNER_CREDENTIAL_REQUIRED';
+    throw error;
+  }
   const sandbox = getSandbox(args);
-  const cases = buildCases();
   const holdoutBundlePath = process.env.AGENT_HOLDOUT_BUNDLE_PATH?.trim() || null;
+  if (args.requireQualifiedLiveEvidence && (!holdoutBundlePath || !process.env.AGENT_HOLDOUT_TRUSTED_PUBLIC_KEY?.trim())) {
+    const error = new Error('A signed holdout bundle and trusted public key are required for live qualification.');
+    error.code = 'LIVE_QUALIFICATION_HOLDOUT_REQUIRED';
+    throw error;
+  }
   const baseSpec = createScaffoldSpec({ version: 'experiment-base', promptBundle: CURRENT_PROMPT_BUNDLE });
-  const safeOptimizerCases = cases.filter(item => item.partition !== 'holdout').map(item => ({
-    id: item.id,
-    partition: item.partition,
-    expectedAction: item.expectedAction,
-    safeSummary: 'Sanitized bounded PlanReview fixture for offline optimizer evaluation.',
-  }));
-  const proposals = await runGepaProposalBridge({
-    basePromptBundle: CURRENT_PROMPT_BUNDLE,
-    allowedMutationSurfaces: ['promptBundle.plannerInstruction'],
-    trainCases: safeOptimizerCases.filter(item => item.partition === 'train'),
-    validationCases: safeOptimizerCases.filter(item => item.partition === 'validation'),
-    failureFeedback: ['grounding passed', 'candidate must preserve financial authority delta zero', 'use the minimum safe read-only checks'],
-    budget: { maxCandidates: Math.min(12, Math.max(1, Number(process.env.EVOLUTION_MAX_CANDIDATES || 2))), maxMetricCalls: 12 },
+  const proposalOptions = buildLiveGepaProposalOptions({
+    cases,
+    maxCandidates: process.env.EVOLUTION_MAX_CANDIDATES || 2,
     optimizerConfig: { provider: args.gepaProvider, taskModel: liveModels.model, reflectionModel: liveModels.reflectionModel },
     pythonWorkingDirectory: path.resolve('ml-service'),
   });
+  const proposals = await runGepaProposalBridge({ basePromptBundle: CURRENT_PROMPT_BUNDLE, ...proposalOptions });
+  const plannerModelGateway = createModelGateway({ providers: [ProviderManager.nvidia], maxOutputTokens: 256 });
+  const plannerProvider = createLiveCandidatePlanner({ modelGateway: plannerModelGateway, maxCalls: 32, maxOutputTokens: 256 });
   const runner = createPlanReviewScaffoldRunner({ dependencies: {
     captureFinancialAuthority: async ({ caseDefinition }) => {
       const fixtureContext = caseDefinition?.fixture?.context;
@@ -210,7 +243,8 @@ async function run() {
         }),
       };
     },
-    plannerProvider: { generate: async () => ({ text: '{"checks":["get_current_profile_context"]}' }) },
+    plannerProvider,
+    strictModelPlanner: true,
     loadPlanReviewContext: async () => context,
     explanationProviders: [],
     persistAgentRun: async () => undefined,
@@ -232,12 +266,15 @@ async function run() {
   });
   const report = {
     status: result.status,
+    experimentEvidenceState: 'UNQUALIFIED_SINGLE_FIXTURE; TRAIN_VALIDATION_INDEPENDENCE_NOT_ESTABLISHED',
     generatedAt: new Date().toISOString(),
     experimentHash: canonicalSha256({ candidates: result.candidateRecords.map(item => item.candidateId), paretoCandidateIds: result.paretoCandidateIds }),
     gepaProvider: args.gepaProvider,
     liveGepaExecuted: args.gepaProvider === 'dspy',
     sandboxMode: sandbox.sandboxMode,
-    liveE2BExecuted: sandbox.liveE2BExecuted,
+    e2bManifestBindingCheckExecuted: sandbox.e2bManifestBindingCheckExecuted,
+    candidateEvaluationLocation: sandbox.candidateEvaluationLocation,
+    candidatePlannerModelCalls: plannerProvider.calls,
     sandboxNotice: sandbox.sandboxNotice,
     candidateCount: result.candidateRecords.length,
     paretoCandidateIds: result.paretoCandidateIds,
@@ -247,6 +284,8 @@ async function run() {
       candidateId: item.candidateId,
       status: item.status,
       hardGatePassed: item.hardGatePassed,
+      sandboxTestPassed: item.sandboxTestPassed,
+      candidateEvaluationLocation: item.candidateEvaluationLocation,
       financialAuthorityDelta: item.financialAuthorityDelta,
       authorityMeasurementState: item.authorityMeasurementState,
       evaluationPassed: item.evaluation.passed,
@@ -259,12 +298,19 @@ async function run() {
     })),
   };
   await writeReport(args.outputDir, report);
+  if (args.requireQualifiedLiveEvidence && (!report.candidates.length
+      || report.authorityMeasurementState !== 'MEASURED'
+      || report.candidates.some(candidate => candidate.status !== 'SHADOW_READY' || !candidate.holdoutPassed))) {
+    const error = new Error('The live experiment report remains unqualified: independent data and measured authority gates are incomplete.');
+    error.code = 'LIVE_EXPERIMENT_NOT_QUALIFIED';
+    throw error;
+  }
   return report;
 }
 
 try {
   const report = await run();
-  console.log(JSON.stringify({ status: report.status, candidateCount: report.candidateCount, authorityMeasurementState: report.authorityMeasurementState, liveGepaExecuted: report.liveGepaExecuted, liveE2BExecuted: report.liveE2BExecuted }));
+  console.log(JSON.stringify({ status: report.status, candidateCount: report.candidateCount, candidatePlannerModelCalls: report.candidatePlannerModelCalls, authorityMeasurementState: report.authorityMeasurementState, liveGepaExecuted: report.liveGepaExecuted, e2bManifestBindingCheckExecuted: report.e2bManifestBindingCheckExecuted, candidateEvaluationLocation: report.candidateEvaluationLocation }));
 } catch (error) {
   const safeCode = error?.code || 'EVOLUTION_EXPERIMENT_FAILED';
   console.error(`${safeCode}: ${error?.message || 'Evolution experiment failed.'}`);

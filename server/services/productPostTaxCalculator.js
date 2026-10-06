@@ -635,7 +635,7 @@ export function generateBeginnerSuitability({ product, profile = {}, parentCatal
   if (parentId === 'ppf' || parentId === 'sukanya') {
     whyThisFitsYou = `Shown because you selected ${goals}. Backed by the Government of India with sovereign backing; applicable tax treatment depends on the selected fiscal-year policy and your account facts.`;
   } else if (parentId === 'rbi_bonds') {
-    whyThisFitsYou = `Shown because you selected ${goals} with a ${horizon} horizon. Issued directly by the RBI with sovereign safety, paying a floating coupon that automatically resets every 6 months.`;
+    whyThisFitsYou = `Shown because you selected ${goals} with a ${horizon} horizon. Government of India bond, administered by the RBI, with sovereign safety and a floating coupon that resets every 6 months.`;
   } else if (parentId === 'fd' || parentId === 'sbi_fd') {
     whyThisFitsYou = `Shown because you selected ${goals}. SBI publishes rates for selected term-deposit tenures; the applicable rate and early-withdrawal terms depend on the deposit you choose.`;
   } else if (parentId === 'scss') {

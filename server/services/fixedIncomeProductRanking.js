@@ -1,4 +1,7 @@
-import { AVAILABILITY, FRESHNESS, PROVIDERS } from './marketData/contracts.js';
+import { AVAILABILITY, FACT_KINDS, FRESHNESS, MARKET_DATA_SCHEMA_VERSION, PROVIDERS } from './marketData/contracts.js';
+import { GOVERNMENT_RATE_DATA_CLASS, INDIA_POST_SAVINGS_URL } from './marketData/GovernmentSmallSavingsProvider.js';
+import { RBI_FRSB_NOTIFICATION_URL, RBI_RATE_DATA_CLASS } from './marketData/RbiFloatingRateSavingsBondProvider.js';
+import { SBI_RATE_DATA_CLASS, SBI_TERM_DEPOSIT_URL } from './marketData/SbiTermDepositProvider.js';
 
 export const FIXED_INCOME_RANKING_VERSION = 'wti-fixed-income-comparison-1.0.0';
 
@@ -107,27 +110,90 @@ function commonProductDto(product, fact, parentInstrumentId) {
   };
 }
 
-function isUsableFact(fact) {
-  return fact?.availabilityStatus === AVAILABILITY.AVAILABLE
-    && fact?.freshness?.status === FRESHNESS.FRESH
-    && Number.isFinite(Number(fact.value));
+function indiaDateAt(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(date);
+  const fields = Object.fromEntries(parts.filter(part => part.type !== 'literal').map(part => [part.type, part.value]));
+  return `${fields.year}-${fields.month}-${fields.day}`;
 }
 
-export function selectCurrentEffectiveFact(facts, canonicalProductId) {
+function isUsableFact(fact, now) {
+  const today = indiaDateAt(now);
+  const effectiveFrom = fact?.effectiveFrom == null ? null : String(fact.effectiveFrom).slice(0, 10);
+  const effectiveTo = fact?.effectiveTo == null ? null : String(fact.effectiveTo).slice(0, 10);
+  const hasValidEffectivePeriod = (!effectiveFrom || /^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom))
+    && (!effectiveTo || /^\d{4}-\d{2}-\d{2}$/.test(effectiveTo))
+    && (!effectiveFrom || !effectiveTo || effectiveFrom <= effectiveTo);
+  return fact?.availabilityStatus === AVAILABILITY.AVAILABLE
+    && fact?.freshness?.status === FRESHNESS.FRESH
+    && Number.isFinite(Number(fact.value))
+    && Number(fact.value) > 0
+    && today !== null
+    && hasValidEffectivePeriod
+    && (!effectiveFrom || today >= effectiveFrom)
+    && (!effectiveTo || today <= effectiveTo);
+}
+
+function hasQualifiedFact(fact, {
+  canonicalProductId,
+  provider,
+  sourceInstrumentId,
+  sourceUrl,
+  dataClass,
+  rateBasis,
+  kind = FACT_KINDS.SCHEME_INTEREST_RATE,
+}) {
+  return fact?.schemaVersion === MARKET_DATA_SCHEMA_VERSION
+    && fact.kind === kind
+    && fact.canonicalProductId === canonicalProductId
+    && fact.source?.provider === provider
+    && fact.source?.instrumentId === sourceInstrumentId
+    && fact.source?.url === sourceUrl
+    && fact.unit === 'PERCENT_PER_ANNUM'
+    && fact.dataClass === dataClass
+    && fact.rateBasis === rateBasis;
+}
+
+function hasQualifiedProduct(product, { canonicalProductId, provider, productType, sourceUrl }) {
+  return product?.schemaVersion === MARKET_DATA_SCHEMA_VERSION
+    && product.canonicalProductId === canonicalProductId
+    && product.productType === productType
+    && product.source?.provider === provider
+    && product.source?.url === sourceUrl;
+}
+
+export function selectCurrentEffectiveFact(facts, canonicalProductId, now = new Date()) {
   return (facts || [])
-    .filter(fact => fact.canonicalProductId === canonicalProductId && isUsableFact(fact))
+    .filter(fact => fact.canonicalProductId === canonicalProductId && isUsableFact(fact, now))
     .sort((left, right) => String(right.effectiveFrom || '').localeCompare(String(left.effectiveFrom || '')))[0] || null;
 }
 
-function selectGovernmentProduct(parentInstrumentId, snapshot) {
+function selectGovernmentProduct(parentInstrumentId, snapshot, now) {
   const schemeId = GOVERNMENT_PARENT_SCHEMES[parentInstrumentId];
   const canonicalId = `government:india-post:${schemeId}`;
   const product = (snapshot?.products || []).find(item => item.canonicalProductId === canonicalId);
-  const fact = selectCurrentEffectiveFact(snapshot?.facts, canonicalId);
-  return product && isUsableFact(fact) ? { product, fact } : null;
+  const fact = selectCurrentEffectiveFact(snapshot?.facts, canonicalId, now);
+  const productValid = hasQualifiedProduct(product, {
+    canonicalProductId: canonicalId,
+    provider: PROVIDERS.GOVERNMENT_OF_INDIA,
+    productType: 'GOVERNMENT_SCHEME',
+    sourceUrl: INDIA_POST_SAVINGS_URL,
+  }) && product.externalIds?.some(item => item.source === 'INDIA_POST_SCHEME_ID' && item.value === schemeId);
+  const factValid = isUsableFact(fact, now) && hasQualifiedFact(fact, {
+    canonicalProductId: canonicalId,
+    provider: PROVIDERS.GOVERNMENT_OF_INDIA,
+    sourceInstrumentId: schemeId,
+    sourceUrl: INDIA_POST_SAVINGS_URL,
+    dataClass: GOVERNMENT_RATE_DATA_CLASS,
+    rateBasis: 'OFFICIAL_NOMINAL_RATE_PER_ANNUM',
+  });
+  return productValid && factValid ? { product, fact } : null;
 }
 
-function selectComparableSbiProduct(profile, snapshot) {
+function selectComparableSbiProduct(profile, snapshot, now) {
   const horizonDays = Number(profile?.investmentHorizonYears) * 365;
   const depositorType = Number(profile?.age) >= 60 ? 'SENIOR_CITIZEN' : 'GENERAL_PUBLIC';
   if (!Number.isFinite(horizonDays) || horizonDays <= 0) return null;
@@ -139,17 +205,64 @@ function selectComparableSbiProduct(profile, snapshot) {
   const fact = product
     ? (snapshot?.facts || []).find(item => item.canonicalProductId === product.canonicalProductId)
     : null;
-  return product && isUsableFact(fact) ? { product, fact } : null;
+  const canonicalProductId = product?.canonicalProductId;
+  const idMatch = typeof canonicalProductId === 'string'
+    && /^deposit:sbi:retail-domestic:[a-z0-9-]+:(?:public|senior)$/.test(canonicalProductId);
+  const depositorSlug = product?.depositorType === 'SENIOR_CITIZEN' ? 'senior' : 'public';
+  const tenureId = idMatch ? canonicalProductId.match(/^deposit:sbi:retail-domestic:([a-z0-9-]+):/)[1] : null;
+  const expectedInstrumentId = tenureId ? `retail-domestic:${tenureId}:${depositorSlug}` : null;
+  const productValid = idMatch
+    && product.schemaVersion === MARKET_DATA_SCHEMA_VERSION
+    && product.productType === 'BANK_TERM_DEPOSIT'
+    && product.providerName === 'State Bank of India'
+    && product.source?.provider === PROVIDERS.SBI
+    && product.source?.url === SBI_TERM_DEPOSIT_URL
+    && product.externalIds?.some(item => item.source === 'SBI_TENURE_CLASS' && item.value === tenureId)
+    && product.depositType === 'RETAIL_DOMESTIC_TERM_DEPOSIT_BELOW_INR_3_CRORE'
+    && product.callability === 'CALLABLE_STANDARD_CARD_RATE';
+  const factValid = isUsableFact(fact, now) && hasQualifiedFact(fact, {
+    canonicalProductId,
+    provider: PROVIDERS.SBI,
+    sourceInstrumentId: expectedInstrumentId,
+    sourceUrl: SBI_TERM_DEPOSIT_URL,
+    dataClass: SBI_RATE_DATA_CLASS,
+    rateBasis: 'OFFICIAL_NOMINAL_CARD_RATE_PER_ANNUM',
+    kind: FACT_KINDS.TERM_DEPOSIT_RATE,
+  });
+  return productValid && factValid ? { product, fact } : null;
 }
 
-function selectRbiProduct(snapshot) {
+function selectRbiProduct(snapshot, now) {
   const canonicalId = 'government:rbi:frsb-2020-taxable';
   const product = (snapshot?.products || []).find(item => item.canonicalProductId === canonicalId);
-  const fact = selectCurrentEffectiveFact(snapshot?.facts, canonicalId);
-  return product && isUsableFact(fact) ? { product, fact } : null;
+  const fact = selectCurrentEffectiveFact(snapshot?.facts, canonicalId, now);
+  const productValid = hasQualifiedProduct(product, {
+    canonicalProductId: canonicalId,
+    provider: PROVIDERS.RBI,
+    productType: 'GOVERNMENT_BOND',
+    sourceUrl: RBI_FRSB_NOTIFICATION_URL,
+  }) && product.providerName === 'Government of India / Reserve Bank of India'
+    && product.tenureMonths === 84
+    && product.couponResetFrequency === 'SEMI_ANNUAL'
+    && product.interestPaymentFrequency === 'SEMI_ANNUAL'
+    && product.referenceRate === 'NSC'
+    && product.spreadBps === 35;
+  const factValid = isUsableFact(fact, now) && hasQualifiedFact(fact, {
+    canonicalProductId: canonicalId,
+    provider: PROVIDERS.RBI,
+    sourceInstrumentId: 'frsb-2020-taxable',
+    sourceUrl: RBI_FRSB_NOTIFICATION_URL,
+    dataClass: RBI_RATE_DATA_CLASS,
+    rateBasis: 'NSC_REFERENCE_RATE_PLUS_35_BPS',
+  }) && fact.kind === FACT_KINDS.SCHEME_INTEREST_RATE
+    && fact.referenceRate === 'NSC'
+    && fact.spreadBps === 35;
+  return productValid && factValid ? { product, fact } : null;
 }
 
-export function compareVerifiedFixedIncomeProducts({ parentInstrumentId, snapshot, profile }) {
+export function compareVerifiedFixedIncomeProducts({ parentInstrumentId, snapshot, profile, now = new Date() }) {
+  const currentTime = now instanceof Date ? new Date(now.getTime()) : new Date(now);
+  if (!Number.isFinite(currentTime.getTime())) throw new TypeError('now must be a valid date.');
   const provider = fixedIncomeProviderForParent(parentInstrumentId);
   if (!provider) {
     return unavailable(
@@ -165,14 +278,21 @@ export function compareVerifiedFixedIncomeProducts({ parentInstrumentId, snapsho
       'The official source did not provide a usable current snapshot. No static rate was substituted.',
     );
   }
+  if (snapshot?.schemaVersion !== MARKET_DATA_SCHEMA_VERSION || snapshot?.provider !== provider) {
+    return unavailable(
+      ['OFFICIAL_SOURCE_IDENTITY_MISMATCH'],
+      provider,
+      'The snapshot identity did not match the qualified provider contract. No source fact was presented.',
+    );
+  }
 
   let selected = null;
   if (provider === PROVIDERS.GOVERNMENT_OF_INDIA) {
-    selected = selectGovernmentProduct(parentInstrumentId, snapshot);
+    selected = selectGovernmentProduct(parentInstrumentId, snapshot, currentTime);
   } else if (provider === PROVIDERS.SBI) {
-    selected = selectComparableSbiProduct(profile, snapshot);
+    selected = selectComparableSbiProduct(profile, snapshot, currentTime);
   } else if (provider === PROVIDERS.RBI) {
-    selected = selectRbiProduct(snapshot);
+    selected = selectRbiProduct(snapshot, currentTime);
   }
 
   if (!selected) {
@@ -206,11 +326,11 @@ export function compareVerifiedFixedIncomeProducts({ parentInstrumentId, snapsho
     dto.callability = selected.product.callability;
     dto.riskQuality = null;
   } else if (provider === PROVIDERS.RBI) {
-    dto.tenureMonths = selected.product.tenureMonths ?? 84;
-    dto.couponResetFrequency = selected.product.couponResetFrequency ?? 'SEMI_ANNUAL';
-    dto.interestPaymentFrequency = selected.product.interestPaymentFrequency ?? 'SEMI_ANNUAL';
-    dto.referenceRate = selected.product.referenceRate ?? 'NSC';
-    dto.spreadBps = selected.product.spreadBps ?? 35;
+    dto.tenureMonths = selected.product.tenureMonths;
+    dto.couponResetFrequency = selected.product.couponResetFrequency;
+    dto.interestPaymentFrequency = selected.product.interestPaymentFrequency;
+    dto.referenceRate = selected.product.referenceRate;
+    dto.spreadBps = selected.product.spreadBps;
     dto.rankingReasonCodes = [
       'OFFICIAL_SOURCE_FACT_VERIFIED',
       'SINGLE_CANONICAL_PRODUCT',

@@ -44,6 +44,7 @@ function navFact(code, value, observedAt = CURRENT_DATE, url = 'https://portal.a
     unit: 'NAV_PER_UNIT',
     observedAt,
     fetchedAt: FETCHED_AT,
+    historicalContext: { targetDate: observedAt.slice(0, 10) },
     availabilityStatus: 'AVAILABLE',
     freshness: { status: 'FRESH', ageSeconds: 86400, maxAgeSeconds: 345600 },
     source: { provider: 'AMFI', instrumentId: String(code), url },
@@ -76,6 +77,7 @@ function snapshots() {
     provider: 'AMFI',
     status: 'AVAILABLE',
     fetchedAt: FETCHED_AT,
+    targetDate: '2025-09-07',
     facts: ['101', '102', '103', '104', '105', '106', '107', '108'].map(code => navFact(
       code,
       100,
@@ -115,6 +117,7 @@ test('Phase 2 ranks at most five exact-category Direct Growth options by verifie
     parentInstrumentId: 'large_cap_mf',
     currentSnapshot: current,
     historicalSnapshot: historical,
+    now: new Date(FETCHED_AT),
   });
   assert.equal(result.ranking.version, MUTUAL_FUND_RANKING_VERSION);
   assert.equal(result.ranking.status, 'EVIDENCE_RANKED');
@@ -139,6 +142,31 @@ test('Phase 2 ranks at most five exact-category Direct Growth options by verifie
   assert.equal(result.comparisonUniverse.historicalEvidenceProductCount, 6);
 });
 
+test('historical NAV ranking requires a recent query fetch and a fact bound to the requested date', () => {
+  const staleQuery = snapshots();
+  staleQuery.historical.fetchedAt = '2026-09-06T00:00:00.000Z';
+  const staleResult = rankVerifiedMutualFundProducts({
+    parentInstrumentId: 'large_cap_mf',
+    currentSnapshot: staleQuery.current,
+    historicalSnapshot: staleQuery.historical,
+    now: new Date(FETCHED_AT),
+  });
+  assert.equal(staleResult.ranking.status, 'VERIFIED_COMPARABLE_OPTIONS');
+  assert.equal(staleResult.comparisonUniverse.historicalEvidenceProductCount, 0);
+  assert.ok(staleResult.products.every(product => product.historicalReturn === null));
+
+  const wrongTarget = snapshots();
+  wrongTarget.historical.targetDate = '2025-09-08';
+  const mismatch = rankVerifiedMutualFundProducts({
+    parentInstrumentId: 'large_cap_mf',
+    currentSnapshot: wrongTarget.current,
+    historicalSnapshot: wrongTarget.historical,
+    now: new Date(FETCHED_AT),
+  });
+  assert.equal(mismatch.ranking.status, 'VERIFIED_COMPARABLE_OPTIONS');
+  assert.equal(mismatch.comparisonUniverse.historicalEvidenceProductCount, 0);
+});
+
 test('Direct and Regular plans never share a merit universe', () => {
   const { current, historical } = snapshots();
   current.products = [
@@ -156,6 +184,7 @@ test('Direct and Regular plans never share a merit universe', () => {
     parentInstrumentId: 'large_cap_mf',
     currentSnapshot: current,
     historicalSnapshot: historical,
+    now: new Date(FETCHED_AT),
   });
   assert.equal(result.ranking.status, 'EVIDENCE_RANKED');
   assert.equal(result.ranking.planClass, 'DIRECT');
@@ -178,6 +207,7 @@ test('missing Plan remains null and cannot be treated as Direct or promoted into
     parentInstrumentId: 'large_cap_mf',
     currentSnapshot: current,
     historicalSnapshot: historical,
+    now: new Date(FETCHED_AT),
   });
   assert.equal(result.ranking.status, 'UNAVAILABLE');
   assert.equal(result.products.length, 0);
@@ -200,6 +230,7 @@ test('indistinguishable historical evidence remains a comparable set instead of 
     parentInstrumentId: 'large_cap_mf',
     currentSnapshot: current,
     historicalSnapshot: historical,
+    now: new Date(FETCHED_AT),
   });
   assert.equal(result.ranking.status, 'VERIFIED_COMPARABLE_OPTIONS');
   assert.ok(result.products.every(product => product.presentationStatus === 'VERIFIED_COMPARABLE_OPTION'));
@@ -222,6 +253,7 @@ test('fixed maturity plans remain comparable and cannot be ranked without verifi
     parentInstrumentId: 'fixed_maturity_plan',
     currentSnapshot: current,
     historicalSnapshot: historical,
+    now: new Date(FETCHED_AT),
   });
   assert.equal(result.ranking.status, 'VERIFIED_COMPARABLE_OPTIONS');
   assert.ok(result.ranking.reasonCodes.includes('COMPARABLE_MATURITY_TENURE_NOT_VERIFIED'));
@@ -244,6 +276,7 @@ test('unavailable, stale, mismatched, and unsupported evidence produces zero pro
     parentInstrumentId: 'large_cap_mf',
     currentSnapshot: stale.current,
     historicalSnapshot: stale.historical,
+    now: new Date(FETCHED_AT),
   });
   assert.equal(noFreshProducts.products.length, 0);
   assert.equal(noFreshProducts.ranking.status, 'UNAVAILABLE');
@@ -252,6 +285,7 @@ test('unavailable, stale, mismatched, and unsupported evidence produces zero pro
     parentInstrumentId: 'index_mf',
     currentSnapshot: snapshots().current,
     historicalSnapshot: snapshots().historical,
+    now: new Date(FETCHED_AT),
   });
   assert.equal(unsupported.products.length, 0);
   assert.deepEqual(unsupported.ranking.reasonCodes, ['PRODUCT_CLASS_NOT_SUPPORTED_PHASE_2']);
@@ -267,6 +301,7 @@ test('AMFI ranking excludes duplicate and cross-instrument/provider NAV evidence
     parentInstrumentId: 'large_cap_mf',
     currentSnapshot: wrongProvider.current,
     historicalSnapshot: wrongProvider.historical,
+    now: new Date(FETCHED_AT),
   });
   assert.equal(wrongProviderResult.products.some(product => product.id === 'mf:amfi:101'), false);
 
@@ -276,6 +311,7 @@ test('AMFI ranking excludes duplicate and cross-instrument/provider NAV evidence
     parentInstrumentId: 'large_cap_mf',
     currentSnapshot: duplicate.current,
     historicalSnapshot: duplicate.historical,
+    now: new Date(FETCHED_AT),
   });
   assert.equal(duplicateResult.products.some(product => product.id === 'mf:amfi:101'), false);
 
@@ -288,6 +324,7 @@ test('AMFI ranking excludes duplicate and cross-instrument/provider NAV evidence
     parentInstrumentId: 'large_cap_mf',
     currentSnapshot: wrongHistory.current,
     historicalSnapshot: wrongHistory.historical,
+    now: new Date(FETCHED_AT),
   });
   assert.equal(wrongHistoryResult.products.some(product => product.id === 'mf:amfi:101'), false);
 
@@ -297,6 +334,7 @@ test('AMFI ranking excludes duplicate and cross-instrument/provider NAV evidence
     parentInstrumentId: 'large_cap_mf',
     currentSnapshot: wrongSnapshotProvider.current,
     historicalSnapshot: wrongSnapshotProvider.historical,
+    now: new Date(FETCHED_AT),
   });
   assert.equal(wrongSnapshotResult.products.length, 0);
 
@@ -306,6 +344,7 @@ test('AMFI ranking excludes duplicate and cross-instrument/provider NAV evidence
     parentInstrumentId: 'large_cap_mf',
     currentSnapshot: duplicateSchemeIdentity.current,
     historicalSnapshot: duplicateSchemeIdentity.historical,
+    now: new Date(FETCHED_AT),
   });
   assert.equal(duplicateIdentityResult.products.some(product => product.id === 'mf:amfi:101'), false);
 });
@@ -313,6 +352,7 @@ test('AMFI ranking excludes duplicate and cross-instrument/provider NAV evidence
 test('WTI preserves hard parent suitability before requesting any product data', async () => {
   let sourceCalls = 0;
   const dependencies = {
+    now: new Date(FETCHED_AT),
     fetchAmfiProductSnapshot: async () => { sourceCalls += 1; return snapshots().current; },
     fetchAmfiHistoricalNavSnapshot: async () => { sourceCalls += 1; return snapshots().historical; },
   };

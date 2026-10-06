@@ -104,3 +104,36 @@ def test_response_cache_is_partitioned_by_shared_corpus_generation(tmp_path):
     assert cache.stats["response_misses"] == 2
     assert cache.stats["response_hits"] == 0
     assert len(cache._response_cache) == 2
+
+def test_rag_discards_evidence_when_generation_changes_during_retrieval(tmp_path):
+    class FlappingGenerationStore:
+        def __init__(self):
+            self.calls = 0
+
+        def get_generation_snapshot(self):
+            self.calls += 1
+            generation = "generation-a" if self.calls == 1 else "generation-b"
+            return {"generation_id": generation, "revision": 1 if generation == "generation-a" else 2, "manifest_sha256": ("a" if generation == "generation-a" else "b") * 64, "membership_sha256": ("c" if generation == "generation-a" else "d") * 64}
+
+        def get_corpus_revision(self):
+            return "1"
+
+    class EmptyRetriever:
+        strategy_name = "test"
+
+        def retrieve(self, **_kwargs):
+            return []
+
+    pipeline = RAGPipeline(
+        embedder=DenseVectorEmbeddingProvider(dimension=64, enable_cache=False),
+        vector_store=FlappingGenerationStore(),
+        retriever=EmptyRetriever(),
+        cache_manager=MultiLevelCacheManager(cache_dir=tmp_path / "cache"),
+        config=RAGConfig(embedding_dim=64),
+    )
+    response = pipeline.query(RAGQueryRequest(question="What is the current official tax rule?"))
+    assert response.grounded is False
+    assert response.metrics["abstention_reason"] == "corpus_changed_during_retrieval"
+    assert response.metrics["corpus_generation_id"] == "generation-a"
+    assert pipeline.cache_manager.stats["response_misses"] == 1
+    assert len(pipeline.cache_manager._response_cache) == 0

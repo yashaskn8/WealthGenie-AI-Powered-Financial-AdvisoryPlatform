@@ -21,6 +21,18 @@ def test_optimizer_dataset_rejects_private_and_holdout_fields():
         validate_optimizer_dataset([{'partition': 'holdout', 'answerKey': 'sealed'}])
 
 
+@pytest.mark.parametrize('identifier', [
+    'PAN ABCDE1234F',
+    'Aadhaar 1234 5678 9012',
+    'account number: 123456789012',
+    'alice@example.com',
+    '+91 9876543210',
+])
+def test_optimizer_dataset_rejects_indian_identifiers_inside_text_values(identifier):
+    with pytest.raises(ValueError, match='private identifier'):
+        validate_optimizer_dataset([{'partition': 'train', 'safeSummary': f'private value {identifier}'}])
+
+
 def test_gepa_cli_paths_are_confined_to_bridge_temp_directory(tmp_path, monkeypatch):
     bridge_dir = tmp_path / 'wealthgenie-gepa-unit-test'
     bridge_dir.mkdir()

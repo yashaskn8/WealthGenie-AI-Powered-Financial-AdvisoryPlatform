@@ -5,7 +5,7 @@ import { planWithProvider } from '../agents/planReview/planReviewGraph.js';
 import { createPromptBundle, CURRENT_PROMPT_BUNDLE, verifyPromptBundleHash } from '../agents/evolution/promptBundle.js';
 import { createScaffoldSpec } from '../agents/evolution/scaffoldSpec.js';
 import { createEvolutionSandboxManifest, assertSandboxManifestIntegrity } from '../agents/evolution/sandboxManifest.js';
-import { createEvolutionSandboxProvider } from '../agents/evolution/sandboxProvider.js';
+import { createEvolutionSandboxProvider, sandboxExecutionPassed } from '../agents/evolution/sandboxProvider.js';
 import { createEvolutionBudget } from '../agents/evolution/evolutionBudget.js';
 import { scanPromptBundleSecurity } from '../agents/evolution/candidateSecurity.js';
 import { selectParetoFrontier } from '../agents/evolution/pareto.js';
@@ -132,6 +132,15 @@ test('fixture sandbox is attested and never receives arbitrary commands', async 
   assert.equal(result.manifestHash, manifest.manifestHash);
 });
 
+test('sandbox hard gate fails closed for nonzero, missing, or unknown execution status', () => {
+  assert.equal(sandboxExecutionPassed({ provider: 'e2b', testResults: { exitCode: 0 } }), true);
+  assert.equal(sandboxExecutionPassed({ provider: 'e2b', testResults: { exitCode: 1 } }), false);
+  assert.equal(sandboxExecutionPassed({ provider: 'e2b', testResults: {} }), false);
+  assert.equal(sandboxExecutionPassed({ provider: 'fixture', testResults: { passed: true } }), true);
+  assert.equal(sandboxExecutionPassed({ provider: 'fixture', testResults: { passed: false } }), false);
+  assert.equal(sandboxExecutionPassed({ provider: 'other', testResults: { passed: true } }), false);
+});
+
 test('remote sandbox rejects secret-bearing workspace content before upload', async () => {
   const provider = createEvolutionSandboxProvider({ provider: 'e2b', enabled: false, apiKey: 'test-key' });
   const manifest = createEvolutionSandboxManifest({ candidateId: 'candidate', scaffoldHash: 'a'.repeat(64), promptBundleHash: 'b'.repeat(64), datasetHash: 'c'.repeat(64), allowedFiles: ['candidate-evaluation'] });
@@ -191,6 +200,24 @@ test('governed evolution executes the real PlanReview runner and remains shadow-
   assert.equal(result.candidateRecords[0].holdout.scoreCards.length, 0);
   assert.equal(result.candidateRecords[0].reliability.candidateReliabilityCoverageComplete, true);
   assert.match(observedCandidatePrompt, /candidate planner instruction/);
+});
+
+test('strict live candidate evaluation rejects planner fallback instead of scoring deterministic output', async () => {
+  const runner = createPlanReviewScaffoldRunner({ dependencies: {
+    captureFinancialAuthority: async () => ({ authorityMeasurementState: 'SIMULATED' }),
+    plannerProvider: { generate: async () => ({ text: null }) },
+    strictModelPlanner: true,
+    loadPlanReviewContext: async () => context,
+    explanationProviders: [],
+    persistAgentRun: async () => undefined,
+    timeoutMs: 2000,
+    toolTimeoutMs: 100,
+  } });
+  const candidate = createScaffoldSpec({ version: 'strict-live-candidate' });
+  await assert.rejects(() => runner({
+    candidate,
+    caseDefinition: { fixture: { userId, profileId, context } },
+  }), { code: 'EVOLUTION_PLANNER_REQUIRED' });
 });
 
 test('externally signed matching holdout can reach SHADOW_READY only after every governed gate passes', async () => {

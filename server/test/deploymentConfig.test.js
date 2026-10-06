@@ -15,6 +15,7 @@ function withDeploymentFixture(run) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wealthgenie-deployment-contract-'));
   try {
     fs.cpSync(path.join(repositoryRoot, '.github/workflows'), path.join(root, '.github/workflows'), { recursive: true });
+    fs.copyFileSync(path.join(repositoryRoot, '.github/a2a-tck-known-blockers.json'), path.join(root, '.github/a2a-tck-known-blockers.json'));
     fs.cpSync(path.join(repositoryRoot, 'k8s'), path.join(root, 'k8s'), { recursive: true });
     fs.cpSync(path.join(repositoryRoot, 'deploy'), path.join(root, 'deploy'), { recursive: true });
     fs.copyFileSync(path.join(repositoryRoot, 'docker-compose.yml'), path.join(root, 'docker-compose.yml'));
@@ -185,11 +186,31 @@ test('production template filter accepts only the checked-in non-deployable imag
   assert.equal(result.stdout, manifest);
 });
 
-test('Kind CD installs a fixed Metrics Server release compatible with its Kubernetes 1.31 node image', () => {
+test('Kind CD verifies the fixed Metrics Server manifest digest on a compatible Kubernetes node image', () => {
   const workflow = fs.readFileSync(path.join(repositoryRoot, '.github/workflows/cd.yml'), 'utf8');
+  const parsed = parse(workflow);
   assert.match(workflow, /version:\s*v0\.24\.0/);
-  assert.match(workflow, /releases\/download\/v0\.8\.1\/components\.yaml/);
+  assert.equal(parsed.jobs['deploy-and-verify-kind'].steps
+    .find(step => step.name === 'Create Kind Kubernetes Cluster').with.node_image, 'kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256');
+  assert.match(workflow, /releases\/download\/v0\.9\.0\/components\.yaml/);
+  assert.match(workflow, /1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b/);
+  assert.match(workflow, /sha256sum --check/);
   assert.doesNotMatch(workflow, /metrics-server\/releases\/latest\//);
+});
+
+test('deployment validator rejects a changed Metrics Server manifest digest', () => {
+  withDeploymentFixture(root => {
+    const workflowPath = '.github/workflows/cd.yml';
+    const workflow = readYaml(root, workflowPath);
+    const install = workflow.jobs['deploy-and-verify-kind'].steps
+      .find(step => step.name === 'Install Metrics Server for HPA');
+    install.run = install.run.replace('1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b', '0'.repeat(64));
+    writeYaml(root, workflowPath, workflow);
+
+    const result = validate(root);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /verify the pinned Metrics Server v0\.9\.0 manifest digest/);
+  });
 });
 
 test('deployment validator rejects mutable Metrics Server latest downloads', () => {
@@ -199,14 +220,14 @@ test('deployment validator rejects mutable Metrics Server latest downloads', () 
     const install = workflow.jobs['deploy-and-verify-kind'].steps
       .find(step => step.name === 'Install Metrics Server for HPA');
     install.run = install.run.replace(
-      'releases/download/v0.8.1/components.yaml',
+      'releases/download/v0.9.0/components.yaml',
       'releases/latest/download/components.yaml',
     );
     writeYaml(root, workflowPath, workflow);
 
     const result = validate(root);
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /pin a Metrics Server release compatible/);
+    assert.match(result.stderr, /verify the pinned Metrics Server v0\.9\.0 manifest digest/);
   });
 });
 

@@ -172,17 +172,59 @@ function isOfficialAmfiUrl(value) {
   }
 }
 
-function isQualifiedNavFactForProduct(fact, product, schemeCode) {
+const AMFI_CURRENT_NAV_MAX_AGE_SECONDS = 4 * 24 * 60 * 60;
+const AMFI_HISTORY_FETCH_MAX_AGE_SECONDS = 24 * 60 * 60;
+const AMFI_HISTORY_WINDOW_RADIUS_DAYS = 3;
+
+function isQualifiedNavFactForProduct(fact, product, schemeCode, now) {
+  const observedAt = Date.parse(fact?.observedAt);
+  const maxAgeSeconds = Number(fact?.freshness?.maxAgeSeconds);
+  const ageSeconds = (now.getTime() - observedAt) / 1000;
   return fact?.schemaVersion === MARKET_DATA_SCHEMA_VERSION
     && fact?.kind === 'MUTUAL_FUND_NAV'
     && fact?.canonicalProductId === product.canonicalProductId
     && fact?.availabilityStatus === AVAILABILITY.AVAILABLE
     && fact?.freshness?.status === FRESHNESS.FRESH
+    && Number.isFinite(observedAt)
+    && Number.isFinite(maxAgeSeconds)
+    && maxAgeSeconds > 0
+    && ageSeconds >= 0
+    && ageSeconds <= Math.min(maxAgeSeconds, AMFI_CURRENT_NAV_MAX_AGE_SECONDS)
     && fact?.currency === 'INR'
     && fact?.unit === 'NAV_PER_UNIT'
     && fact?.source?.provider === PROVIDERS.AMFI
     && String(fact?.source?.instrumentId ?? '') === schemeCode
     && isOfficialAmfiUrl(fact?.source?.url);
+}
+
+function isQualifiedHistoricalNavFactForProduct(fact, product, schemeCode, snapshot, now) {
+  const fetchedAt = Date.parse(snapshot?.fetchedAt);
+  const factFetchedAt = Date.parse(fact?.fetchedAt);
+  const observedAt = Date.parse(fact?.observedAt);
+  const targetDate = String(snapshot?.targetDate || '');
+  const targetTime = Date.parse(`${targetDate}T00:00:00.000Z`);
+  const fetchedAgeSeconds = (now.getTime() - fetchedAt) / 1000;
+  const distanceDays = Math.abs(observedAt - targetTime) / (24 * 60 * 60 * 1000);
+  return fact?.schemaVersion === MARKET_DATA_SCHEMA_VERSION
+    && fact?.kind === 'MUTUAL_FUND_NAV'
+    && fact?.canonicalProductId === product.canonicalProductId
+    && fact?.availabilityStatus === AVAILABILITY.AVAILABLE
+    && fact?.currency === 'INR'
+    && fact?.unit === 'NAV_PER_UNIT'
+    && fact?.source?.provider === PROVIDERS.AMFI
+    && String(fact?.source?.instrumentId ?? '') === schemeCode
+    && isOfficialAmfiUrl(fact?.source?.url)
+    && /^\d{4}-\d{2}-\d{2}$/.test(targetDate)
+    && Number.isFinite(targetTime)
+    && Number.isFinite(observedAt)
+    && Number.isFinite(fetchedAt)
+    && Number.isFinite(factFetchedAt)
+    && factFetchedAt === fetchedAt
+    && fetchedAgeSeconds >= 0
+    && fetchedAgeSeconds <= AMFI_HISTORY_FETCH_MAX_AGE_SECONDS
+    && fact?.historicalContext?.targetDate === targetDate
+    && Number.isFinite(distanceDays)
+    && distanceDays <= AMFI_HISTORY_WINDOW_RADIUS_DAYS;
 }
 
 function uniqueFactsByProduct(facts) {
@@ -346,8 +388,11 @@ export function rankVerifiedMutualFundProducts({
   parentInstrumentId,
   currentSnapshot,
   historicalSnapshot,
+  now = new Date(),
   limit = MUTUAL_FUND_RESULT_LIMIT,
 }) {
+  const currentTime = now instanceof Date ? new Date(now.getTime()) : new Date(now);
+  if (!Number.isFinite(currentTime.getTime())) throw new TypeError('now must be a valid date.');
   if (!Number.isInteger(limit) || limit < 0 || limit > MUTUAL_FUND_RESULT_LIMIT) {
     throw new RangeError(`limit must be an integer from 0 to ${MUTUAL_FUND_RESULT_LIMIT}.`);
   }
@@ -397,7 +442,7 @@ export function rankVerifiedMutualFundProducts({
   const freshCategoryProducts = verifiedCategoryProducts.flatMap(product => {
     const currentFact = currentFacts.get(product.canonicalProductId);
     const schemeCode = sourceSchemeCode(product);
-    if (!isQualifiedNavFactForProduct(currentFact, product, schemeCode)
+    if (!isQualifiedNavFactForProduct(currentFact, product, schemeCode, currentTime)
         || establishedNumber(currentFact.value) === null
         || currentFact.value <= 0) return [];
     return [{
@@ -413,10 +458,12 @@ export function rankVerifiedMutualFundProducts({
       historicalReturn: !COMPARISON_ONLY_PARENT_CATEGORIES.has(parentInstrumentId)
         && historicalSnapshotQualified
         && isEstablishedGrowthOption(item.product.option)
-        && isQualifiedNavFactForProduct(
+        && isQualifiedHistoricalNavFactForProduct(
           historicalFacts.get(item.product.canonicalProductId),
           item.product,
           sourceSchemeCode(item.product),
+          historicalSnapshot,
+          currentTime,
         )
         ? annualizedHistoricalReturn(item.currentFact, historicalFacts.get(item.product.canonicalProductId))
         : null,

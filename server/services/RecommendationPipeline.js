@@ -600,6 +600,7 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
         parentInstrumentId: catalog.id,
         snapshot: null,
         profile: canonical,
+        now: dependencies.now || new Date(),
       });
       return formatOutput(result.products, {
         excluded,
@@ -615,6 +616,7 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
       parentInstrumentId: catalog.id,
       snapshot,
       profile: canonical,
+      now: dependencies.now || new Date(),
     });
     return formatOutput(result.products, {
       excluded,
@@ -670,6 +672,7 @@ export async function rankWhereToInvestBackend(profileInput, options = {}, depen
         parentInstrumentId: catalog.id,
         currentSnapshot,
         historicalSnapshot,
+        now: dependencies.now || new Date(),
       });
     reportPipelineTiming(dependencies.onStageTiming, qualificationStage, qualificationStartedAt,
       result.ranking?.status || 'COMPLETED');

@@ -17,6 +17,7 @@ import {
   MAX_TOOL_CALLS_PER_TOOL,
   PLAN_REVIEW_TOOL_CAPABILITIES,
   SAFE_PLAN_REVIEW_TOOLS,
+  isSafePlanReviewCapability,
   validatePlannerPlan,
 } from './planReviewSchemas.js';
 import {
@@ -293,6 +294,11 @@ async function determineChecksNode(state, dependencies) {
     } catch (error) {
       if (dependencies.signal?.aborted || error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') throw error;
       if (error?.code === 'AGENT_BUDGET_EXCEEDED' || error?.code === 'AGENT_BUDGET_PERSISTENCE_UNAVAILABLE') throw error;
+      if (dependencies.strictModelPlanner === true) {
+        const requiredModelError = new Error('The strict candidate planner did not produce a valid model plan.');
+        requiredModelError.code = 'EVOLUTION_PLANNER_REQUIRED';
+        throw requiredModelError;
+      }
       if (error?.code === 'FORBIDDEN_TOOL_REQUEST' || error?.code === 'INVALID_PLANNER_OUTPUT') {
         plannerRejectionCode = error.code;
         rejectedToolRequestCount = Math.min(MAX_TOOL_CALLS, Math.max(0, Number(error.rejectedToolRequestCount) || 0));
@@ -312,7 +318,7 @@ async function determineChecksNode(state, dependencies) {
   };
 }
 
-async function executeSafeToolsNode(state, dependencies) {
+export async function executeSafeToolsNode(state, dependencies) {
   const toolResults = { ...(state.toolResults || {}) };
   const toolCallCounts = { ...(state.toolCallCounts || {}) };
   const repeatedRequests = [];
@@ -373,7 +379,24 @@ async function executeSafeToolsNode(state, dependencies) {
         startedAt: toolStartedAt,
       }),
     });
+    let executionStarted = false;
     try {
+      if (!isSafePlanReviewCapability(toolName, capability)) {
+        const error = new Error('PlanReview tool capability violates the read-only policy.');
+        error.code = 'TOOL_CAPABILITY_POLICY_INVALID';
+        throw error;
+      }
+      await reportProgress(dependencies, {
+        node: 'execute_safe_tools',
+        state: { ...state, toolCallCounts, toolCallCount, repeatedRequests },
+        event: trajectoryEvent('TOOL_AUTHORIZED', {
+          tool: toolName,
+          toolCallId,
+          ...capability,
+          inputHash: toolInputHash,
+          startedAt: toolStartedAt,
+        }),
+      });
       const timeoutMs = Number(dependencies.toolTimeoutMs) || 5000;
       const toolAbortController = new AbortController();
       const parentSignal = dependencies.signal;
@@ -389,6 +412,7 @@ async function executeSafeToolsNode(state, dependencies) {
           ...context,
           dependencies: { ...dependencies, signal: toolAbortController.signal },
         };
+        executionStarted = true;
         const value = await withTimeout(
           executePlanReviewTool(toolName, toolContext),
           timeoutMs,
@@ -407,6 +431,7 @@ async function executeSafeToolsNode(state, dependencies) {
           tool: toolName,
           toolCallId,
           ...capability,
+          executionStarted,
           inputHash: toolInputHash,
           outputHash: canonicalSha256(result === undefined ? null : result),
           startedAt: toolStartedAt,
@@ -424,6 +449,7 @@ async function executeSafeToolsNode(state, dependencies) {
           tool: toolName,
           toolCallId,
           ...capability,
+          executionStarted,
           code: error.code || 'TOOL_FAILED',
           inputHash: toolInputHash,
           startedAt: toolStartedAt,
@@ -701,6 +727,10 @@ async function persistNode(state, dependencies) {
       startedAt: state.startedAt,
       completedAt: new Date(),
       planner: state.planner,
+      promptScaffoldHash: canonicalSha256({
+        promptBundle: resolvePromptBundle({ dependencies, scaffoldSpec: dependencies.scaffoldSpec }).contentHash,
+        scaffoldSpec: dependencies.scaffoldSpec || null,
+      }),
       stepCount: state.stepCount,
       toolCallCount: state.toolCallCount,
       modelCallCount: state.modelCallCount,

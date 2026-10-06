@@ -20,9 +20,98 @@ async function installAuthProbe(page: Page) {
       document.body.dataset.authUser = api.getUserInfo()?.id || 'signed-out';
     };
     api.subscribeAuth(render);
+    api.subscribeProfileChanges(() => {
+      const count = Number(document.body.dataset.profileSignals || '0') + 1;
+      document.body.dataset.profileSignals = String(count);
+    });
     render();
   });
 }
+
+test('a profile save invalidates another tab without broadcasting financial profile values', async ({ context }) => {
+  test.setTimeout(30_000);
+  const server = await installServerSessionRoutes(context);
+  const savedRequests: unknown[] = [];
+  await context.route('**/api/profile/profile-1', async route => {
+    savedRequests.push(route.request().postDataJSON());
+    await route.fulfill({ status: 200, json: { profile: { profileId: 'profile-1', version: 2 } } });
+  });
+  const tabA = await context.newPage();
+  const tabB = await context.newPage();
+  try {
+    await installAuthProbe(tabA);
+    await installAuthProbe(tabB);
+    await tabA.evaluate(() => {
+      (window as any).__profileWireMessages = [];
+      const observer = new BroadcastChannel('wealthgenie-profile-state');
+      observer.onmessage = event => (window as any).__profileWireMessages.push(event.data);
+      (window as any).__profileWireObserver = observer;
+    });
+    await tabA.evaluate(() => (window as any).__authApi.login('user-a@example.com', 'safe-test-password'));
+    await tabB.evaluate(() => (window as any).__authApi.restoreSession());
+    await tabA.evaluate(() => (window as any).__authApi.updateProfile('profile-1', {
+      monthly_take_home: 100000,
+      monthly_savings: 20000,
+      age: 35,
+      risk_tolerance: 'Moderate',
+      investment_goals: ['Wealth Growth'],
+      investment_horizon_years: 10,
+      version: 1,
+    }));
+    await expect(tabB.locator('body')).toHaveAttribute('data-profile-signals', '1');
+    await expect.poll(() => tabA.evaluate(() => (window as any).__profileWireMessages.length)).toBe(1);
+    expect(savedRequests).toHaveLength(1);
+    expect(JSON.stringify(savedRequests[0])).toContain('100000');
+    const wireMessages = await tabA.evaluate(() => JSON.stringify((window as any).__profileWireMessages));
+    for (const privateValue of ['100000', '20000', 'Moderate', 'Wealth Growth', 'monthly_take_home']) {
+      expect(wireMessages).not.toContain(privateValue);
+    }
+    const signal = await tabB.evaluate(() => (window as any).__authApi.getUserInfo()?.id);
+    expect(signal).toBe('user-a');
+    expect(await tabB.locator('body').getAttribute('data-profile-signals')).toBe('1');
+  } finally {
+    await tabA.evaluate(() => (window as any).__profileWireObserver?.close()).catch(() => undefined);
+    server.releaseLateResponse();
+    server.releaseHeldSessionRestore();
+    await tabA.close();
+    await tabB.close();
+  }
+});
+
+test('a committed profile update with a lost response still invalidates peer tabs', async ({ context }) => {
+  test.setTimeout(30_000);
+  const server = await installServerSessionRoutes(context);
+  let committed = false;
+  await context.route('**/api/profile/profile-uncertain', async route => {
+    committed = true;
+    await route.abort('timedout');
+  });
+  const tabA = await context.newPage();
+  const tabB = await context.newPage();
+  try {
+    await installAuthProbe(tabA);
+    await installAuthProbe(tabB);
+    await tabA.evaluate(() => (window as any).__authApi.login('user-a@example.com', 'safe-test-password'));
+    await tabB.evaluate(() => (window as any).__authApi.restoreSession());
+    const outcome = await tabA.evaluate(async () => (window as any).__authApi.updateProfile('profile-uncertain', {
+      monthly_take_home: 90000,
+      monthly_savings: 15000,
+      age: 35,
+      risk_tolerance: 'Moderate',
+      investment_goals: ['Wealth Growth'],
+      investment_horizon_years: 10,
+      version: 1,
+    }).then(() => 'resolved').catch(() => 'uncertain'));
+    expect(outcome).toBe('uncertain');
+    expect(committed).toBe(true);
+    await expect(tabB.locator('body')).toHaveAttribute('data-profile-signals', '1');
+  } finally {
+    server.releaseLateResponse();
+    server.releaseHeldSessionRestore();
+    await tabA.close();
+    await tabB.close();
+  }
+});
 
 async function installServerSessionRoutes(context: BrowserContext) {
   let serverUser: { id: string; email: string } | null = null;

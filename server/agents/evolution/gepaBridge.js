@@ -11,7 +11,7 @@ import { createEvolutionBudget } from './evolutionBudget.js';
 import { assertGepaFeedbackSafe } from './feedback.js';
 
 const MAX_BRIDGE_BYTES = 2 * 1024 * 1024;
-const PRIVATE_DATA_PATTERN = /email|phone|income|salary|monthlytakehome|bankaccount|password|jwt|rawprofile|userid|user_id|holdout|answerkey|secret|privatekey/i;
+const PRIVATE_DATA_PATTERN = /email|phone|income|salary|monthlytakehome|bankaccount|password|jwt|rawprofile|userid|user_id|holdout|answerkey|secret|privatekey|\b[A-Z]{5}\d{4}[A-Z]\b|\b\d{4}[ -]?\d{4}[ -]?\d{4}\b|(?<!\w)(?:\+?91[\s-]?)?[6-9]\d{9}(?!\w)|\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b|\b(?:account\s*(?:number|no\.?|#)?|a\/c)\s*[:#-]?\s*[A-Z0-9-]{8,24}\b/i;
 const FORBIDDEN_OUTPUT_KEY_PATTERN = /sourcecode|shellcommand|evaluator|holdout|promotionpolicy|reliabilityhardgate|financialengine|taxrules|allocation|authorization|deployment|sandboxpolicy|script|executable|code/i;
 const TRUSTED_ML_SERVICE_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), '../../../ml-service');
 const MUTABLE_PROPOSAL_FIELDS = Object.freeze({

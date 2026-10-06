@@ -623,6 +623,40 @@ const DashboardShell = ({ userProfile, onProfileUpdate, initialRecommendation = 
     }
   };
 
+  useEffect(() => api.subscribeProfileChanges(() => {
+    const token = beginOperation();
+    writeBackendRecs(null);
+    setBackendFallback({ message: 'Your profile changed in another tab. Refreshing your current financial plan.' });
+    setIsRecommendationLoading(true);
+    setIsAdvisoryLoading(false);
+    void (async () => {
+      try {
+        const canonicalProfile = await api.getCurrentProfile({ retries: 0, signal: token.controller.signal });
+        if (!operationIsCurrent(token)) return;
+        const canonicalProfileId = canonicalProfile?.profileId || canonicalProfile?._id;
+        if (!canonicalProfileId || canonicalProfileId !== token.profileId
+            || financialProfileKey(canonicalProfile) === token.profileKey) {
+          writeBackendRecs(null);
+          setBackendFallback({ message: 'The current profile could not be verified. Recalculate before using personalized results.' });
+          setIsRecommendationLoading(false);
+          return;
+        }
+        skipProfileRestoreRef.current = profileOperationIdentity({
+          profileId: canonicalProfileId,
+          profileVersion: canonicalProfile.version,
+          profileKey: financialProfileKey(canonicalProfile),
+        });
+        onProfileUpdate(canonicalProfile);
+        void handleAuthoritativeRecompute(canonicalProfile);
+      } catch (error) {
+        if (!operationIsCurrent(token) || error?.code === 'REQUEST_ABORTED' || error?.name === 'AbortError') return;
+        writeBackendRecs(null);
+        setBackendFallback({ message: 'Your profile changed, but the latest version could not be verified. Recalculate before using personalized results.' });
+        setIsRecommendationLoading(false);
+      }
+    })();
+  }), [onProfileUpdate, userProfile]);
+
   const handleCommittedProfileUpdate = (updatedProfile, { recommendation: committedRecommendation = null } = {}) => {
     const updatedProfileId = updatedProfile?.profileId || updatedProfile?._id;
     if (!updatedProfileId) {

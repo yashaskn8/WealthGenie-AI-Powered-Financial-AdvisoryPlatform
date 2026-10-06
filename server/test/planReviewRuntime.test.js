@@ -17,6 +17,7 @@ import { MongoPlanReviewCheckpointer } from '../agents/planReview/mongoPlanRevie
 import { buildRecommendationSummary, loadPlanReviewContext } from '../agents/planReview/planReviewTools.js';
 import { completePlanReviewMandateAction, persistPlanReviewAction, reconcileTerminalPlanReviewMandates } from '../agents/planReview/planReviewApproval.js';
 import { createPlanReviewGraph } from '../agents/planReview/planReviewGraph.js';
+import { terminalizePlanReviewRun } from '../agents/planReview/planReviewTerminal.js';
 
 const userId = '64b000000000000000000010';
 const profileId = '64b000000000000000000001';
@@ -38,6 +39,57 @@ test('plan review state machine permits only explicit durable transitions', () =
   assert.equal(canTransitionPlanReviewState('COMPLETED', 'RUNNING'), false);
   assert.doesNotThrow(() => assertPlanReviewTransition('WAITING_FOR_APPROVAL', 'CANCELLED'));
   assert.throws(() => assertPlanReviewTransition('COMPLETED', 'RUNNING'), { code: 'INVALID_AGENT_STATE_TRANSITION' });
+});
+
+test('direct cancellation and supersession commit terminal event and checkpoint retention atomically', async () => {
+  for (const status of ['CANCELLED', 'SUPERSEDED']) {
+    const now = new Date('2026-09-26T00:00:00.000Z');
+    const run = { userId, runId: `run-${status}`, status: 'RUNNING', executionGeneration: 2, eventSequence: 4 };
+    let insideTransaction = false;
+    const session = {
+      async withTransaction(callback) { insideTransaction = true; try { await callback(); } finally { insideTransaction = false; } },
+      async endSession() {},
+    };
+    const model = {
+      db: { async startSession() { return session; } },
+      async findOneAndUpdate(filter, update, options) {
+        assert.equal(insideTransaction, true);
+        assert.equal(options.session, session);
+        assert.deepEqual(filter.status.$in, ['RUNNING']);
+        run.status = update.$set.status;
+        run.eventSequence += update.$inc.eventSequence;
+        Object.assign(run, update.$set);
+        return run;
+      },
+    };
+    const events = [];
+    const eventModel = { async create(rows, options) {
+      assert.equal(insideTransaction, true);
+      assert.equal(options.session, session);
+      events.push(...rows);
+    } };
+    const expiries = [];
+    const checkpointModel = label => ({ async updateMany(_filter, update, options) {
+      assert.equal(insideTransaction, true);
+      assert.equal(options.session, session);
+      expiries.push([label, update.$set.expiresAt]);
+    } });
+    const transitioned = await terminalizePlanReviewRun({
+      model, eventModel, checkpointModel: checkpointModel('checkpoint'),
+      graphCheckpointModel: checkpointModel('graph'), userId, runId: run.runId,
+      expectedStatuses: ['RUNNING'], status,
+      reasonCode: status === 'CANCELLED' ? 'USER_REQUESTED_CANCELLATION' : 'PLAN_REVIEW_SOURCE_SUPERSEDED',
+      now,
+    });
+    assert.equal(transitioned.status, status);
+    assert.equal(run.eventSequence, 5);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].sequence, 5);
+    assert.equal(events[0].executionGeneration, 2);
+    assert.equal(events[0].eventType, status === 'CANCELLED' ? 'RUN_CANCELLED' : 'RUN_SUPERSEDED');
+    assert.deepEqual(expiries.map(([label]) => label).sort(), ['checkpoint', 'graph']);
+    assert.ok(expiries.every(([, expiresAt]) => expiresAt > now));
+  }
 });
 
 test('approval action is a descriptor and never a financial mutation', () => {

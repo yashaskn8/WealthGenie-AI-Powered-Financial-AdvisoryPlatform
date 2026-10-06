@@ -59,6 +59,16 @@ def _topic_terms(value: str) -> set[str]:
     }
     return {term[:-1] if term.endswith("s") and len(term) > 4 else term for term in terms}
 
+def _generation_snapshot(vector_store: BaseVectorStore) -> Dict[str, Any]:
+    getter = getattr(vector_store, "get_generation_snapshot", None)
+    return dict(getter()) if callable(getter) else {"generation_id": None, "revision": vector_store.get_corpus_revision()}
+
+def _same_generation(before: Dict[str, Any], after: Dict[str, Any]) -> bool:
+    return all(before.get(key) == after.get(key) for key in ("generation_id", "revision", "manifest_sha256", "membership_sha256"))
+
+def _generation_metrics(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    return {"corpus_generation_id": snapshot.get("generation_id"), "corpus_revision": snapshot.get("revision"), "corpus_generation_manifest_sha256": snapshot.get("manifest_sha256"), "corpus_generation_membership_sha256": snapshot.get("membership_sha256")}
+
 # Registry of built-in reranker strategies
 _RERANKER_REGISTRY: Dict[str, type] = {
     "no_op": NoOpReranker,
@@ -149,11 +159,7 @@ class RAGPipeline:
             return self._abstain("corpus_unavailable", qu_result, 0.0)
         embedding_identity = getattr(self.embedder, "embedding_identity", None)
         try:
-            generation_snapshot = (
-                self.vector_store.get_generation_snapshot()
-                if callable(getattr(self.vector_store, "get_generation_snapshot", None))
-                else {"generation_id": None, "revision": self.vector_store.get_corpus_revision()}
-            )
+            generation_snapshot = _generation_snapshot(self.vector_store)
         except Exception as exc:
             logger.error("RAG corpus generation could not be verified before retrieval: %s", exc)
             qu_result = self.query_understanding.process(request.question)
@@ -212,6 +218,14 @@ class RAGPipeline:
             logger.error("RAG retrieval unavailable; returning abstention without citations: %s", exc)
             return self._abstain("retrieval_unavailable", qu_result, qu_latency)
         retrieval_latency = (time.perf_counter() - t1) * 1000.0
+        try:
+            post_retrieval_generation = _generation_snapshot(self.vector_store)
+        except Exception as exc:
+            logger.error("RAG corpus generation could not be verified after retrieval: %s", exc)
+            return self._abstain("corpus_unavailable", qu_result, qu_latency, retrieval_latency)
+        if not _same_generation(generation_snapshot, post_retrieval_generation):
+            logger.warning("RAG corpus generation changed during retrieval; discarding unbound evidence")
+            return self._abstain("corpus_changed_during_retrieval", qu_result, qu_latency, retrieval_latency, generation_snapshot=generation_snapshot)
 
         # 3. Rerank Retrieved Chunks
         t2 = time.perf_counter()
@@ -292,6 +306,7 @@ class RAGPipeline:
             "reranker": self.reranker.reranker_name,
             "top_score": top_score,
         }
+        metrics.update(_generation_metrics(generation_snapshot))
 
         response = RAGQueryResponse(
             answer=answer,
@@ -388,6 +403,7 @@ class RAGPipeline:
         reranking_latency: float = 0.0,
         chunks_retrieved: int = 0,
         top_score: float = 0.0,
+        generation_snapshot: Optional[Dict[str, Any]] = None,
     ) -> RAGQueryResponse:
         self.telemetry.record_query_trace(
             retrieval_strategy=self.retriever.strategy_name,
@@ -405,19 +421,22 @@ class RAGPipeline:
             citation_count=0,
             top_score=top_score,
         )
+        metrics = {
+            "response_mode": "abstention",
+            "abstention_reason": reason,
+            "intent": qu_result["intent"],
+            "query_understanding_latency_ms": round(qu_latency, 2),
+            "retrieval_latency_ms": round(retrieval_latency, 2),
+            "reranking_latency_ms": round(reranking_latency, 2),
+            "chunks_retrieved": chunks_retrieved,
+            "chunks_after_reranking": 0,
+        }
+        if generation_snapshot is not None:
+            metrics.update(_generation_metrics(generation_snapshot))
         return RAGQueryResponse(
             answer=ABSTENTION_MESSAGE,
             citations=[],
             retrieved_chunks=[],
-            metrics={
-                "response_mode": "abstention",
-                "abstention_reason": reason,
-                "intent": qu_result["intent"],
-                "query_understanding_latency_ms": round(qu_latency, 2),
-                "retrieval_latency_ms": round(retrieval_latency, 2),
-                "reranking_latency_ms": round(reranking_latency, 2),
-                "chunks_retrieved": chunks_retrieved,
-                "chunks_after_reranking": 0,
-            },
+            metrics=metrics,
             grounded=False,
         )

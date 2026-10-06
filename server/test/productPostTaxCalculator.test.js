@@ -228,6 +228,15 @@ test('SBI suitability copy does not make unsupported guarantee or deposit-insura
   assert.doesNotMatch(suitability.whyThisFitsYou, /guaranteed|DICGC|insurance|largest bank/i);
 });
 
+test('FRSB suitability copy identifies the Government of India as issuer and RBI as administrator', () => {
+  const suitability = generateBeginnerSuitability({
+    product: { id: 'rbi:frsb:current', name: 'RBI Floating Rate Savings Bond', parentInstrumentId: 'rbi_bonds' },
+    profile: { investmentGoals: ['Capital preservation'], investmentHorizonYears: 7, riskTolerance: 'Conservative' },
+  });
+  assert.match(suitability.whyThisFitsYou, /Government of India bond, administered by the RBI/i);
+  assert.doesNotMatch(suitability.whyThisFitsYou, /issued directly by the RBI/i);
+});
+
 test('enrichProductsWithPostTaxAndSuitability enriches product array without mutating historicalReturn', () => {
   const products = [
     {

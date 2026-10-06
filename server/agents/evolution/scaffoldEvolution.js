@@ -39,6 +39,12 @@ export function createPlanReviewScaffoldRunner({ dependencies = {} } = {}) {
         },
       },
     });
+    if (dependencies.strictModelPlanner === true
+        && (review?.planner?.fallback === true || review?.planner?.provider === 'DETERMINISTIC')) {
+      const error = new Error('The live candidate planner fell back to deterministic output.');
+      error.code = 'EVOLUTION_PLANNER_REQUIRED';
+      throw error;
+    }
     const after = await dependencies.captureFinancialAuthority({ caseDefinition, phase: 'after' });
     const beforeFingerprint = canonicalSha256(before);
     const afterFingerprint = canonicalSha256(after);

@@ -29,7 +29,7 @@ class SwitchModelRequest(BaseModel):
 
 
 class ToolQueryRequest(BaseModel):
-    tool_name: str = Field(..., description="Name of financial tool to execute (calculate_sip, calculate_cagr, calculate_tax_rebate)")
+    tool_name: str = Field(..., description="Name of a non-authoritative calculator to execute (calculate_sip, calculate_cagr)")
     arguments: Dict[str, Any] = Field(..., description="Tool input parameters")
 
 
@@ -124,7 +124,7 @@ def tool_query(
     request: ToolQueryRequest,
     verified_user_id: str = Depends(verify_verified_user_id),
 ):
-    """Executes financial calculator tools (calculate_sip, calculate_cagr, calculate_tax_rebate)."""
+    """Executes non-authoritative SIP or historical CAGR calculations."""
     res = tool_engine.execute_tool(request.tool_name, request.arguments)
     if not res.success:
         raise HTTPException(status_code=400, detail=res.result.get("error", "Tool execution failed"))

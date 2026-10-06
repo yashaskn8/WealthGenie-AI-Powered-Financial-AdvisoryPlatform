@@ -5,7 +5,7 @@ import { trace, propagation } from '@opentelemetry/api';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { sanitizeTelemetryAttributes } from '../utils/telemetrySanitizer.js';
+import { sanitizeTelemetryAttributes, sanitizeTelemetrySpanEvents, sanitizeTelemetrySpanName } from '../utils/telemetrySanitizer.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -41,11 +41,12 @@ export class FileSpanExporter {
           trace_id: traceId,
           span_id: spanId,
           parent_span_id: parentSpanId,
-          name: span.name,
+          name: sanitizeTelemetrySpanName(span.name),
           duration_ms: durationMs,
           status: span.status.code === 1 ? 'OK' : (span.status.code === 2 ? 'ERROR' : 'UNSET'),
           timestamp: new Date(span.startTime[0] * 1000 + span.startTime[1] / 1e6).toISOString(),
           attributes: sanitizeTelemetryAttributes(span.attributes || {}),
+          events: sanitizeTelemetrySpanEvents(span.events || []),
         });
       });
 
@@ -55,12 +56,12 @@ export class FileSpanExporter {
       }
       this.writeFailureReported = false;
       resultCallback({ code: 0 }); // ExportResultCode.SUCCESS
-    } catch (err) {
+    } catch {
       if (!this.writeFailureReported) {
-        console.warn('[Tracing] Failed to export spans to file:', err.message, `path=${this.filePath}`);
+        console.warn('[Tracing] Failed to export spans to the configured file sink.');
         this.writeFailureReported = true;
       }
-      resultCallback({ code: 1, error: err }); // ExportResultCode.FAILED
+      resultCallback({ code: 1, error: new Error('Trace export failed.') }); // ExportResultCode.FAILED
     }
   }
 

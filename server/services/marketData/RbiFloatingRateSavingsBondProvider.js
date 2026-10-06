@@ -18,14 +18,32 @@ export const RBI_FRSB_CANONICAL_PRODUCT_ID = 'government:rbi:frsb-2020-taxable';
 export const RBI_RATE_DATA_CLASS = 'OFFICIAL_RBI_FLOATING_COUPON_RATE';
 export const RBI_FRSB_SPREAD_BPS = 35;
 export const RBI_FRSB_SPREAD_PERCENT = 0.35;
+const INDIA_TIME_ZONE = 'Asia/Kolkata';
+
+function indiaCalendarParts(referenceDate) {
+  const date = referenceDate instanceof Date ? referenceDate : new Date(referenceDate);
+  if (Number.isNaN(date.getTime())) throw new TypeError('Invalid FRSB reset-period date.');
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: INDIA_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+  }).formatToParts(date);
+  return Object.fromEntries(parts.filter(part => part.type !== 'literal').map(part => [part.type, part.value]));
+}
+
+export function rbiFrsbCacheKeyAt(referenceDate) {
+  const { resetDate } = calculateFrsbResetPeriod(referenceDate);
+  return `${RBI_FRSB_CACHE_KEY}:${resetDate}`;
+}
 
 export function calculateFrsbResetPeriod(referenceDate = new Date()) {
   const date = referenceDate instanceof Date ? referenceDate : new Date(referenceDate);
   if (Number.isNaN(date.getTime())) {
     throw new TypeError('Invalid reference date for FRSB reset period calculation.');
   }
-  const year = date.getUTCFullYear();
-  const month = date.getUTCMonth(); // 0 = Jan, ..., 5 = Jun, 6 = Jul, ..., 11 = Dec
+  const { year: yearText, month: monthText } = indiaCalendarParts(date);
+  const year = Number(yearText);
+  const month = Number(monthText) - 1; // 0 = Jan, ..., 5 = Jun, 6 = Jul, ..., 11 = Dec
   if (month < 6) {
     return {
       resetDate: `${year}-01-01`,
@@ -150,8 +168,8 @@ export function deriveRbiFloatingRateSavingsBondSnapshot({
   const couponValue = Number((nscValue + spreadPercent).toFixed(4));
   const canonicalProductId = RBI_FRSB_CANONICAL_PRODUCT_ID;
 
-  const intervalStart = new Date(`${effectiveFrom}T00:00:00.000Z`);
-  const intervalEnd = new Date(`${effectiveTo}T23:59:59.999Z`);
+  const intervalStart = new Date(`${effectiveFrom}T00:00:00.000+05:30`);
+  const intervalEnd = new Date(`${effectiveTo}T23:59:59.999+05:30`);
   const freshnessStatus = nowDate >= intervalStart && nowDate <= intervalEnd
     ? FRESHNESS.FRESH
     : FRESHNESS.STALE;
@@ -231,7 +249,7 @@ export default class RbiFloatingRateSavingsBondProvider extends MarketDataProvid
 
   async getSnapshot({ forceRefresh = false, nscSnapshot = null } = {}) {
     return readThroughMarketCache({
-      cacheKey: RBI_FRSB_CACHE_KEY,
+      cacheKey: rbiFrsbCacheKeyAt(this.clock()),
       ttlSeconds: RBI_FRSB_CACHE_TTL_SECONDS,
       forceRefresh,
       loader: async () => {

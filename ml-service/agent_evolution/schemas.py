@@ -54,6 +54,14 @@ FORBIDDEN_ARTIFACT_KEYS = re.compile(
     r'reliabilityHardGate|financialEngine|taxRules|allocation|authorization|'
     r'deployment|sandboxPolicy|script|executable|code)$', re.I,
 )
+PRIVATE_VALUE_PATTERN = re.compile(
+    r'(?:\b[A-Z]{5}\d{4}[A-Z]\b|'
+    r'\b\d{4}[ -]?\d{4}[ -]?\d{4}\b|'
+    r'(?<!\w)(?:\+?91[\s-]?)?[6-9]\d{9}(?!\w)|'
+    r'\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b|'
+    r'\b(?:account\s*(?:number|no\.?|#)?|a/c)\s*[:#-]?\s*[A-Z0-9-]{8,24}\b)',
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -91,6 +99,8 @@ def _assert_private_free(value: Any, path: str = 'root') -> None:
     elif isinstance(value, (list, tuple)):
         for index, child in enumerate(value):
             _assert_private_free(child, f'{path}[{index}]')
+    elif isinstance(value, str) and PRIVATE_VALUE_PATTERN.search(value):
+        raise ValueError(f'private identifier rejected at {path}')
 
 
 def validate_optimizer_dataset(dataset: list[dict[str, Any]]) -> list[dict[str, Any]]:

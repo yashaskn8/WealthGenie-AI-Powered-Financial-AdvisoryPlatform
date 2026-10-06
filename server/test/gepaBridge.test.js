@@ -268,6 +268,21 @@ test('GEPA bridge rejects private or sealed optimizer inputs', () => {
   }), /train or validation|holdout/i);
 });
 
+test('GEPA bridge rejects Indian identity, contact, and bank-account values in free text', () => {
+  for (const identifier of [
+    'PAN ABCDE1234F',
+    'Aadhaar 1234 5678 9012',
+    'account number: 123456789012',
+    'alice@example.com',
+    '+91 9876543210',
+  ]) {
+    assert.throws(() => createGepaBridgeInput({
+      ...bridgeOptions,
+      trainCases: [{ id: 'private-value', question: `Please review ${identifier}` }],
+    }), /private|sealed/i, identifier);
+  }
+});
+
 test('GEPA declared mutation surface must exactly cover each submitted mutable field', () => {
   const basePromptBundle = createPromptBundle({ bundleId: 'surface-parent', version: '1', plannerInstruction: 'Planner A' });
   assert.throws(() => validateGepaProposal({

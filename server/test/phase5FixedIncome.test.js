@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   parseIndiaPostSavingsBundle,
+  governmentSavingsCacheKeyAt,
 } from '../services/marketData/GovernmentSmallSavingsProvider.js';
 import { parseSbiRetailTermDepositPage } from '../services/marketData/SbiTermDepositProvider.js';
 import {
@@ -13,6 +14,7 @@ import { rankWhereToInvestBackend } from '../services/RecommendationPipeline.js'
 import { canonicalProfile } from './helpers/canonicalProfile.js';
 import {
   calculateFrsbResetPeriod,
+  rbiFrsbCacheKeyAt,
   deriveRbiFloatingRateSavingsBondSnapshot,
   parseRbiOperationalGuidelines,
   RBI_FRSB_NOTIFICATION_URL,
@@ -88,7 +90,7 @@ test('official India Post parser never converts negative or malformed rates into
   assert.equal(ppf.value, null);
   assert.equal(ppf.availabilityStatus, AVAILABILITY.UNAVAILABLE);
   assert.equal(compareVerifiedFixedIncomeProducts({
-    parentInstrumentId: 'ppf', snapshot, profile: canonicalProfile(),
+    parentInstrumentId: 'ppf', snapshot, profile: canonicalProfile(), now: NOW,
   }).products.length, 0);
 
   const malformedRows = ROWS.map(row => row.instrument === 'Public Provident Fund Scheme'
@@ -137,7 +139,7 @@ test('multiple official intervals remain distinct and latest current fact is sel
     fetchedAt: NOW.toISOString(), now: NOW,
   });
   const id = 'government:india-post:ppf';
-  const selected = selectCurrentEffectiveFact([...prior.facts, ...current.facts], id);
+  const selected = selectCurrentEffectiveFact([...prior.facts, ...current.facts], id, NOW);
   assert.equal(selected.effectiveFrom, '2026-07-01');
   assert.equal(buildObservationOperations(prior).length, ROWS.length);
   assert.equal(buildObservationOperations(current).length, ROWS.length);
@@ -149,7 +151,7 @@ test('stale or missing government source facts never become recommendations', ()
   });
   assert.equal(stale.facts[0].freshness.status, 'STALE');
   const result = compareVerifiedFixedIncomeProducts({
-    parentInstrumentId: 'ppf', snapshot: stale, profile: canonicalProfile(),
+    parentInstrumentId: 'ppf', snapshot: stale, profile: canonicalProfile(), now: NOW,
   });
   assert.equal(result.products.length, 0);
   assert.deepEqual(result.ranking.reasonCodes, ['CURRENT_EFFECTIVE_SCHEME_RATE_UNAVAILABLE']);
@@ -160,6 +162,57 @@ test('stale or missing government source facts never become recommendations', ()
     /incomplete_rate_table/,
   );
   assert.throws(() => parseIndiaPostSavingsBundle('not the official schema', { now: NOW }), /effective_interval/);
+});
+
+test('fixed-income comparison rejects provider, source, instrument, kind, unit, and product contract mismatches', () => {
+  const snapshot = parseIndiaPostSavingsBundle(governmentBundle(), {
+    fetchedAt: NOW.toISOString(), now: NOW,
+  });
+  const ppfId = 'government:india-post:ppf';
+  const mutatePpfFact = mutate => ({
+    ...snapshot,
+    facts: snapshot.facts.map(fact => fact.canonicalProductId === ppfId ? mutate(fact) : fact),
+  });
+  const invalidSnapshots = [
+    { ...snapshot, provider: PROVIDERS.RBI },
+    mutatePpfFact(fact => ({ ...fact, source: { ...fact.source, provider: PROVIDERS.RBI } })),
+    mutatePpfFact(fact => ({ ...fact, source: { ...fact.source, instrumentId: 'nsc' } })),
+    mutatePpfFact(fact => ({ ...fact, source: { ...fact.source, url: 'https://example.com/rate' } })),
+    mutatePpfFact(fact => ({ ...fact, kind: 'TERM_DEPOSIT_RATE' })),
+    mutatePpfFact(fact => ({ ...fact, unit: 'PERCENT_PER_MONTH' })),
+    {
+      ...snapshot,
+      products: snapshot.products.map(product => product.canonicalProductId === ppfId
+        ? { ...product, source: { provider: PROVIDERS.RBI, url: 'https://example.com/rate' } }
+        : product),
+    },
+  ];
+  for (const invalid of invalidSnapshots) {
+    const result = compareVerifiedFixedIncomeProducts({
+      parentInstrumentId: 'ppf', snapshot: invalid, profile: canonicalProfile(), now: NOW,
+    });
+    assert.equal(result.products.length, 0);
+    assert.equal(result.ranking.status, 'UNAVAILABLE');
+  }
+});
+
+test('comparison rejects a cached fact after its Indian effective interval ends even if its stored freshness says FRESH', () => {
+  const parsedAtQuarterStart = parseIndiaPostSavingsBundle(governmentBundle(), {
+    fetchedAt: NOW.toISOString(), now: NOW,
+  });
+  const expired = {
+    ...parsedAtQuarterStart,
+    facts: parsedAtQuarterStart.facts.map(fact => ({
+      ...fact,
+      freshness: { ...fact.freshness, status: 'FRESH' },
+    })),
+  };
+  const afterQuarter = new Date('2026-10-01T00:00:00.000+05:30');
+  const result = compareVerifiedFixedIncomeProducts({
+    parentInstrumentId: 'ppf', snapshot: expired, profile: canonicalProfile(), now: afterQuarter,
+  });
+  assert.equal(result.products.length, 0);
+  assert.equal(result.ranking.status, 'UNAVAILABLE');
 });
 
 test('India Post effective dates and observation timestamps must be valid calendar values', () => {
@@ -211,6 +264,7 @@ test('FD comparison never crosses tenure/depositor classes or pads to five', () 
   });
   const result = compareVerifiedFixedIncomeProducts({
     parentInstrumentId: 'fd', snapshot, profile: canonicalProfile({ age: 35, investmentHorizonYears: 2 }),
+    now: NOW,
   });
   assert.equal(result.products.length, 1);
   assert.equal(result.ranking.status, 'VERIFIED_COMPARABLE_OPTIONS');
@@ -276,7 +330,7 @@ test('WTI runs the hard suitability gate before official fixed-income provider a
   const accepted = await rankWhereToInvestBackend(
     canonicalProfile({ investmentHorizonYears: 15 }),
     { parentInstrumentId: 'ppf' },
-    { fetchGovernmentSavingsSnapshot: async () => { calls += 1; return snapshot; } },
+    { now: NOW, fetchGovernmentSavingsSnapshot: async () => { calls += 1; return snapshot; } },
   );
   assert.equal(accepted.length, 1);
   assert.equal(accepted[0].officialRate.value, 7.1);
@@ -349,6 +403,21 @@ test('TEST 4, 5, 6: FRSB effective period is six months, July reset produces Jul
   assert.equal(julyDurationDays, 184);
   const janDurationDays = (new Date(janReset.effectiveTo) - new Date(janReset.effectiveFrom)) / (1000 * 60 * 60 * 24) + 1;
   assert.equal(janDurationDays, 181);
+});
+
+test('government-rate cache keys roll at India quarter and FRSB reset boundaries', () => {
+  assert.notEqual(
+    governmentSavingsCacheKeyAt(new Date('2026-09-30T18:29:59.999Z')),
+    governmentSavingsCacheKeyAt(new Date('2026-09-30T18:30:00.000Z')),
+  );
+  assert.notEqual(
+    rbiFrsbCacheKeyAt(new Date('2026-06-30T18:29:59.999Z')),
+    rbiFrsbCacheKeyAt(new Date('2026-06-30T18:30:00.000Z')),
+  );
+  assert.equal(
+    governmentSavingsCacheKeyAt(new Date('2026-09-30T18:29:59.999Z')),
+    governmentSavingsCacheKeyAt(new Date('2026-09-30T00:00:00.000Z')),
+  );
 });
 
 test('TEST 7 — CRITICAL: An October NSC change does NOT mutate an already-established July–December FRSB coupon', () => {
@@ -424,6 +493,7 @@ test('TEST 10: No static coupon fallback', () => {
     parentInstrumentId: 'rbi_bonds',
     snapshot: missingSnapshot,
     profile: canonicalProfile({ investmentHorizonYears: 10 }),
+    now: NOW,
   });
   assert.equal(result.products.length, 0);
   assert.equal(result.ranking.status, 'UNAVAILABLE');

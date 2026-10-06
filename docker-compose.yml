@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   mongodb:
-    image: mongo:7.0
+    image: mongo:7.0@sha256:9854f7139445d766a9523571d6f047530c45547460ffcf8259eb2bf4264632ca
     container_name: wealthgenie-mongodb
     restart: unless-stopped
     command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
@@ -17,7 +17,7 @@ services:
       retries: 5
 
   redis:
-    image: redis:7.2-alpine
+    image: redis:7.2-alpine@sha256:05a97a479bc73de66f087dc05b569010772880f778cc8671fa6b8aadee32e5c6
     container_name: wealthgenie-redis
     restart: unless-stopped
     ports:

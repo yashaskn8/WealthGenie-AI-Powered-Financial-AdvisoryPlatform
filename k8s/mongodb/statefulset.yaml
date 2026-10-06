@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: mongodb
-          image: mongo:7.0
+          image: mongo:7.0@sha256:9854f7139445d766a9523571d6f047530c45547460ffcf8259eb2bf4264632ca
           args: ["--replSet", "rs0", "--bind_ip_all"]
           ports:
             - containerPort: 27017

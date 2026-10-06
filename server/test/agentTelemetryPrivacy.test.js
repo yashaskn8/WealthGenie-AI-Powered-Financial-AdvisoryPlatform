@@ -19,6 +19,10 @@ const ATTACK_VALUES = [
   'email: telemetry-person-sentinel@example.invalid',
   'phone: +919876543210',
   'PAN: ABCDE1234F',
+  'Aadhaar: 1234 5678 9012',
+  'unlabeled bank identifier 123456789012',
+  'Aadhaar: 1234 5678 9012',
+  'unlabeled bank identifier 123456789012',
   'bank_account: bank-account-secret-sentinel',
   'income: 180000 salary: 120000',
   'api_key: api-key-secret-sentinel',
@@ -79,6 +83,10 @@ test('agent telemetry redacts hostile values on every allowlisted attribute befo
     'telemetry-person-sentinel@example.invalid',
     '+919876543210',
     'ABCDE1234F',
+    '1234 5678 9012',
+    '123456789012',
+    '1234 5678 9012',
+    '123456789012',
     'bank-account-secret-sentinel',
     '180000',
     '120000',
@@ -115,6 +123,8 @@ test('recordAgentError exports only sanitized bounded exception data, including 
     'exception-bearer-sentinel',
     'exception-mongo-secret-sentinel',
     'ABCDE1234F',
+    '1234 5678 9012',
+    '1234 5678 9012',
     'nested-account-secret-sentinel',
     'exception-cookie-secret-sentinel',
     'exception-google-signature-sentinel',
@@ -126,6 +136,23 @@ test('recordAgentError exports only sanitized bounded exception data, including 
   assert.equal(exported.events[0].attributes['exception.type'], 'ProviderError');
   assert.equal(exported.attributes['error.type'], 'error-code-safe');
   assert.match(exported.events[0].attributes['exception.message'], /provider failed/);
+
+  const directory = mkdtempSync(path.join(tmpdir(), 'wealthgenie-trace-exception-'));
+  try {
+    const tracePath = path.join(directory, 'trace.jsonl');
+    const fileExporter = new FileSpanExporter(tracePath);
+    await new Promise((resolve, reject) => fileExporter.export([exported], result => (
+      result.code === 0 ? resolve() : reject(result.error)
+    )));
+    const record = JSON.parse(readFileSync(tracePath, 'utf8'));
+    assert.equal(record.events.length, 1);
+    assert.equal(record.events[0].attributes['exception.type'], 'ProviderError');
+    assert.equal(JSON.stringify(record).includes('ABCDE1234F'), false);
+    assert.equal(JSON.stringify(record).includes('exception-bearer-sentinel'), false);
+    assert.equal(Object.hasOwn(record.events[0].attributes, 'exception.stacktrace'), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('Axios, Mongo, Redis, A2A, MCP, and WebAuthn exception fields are sanitized before export', async () => {
@@ -153,6 +180,12 @@ test('Axios, Mongo, Redis, A2A, MCP, and WebAuthn exception fields are sanitized
     Object.assign(new Error('WebAuthn challenge PAN: ABCDE1234F phone: +919876543210'), {
       name: 'WebAuthnError',
     }),
+    Object.assign(new Error('Aadhaar 1234 5678 9012; account 123456789012'), {
+      name: 'IdentityError',
+    }),
+    Object.assign(new Error('Aadhaar 1234 5678 9012; account 123456789012'), {
+      name: 'IdentityError',
+    }),
   ];
   const exportedData = [];
 
@@ -172,6 +205,10 @@ test('Axios, Mongo, Redis, A2A, MCP, and WebAuthn exception fields are sanitized
     'mcp-api-key-secret-sentinel',
     'ABCDE1234F',
     '+919876543210',
+    '1234 5678 9012',
+    '123456789012',
+    '1234 5678 9012',
+    '123456789012',
   ]) {
     assert.equal(serialized.includes(secret), false, `exported exception telemetry leaked ${secret}`);
   }
@@ -231,6 +268,10 @@ test('file span exporter applies the same value sanitization to emitted span att
       'telemetry-person-sentinel@example.invalid',
       '+919876543210',
       'ABCDE1234F',
+      '1234 5678 9012',
+      '123456789012',
+      '1234 5678 9012',
+      '123456789012',
       'bank-account-secret-sentinel',
       '180000',
       '120000',
@@ -241,6 +282,45 @@ test('file span exporter applies the same value sanitization to emitted span att
     ]) {
       assert.equal(serialized.includes(secret), false, `file telemetry leaked ${secret}`);
     }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('file span exporter reduces dynamic span names and hides sink error details', async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'wealthgenie-telemetry-span-'));
+  const filePath = path.join(directory, 'traces.jsonl');
+  const [span] = await exportSpans([() => {}]);
+  const exporter = new FileSpanExporter(filePath);
+  const dynamicSpan = new Proxy(span, {
+    get(target, property) {
+      return property === 'name'
+        ? 'POST /profile/prana-income-180000'
+        : Reflect.get(target, property, target);
+    },
+  });
+
+  try {
+    await new Promise((resolve, reject) => {
+      exporter.export([dynamicSpan], result => {
+        if (result.code !== 0) reject(result.error || new Error('trace export failed'));
+        else resolve();
+      });
+    });
+    const serialized = readFileSync(filePath, 'utf8');
+    assert.match(serialized, /"name":"http\.request\.POST"/);
+    assert.equal(serialized.includes('prana-income-180000'), false);
+
+    const directoryUsedAsFile = mkdtempSync(path.join(tmpdir(), 'wealthgenie-telemetry-failure-'));
+    const failureExporter = new FileSpanExporter(directoryUsedAsFile);
+    let result;
+    await new Promise(resolve => failureExporter.export([dynamicSpan], value => {
+      result = value;
+      resolve();
+    }));
+    assert.equal(result.code, 1);
+    assert.equal(result.error.message, 'Trace export failed.');
+    rmSync(directoryUsedAsFile, { recursive: true, force: true });
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

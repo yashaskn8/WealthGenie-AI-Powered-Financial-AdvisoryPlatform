@@ -6,6 +6,7 @@ import UserIntentMandate from '../../models/UserIntentMandate.js';
 import AgentCheckpoint from '../../models/AgentCheckpoint.js';
 import AgentGraphCheckpoint from '../../models/AgentGraphCheckpoint.js';
 import AgentRunEvent from '../../models/AgentRunEvent.js';
+import { evaluateProductionAgentRun, persistProductionAgentEvaluation } from '../evals/productionEvaluator.js';
 import FinancialProfile from '../../models/FinancialProfile.js';
 import FinancialProfileState from '../../models/FinancialProfileState.js';
 import RecommendationState from '../../models/RecommendationState.js';
@@ -129,6 +130,12 @@ function addTrajectory(existing, event, node) {
     writesFinancialAuthority: typeof event.writesFinancialAuthority === 'boolean' ? event.writesFinancialAuthority : null,
     networkAccess: typeof event.networkAccess === 'string' ? event.networkAccess.slice(0, 20) : null,
     shadowAllowed: typeof event.shadowAllowed === 'boolean' ? event.shadowAllowed : null,
+    requested: ['TOOL_SELECTED', 'TOOL_AUTHORIZED', 'TOOL_SUCCEEDED', 'TOOL_FAILED'].includes(event.type),
+    attempted: event.type === 'TOOL_SUCCEEDED' || (event.type === 'TOOL_FAILED' && event.executionStarted === true),
+    authorized: ['TOOL_AUTHORIZED', 'TOOL_SUCCEEDED'].includes(event.type)
+      || (event.type === 'TOOL_FAILED' && event.executionStarted === true),
+    executed: event.type === 'TOOL_SUCCEEDED' || (event.type === 'TOOL_FAILED' && event.executionStarted === true),
+    executionGeneration: Number.isInteger(Number(event.executionGeneration)) ? Number(event.executionGeneration) : null,
     code: event.code || null,
     inputHash: /^[a-f0-9]{64}$/.test(event.inputHash || '') ? event.inputHash : null,
     outputHash: /^[a-f0-9]{64}$/.test(event.outputHash || '') ? event.outputHash : null,
@@ -208,6 +215,7 @@ export async function recoverExpiredPlanReviewRuns({
   eventModel = AgentRunEvent,
   checkpointModel = AgentCheckpoint,
   graphCheckpointModel = AgentGraphCheckpoint,
+  productionEvaluationModel = null,
   mongo = mongoose,
   nowValue = now(),
 } = {}) {
@@ -272,8 +280,9 @@ export async function recoverExpiredPlanReviewRuns({
         const expiresAt = new Date(nowValue.getTime() + PLAN_REVIEW_CHECKPOINT_RETENTION_MS);
         await checkpointModel.updateMany({ runId: candidate.runId, userId: candidate.userId }, { $set: { expiresAt } }, { session });
         await graphCheckpointModel.updateMany({ runId: candidate.runId, userId: candidate.userId }, { $set: { expiresAt } }, { session });
+        let recoveryEvent = null;
         if (eventModel?.create) {
-          await eventModel.create([{
+          [recoveryEvent] = await eventModel.create([{
             runId: candidate.runId,
             userId: candidate.userId,
             executionGeneration: candidate.executionGeneration,
@@ -282,6 +291,38 @@ export async function recoverExpiredPlanReviewRuns({
             node: candidate.currentNode || null,
             data: { type: 'RUN_FAILED', code: 'INTERNAL_RUNTIME_FAILURE', at: nowValue.toISOString() },
           }], { session });
+        }
+        if (productionEvaluationModel) {
+          let durableEvents = recoveryEvent ? [recoveryEvent] : [];
+          if (eventModel?.find) {
+            const eventQuery = eventModel.find({ runId: candidate.runId, userId: candidate.userId });
+            eventQuery.session?.(session);
+            eventQuery.sort?.({ sequence: 1 });
+            durableEvents = await (eventQuery.lean ? eventQuery.lean() : eventQuery);
+          }
+          const failureRun = {
+            ...candidate,
+            status: 'FAILED',
+            failure: { code: 'INTERNAL_RUNTIME_FAILURE', message: 'Worker lease expired after the maximum retry attempts.' },
+            eventSequence,
+            completedAt: nowValue,
+            trajectory: [...(candidate.trajectory || []), {
+              type: 'RUN_FAILED',
+              executionGeneration: candidate.executionGeneration,
+              at: nowValue.toISOString(),
+            }].slice(-100),
+            toolExecutionLedger: candidate.toolExecutionLedger || [],
+          };
+          const evaluation = evaluateProductionAgentRun({
+            run: failureRun,
+            durableEvents: durableEvents || [],
+            baselineVersion: process.env.WG_PRODUCTION_EVALUATION_BASELINE_VERSION || null,
+            evaluatedAt: nowValue,
+          });
+          await persistProductionAgentEvaluation(evaluation, {
+            model: productionEvaluationModel,
+            session,
+          });
         }
         candidateRecovered = true;
       });
@@ -308,6 +349,7 @@ class PlanReviewWorker {
     checkpointModel = AgentCheckpoint,
     graphCheckpointModel = AgentGraphCheckpoint,
     eventModel = null,
+    productionEvaluationModel = null,
     mandateModel = UserIntentMandate,
     profileModel = FinancialProfile,
     profileStateModel = FinancialProfileState,
@@ -328,6 +370,7 @@ class PlanReviewWorker {
     this.checkpointModel = checkpointModel;
     this.graphCheckpointModel = graphCheckpointModel;
     this.eventModel = eventModel;
+    this.productionEvaluationModel = productionEvaluationModel;
     this.mandateModel = mandateModel;
     this.profileModel = profileModel;
     this.profileStateModel = profileStateModel;
@@ -474,10 +517,13 @@ class PlanReviewWorker {
           checkpointSequence: sequence,
           progress: progressFor(payload.node, completedNodes),
         };
-        if (payload.event) set.trajectory = addTrajectory(current.trajectory, payload.event, payload.node);
-        if (['TOOL_SELECTED', 'TOOL_SUCCEEDED', 'TOOL_FAILED'].includes(payload.event?.type)) {
+        if (payload.event) set.trajectory = addTrajectory(current.trajectory, {
+          ...payload.event,
+          executionGeneration: run.executionGeneration,
+        }, payload.node);
+        if (['TOOL_SELECTED', 'TOOL_AUTHORIZED', 'TOOL_SUCCEEDED', 'TOOL_FAILED'].includes(payload.event?.type)) {
           const has = key => Object.prototype.hasOwnProperty.call(payload.event, key);
-          const selected = payload.event.type === 'TOOL_SELECTED';
+          const stage = ({ TOOL_SELECTED: 'SELECTED', TOOL_AUTHORIZED: 'AUTHORIZED', TOOL_SUCCEEDED: 'SUCCEEDED', TOOL_FAILED: 'FAILED' })[payload.event.type];
           const ledger = {
             sequence,
             tool: payload.event.tool || null,
@@ -490,8 +536,15 @@ class PlanReviewWorker {
             writesFinancialAuthority: typeof payload.event.writesFinancialAuthority === 'boolean' ? payload.event.writesFinancialAuthority : null,
             networkAccess: typeof payload.event.networkAccess === 'string' ? payload.event.networkAccess.slice(0, 20) : null,
             shadowAllowed: typeof payload.event.shadowAllowed === 'boolean' ? payload.event.shadowAllowed : null,
-            stage: selected ? 'SELECTED' : (payload.event.type === 'TOOL_SUCCEEDED' ? 'SUCCEEDED' : 'FAILED'),
-            success: selected ? null : payload.event.type === 'TOOL_SUCCEEDED',
+            requested: true,
+            attempted: stage === 'SUCCEEDED' || (stage === 'FAILED' && payload.event.executionStarted === true),
+            authorized: ['TOOL_AUTHORIZED', 'TOOL_SUCCEEDED'].includes(payload.event.type)
+              || (payload.event.type === 'TOOL_FAILED' && payload.event.executionStarted === true),
+            executed: payload.event.type === 'TOOL_SUCCEEDED'
+              || (payload.event.type === 'TOOL_FAILED' && payload.event.executionStarted === true),
+            executionGeneration: run.executionGeneration,
+            stage,
+            success: ['SELECTED', 'AUTHORIZED'].includes(stage) ? null : payload.event.type === 'TOOL_SUCCEEDED',
             code: payload.event.code || null,
             inputHash: /^[a-f0-9]{64}$/.test(payload.event.inputHash || '')
               ? payload.event.inputHash
@@ -500,7 +553,7 @@ class PlanReviewWorker {
               ? payload.event.outputHash
               : (has('output') ? canonicalSha256(payload.event.output) : null),
             startedAt: payload.event.startedAt || payload.event.at || now().toISOString(),
-            completedAt: selected ? null : now().toISOString(),
+            completedAt: ['SELECTED', 'AUTHORIZED'].includes(stage) ? null : now().toISOString(),
           };
           set.toolExecutionLedger = [...(current.toolExecutionLedger || []), ledger].slice(-50);
         }
@@ -560,7 +613,16 @@ class PlanReviewWorker {
   }
 
   async appendEvent(run, sequence, event, node = null) {
-    if (!this.eventModel?.create || !event?.type) return;
+    if (!event?.type) return;
+    const isToolEvent = ['TOOL_SELECTED', 'TOOL_AUTHORIZED', 'TOOL_SUCCEEDED', 'TOOL_FAILED'].includes(event.type);
+    if (!this.eventModel?.create) {
+      if (isToolEvent) {
+        const error = new Error('PlanReview tool execution evidence storage is unavailable.');
+        error.code = 'TOOL_EVIDENCE_PERSISTENCE_UNAVAILABLE';
+        throw error;
+      }
+      return;
+    }
     let session;
     try {
       session = await this.mongo.startSession();
@@ -615,6 +677,12 @@ class PlanReviewWorker {
             node: node || null,
             tool: event.tool || null,
             toolCallId: /^[0-9a-f-]{36}$/i.test(event.toolCallId || '') ? event.toolCallId : null,
+            requested: ['TOOL_SELECTED', 'TOOL_AUTHORIZED', 'TOOL_SUCCEEDED', 'TOOL_FAILED'].includes(event.type),
+            attempted: event.type === 'TOOL_SUCCEEDED' || (event.type === 'TOOL_FAILED' && event.executionStarted === true),
+            authorized: ['TOOL_AUTHORIZED', 'TOOL_SUCCEEDED'].includes(event.type)
+              || (event.type === 'TOOL_FAILED' && event.executionStarted === true),
+            executed: event.type === 'TOOL_SUCCEEDED' || (event.type === 'TOOL_FAILED' && event.executionStarted === true),
+            executionGeneration: run.executionGeneration,
             capabilityId: typeof event.capabilityId === 'string' ? event.capabilityId.slice(0, 120) : null,
             capabilityVersion: typeof event.capabilityVersion === 'string' ? event.capabilityVersion.slice(0, 40) : null,
             capabilityEffect: typeof event.effect === 'string' ? event.effect.slice(0, 20) : null,
@@ -635,8 +703,14 @@ class PlanReviewWorker {
         }], { session });
       });
     } catch (error) {
-      // Event streaming is a progress surface. A transient event write must
-      // never change the authoritative AgentRun result or financial outcome.
+      // Tool events are part of the execution authorization/evidence boundary:
+      // never execute a tool if its durable event could not be published.
+      if (isToolEvent) {
+        if (error?.code !== 11000) PrometheusMetrics.inc('agent_event_persistence_failures_total');
+        throw error;
+      }
+      // Other event streaming is a progress surface. A transient event write
+      // must not change the authoritative AgentRun result or financial outcome.
       if (error?.code !== 11000) PrometheusMetrics.inc('agent_event_persistence_failures_total');
     } finally {
       try {
@@ -795,6 +869,41 @@ class PlanReviewWorker {
             data: { type: terminalEvent, node: 'persist_agent_run', at: now().toISOString() },
           }], { session });
         }
+        if (this.productionEvaluationModel) {
+          let durableEvents = [];
+          if (this.eventModel?.find) {
+            const eventQuery = this.eventModel.find({ runId: run.runId, userId: run.userId });
+            eventQuery.session?.(session);
+            eventQuery.sort?.({ sequence: 1 });
+            durableEvents = await (eventQuery.lean ? eventQuery.lean() : eventQuery);
+          }
+          const completedAt = update.$set.completedAt;
+          const evaluationRun = {
+            ...current,
+            ...update.$set,
+            runId: run.runId,
+            userId: run.userId,
+            executionGeneration: run.executionGeneration,
+            status,
+            eventSequence: terminalSequence,
+            trajectory: [...(current.trajectory || []), {
+              type: terminalEvent, node: 'persist_agent_run', executionGeneration: run.executionGeneration,
+              at: completedAt.toISOString(),
+            }].slice(-100),
+            toolExecutionLedger: current.toolExecutionLedger || [],
+          };
+          const evaluation = evaluateProductionAgentRun({
+            run: evaluationRun,
+            durableEvents: durableEvents || [],
+            afterStateBinding: { planReviewSnapshotHash: snapshot.planReviewSnapshotHash, sourceBinding: snapshot.sourceBinding },
+            baselineVersion: process.env.WG_PRODUCTION_EVALUATION_BASELINE_VERSION || null,
+            evaluatedAt: completedAt,
+          });
+          await persistProductionAgentEvaluation(evaluation, {
+            model: this.productionEvaluationModel,
+            session,
+          });
+        }
         if (status === 'COMPLETED') {
           const expiresAt = new Date(Date.now() + PLAN_REVIEW_CHECKPOINT_RETENTION_MS);
           await this.checkpointModel.updateMany({ runId: run.runId, userId: run.userId }, { $set: { expiresAt } }, { session });
@@ -916,6 +1025,41 @@ class PlanReviewWorker {
           const expiresAt = new Date(Date.now() + PLAN_REVIEW_CHECKPOINT_RETENTION_MS);
           await this.checkpointModel.updateMany({ runId: run.runId, userId: run.userId }, { $set: { expiresAt } }, { session });
           await this.graphCheckpointModel.updateMany({ runId: run.runId, userId: run.userId }, { $set: { expiresAt } }, { session });
+          if (this.productionEvaluationModel) {
+            let durableEvents = [];
+            if (this.eventModel?.find) {
+              const eventQuery = this.eventModel.find({ runId: run.runId, userId: run.userId });
+              eventQuery.session?.(session);
+              eventQuery.sort?.({ sequence: 1 });
+              durableEvents = await (eventQuery.lean ? eventQuery.lean() : eventQuery);
+            }
+            const failureRun = {
+              ...current,
+              ...update.$set,
+              runId: run.runId,
+              userId: run.userId,
+              executionGeneration: run.executionGeneration,
+              status: update.$set.status,
+              eventSequence: persistedEventSequence,
+              completedAt: terminal || cancelled || budgetExceeded || superseded ? now() : null,
+              trajectory: [...(current.trajectory || []), {
+                type: superseded ? 'RUN_SUPERSEDED' : (cancelled ? 'RUN_CANCELLED' : (budgetExceeded ? 'RUN_BUDGET_EXCEEDED' : 'RUN_FAILED')),
+                executionGeneration: run.executionGeneration,
+                at: now().toISOString(),
+              }].slice(-100),
+              toolExecutionLedger: current.toolExecutionLedger || [],
+            };
+            const evaluation = evaluateProductionAgentRun({
+              run: failureRun,
+              durableEvents: durableEvents || [],
+              baselineVersion: process.env.WG_PRODUCTION_EVALUATION_BASELINE_VERSION || null,
+              evaluatedAt: now(),
+            });
+            await persistProductionAgentEvaluation(evaluation, {
+              model: this.productionEvaluationModel,
+              session,
+            });
+          }
         }
       });
     } finally {
@@ -1040,7 +1184,7 @@ class PlanReviewWorker {
       });
     }, 30000);
     this.mandateReconciliationTimer.unref?.();
-    const recover = () => this.recoverExpiredRunsImpl({ model: this.model, eventModel: this.eventModel, checkpointModel: this.checkpointModel, graphCheckpointModel: this.graphCheckpointModel, mongo: this.mongo }).catch(error => {
+    const recover = () => this.recoverExpiredRunsImpl({ model: this.model, eventModel: this.eventModel, checkpointModel: this.checkpointModel, graphCheckpointModel: this.graphCheckpointModel, productionEvaluationModel: this.productionEvaluationModel, mongo: this.mongo }).catch(error => {
       PrometheusMetrics.inc('agent_worker_recovery_failures_total');
       logger.error('PlanReview expired-run recovery failed', { code: error?.code || 'EXPIRED_RUN_RECOVERY_FAILED' });
     });

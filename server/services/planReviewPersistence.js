@@ -2,6 +2,7 @@ import AgentRun from '../models/AgentRun.js';
 import AgentCheckpoint from '../models/AgentCheckpoint.js';
 import AgentGraphCheckpoint from '../models/AgentGraphCheckpoint.js';
 import AgentRunEvent from '../models/AgentRunEvent.js';
+import ProductionAgentEvaluation from '../models/ProductionAgentEvaluation.js';
 import { verifyPersistenceIndexes } from './persistenceIndexReadiness.js';
 
 export const PHASE4_PLAN_REVIEW_INDEX_MODELS = Object.freeze([
@@ -9,6 +10,7 @@ export const PHASE4_PLAN_REVIEW_INDEX_MODELS = Object.freeze([
   AgentCheckpoint,
   AgentGraphCheckpoint,
   AgentRunEvent,
+  ProductionAgentEvaluation,
 ]);
 
 /** Runtime gate: read-only index verification; never creates or repairs indexes. */

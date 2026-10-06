@@ -12,6 +12,7 @@ import { inspectPlanHealth, planHealthEventFingerprint } from '../services/planH
 import { buildPlanReviewSnapshotBinding, hashPlanReviewSnapshot, PLAN_REVIEW_PRIORITY_RANK } from '../agents/planReview/planReviewRuntime.js';
 import { canonicalSha256 } from '../utils/canonicalJson.js';
 import { PrometheusMetrics } from '../services/metricsCollector.js';
+import { executeSafeToolsNode } from '../agents/planReview/planReviewGraph.js';
 
 const userId = '64b000000000000000000010';
 const noCheckpointRetention = { updateMany: async () => ({ modifiedCount: 0 }) };
@@ -161,6 +162,36 @@ test('best-effort progress event cleanup failure cannot escape after its transac
   assert.equal(events[0].sequence, 1);
 });
 
+test('tool evidence insertion failure aborts graph execution before the read-only tool runs', async () => {
+  const run = {
+    runId: 'run-tool-event-failure', userId, workerId: 'worker-tool-event-failure',
+    executionGeneration: 1, status: 'RUNNING', cancellationRequested: false,
+    leaseUntil: new Date(Date.now() + 60000), checkpointSequence: 0, eventSequence: 0,
+    toolExecutionLedger: [], trajectory: [], progress: { completedNodes: [] },
+  };
+  const session = { withTransaction: async callback => callback(), endSession: async () => {} };
+  const worker = createPlanReviewWorker({
+    worker: run.workerId,
+    model: {
+      findOne() { const query = { session() { return query; }, lean: async () => run }; return query; },
+      async updateOne(_filter, update) { Object.assign(run, update.$set); return { modifiedCount: 1 }; },
+    },
+    checkpointModel: { async findOneAndUpdate() { return {}; } },
+    mongo: { startSession: async () => session },
+    eventModel: { async create() { throw Object.assign(new Error('injected tool event failure'), { code: 'EVENT_STORE_UNAVAILABLE' }); } },
+  });
+  let toolInvoked = false;
+  await assert.rejects(executeSafeToolsNode({
+    userId, profileId: '64b000000000000000000011', requestedChecks: ['get_current_profile_context'],
+    toolCallCount: 0, toolCallCounts: {}, toolResults: {},
+  }, {
+    onNodeProgress: payload => worker.updateProgress(run, payload),
+    toolOverrides: { get_current_profile_context: async () => { toolInvoked = true; return { status: 'AVAILABLE' }; } },
+  }), { code: 'EVENT_STORE_UNAVAILABLE' });
+  assert.equal(toolInvoked, false);
+  assert.equal(run.toolExecutionLedger.length, 1, 'checkpointed ledger remains an incomplete fail-closed record');
+});
+
 test('50 workers use explicit numeric queue priority and exactly one claims one queued run', async () => {
   let claimed = false;
   let observedSort;
@@ -213,8 +244,10 @@ test('concurrent checkpoint writers serialize sequence allocation and store only
       return lean(matches ? { ...run, progress: { ...run.progress }, toolExecutionLedger: [...run.toolExecutionLedger] } : null);
     },
     async updateOne(filter, update) {
-      const expected = filter.checkpointSequence ?? (filter.$or ? 0 : null);
-      if (expected !== null && Number(run.checkpointSequence || 0) !== expected) return { modifiedCount: 0 };
+      const checkpointFence = filter.checkpointSequence ?? (filter.$or?.some(item => Object.hasOwn(item, 'checkpointSequence')) ? 0 : null);
+      const eventFence = filter.eventSequence ?? (filter.$or?.some(item => Object.hasOwn(item, 'eventSequence')) ? 0 : null);
+      if (checkpointFence !== null && Number(run.checkpointSequence || 0) !== checkpointFence) return { modifiedCount: 0 };
+      if (eventFence !== null && Number(run.eventSequence || 0) !== eventFence) return { modifiedCount: 0 };
       if (filter.leaseUntil?.$gt && !(run.leaseUntil > filter.leaseUntil.$gt)) return { modifiedCount: 0 };
       Object.assign(run, update.$set);
       return { modifiedCount: 1 };
@@ -225,6 +258,17 @@ test('concurrent checkpoint writers serialize sequence allocation and store only
       checkpoints.set(filter.sequence, { ...update.$setOnInsert, ...update.$set });
       return checkpoints.get(filter.sequence);
     },
+  };
+  const durableEvents = [];
+  const eventModel = {
+    findOne() {
+      const query = {
+        sort() { return query; },
+        lean: async () => [...durableEvents].sort((left, right) => right.sequence - left.sequence)[0] || null,
+      };
+      return query;
+    },
+    async create(rows) { durableEvents.push(...rows); },
   };
   const mongo = {
     async startSession() {
@@ -240,7 +284,7 @@ test('concurrent checkpoint writers serialize sequence allocation and store only
       };
     },
   };
-  const worker = createPlanReviewWorker({ model, checkpointModel, mongo, worker: run.workerId, runtimeConfig: { agentPlanReview: { leaseMs: 60000 } } });
+  const worker = createPlanReviewWorker({ model, checkpointModel, eventModel, mongo, worker: run.workerId, runtimeConfig: { agentPlanReview: { leaseMs: 60000 } } });
 
   await Promise.all([
     worker.updateProgress(run, { node: 'load_context', state: {}, event: { type: 'NODE_ENTERED' } }),
@@ -267,6 +311,7 @@ test('concurrent checkpoint writers serialize sequence allocation and store only
   assert.equal(selection.completedAt, null);
   assert.equal(selection.toolCallId, toolCallId);
   assert.equal(ledger.toolCallId, toolCallId);
+  assert.equal(durableEvents.length, 3);
   assert.equal(selection.capabilityId, capability.capabilityId);
   assert.equal(ledger.capabilityId, capability.capabilityId);
   assert.equal(selection.capabilityEffect, 'READ');
@@ -279,6 +324,8 @@ test('concurrent checkpoint writers serialize sequence allocation and store only
   assert.equal(trajectoryResult.toolCallId, toolCallId);
   assert.equal(trajectorySelection.capabilityId, capability.capabilityId);
   assert.equal(trajectoryResult.capabilityId, capability.capabilityId);
+  assert.equal(trajectorySelection.attempted, false);
+  assert.equal(trajectoryResult.attempted, true);
   assert.equal('input' in ledger, false);
   assert.equal('output' in ledger, false);
 });
@@ -885,6 +932,7 @@ test('expired runs at the retry ceiling are terminally recovered and not reclaim
   };
   const writes = [];
   const events = [];
+  const evaluations = [];
   const session = { withTransaction: async callback => callback(), endSession: async () => {} };
   const model = {
     find: () => lean([candidate]),
@@ -895,9 +943,20 @@ test('expired runs at the retry ceiling are terminally recovered and not reclaim
   };
   const count = await recoverExpiredPlanReviewRuns({
     model,
-    eventModel: { async create(rows, options) { events.push({ rows, options }); } },
+    eventModel: {
+      async create(rows, options) { events.push({ rows, options }); return rows; },
+      find() {
+        const query = {
+          session() { return query; },
+          sort() { return query; },
+          lean: async () => events.flatMap(event => event.rows),
+        };
+        return query;
+      },
+    },
     checkpointModel: { async updateMany(...args) { writes.push(['checkpoint', ...args]); } },
     graphCheckpointModel: { async updateMany(...args) { writes.push(['graph', ...args]); } },
+    productionEvaluationModel: { async create(rows, options) { evaluations.push({ rows, options }); return rows; } },
     mongo: { startSession: async () => session },
     nowValue: new Date('2026-01-01T00:00:00.000Z'),
   });
@@ -913,7 +972,36 @@ test('expired runs at the retry ceiling are terminally recovered and not reclaim
   });
   assert.equal(events[0].rows[0].sequence, 5);
   assert.equal(events[0].rows[0].eventType, 'RUN_FAILED');
+  assert.equal(evaluations[0].rows[0].runId, candidate.runId);
+  assert.equal(evaluations[0].rows[0].executionGeneration, candidate.executionGeneration);
+  assert.doesNotMatch(evaluations[0].rows[0].qualitySignals.missingEvidence.join(','), /durableEventSequenceOrGeneration/);
+  assert.equal(evaluations[0].options.session, session);
   assert.equal(writes.length, 2, 'terminal recovery schedules transient checkpoint expiry in the same transaction');
+});
+
+test('expired-run recovery aborts its transaction when immutable evaluation persistence fails', async () => {
+  const candidate = {
+    _id: '64b000000000000000000099', runId: 'run-expired-evaluation-failure', userId,
+    workerId: 'old-worker', executionGeneration: 2, attempt: 2, eventSequence: 4,
+  };
+  let transactionCommitted = false;
+  const session = {
+    async withTransaction(callback) {
+      await callback();
+      transactionCommitted = true;
+    },
+    async endSession() {},
+  };
+  await assert.rejects(recoverExpiredPlanReviewRuns({
+    model: { find: () => lean([candidate]), updateOne: async () => ({ modifiedCount: 1 }) },
+    eventModel: { create: async rows => rows, find: () => ({ lean: async () => [] }) },
+    checkpointModel: { updateMany: async () => ({ modifiedCount: 0 }) },
+    graphCheckpointModel: { updateMany: async () => ({ modifiedCount: 0 }) },
+    productionEvaluationModel: { create: async () => { throw new Error('evaluation persistence unavailable'); } },
+    mongo: { startSession: async () => session },
+    nowValue: new Date('2026-01-01T00:00:00.000Z'),
+  }), /evaluation persistence unavailable/);
+  assert.equal(transactionCommitted, false);
 });
 
 test('expired-run recovery is repeated by its durable worker timer while the process remains alive', async () => {

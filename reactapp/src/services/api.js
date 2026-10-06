@@ -60,6 +60,12 @@ let authBroadcastRevision = 0;
 let authBroadcastChannel = null;
 const AUTH_CHANNEL_NAME = 'wealthgenie-auth-state';
 const AUTH_STORAGE_KEY = '__wealthgenie_auth_signal__';
+const PROFILE_CHANNEL_NAME = 'wealthgenie-profile-state';
+const PROFILE_STORAGE_KEY = '__wealthgenie_profile_signal__';
+let profileBroadcastChannel = null;
+let profileBroadcastRevision = 0;
+const profileListeners = new Set();
+const remoteProfileRevisions = new Map();
 
 // Track the current authenticated user
 let currentUser = null;
@@ -88,6 +94,34 @@ function broadcastAuthSignal(type) {
   } catch {
     // Auth remains server-authorized when browser messaging or storage is unavailable.
   }
+}
+
+function readProfileSignal(value) {
+  if (!value || typeof value !== 'object') return false;
+  const { source, revision, type } = value;
+  if (typeof source !== 'string' || source === authTabId || !Number.isSafeInteger(revision)
+      || revision < 1 || type !== 'PROFILE_CHANGED') return false;
+  if (revision <= (remoteProfileRevisions.get(source) || 0)) return false;
+  remoteProfileRevisions.set(source, revision);
+  return true;
+}
+
+function broadcastProfileSignal() {
+  if (typeof window === 'undefined') return;
+  const message = { source: authTabId, revision: ++profileBroadcastRevision, type: 'PROFILE_CHANGED' };
+  try {
+    if (profileBroadcastChannel) profileBroadcastChannel.postMessage(message);
+    else {
+      window.localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(message));
+      window.localStorage.removeItem(PROFILE_STORAGE_KEY);
+    }
+  } catch {
+    // Server state remains authoritative when browser signaling is unavailable.
+  }
+}
+
+function receiveProfileSignal(value) {
+  if (readProfileSignal(value)) profileListeners.forEach(listener => listener());
 }
 
 function abortAuthenticatedRequests() {
@@ -127,6 +161,15 @@ if (typeof window !== 'undefined') {
       try { void receiveAuthSignal(JSON.parse(event.newValue)); } catch { /* Ignore malformed signals. */ }
     });
   }
+  if (typeof window.BroadcastChannel === 'function') {
+    profileBroadcastChannel = new window.BroadcastChannel(PROFILE_CHANNEL_NAME);
+    profileBroadcastChannel.addEventListener('message', event => receiveProfileSignal(event.data));
+  } else {
+    window.addEventListener('storage', event => {
+      if (event.key !== PROFILE_STORAGE_KEY || !event.newValue) return;
+      try { receiveProfileSignal(JSON.parse(event.newValue)); } catch { /* Ignore malformed signals. */ }
+    });
+  }
 }
 
 function notifyAuthChange() {
@@ -141,6 +184,12 @@ export function subscribeAuth(listener) {
 
 export function getAuthSnapshot() {
   return authRevision;
+}
+
+/** A profile signal contains no profile fields; subscribers reload canonical server state. */
+export function subscribeProfileChanges(listener) {
+  profileListeners.add(listener);
+  return () => profileListeners.delete(listener);
 }
 
 export function setUserInfo(user, { broadcast = true } = {}) {
@@ -431,13 +480,20 @@ export async function precomputeProfile(profile, requestOptions = {}) {
 }
 
 export async function completeFinancialProfile(profile, candidateId = null, requestOptions = {}) {
-  return request('POST', '/profile/complete', {
-    ...toFinancialProfilePayload(profile),
-    ...(candidateId ? { candidateId } : {}),
-  }, {
-    timeoutMs: PROFILE_USER_FLOW_TIMEOUT_MS,
-    ...requestOptions,
-  });
+  try {
+    return await request('POST', '/profile/complete', {
+      ...toFinancialProfilePayload(profile),
+      ...(candidateId ? { candidateId } : {}),
+    }, {
+      timeoutMs: PROFILE_USER_FLOW_TIMEOUT_MS,
+      ...requestOptions,
+    });
+  } finally {
+    // The server may commit before the response is lost. Invalidate other tabs
+    // even on timeout/abort so they reload canonical state instead of retaining
+    // a recommendation bound to an older profile revision.
+    broadcastProfileSignal();
+  }
 }
 
 export async function getCurrentRecommendation(profileId, options = {}) {
@@ -457,12 +513,16 @@ export async function getFinancialHealthScore(profileId, options = {}) {
 }
 
 export async function updateProfile(profileId, profile, requestOptions = {}) {
-  return request(
-    'PUT',
-    `/profile/${profileId}`,
-    toFinancialProfilePayload(profile, { requireVersion: true }),
-    requestOptions,
-  );
+  try {
+    return await request(
+      'PUT',
+      `/profile/${profileId}`,
+      toFinancialProfilePayload(profile, { requireVersion: true }),
+      requestOptions,
+    );
+  } finally {
+    broadcastProfileSignal();
+  }
 }
 // ─── RECOMMENDATIONS ─────────────────────────────────────
 export async function getRecommendations(profileId, options = {}) {

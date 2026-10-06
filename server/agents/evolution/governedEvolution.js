@@ -5,7 +5,7 @@ import { runCandidateReliabilitySuite, RELIABILITY_SCENARIOS, CANDIDATE_RELIABIL
 import { createPlanReviewScaffoldRunner } from './scaffoldEvolution.js';
 import { createScaffoldSpec, assertScaffoldSpecSafe } from './scaffoldSpec.js';
 import { createEvolutionSandboxManifest } from './sandboxManifest.js';
-import { createEvolutionSandboxProvider } from './sandboxProvider.js';
+import { createEvolutionSandboxProvider, sandboxExecutionPassed } from './sandboxProvider.js';
 import { buildGepaFeedback, assertGepaFeedbackSafe } from './feedback.js';
 import { validateCandidateSurfaces, scanPromptBundleSecurity } from './candidateSecurity.js';
 import { buildCandidateLineage, selectParetoFrontier } from './pareto.js';
@@ -157,6 +157,7 @@ export async function runGovernedEvolution({
       workspaceFiles: buildCandidateSandboxWorkspace({ candidate, sandboxManifest }),
       command: 'node --test candidate-evaluation',
     });
+    const sandboxTestPassed = sandboxExecutionPassed(sandbox);
     sandboxRuns += 1;
     const sandboxDurationMs = Math.max(0, new Date(sandbox.completedAt).getTime() - new Date(sandbox.startedAt).getTime());
     if (Number.isFinite(sandboxDurationMs)) sandboxElapsedMs += sandboxDurationMs;
@@ -209,6 +210,7 @@ export async function runGovernedEvolution({
     const hardGatePassed = evaluation.passed
       && reliabilityEvaluation.passed
       && reliabilityEvaluation.candidateReliabilityCoverageComplete === true
+      && sandboxTestPassed
       && authorityMeasurementComplete
       && authorityDelta === 0
       && !budgetExceeded
@@ -220,7 +222,9 @@ export async function runGovernedEvolution({
       evaluation,
       reliability: reliabilityEvaluation,
       authorityDelta,
-      failures: [...failureReports, ...(budgetExceeded ? ['EVOLUTION_BUDGET_EXCEEDED'] : [])],
+      failures: [...failureReports,
+        ...(budgetExceeded ? ['EVOLUTION_BUDGET_EXCEEDED'] : []),
+        ...(!sandboxTestPassed ? ['SANDBOX_TESTS_FAILED'] : [])],
       sandbox,
     });
     assertGepaFeedbackSafe(feedback);
@@ -253,7 +257,7 @@ export async function runGovernedEvolution({
       candidateId,
       status: hardGatePassed
         ? 'SHADOW_READY'
-        : (evaluation.passed && reliabilityEvaluation.passed && !budgetExceeded
+        : (evaluation.passed && reliabilityEvaluation.passed && sandboxTestPassed && !budgetExceeded
           ? (holdout?.holdoutAttestation === 'VERIFIED'
             ? 'REJECTED'
             : (holdoutAvailable ? 'HOLDOUT_ATTESTATION_REQUIRED' : 'HOLDOUT_PENDING'))
@@ -274,6 +278,10 @@ export async function runGovernedEvolution({
       reliability: reliabilityEvaluation,
       holdout: holdoutSummary,
       sandbox,
+      sandboxTestPassed,
+      candidateEvaluationLocation: provider.name === 'e2b'
+        ? 'HOST_PROCESS; E2B_ONLY_CHECKS_MANIFEST_BINDING'
+        : 'HOST_PROCESS; FIXTURE_SANDBOX_CHECKS_MANIFEST_BINDING',
       feedback,
       hardGatePassed,
       authorityMeasurementComplete,

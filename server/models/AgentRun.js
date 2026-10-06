@@ -28,6 +28,8 @@ const agentRunSchema = new mongoose.Schema({
   plannerVersion: { type: String, default: 'plan-review-planner-1.0.0' },
   policyVersion: { type: String, default: 'plan-review-policy-1.0.0' },
   groundingVersion: { type: String, default: null },
+  promptScaffoldHash: { type: String, default: null, match: /^[a-f0-9]{64}$/ },
+  ragManifestHash: { type: String, default: null, match: /^[a-f0-9]{64}$/ },
   agentVersion: { type: String, default: PLAN_REVIEW_AGENT_VERSION, immutable: true },
   graphVersion: { type: String, default: PLAN_REVIEW_GRAPH_VERSION, immutable: true },
   toolCatalogVersion: { type: String, default: PLAN_REVIEW_TOOL_CATALOG_VERSION, immutable: true },

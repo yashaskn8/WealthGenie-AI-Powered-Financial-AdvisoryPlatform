@@ -8,9 +8,12 @@ import App, { advisoryMatchesCurrentFinancialState } from '../App.jsx';
 const appMocks = vi.hoisted(() => ({
   initialRecommendation: null,
   profile: null,
+  profileChangeListener: null,
   fetchAdvisory: vi.fn(),
+  getCurrentProfile: vi.fn(),
   getCurrentRecommendation: vi.fn(),
   getRecommendations: vi.fn(),
+  subscribeProfileChanges: vi.fn(),
   updateRecommendationWeights: vi.fn(),
 }));
 
@@ -19,8 +22,13 @@ vi.mock('../services/api', async (importOriginal) => {
   return {
     ...actual,
     fetchAdvisory: appMocks.fetchAdvisory,
+    getCurrentProfile: appMocks.getCurrentProfile,
     getCurrentRecommendation: appMocks.getCurrentRecommendation,
     getRecommendations: appMocks.getRecommendations,
+    subscribeProfileChanges: listener => {
+      appMocks.profileChangeListener = listener;
+      return () => { appMocks.profileChangeListener = null; };
+    },
     updateRecommendationWeights: appMocks.updateRecommendationWeights,
   };
 });
@@ -665,6 +673,8 @@ describe('profile edits trigger one authoritative recommendation recompute', () 
     };
     appMocks.fetchAdvisory.mockReset();
     appMocks.fetchAdvisory.mockResolvedValue({});
+    appMocks.getCurrentProfile.mockReset();
+    appMocks.getCurrentProfile.mockResolvedValue(appMocks.profile);
     appMocks.getCurrentRecommendation.mockReset();
     appMocks.getCurrentRecommendation.mockResolvedValue(revision4);
     appMocks.getRecommendations.mockReset();
@@ -747,6 +757,43 @@ describe('profile edits trigger one authoritative recommendation recompute', () 
       expect(screen.getByTestId('advisory-text')).toHaveTextContent('Atomic update advisory');
     });
     expect(appMocks.getRecommendations).not.toHaveBeenCalled();
+  });
+
+  it('does not let the initial restore effect abort a cross-tab profile recompute', async () => {
+    const canonicalProfile = {
+      ...appMocks.profile,
+      version: 2,
+      monthly_savings: 26000,
+    };
+    const recomputed = {
+      ...currentState(1, {
+        stateId: '64b000000000000000000061',
+        allocationRevisionId: '64b000000000000000000062',
+        recommendationId: '64b000000000000000000063',
+        profileVersion: 2,
+        profileInputHash: nextProfileInputHash,
+      }),
+      instruments: [],
+      advisory_text: 'Current profile advisory',
+      advisory_explanation: { status: 'READY' },
+    };
+    appMocks.getCurrentProfile.mockResolvedValue(canonicalProfile);
+    appMocks.getRecommendations.mockResolvedValue(recomputed);
+    render(<App />);
+
+    await waitFor(() => expect(appMocks.profileChangeListener).toBeTypeOf('function'));
+    fireEvent.click(screen.getByRole('button', { name: 'Test home' }));
+    expect(screen.getByTestId('dashboard-profile-version')).toHaveTextContent('1');
+    await act(async () => appMocks.profileChangeListener());
+    await waitFor(() => {
+      expect(screen.getByTestId('dashboard-profile-version')).toHaveTextContent('2');
+      expect(screen.getByTestId('portfolio-fingerprint')).toHaveTextContent('b'.repeat(64));
+      expect(screen.getByTestId('advisory-text')).toHaveTextContent('Current profile advisory');
+    });
+
+    expect(appMocks.getCurrentProfile).toHaveBeenCalledTimes(1);
+    expect(appMocks.getRecommendations).toHaveBeenCalledTimes(1);
+    expect(appMocks.getCurrentRecommendation).not.toHaveBeenCalled();
   });
 
   it('keeps recommendations unavailable after recompute failure and supports an explicit retry', async () => {

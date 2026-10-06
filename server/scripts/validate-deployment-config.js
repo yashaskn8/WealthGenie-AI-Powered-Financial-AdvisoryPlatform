@@ -227,9 +227,12 @@ const kindCluster = namedStep(cdSteps, 'Create Kind Kubernetes Cluster');
 const productionValidatorDependencies = namedStep(cdSteps, 'Install production manifest validator dependencies');
 const metricsServerInstall = namedStep(cdSteps, 'Install Metrics Server for HPA');
 if (kindCluster.step.with?.version !== 'v0.24.0'
-    || !metricsServerInstall.step.run?.includes('releases/download/v0.8.1/components.yaml')
+    || kindCluster.step.with?.node_image !== 'kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256'
+    || !metricsServerInstall.step.run?.includes('releases/download/v0.9.0/components.yaml')
+    || !metricsServerInstall.step.run?.includes('1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b')
+    || !metricsServerInstall.step.run?.includes('sha256sum --check')
     || metricsServerInstall.step.run?.includes('metrics-server/releases/latest/')) {
-  throw new Error('Kind CD must pin a Metrics Server release compatible with the Kubernetes 1.31 test cluster');
+  throw new Error('Kind CD must verify the pinned Metrics Server v0.9.0 manifest digest on a Kubernetes 1.34 node image');
 }
 const productionRenderValidation = namedStep(cdSteps, 'Render and validate fail-closed production image template');
 if (!(productionValidatorDependencies.index < productionRenderValidation.index)

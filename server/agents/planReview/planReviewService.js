@@ -1,6 +1,9 @@
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import AgentRun from '../../models/AgentRun.js';
+import AgentRunEvent from '../../models/AgentRunEvent.js';
+import AgentCheckpoint from '../../models/AgentCheckpoint.js';
+import AgentGraphCheckpoint from '../../models/AgentGraphCheckpoint.js';
 import AgentQueueAdmission from '../../models/AgentQueueAdmission.js';
 import FinancialProfile from '../../models/FinancialProfile.js';
 import { ProviderManager } from '../../services/providerAbstraction.js';
@@ -20,6 +23,7 @@ import {
 import { resolvePlanReviewSnapshot } from './planReviewSnapshot.js';
 import { createModelGateway } from '../modelGateway.js';
 import { createResearchMeshClient } from '../research/researchMeshClient.js';
+import { terminalizePlanReviewRun } from './planReviewTerminal.js';
 
 function primaryProvider() {
   if (String(process.env.LLM_DEFAULT_PROVIDER || '').trim().toLowerCase() === 'mock') return null;
@@ -37,7 +41,7 @@ function publicReview(review) {
   return safe;
 }
 
-export async function persistPlanReviewRun({ review, userId, profileId, recommendationId, planReviewSnapshotHash, sourceBinding, traceId, correlationId, startedAt, completedAt, _planner, stepCount, toolCallCount, modelCallCount, tokenUsage, model = AgentRun }) {
+export async function persistPlanReviewRun({ review, userId, profileId, recommendationId, planReviewSnapshotHash, sourceBinding, traceId, correlationId, startedAt, completedAt, promptScaffoldHash = null, stepCount, toolCallCount, modelCallCount, tokenUsage, model = AgentRun }) {
   const exactCounter = (name, value, max) => {
     const count = value === undefined || value === null ? 0 : Number(value);
     if (!Number.isInteger(count) || count < 0 || count > max) {
@@ -65,6 +69,8 @@ export async function persistPlanReviewRun({ review, userId, profileId, recommen
     plannerVersion: PLAN_REVIEW_PLANNER_VERSION,
     policyVersion: PLAN_REVIEW_POLICY_VERSION,
     groundingVersion: review.evidence?.entries?.length ? 'grounded-financial-evidence-1.0.0' : null,
+    promptScaffoldHash,
+    ragManifestHash: null,
     agentVersion: PLAN_REVIEW_AGENT_VERSION,
     graphVersion: PLAN_REVIEW_GRAPH_VERSION,
     toolCatalogVersion: PLAN_REVIEW_TOOL_CATALOG_VERSION,
@@ -202,21 +208,40 @@ export async function enqueuePlanReviewRun({
 
       // Retire stale active work atomically with admission; history and
       // checkpoints remain intact.
-      await model.updateMany({
+      const staleFilter = {
         userId,
         profileId,
         agentType: 'PLAN_REVIEW',
         status: { $in: CAPACITY_CONSUMING_PLAN_REVIEW_STATES },
         planReviewSnapshotHash: { $ne: planReviewSnapshotHash },
-      }, {
-        $set: {
-          status: 'SUPERSEDED',
-          completedAt: new Date(),
-          leaseUntil: null,
-          failure: { code: 'PLAN_REVIEW_SOURCE_SUPERSEDED', message: 'Financial source state changed before this review completed.' },
-        },
-        $unset: { activeDedupeKey: 1 },
-      }, { session });
+      };
+      if (typeof model.find === 'function') {
+        const staleQuery = model.find(staleFilter);
+        staleQuery.session?.(session);
+        const staleRuns = await (staleQuery.lean ? staleQuery.lean() : staleQuery);
+        for (const stale of staleRuns || []) {
+          await terminalizePlanReviewRun({
+            model,
+            userId,
+            runId: stale.runId,
+            expectedStatuses: [stale.status],
+            expectedPlanReviewSnapshotHash: stale.planReviewSnapshotHash,
+            status: 'SUPERSEDED',
+            reasonCode: 'PLAN_REVIEW_SOURCE_SUPERSEDED',
+            node: stale.currentNode || null,
+            now: new Date(),
+            session,
+          });
+        }
+      } else {
+        await model.updateMany(staleFilter, {
+          $set: {
+            status: 'SUPERSEDED', completedAt: new Date(), leaseUntil: null,
+            failure: { code: 'PLAN_REVIEW_SOURCE_SUPERSEDED', message: 'Financial source state changed before this review completed.' },
+          },
+          $unset: { activeDedupeKey: 1 },
+        }, { session });
+      }
 
       const activeQuery = model.findOne({
         userId,
@@ -303,6 +328,9 @@ export async function getPlanReviewRun({
   profileModel = FinancialProfile,
   snapshotResolver = resolvePlanReviewSnapshot,
   snapshotDependencies = {},
+  eventModel = AgentRunEvent,
+  checkpointModel = AgentCheckpoint,
+  graphCheckpointModel = AgentGraphCheckpoint,
 }) {
   const run = await model.findOne({ userId, runId }).lean();
   if (!run) return null;
@@ -313,16 +341,17 @@ export async function getPlanReviewRun({
     match = currentHash === run.planReviewSnapshotHash;
   }
   if (!match && activeStatus) {
-    await model.updateOne({ userId, runId, status: run.status, planReviewSnapshotHash: run.planReviewSnapshotHash }, {
-      $set: {
-        status: 'SUPERSEDED',
-        completedAt: new Date(),
-        leaseUntil: null,
-        failure: { code: 'PLAN_REVIEW_SOURCE_SUPERSEDED', message: 'Financial source state changed before this review completed.' },
-      },
-      $unset: { activeDedupeKey: 1 },
+    const transitioned = await terminalizePlanReviewRun({
+      model, eventModel, checkpointModel, graphCheckpointModel, userId, runId,
+      expectedStatuses: [run.status],
+      expectedPlanReviewSnapshotHash: run.planReviewSnapshotHash,
+      status: 'SUPERSEDED', reasonCode: 'PLAN_REVIEW_SOURCE_SUPERSEDED',
     });
-    run.status = 'SUPERSEDED';
+    if (transitioned) run.status = transitioned.status;
+    else {
+      const latest = await model.findOne({ userId, runId }).lean();
+      if (latest) Object.assign(run, latest);
+    }
   }
   return publicRun(run, { currentStateMatch: match });
 }
