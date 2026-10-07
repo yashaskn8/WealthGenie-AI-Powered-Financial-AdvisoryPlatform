@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
@@ -226,7 +227,7 @@ const cdSteps = cd.jobs?.['deploy-and-verify-kind']?.steps || [];
 const kindCluster = namedStep(cdSteps, 'Create Kind Kubernetes Cluster');
 const productionValidatorDependencies = namedStep(cdSteps, 'Install production manifest validator dependencies');
 const metricsServerInstall = namedStep(cdSteps, 'Install Metrics Server for HPA');
-if (kindCluster.step.with?.version !== 'v0.24.0'
+if (kindCluster.step.with?.version !== 'v0.31.0'
     || kindCluster.step.with?.node_image !== 'kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256'
     || !metricsServerInstall.step.run?.includes('releases/download/v0.9.0/components.yaml')
     || !metricsServerInstall.step.run?.includes('1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b')
@@ -293,6 +294,19 @@ const expectedTckUntrackedPaths = [
   'reports/junitreport.xml',
   'reports/tck_report.html',
 ];
+const expectedTckInventorySha256 = '62cedc3216bb27545d2ede0bb8cf6588ef893e2f827b1de2ac4104a215122028';
+const tckTestCases = Array.isArray(tckPolicy.test_cases) ? tckPolicy.test_cases : [];
+const sortedTckTestCases = [...tckTestCases].sort((left, right) => {
+  const leftId = String(left?.junit_classname || '') + '::' + String(left?.junit_name || '');
+  const rightId = String(right?.junit_classname || '') + '::' + String(right?.junit_name || '');
+  return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+});
+const tckInventoryCanonical = sortedTckTestCases
+  .map(testCase => testCase.junit_classname + '::' + testCase.junit_name + '\t' + (testCase.expected_skip_reason || ''))
+  .join('\n');
+const tckInventoryHash = createHash('sha256').update(tckInventoryCanonical, 'utf8').digest('hex');
+const tckTestCaseIds = new Set(sortedTckTestCases.map(testCase => testCase.junit_classname + '::' + testCase.junit_name));
+const tckExpectedSkipCount = sortedTckTestCases.filter(testCase => typeof testCase.expected_skip_reason === 'string').length;
 const expectedTckIssueClasses = {
   'https://github.com/a2aproject/a2a-tck/issues/202': 'MISSING_EXPECTED_ERROR_ASSERTION',
   'https://github.com/a2aproject/a2a-tck/issues/229': 'FIXTURE_APPLICABILITY',
@@ -315,10 +329,21 @@ if (!tckWorkflow.includes(`A2A_TCK_SHA: ${pinnedTckSha}`)
     || tckWorkflow.includes('continue-on-error: true')
     || tckPolicy.tck_sha !== pinnedTckSha
     || tckPolicy.tck_repository !== 'a2aproject/a2a-tck'
-    || tckPolicy.policy_schema_version !== 4
+    || tckPolicy.policy_schema_version !== 5
     || tckPolicy.classification !== 'KNOWN_UPSTREAM_TCK_EXCEPTIONS'
     || tckPolicy.test_case_count !== 235
     || tckPolicy.skipped_test_case_count !== 178
+    || tckTestCases.length !== 235
+    || tckTestCaseIds.size !== 235
+    || tckExpectedSkipCount !== 178
+    || tckPolicy.test_case_inventory_sha256 !== expectedTckInventorySha256
+    || tckInventoryHash !== expectedTckInventorySha256
+    || tckPolicy.test_inventory_evidence?.tck_sha !== pinnedTckSha
+    || tckPolicy.test_inventory_evidence?.workflow_run_id !== 37421617732
+    || tckPolicy.test_inventory_evidence?.workflow_head_sha !== '15454b98fa87ed29db7fd58eb21cbe29eb016678'
+    || tckPolicy.test_inventory_evidence?.workflow_head_is_ancestor_of_current_main !== true
+    || tckPolicy.test_inventory_evidence?.junit_report_sha256 !== '69b917d3c73c37c375c44b3a694ed7408b643733a7b271e67416a4b9c4f5ca4b'
+    || tckPolicy.test_inventory_evidence?.collected_identity_match !== true
     || Object.keys(tckIssueClasses).length !== 2
     || Object.entries(expectedTckIssueClasses).some(([url, classification]) => tckIssueClasses[url] !== classification)
     || !Array.isArray(tckPolicy.known_failures)

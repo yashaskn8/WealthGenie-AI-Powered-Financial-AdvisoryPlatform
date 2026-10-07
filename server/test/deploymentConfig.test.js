@@ -189,7 +189,7 @@ test('production template filter accepts only the checked-in non-deployable imag
 test('Kind CD verifies the fixed Metrics Server manifest digest on a compatible Kubernetes node image', () => {
   const workflow = fs.readFileSync(path.join(repositoryRoot, '.github/workflows/cd.yml'), 'utf8');
   const parsed = parse(workflow);
-  assert.match(workflow, /version:\s*v0\.24\.0/);
+  assert.match(workflow, /version:\s*v0\.31\.0/);
   assert.equal(parsed.jobs['deploy-and-verify-kind'].steps
     .find(step => step.name === 'Create Kind Kubernetes Cluster').with.node_image, 'kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256');
   assert.match(workflow, /releases\/download\/v0\.9\.0\/components\.yaml/);
