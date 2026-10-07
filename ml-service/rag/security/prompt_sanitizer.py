@@ -292,7 +292,7 @@ class PromptSanitizer:
             # Layer 1 regex on decoded text
             for pattern in PROMPT_INJECTION_PATTERNS + ROLE_LEAKAGE_PATTERNS:
                 if re.search(pattern, decoded_lower):
-                    violations.append(f"Encoded Base64 Injection Payload (Layer 1 Regex): '{pattern}' inside '{decoded}'")
+                    violations.append(f"Encoded Base64 Injection Payload (Layer 1 Regex): '{pattern}'")
 
             # Layer 2 semantic check on decoded text
             if self.semantic_guard.is_ready:
@@ -300,7 +300,7 @@ class PromptSanitizer:
                 if is_dec_semantic_violation:
                     violations.append(
                         f"Encoded Base64 Injection Payload (Layer 2 Embedding Sim: {dec_sim_score:.4f}): "
-                        f"Matched intent '{dec_matched_intent}' inside '{decoded}'"
+                        f"Matched intent '{dec_matched_intent}'"
                     )
 
         if violations:

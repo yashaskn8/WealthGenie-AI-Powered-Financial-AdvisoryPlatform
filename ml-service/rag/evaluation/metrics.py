@@ -4,10 +4,43 @@ Calculates Recall@k, Precision@k, MRR, NDCG, Hit Rate, Context Precision/Recall,
 """
 
 import math
-from typing import List, Set
+import numbers
+from typing import Dict, List, Set, Any
 import numpy as np
 
 from rag.schema import RetrievedChunk, Citation
+
+
+def summarize_metric_values(raw_values: List[object]) -> Dict[str, Any]:
+    """Summarize finite numeric observations without turning missing evidence into zero."""
+    values = []
+    nan_count = 0
+    unavailable_count = 0
+    invalid_count = 0
+    for value in raw_values:
+        if value is None:
+            unavailable_count += 1
+            continue
+        if not isinstance(value, numbers.Real):
+            invalid_count += 1
+            continue
+        numeric = float(value)
+        if math.isnan(numeric):
+            nan_count += 1
+        elif math.isfinite(numeric):
+            values.append(numeric)
+        else:
+            invalid_count += 1
+
+    return {
+        "mean": round(sum(values) / len(values), 4) if values else None,
+        "min": round(min(values), 4) if values else None,
+        "max": round(max(values), 4) if values else None,
+        "valid_count": len(values),
+        "nan_count": nan_count,
+        "unavailable_count": unavailable_count,
+        "invalid_count": invalid_count,
+    }
 
 
 def compute_recall_at_k(retrieved_chunk_ids: List[str], ground_truth_ids: Set[str], k: int) -> float:
@@ -93,12 +126,27 @@ def compute_chunk_diversity(embeddings: List[List[float]]) -> float:
 
 
 def compute_citation_accuracy(citations: List[Citation], retrieved_chunks: List[RetrievedChunk]) -> float:
-    """Compute citation-ID validity; this does not measure factual entailment."""
+    """Validate sequential citation IDs and retrieved chunk references, not entailment."""
     if not citations:
         return 0.0
+    identifiers = [citation.citation_id for citation in citations]
+    if (not all(type(identifier) is int for identifier in identifiers)
+            or len(set(identifiers)) != len(identifiers)
+            or set(identifiers) != set(range(1, len(identifiers) + 1))):
+        return 0.0
     retrieved_chunk_ids = {r.chunk.chunk_id for r in retrieved_chunks}
-    valid_citations = sum(1 for c in citations if c.chunk_id in retrieved_chunk_ids)
+    valid_citations = sum(1 for citation in citations if citation.chunk_id in retrieved_chunk_ids)
     return float(valid_citations / len(citations))
+
+
+def format_metric_value(value: object) -> str:
+    """Format a measured metric, preserving unavailable/invalid values as N/A."""
+    if not isinstance(value, numbers.Real):
+        return "N/A"
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        return "N/A"
+    return f"{numeric:.4f}"
 
 
 def compute_grounding_score(response_text: str, retrieved_texts: List[str]) -> float:

@@ -28,6 +28,7 @@ from rag.config import RAGConfig
 from rag.corpus_manifest import MANIFEST_FILENAME, current_documents, load_corpus_manifest
 from rag.embeddings.dense_embedding import get_embedding_provider
 from rag.evaluation.evaluator import RAGEvaluator
+from rag.evaluation.metrics import format_metric_value, summarize_metric_values
 from rag.retrieval.pipeline import RAGPipeline
 from rag.schema import RAGQueryRequest
 from rag.vector_store.memory_vector_store import PersistentVectorStore
@@ -136,6 +137,10 @@ def run_benchmark() -> Dict[str, Any]:
     total_source_hits = 0
     total_queries = len(questions)
     all_latencies: List[float] = []
+    provenance_by_key = {
+        entry["document_key"]: {**entry, "_manifest_sha256": manifest["manifest_sha256"]}
+        for entry in manifest["documents"]
+    }
 
     for idx, q_item in enumerate(questions, start=1):
         question = q_item["query"]
@@ -164,6 +169,15 @@ def run_benchmark() -> Dict[str, Any]:
             response=response,
             ground_truth_chunk_ids=gt_chunk_ids,
             expected_abstention=q_item["expected_abstention"],
+            required_facts=q_item["required_facts"],
+            forbidden_claims=q_item["forbidden_claims"],
+            expected_provenance={
+                key: provenance_by_key.get(key)
+                for key in relevant_document_keys
+            },
+            expected_manifest_sha256=manifest["manifest_sha256"],
+            expected_jurisdiction="IN",
+            as_of_date=date.today(),
             k=4,
         )
 
@@ -193,7 +207,7 @@ def run_benchmark() -> Dict[str, Any]:
             "required_facts": q_item["required_facts"],
             "forbidden_claims": q_item["forbidden_claims"],
             "source_hit": hit,
-            "abstention_correct": (not response.grounded and not response.citations) if q_item["expected_abstention"] else None,
+            "abstention_correct": eval_result["metrics"]["abstention_correctness"],
             "grounded": response.grounded,
             "metrics": eval_result["metrics"],
             "query_latency_ms": round(query_time_ms, 2),
@@ -208,29 +222,21 @@ def run_benchmark() -> Dict[str, Any]:
             category_metrics[category] = []
         category_metrics[category].append(eval_result["metrics"])
 
-    # Aggregate metrics
+    # Aggregate only finite numeric observations. None means unverified/unavailable
+    # evidence and must remain null rather than crashing or becoming a false zero.
     all_metrics_keys = list(per_question_results[0]["metrics"].keys()) if per_question_results else []
     aggregate_metrics = {}
     for key in all_metrics_keys:
         raw_values = [r["metrics"][key] for r in per_question_results if key in r["metrics"]]
-        # Filter out NaN values (produced when ground truth is unavailable)
-        values = [v for v in raw_values if not (isinstance(v, float) and math.isnan(v))]
-        aggregate_metrics[key] = {
-            "mean": round(sum(values) / len(values), 4) if values else 0.0,
-            "min": round(min(values), 4) if values else 0.0,
-            "max": round(max(values), 4) if values else 0.0,
-            "valid_count": len(values),
-            "nan_count": len(raw_values) - len(values),
-        }
+        aggregate_metrics[key] = summarize_metric_values(raw_values)
 
-    # Category breakdowns
+    # Category breakdowns preserve the same unavailable semantics as the overall report.
     category_summaries = {}
     for cat, metrics_list in category_metrics.items():
         cat_summary = {}
         for key in all_metrics_keys:
             raw = [m[key] for m in metrics_list if key in m]
-            values = [v for v in raw if not (isinstance(v, float) and math.isnan(v))]
-            cat_summary[key] = round(sum(values) / len(values), 4) if values else 0.0
+            cat_summary[key] = summarize_metric_values(raw)["mean"]
         cat_count = len(metrics_list)
         cat_source_hits = sum(1 for r in per_question_results if r["category"] == cat and r["source_hit"])
         cat_summary["question_count"] = cat_count
@@ -331,7 +337,10 @@ def main():
     print("")
     print("Aggregate Retrieval Metrics (mean):")
     for key, vals in agg.items():
-        print(f"  {key:25s}: {vals['mean']:.4f}  (min={vals['min']:.4f}, max={vals['max']:.4f})")
+        print(
+            f"  {key:32s}: {format_metric_value(vals['mean'])}  "
+            f"(min={format_metric_value(vals['min'])}, max={format_metric_value(vals['max'])})"
+        )
     print("")
     print("Latency:")
     print(f"  Mean:  {lat['mean_ms']:.1f}ms | P50: {lat['p50_ms']:.1f}ms | P90: {lat['p90_ms']:.1f}ms | P99: {lat['p99_ms']:.1f}ms")

@@ -151,8 +151,14 @@ export async function runGovernedEvolution({
   let metricCalls = 0;
   let sandboxElapsedMs = 0;
   let totalTokenUsage = 0;
+  const evolutionTokenBudget = {
+    maxTotalTokens: budget.maxTotalTokens,
+    reservedTokenUpperBound: 0,
+  };
   for (let index = 0; index < proposals.length; index += 1) {
-    if (sandboxRuns >= budget.maxSandboxRuns || budget.maxSandboxMinutes === 0) break;
+    if (sandboxRuns >= budget.maxSandboxRuns || budget.maxSandboxMinutes === 0
+        || totalTokenUsage >= budget.maxTotalTokens
+        || evolutionTokenBudget.reservedTokenUpperBound >= budget.maxTotalTokens) break;
     const minimumHoldoutCalls = holdoutAvailable ? 10 : 0;
     if (metricCalls + fixtureSandboxMetricCalls + optimizerCases.length + candidateReliabilityCalls + minimumHoldoutCalls > budget.maxMetricCalls) break;
     const proposal = proposals[index];
@@ -171,7 +177,7 @@ export async function runGovernedEvolution({
     const runCandidateInput = async input => {
       const startedAt = Date.now();
       try {
-        const result = await runner(input);
+        const result = await runner({ ...input, evolutionTokenBudget });
         executionObservations.push({ result, durationMs: Math.max(0, Date.now() - startedAt) });
         return result;
       } catch (error) {
@@ -253,6 +259,7 @@ export async function runGovernedEvolution({
     const tokenAccountingIncomplete = rawExecutionMetrics.modelCalls > 0 && rawExecutionMetrics.tokenUsage === null;
     const budgetExceeded = tokenAccountingIncomplete
       || totalTokenUsage > budget.maxTotalTokens
+      || evolutionTokenBudget.reservedTokenUpperBound > budget.maxTotalTokens
       || metricCalls > budget.maxMetricCalls
       || sandboxElapsedMs > budget.maxSandboxMinutes * 60 * 1000;
     const hardGatePassed = evaluation.passed
@@ -349,6 +356,7 @@ export async function runGovernedEvolution({
         financialAuthorityDelta: record.financialAuthorityDelta,
       });
     }
+    if (budgetExceeded) break;
   }
   const paretoCandidateIds = selectParetoFrontier(records);
   PrometheusMetrics.recordEvolutionRun({
@@ -384,6 +392,7 @@ export async function runGovernedEvolution({
     metrics: {
       metricCalls,
       totalTokens: totalTokenUsage,
+      reservedTokenUpperBound: evolutionTokenBudget.reservedTokenUpperBound,
       sandboxRuns,
       sandboxElapsedMs,
     },

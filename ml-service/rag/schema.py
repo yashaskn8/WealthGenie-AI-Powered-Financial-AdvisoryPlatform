@@ -3,8 +3,9 @@ WealthGenie RAG Subsystem - Data Models & Schemas
 Defines Pydantic data contracts for documents, chunks, queries, citations, and metrics.
 """
 
+import json
 from typing import Dict, Any, List, Optional, Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def is_scope_accessible(
@@ -131,12 +132,25 @@ class RAGQueryRequest(BaseModel):
     """Request payload for RAG query execution."""
     model_config = ConfigDict(extra="forbid")
 
-    question: str = Field(..., min_length=3, description="User advisory question")
+    question: str = Field(..., min_length=3, max_length=2000, description="User advisory question")
     top_k: Optional[int] = Field(None, ge=1, le=20, description="Override default top-k retrieval count")
-    tenant_id: str = Field("default", description="Tenant isolation scope identifier")
-    user_id: Optional[str] = Field(None, description="Requesting user ID for scoped retrieval")
-    scope: Optional[str] = Field(None, description="Explicit retrieval scope (e.g. 'global' or 'user:{user_id}')")
-    user_profile: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Contextual investor profile")
+    tenant_id: str = Field("default", max_length=128, description="Tenant isolation scope identifier")
+    user_id: Optional[str] = Field(None, max_length=128, description="Requesting user ID for scoped retrieval")
+    scope: Optional[str] = Field(None, max_length=256, description="Explicit retrieval scope (e.g. 'global' or 'user:{user_id}')")
+    user_profile: Optional[Dict[str, Any]] = Field(default_factory=dict, max_length=64, description="Contextual investor profile")
+
+    @field_validator("user_profile")
+    @classmethod
+    def user_profile_payload_is_bounded(cls, value):
+        if value is None:
+            return {}
+        try:
+            serialized = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise ValueError("user_profile must be a bounded JSON object") from exc
+        if len(serialized.encode("utf-8")) > 16_384:
+            raise ValueError("user_profile exceeds the 16384-byte request limit")
+        return value
     include_citations: bool = Field(True, description="Whether to format inline citations")
 
 

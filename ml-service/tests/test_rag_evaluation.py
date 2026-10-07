@@ -4,6 +4,7 @@ Tests RAG metrics calculations (Recall, Precision, MRR, NDCG, Diversity, Groundi
 """
 
 import pytest
+from datetime import date
 
 from rag.evaluation.metrics import (
     compute_recall_at_k,
@@ -15,6 +16,8 @@ from rag.evaluation.metrics import (
     compute_chunk_diversity,
     compute_citation_accuracy,
     compute_grounding_score,
+    summarize_metric_values,
+    format_metric_value,
 )
 from rag.evaluation.evaluator import RAGEvaluator
 from rag.schema import (
@@ -160,5 +163,411 @@ def test_evaluator_distinguishes_abstention_from_retrieval_metrics(tmp_path):
         ground_truth_chunk_ids=set(),
     )
     assert result["metrics"]["abstention_correctness"] is True
+    assert result["metrics"]["answerability_correctness"] is True
     assert result["metrics"]["citation_id_validity"] is None
     assert result["metrics"]["factual_support"] is None
+
+
+def test_rag_evaluator_rejects_valid_citation_that_does_not_support_required_fact():
+    content = "The commencement notice says the rule takes effect in 2025."
+    metadata = ChunkMetadata(
+        chunk_id="commencement#0", document_id="commencement", chunk_index=0,
+        title="Commencement", source="official-notice",
+    )
+    retrieved = RetrievedChunk(chunk=TextChunk(
+        chunk_id="commencement#0", document_id="commencement", content=content, metadata=metadata,
+    ), score=0.95, rank=1)
+    response = RAGQueryResponse(
+        answer="The rule takes effect in 2026.",
+        citations=[Citation(
+            citation_id=1, document_title="Commencement", source="official-notice",
+            chunk_id="commencement#0", excerpt=content, relevance_score=0.95,
+        )],
+        retrieved_chunks=[retrieved], grounded=True,
+    )
+
+    result = RAGEvaluator().evaluate_query_response(
+        query="When does the rule take effect?", response=response,
+        expected_abstention=False,
+        required_facts=["The rule takes effect in 2026."],
+    )
+    assert result["metrics"]["citation_id_validity"] == 1.0
+    assert result["metrics"]["factual_support"] == 0.0
+    assert result["metrics"]["answerability_correctness"] is True
+
+
+def test_rag_evaluator_scores_supported_required_facts_forbidden_claims_and_answerable_abstention():
+    content = "The rule takes effect on 1 April 2026."
+    metadata = ChunkMetadata(
+        chunk_id="commencement#0", document_id="commencement", chunk_index=0,
+        title="Commencement", source="official-notice",
+    )
+    retrieved = RetrievedChunk(chunk=TextChunk(
+        chunk_id="commencement#0", document_id="commencement", content=content, metadata=metadata,
+    ), score=0.95, rank=1)
+    response = RAGQueryResponse(
+        answer=f"{content} [1]",
+        citations=[Citation(
+            citation_id=1, document_title="Commencement", source="official-notice",
+            chunk_id="commencement#0", excerpt=content, relevance_score=0.95,
+        )],
+        retrieved_chunks=[retrieved], grounded=True,
+    )
+    result = RAGEvaluator().evaluate_query_response(
+        query="When does the rule take effect?", response=response,
+        expected_abstention=False,
+        required_facts=[content],
+        forbidden_claims=["The rule takes effect in 2025."],
+    )
+    assert result["metrics"]["factual_support"] == 1.0
+    assert result["metrics"]["forbidden_claims_passed"] is True
+    assert result["metrics"]["forbidden_claim_violation_count"] == 0
+    assert result["metrics"]["answerability_correctness"] is True
+
+    false_abstention = RAGEvaluator().evaluate_query_response(
+        query="When does the rule take effect?",
+        response=RAGQueryResponse(answer="I cannot verify that.", grounded=False),
+        expected_abstention=False,
+        required_facts=[content],
+    )
+    assert false_abstention["metrics"]["abstention_correctness"] is False
+    assert false_abstention["metrics"]["answerability_correctness"] is False
+
+
+def test_required_fact_support_is_bound_to_the_inline_citation_reference():
+    supported_content = "The rule takes effect on 1 April 2026."
+    unrelated_content = "The notice was published by the Official Authority."
+    unrelated_metadata = ChunkMetadata(
+        chunk_id="publication#0", document_id="publication", chunk_index=0,
+        title="Publication Notice", source="official-publication",
+    )
+    supported_metadata = ChunkMetadata(
+        chunk_id="commencement#0", document_id="commencement", chunk_index=0,
+        title="Commencement", source="official-commencement",
+    )
+    retrieved = [
+        RetrievedChunk(chunk=TextChunk(
+            chunk_id="publication#0", document_id="publication", content=unrelated_content,
+            metadata=unrelated_metadata,
+        ), score=0.9, rank=1),
+        RetrievedChunk(chunk=TextChunk(
+            chunk_id="commencement#0", document_id="commencement", content=supported_content,
+            metadata=supported_metadata,
+        ), score=0.85, rank=2),
+    ]
+    response = RAGQueryResponse(
+        answer=f"{supported_content} [1]",
+        citations=[
+            Citation(
+                citation_id=1, document_title="Publication Notice", source="official-publication",
+                chunk_id="publication#0", excerpt=unrelated_content, relevance_score=0.9,
+            ),
+            Citation(
+                citation_id=2, document_title="Commencement", source="official-commencement",
+                chunk_id="commencement#0", excerpt=supported_content, relevance_score=0.85,
+            ),
+        ],
+        retrieved_chunks=retrieved,
+        grounded=True,
+    )
+
+    result = RAGEvaluator().evaluate_query_response(
+        query="When does the rule take effect?", response=response,
+        required_facts=[supported_content],
+    )
+
+    assert result["metrics"]["citation_reference_validity"] == 1.0
+    assert result["metrics"]["citation_identity_correctness"] == 1.0
+    assert result["metrics"]["factual_support"] == 0.0
+
+
+def test_rag_evaluator_binds_source_identity_trust_freshness_period_and_jurisdiction():
+    manifest_sha = "a" * 64
+    content_sha = "b" * 64
+    source = "https://authority.example/rules.pdf"
+    content = "The rule takes effect on 1 April 2026."
+    metadata = ChunkMetadata(
+        chunk_id="commencement#0", document_id="commencement", chunk_index=0,
+        title="Commencement", source=source, author="Official Authority",
+        publication_date="2026-03-20", effective_date="2026-04-01",
+        source_trust_tier="government_official",
+        custom_metadata={
+            "document_key": "commencement", "content_sha256": content_sha,
+            "effective_to": None, "document_revision": "2026-03-20",
+            "corpus_manifest_sha256": manifest_sha,
+        },
+    )
+    retrieved = RetrievedChunk(chunk=TextChunk(
+        chunk_id="commencement#0", document_id="commencement", content=content,
+        metadata=metadata, lifecycle_state="ACTIVE",
+    ), score=0.95, rank=1)
+    response = RAGQueryResponse(
+        answer=content,
+        citations=[Citation(
+            citation_id=1, document_title="Commencement", source=source,
+            chunk_id="commencement#0", excerpt=content, relevance_score=0.95,
+        )],
+        retrieved_chunks=[retrieved], grounded=True,
+    )
+    expected = {
+        "commencement": {
+            "official_source_url": source, "publishing_authority": "Official Authority",
+            "publication_date": "2026-03-20", "effective_from": "2026-04-01",
+            "effective_to": None, "content_sha256": content_sha,
+            "document_version": "2026-03-20", "trust_tier": "government_official",
+            "jurisdiction": "IN", "_manifest_sha256": manifest_sha,
+        }
+    }
+    result = RAGEvaluator().evaluate_query_response(
+        query="When does the rule take effect?", response=response,
+        expected_abstention=False, expected_provenance=expected,
+        expected_manifest_sha256=manifest_sha, expected_jurisdiction="IN",
+        as_of_date=date(2026, 10, 7),
+    )
+    for metric in ("source_trust", "source_identity", "manifest_binding_current", "effective_period", "jurisdiction"):
+        assert result["metrics"][metric] == 1.0
+    assert result["metrics"]["source_freshness"] is None
+
+    wrong_jurisdiction = RAGEvaluator().evaluate_query_response(
+        query="When does the rule take effect?", response=response,
+        expected_abstention=False, expected_provenance=expected,
+        expected_manifest_sha256=manifest_sha, expected_jurisdiction="US",
+        as_of_date=date(2026, 10, 7),
+    )
+    assert wrong_jurisdiction["metrics"]["jurisdiction"] == 0.0
+
+
+
+def test_benchmark_metric_aggregation_keeps_unverified_values_unavailable():
+    mixed = summarize_metric_values([1.0, None, float("nan"), True])
+    assert mixed == {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "valid_count": 2,
+        "nan_count": 1,
+        "unavailable_count": 1,
+        "invalid_count": 0,
+    }
+
+    unavailable = summarize_metric_values([None, None])
+    assert unavailable["mean"] is None
+    assert unavailable["min"] is None
+    assert unavailable["max"] is None
+    assert unavailable["valid_count"] == 0
+    assert unavailable["unavailable_count"] == 2
+
+
+
+def test_forbidden_claim_categories_catch_assertions_but_allow_explicit_abstentions():
+    deduction = RAGEvaluator().evaluate_query_response(
+        query="Is a deduction available?",
+        response=RAGQueryResponse(answer="You can claim a deduction of ₹1,50,000.", grounded=False),
+        forbidden_claims=["unsupported deduction"],
+    )
+    assert deduction["metrics"]["forbidden_claims_passed"] is False
+    assert deduction["metrics"]["forbidden_claim_violation_count"] == 1
+
+    acquisition = RAGEvaluator().evaluate_query_response(
+        query="Is this exempt for everyone?",
+        response=RAGQueryResponse(
+            answer="You are exempt if you acquired the bond before 1 April 2018.", grounded=False,
+        ),
+        forbidden_claims=["unsupported acquisition-condition claim"],
+    )
+    assert acquisition["metrics"]["forbidden_claims_passed"] is False
+
+    abstention = RAGEvaluator().evaluate_query_response(
+        query="Is a deduction available?",
+        response=RAGQueryResponse(answer="I cannot verify whether a deduction is allowed.", grounded=False),
+        forbidden_claims=["unsupported deduction"],
+    )
+    assert abstention["metrics"]["forbidden_claims_passed"] is True
+
+    no_doubt = RAGEvaluator().evaluate_query_response(
+        query="Is a deduction available?",
+        response=RAGQueryResponse(
+            answer="There is no doubt that you can claim a deduction of ₹1,50,000.", grounded=False,
+        ),
+        forbidden_claims=["unsupported deduction"],
+    )
+    assert no_doubt["metrics"]["forbidden_claims_passed"] is False
+
+
+def test_numeric_tax_ranges_rebate_thresholds_and_bought_conditions_are_detected():
+    numeric_slab = RAGEvaluator().evaluate_query_response(
+        query="What tax slabs apply?",
+        response=RAGQueryResponse(
+            answer="0–4 lakh: 0%; 4–8 lakh: 5%; 8–12 lakh: 10%.", grounded=False,
+        ),
+        forbidden_claims=["any numeric slab"],
+    )
+    assert numeric_slab["metrics"]["forbidden_claims_passed"] is False
+
+    prose_numeric_slab = RAGEvaluator().evaluate_query_response(
+        query="What tax slabs apply?",
+        response=RAGQueryResponse(
+            answer="Income from 4 lakh to 8 lakh is taxed at 5%.", grounded=False,
+        ),
+        forbidden_claims=["any numeric slab"],
+    )
+    assert prose_numeric_slab["metrics"]["forbidden_claims_passed"] is False
+
+    range_after_rate = RAGEvaluator().evaluate_query_response(
+        query="What tax slabs apply?",
+        response=RAGQueryResponse(
+            answer="The tax rate is 5% between 4 lakh and 8 lakh.", grounded=False,
+        ),
+        forbidden_claims=["any numeric slab"],
+    )
+    assert range_after_rate["metrics"]["forbidden_claims_passed"] is False
+
+    rebate_threshold = RAGEvaluator().evaluate_query_response(
+        query="Is income below the rebate threshold tax free?",
+        response=RAGQueryResponse(answer="Income up to ₹12 lakh is tax-free.", grounded=False),
+        forbidden_claims=["any rebate threshold"],
+    )
+    assert rebate_threshold["metrics"]["forbidden_claims_passed"] is False
+
+    for answer in (
+        "No tax applies on income up to 12 lakh.",
+        "Income below 12 lakh is not taxable.",
+        "Up to 12 lakh income carries nil tax.",
+    ):
+        outcome_first_rebate_threshold = RAGEvaluator().evaluate_query_response(
+            query="What tax applies?",
+            response=RAGQueryResponse(answer=answer, grounded=False),
+            forbidden_claims=["any rebate threshold"],
+        )
+        assert outcome_first_rebate_threshold["metrics"]["forbidden_claims_passed"] is False
+
+    bought_condition = RAGEvaluator().evaluate_query_response(
+        query="Does the acquisition date matter?",
+        response=RAGQueryResponse(
+            answer="You are exempt if you bought the bond before 1 April 2018.", grounded=False,
+        ),
+        forbidden_claims=["unsupported acquisition-condition claim"],
+    )
+    assert bought_condition["metrics"]["forbidden_claims_passed"] is False
+
+    acquisition_noun = RAGEvaluator().evaluate_query_response(
+        query="Does acquisition date matter?",
+        response=RAGQueryResponse(
+            answer="An acquisition before 1 April 2026 remains eligible.", grounded=False,
+        ),
+        forbidden_claims=["unsupported acquisition-condition claim"],
+    )
+    assert acquisition_noun["metrics"]["forbidden_claims_passed"] is False
+
+
+def test_fabricated_citation_fails_identity_and_forbidden_citation_checks():
+    content = "The rule takes effect on 1 April 2026."
+    metadata = ChunkMetadata(
+        chunk_id="commencement#0", document_id="commencement", chunk_index=0,
+        title="Commencement", source="official-notice",
+    )
+    retrieved = RetrievedChunk(chunk=TextChunk(
+        chunk_id="commencement#0", document_id="commencement", content=content, metadata=metadata,
+    ), score=0.95, rank=1)
+    response = RAGQueryResponse(
+        answer="The rule takes effect on 1 April 2026.",
+        citations=[Citation(
+            citation_id=1, document_title="Fabricated title", source="https://fake.example/source",
+            chunk_id="commencement#0", excerpt="the rule says something else", relevance_score=0.95,
+        )],
+        retrieved_chunks=[retrieved], grounded=True,
+    )
+
+    result = RAGEvaluator().evaluate_query_response(
+        query="When does the rule take effect?", response=response,
+        forbidden_claims=["fabricated citation"],
+    )
+    assert result["metrics"]["citation_id_validity"] == 1.0
+    assert result["metrics"]["citation_identity_correctness"] == 0.0
+    assert result["metrics"]["forbidden_claims_passed"] is False
+
+    malformed_number = RAGQueryResponse(
+        answer="The rule takes effect on 1 April 2026.",
+        citations=[Citation(
+            citation_id=999, document_title="Commencement", source="official-notice",
+            chunk_id="commencement#0", excerpt=content, relevance_score=0.95,
+        )],
+        retrieved_chunks=[retrieved], grounded=True,
+    )
+    malformed_result = RAGEvaluator().evaluate_query_response(
+        query="When does the rule take effect?", response=malformed_number,
+        forbidden_claims=["fabricated citation"],
+    )
+    assert malformed_result["metrics"]["citation_id_validity"] == 0.0
+    assert malformed_result["metrics"]["citation_identity_correctness"] == 0.0
+    assert malformed_result["metrics"]["forbidden_claims_passed"] is False
+
+    unmapped_reference = RAGQueryResponse(
+        answer="The rule takes effect on 1 April 2026 [99].\n\n- **[1]** Commencement (official-notice)",
+        citations=[Citation(
+            citation_id=1, document_title="Commencement", source="official-notice",
+            chunk_id="commencement#0", excerpt=content, relevance_score=0.95,
+        )],
+        retrieved_chunks=[retrieved], grounded=True,
+    )
+    unmapped_result = RAGEvaluator().evaluate_query_response(
+        query="When does the rule take effect?", response=unmapped_reference,
+        forbidden_claims=["fabricated citation"],
+    )
+    assert unmapped_result["metrics"]["citation_id_validity"] == 1.0
+    assert unmapped_result["metrics"]["citation_reference_validity"] == 0.0
+    assert unmapped_result["metrics"]["forbidden_claims_passed"] is False
+
+    reference_without_citation = RAGEvaluator().evaluate_query_response(
+        query="When does the rule take effect?",
+        response=RAGQueryResponse(answer="The rule takes effect [99].", grounded=False),
+        forbidden_claims=["fabricated citation"],
+    )
+    assert reference_without_citation["metrics"]["citation_reference_validity"] == 0.0
+    assert reference_without_citation["metrics"]["forbidden_claims_passed"] is False
+
+    long_reference = RAGQueryResponse(
+        answer="The rule takes effect on 1 April 2026 [1000000].\n\n- **[1]** Commencement (official-notice)",
+        citations=[Citation(
+            citation_id=1, document_title="Commencement", source="official-notice",
+            chunk_id="commencement#0", excerpt=content, relevance_score=0.95,
+        )],
+        retrieved_chunks=[retrieved], grounded=True,
+    )
+    long_reference_result = RAGEvaluator().evaluate_query_response(
+        query="When does the rule take effect?", response=long_reference,
+        forbidden_claims=["fabricated citation"],
+    )
+    assert long_reference_result["metrics"]["citation_reference_validity"] == 0.0
+    assert long_reference_result["metrics"]["forbidden_claims_passed"] is False
+
+
+def test_provenance_scores_are_not_failed_for_controls_without_expected_sources():
+    no_expected_sources = RAGEvaluator().evaluate_query_response(
+        query="A control question with no relevant source",
+        response=RAGQueryResponse(answer="I cannot verify that.", grounded=False),
+        expected_abstention=True,
+        expected_provenance={},
+    )
+    for metric in (
+        "source_trust", "source_identity", "source_freshness",
+        "manifest_binding_current", "effective_period", "jurisdiction",
+    ):
+        assert no_expected_sources["metrics"][metric] is None
+
+    missing_expected_source = RAGEvaluator().evaluate_query_response(
+        query="A question with a required source",
+        response=RAGQueryResponse(answer="I cannot verify that.", grounded=False),
+        expected_abstention=True,
+        expected_provenance={"official-source": None},
+    )
+    assert missing_expected_source["metrics"]["source_trust"] == 0.0
+    assert missing_expected_source["metrics"]["source_identity"] == 0.0
+
+
+
+def test_optional_metric_formatter_preserves_unavailable_values():
+    assert format_metric_value(None) == "N/A"
+    assert format_metric_value(float("nan")) == "N/A"
+    assert format_metric_value([1, 2]) == "N/A"
+    assert format_metric_value(0.5) == "0.5000"

@@ -9,10 +9,11 @@ import threading
 import time
 from datetime import date
 from pathlib import Path
-from typing import Dict, List, Optional
+from collections import OrderedDict
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from rag.config import RAGConfig
 from rag.chunking.fixed_chunker import FixedSizeChunker
@@ -46,42 +47,113 @@ query_pipeline = RAGPipeline(
     config=rag_config,
 )
 
-# In-memory simple rate limiting: IP -> List of request timestamps
-_RATE_LIMIT_STORE: Dict[str, List[float]] = {}
+# Process-local rate limiting uses verified principals and bounded per-process
+# state. The deployment edge remains responsible for limits shared across workers.
+_RATE_LIMIT_STORE: OrderedDict[str, List[float]] = OrderedDict()
+_PRINCIPAL_RATE_LIMIT_STORE: OrderedDict[str, List[float]] = OrderedDict()
+_GLOBAL_RATE_LIMIT_TIMESTAMPS: List[float] = []
+_INDEX_RATE_LIMIT_STORE: OrderedDict[str, List[float]] = OrderedDict()
+_GLOBAL_INDEX_RATE_LIMIT_TIMESTAMPS: List[float] = []
 _RATE_LIMIT_LOCK = threading.Lock()
 MAX_REQUESTS_PER_MINUTE = 60
+MAX_GLOBAL_REQUESTS_PER_MINUTE = 600
+MAX_TRACKED_RATE_LIMIT_BUCKETS = 4096
+MAX_INDEX_REQUESTS_PER_MINUTE = 10
+MAX_GLOBAL_INDEX_REQUESTS_PER_MINUTE = 100
+MAX_INGEST_TEXT_CHARS = 100_000
 
 
-def check_rate_limit(client_ip: str) -> None:
-    """Enforces simple sliding window rate limiting (60 requests/minute)."""
+def _recent_bucket(store: OrderedDict, key: str, now: float) -> List[float]:
+    timestamps = [timestamp for timestamp in store.get(key, []) if now - timestamp < 60.0]
+    if key not in store and len(store) >= MAX_TRACKED_RATE_LIMIT_BUCKETS:
+        store.popitem(last=False)
+    store[key] = timestamps
+    store.move_to_end(key)
+    return timestamps
+
+
+def clear_rate_limit_state() -> None:
+    """Clear bounded process-local counters for deterministic tests and shutdown hooks."""
+    with _RATE_LIMIT_LOCK:
+        _RATE_LIMIT_STORE.clear()
+        _PRINCIPAL_RATE_LIMIT_STORE.clear()
+        _GLOBAL_RATE_LIMIT_TIMESTAMPS.clear()
+        _INDEX_RATE_LIMIT_STORE.clear()
+        _GLOBAL_INDEX_RATE_LIMIT_TIMESTAMPS.clear()
+
+
+def check_rate_limit(
+    client_ip: str,
+    verified_principal: str = "default",
+    request_kind: str = "query",
+) -> None:
+    """Enforce bounded IP/principal/global limits, with a stricter index quota."""
+    if request_kind not in {"query", "index"}:
+        raise ValueError("Unsupported RAG request kind.")
     now = time.monotonic()
     with _RATE_LIMIT_LOCK:
-        timestamps = _RATE_LIMIT_STORE.get(client_ip, [])
-        # Filter timestamps within last 60s. monotonic() is immune to wall-clock changes.
-        recent = [t for t in timestamps if now - t < 60.0]
+        global_recent = [timestamp for timestamp in _GLOBAL_RATE_LIMIT_TIMESTAMPS if now - timestamp < 60.0]
+        _GLOBAL_RATE_LIMIT_TIMESTAMPS[:] = global_recent
+        ip_recent = _recent_bucket(_RATE_LIMIT_STORE, client_ip, now)
+        principal_recent = _recent_bucket(_PRINCIPAL_RATE_LIMIT_STORE, verified_principal, now)
+        index_recent = None
+        global_index_recent = None
+        if request_kind == "index":
+            global_index_recent = [
+                timestamp for timestamp in _GLOBAL_INDEX_RATE_LIMIT_TIMESTAMPS
+                if now - timestamp < 60.0
+            ]
+            _GLOBAL_INDEX_RATE_LIMIT_TIMESTAMPS[:] = global_index_recent
+            index_recent = _recent_bucket(_INDEX_RATE_LIMIT_STORE, verified_principal, now)
 
-        if len(recent) >= MAX_REQUESTS_PER_MINUTE:
-            logger.warning(f"Rate limit exceeded for IP: {client_ip}")
+        if (len(ip_recent) >= MAX_REQUESTS_PER_MINUTE
+                or len(principal_recent) >= MAX_REQUESTS_PER_MINUTE
+                or len(global_recent) >= MAX_GLOBAL_REQUESTS_PER_MINUTE
+                or (index_recent is not None and len(index_recent) >= MAX_INDEX_REQUESTS_PER_MINUTE)
+                or (global_index_recent is not None
+                    and len(global_index_recent) >= MAX_GLOBAL_INDEX_REQUESTS_PER_MINUTE)):
+            logger.warning("RAG request rate limit exceeded.")
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Rate limit exceeded. Maximum 60 requests per minute allowed.",
+                detail="Rate limit exceeded. Try again later.",
             )
 
-        recent.append(now)
-        _RATE_LIMIT_STORE[client_ip] = recent
+        ip_recent.append(now)
+        principal_recent.append(now)
+        _GLOBAL_RATE_LIMIT_TIMESTAMPS.append(now)
+        if index_recent is not None and global_index_recent is not None:
+            index_recent.append(now)
+            _GLOBAL_INDEX_RATE_LIMIT_TIMESTAMPS.append(now)
 
 
+def check_prevalidation_ip_rate_limit(client_ip: str, request_kind: str = "query") -> None:
+    """Bound unauthenticated parse/validation failures without spending shared quota."""
+    if request_kind not in {"query", "index"}:
+        raise ValueError("Unsupported RAG request kind.")
+    now = time.monotonic()
+    with _RATE_LIMIT_LOCK:
+        ip_recent = _recent_bucket(_RATE_LIMIT_STORE, client_ip, now)
+        limit = min(MAX_REQUESTS_PER_MINUTE, MAX_INDEX_REQUESTS_PER_MINUTE) if request_kind == "index" else MAX_REQUESTS_PER_MINUTE
+        if len(ip_recent) >= limit:
+            logger.warning("RAG prevalidation IP rate limit exceeded.")
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Rate limit exceeded. Try again later.",
+            )
+        ip_recent.append(now)
 
 
 
 class IngestTextRequest(BaseModel):
-    title: str = Field(..., description="Document title")
-    content: str = Field(..., min_length=10, description="Raw text content to ingest")
-    source: str = Field("api_input", description="Source identifier")
-    author: Optional[str] = Field("Financial Authority", description="Author")
-    tenant_id: Optional[str] = Field(None, description="Deprecated/Ignored - Tenant scope derived from verified header")
-    scope: Optional[str] = Field(None, description="Deprecated/Ignored - Scope derived from verified header")
-    user_id: Optional[str] = Field(None, description="Deprecated/Ignored - User ID derived from verified header")
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(..., min_length=1, max_length=256, description="Document title")
+    content: str = Field(..., min_length=10, max_length=MAX_INGEST_TEXT_CHARS, description="Raw text content to ingest")
+    source: str = Field("api_input", min_length=1, max_length=512, description="Source identifier")
+    author: Optional[str] = Field("Financial Authority", max_length=256, description="Author")
+    tenant_id: Optional[str] = Field(None, max_length=128, description="Deprecated/Ignored - Tenant scope derived from verified header")
+    scope: Optional[str] = Field(None, max_length=256, description="Deprecated/Ignored - Scope derived from verified header")
+    user_id: Optional[str] = Field(None, max_length=128, description="Deprecated/Ignored - User ID derived from verified header")
 
 
 @rag_router.get("/health")
@@ -237,7 +309,7 @@ def query_rag(
     Any user_id or tenant_id provided in the request body is strictly ignored.
     """
     client_ip = req.client.host if req.client else "127.0.0.1"
-    check_rate_limit(client_ip)
+    check_rate_limit(client_ip, verified_user_id)
 
     # SECURITY: Overwrite any client-supplied identity with verified header identity
     request.user_id = verified_user_id
@@ -263,7 +335,7 @@ def index_document(
     Any user_id or tenant_id provided in the request body is strictly ignored.
     """
     client_ip = req.client.host if req.client else "127.0.0.1"
-    check_rate_limit(client_ip)
+    check_rate_limit(client_ip, verified_user_id, request_kind="index")
 
     try:
         # Direct user content is deliberately unverified. Claimed source/author fields

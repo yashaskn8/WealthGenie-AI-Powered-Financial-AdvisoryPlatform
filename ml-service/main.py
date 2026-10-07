@@ -132,6 +132,9 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+from rag.request_size_limit import RAGRequestBodyLimitMiddleware
+app.add_middleware(RAGRequestBodyLimitMiddleware)
+
 # OpenTelemetry Distributed Tracing Setup
 from tracing import setup_tracing
 setup_tracing(app)

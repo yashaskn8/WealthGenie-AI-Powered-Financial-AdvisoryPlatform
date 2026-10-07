@@ -5,7 +5,8 @@ Evaluates retrieval, citation-ID validity, lexical support, and abstention behav
 
 import json
 import logging
-from datetime import datetime, timezone
+import re
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Set, Optional
 
@@ -29,6 +30,255 @@ EVALS_DIR.mkdir(parents=True, exist_ok=True)
 logger = logging.getLogger("wealthgenie.rag.evaluation")
 
 
+def _normalized_phrase(value: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", str(value or "").lower()))
+
+
+def _contains_phrase(text: str, phrase: str) -> bool:
+    normalized_text = _normalized_phrase(text)
+    normalized_phrase = _normalized_phrase(phrase)
+    return bool(normalized_phrase and f" {normalized_phrase} " in f" {normalized_text} ")
+
+
+def _citation_numbering_valid(citations) -> bool:
+    if not citations:
+        return True
+    identifiers = [citation.citation_id for citation in citations]
+    return (
+        all(type(identifier) is int for identifier in identifiers)
+        and len(set(identifiers)) == len(identifiers)
+        and set(identifiers) == set(range(1, len(identifiers) + 1))
+    )
+
+
+def _answer_citation_references(answer: str) -> List[Optional[int]]:
+    references = []
+    for match in re.finditer(r"\[(\d+)\]", answer or ""):
+        digits = match.group(1)
+        # Citation IDs are bounded by the retrieved citation count. Avoid parsing
+        # arbitrarily long attacker-controlled integers while keeping them invalid.
+        references.append(int(digits) if len(digits) <= 6 else None)
+    return references
+
+
+def _exact_citation_identity(citation, retrieved_chunk) -> bool:
+    if retrieved_chunk is None:
+        return False
+    chunk = retrieved_chunk.chunk
+    metadata = chunk.metadata
+    return (
+        citation.chunk_id == chunk.chunk_id
+        and citation.document_title == metadata.title
+        and citation.source == metadata.source
+        and _contains_phrase(chunk.content, citation.excerpt)
+    )
+
+
+def _is_negated_claim(answer: str, position: int) -> bool:
+    clause_start = max(
+        answer.rfind(".", 0, position),
+        answer.rfind("!", 0, position),
+        answer.rfind("?", 0, position),
+        answer.rfind(";", 0, position),
+    ) + 1
+    preceding = answer[max(clause_start, position - 48):position]
+    direct_negation = re.search(
+        r"\b(?:cannot|can't|can not|do not|don't|does not|doesn't|did not|didn't|"
+        r"is not|isn't|are not|aren't|was not|wasn't|were not|weren't|not|no|never|"
+        r"unable to|unverified|unsupported|uncertain)\s*$",
+        preceding,
+        re.I,
+    )
+    uncertainty_frame = re.search(
+        r"\b(?:cannot|can't|can not|could not|couldn't|unable to|not able to)\s+"
+        r"(?:verify|confirm|determine|establish|tell|assess)\s+"
+        r"(?:(?:whether|if|that)\s+)?[^.!?;]{0,80}$",
+        preceding,
+        re.I,
+    )
+    no_actor_can = re.search(r"\b(?:no one|nobody|no taxpayer|no investor)\s+(?:(?:can|may|should|will)\s*)?$", preceding, re.I)
+    return bool(direct_negation or uncertainty_frame or no_actor_can)
+
+
+def _has_unnegated_pattern(answer: str, pattern: str) -> bool:
+    return any(not _is_negated_claim(answer, match.start()) for match in re.finditer(pattern, answer, re.I))
+
+
+def _has_unnegated_phrase(answer: str, phrase: str) -> bool:
+    words = _normalized_phrase(phrase).split()
+    if not words:
+        return False
+    pattern = r"\b" + r"\W+".join(re.escape(word) for word in words) + r"\b"
+    return _has_unnegated_pattern(answer, pattern)
+
+
+def _claims_unsupported_deduction(answer: str) -> bool:
+    patterns = (
+        r"\b(?:you|investors?|taxpayers?)\s+(?:can|may|should|will)\s+(?:claim|take|deduct)\b",
+        r"\b(?:claim|take|deduct)\s+(?:an?\s+)?(?:tax\s+)?deduction\b",
+        r"\b(?:tax\s+)?deduction\b.{0,60}(?:₹\s*[\d,]+(?:\.\d+)?|\b\d[\d,]{2,}\b|\b(?:available|allowed|eligible|permitted|exempt)\b)",
+        r"\b(?:deduct|deductible)\b.{0,60}(?:₹\s*[\d,]+|\b\d[\d,]{2,}\b|\b(?:available|allowed|eligible)\b)",
+        r"\b(?:section|sec\.?|u/s)\s*80[cd]\b",
+    )
+    return any(_has_unnegated_pattern(answer, pattern) for pattern in patterns)
+
+
+def _claims_acquisition_condition(answer: str) -> bool:
+    acquisition = r"(?:acquir(?:e|ed|ing)|acquisition(?:s)?|purchas(?:e|ed|ing)|buy|buys|bought|buying|subscrib(?:e|ed|ing)|allot(?:ted|ment)|issu(?:e|ed|ance))"
+    temporal = r"(?:before|after|on|during|between|through|via|from)"
+    patterns = (
+        rf"\b{acquisition}\b.{{0,60}}\b{temporal}\b",
+        rf"\b{temporal}\b.{{0,60}}\b{acquisition}\b",
+    )
+    return any(_has_unnegated_pattern(answer, pattern) for pattern in patterns)
+
+
+def _forbidden_claim_violations(
+    answer: str,
+    forbidden_claims: List[str],
+    invalid_citation: bool = False,
+) -> List[int]:
+    violations = []
+    for index, claim in enumerate(forbidden_claims):
+        claim_text = _normalized_phrase(claim)
+        matched = _has_unnegated_phrase(answer, claim)
+        if "any numeric slab" in claim_text or "unsupported tax slab" in claim_text:
+            range_with_rate = (
+                r"\b(?:₹\s*)?\d[\d,]*(?:\.\d+)?\s*(?:(?:lakh|lac|crore)s?\b)?\s*"
+                r"(?:-|–|—|\bto\b)\s*(?:₹\s*)?\d[\d,]*(?:\.\d+)?\s*"
+                r"(?:(?:lakh|lac|crore)s?\b)?\s*[:=]\s*\d+(?:\.\d+)?\s*%"
+            )
+            prose_range_with_rate = (
+                r"\b(?:₹\s*)?\d[\d,]*(?:\.\d+)?\s*(?:(?:lakh|lac|crore)s?\b)?\s*"
+                r"(?:-|–|—|\bto\b)\s*(?:₹\s*)?\d[\d,]*(?:\.\d+)?\s*"
+                r"(?:(?:lakh|lac|crore)s?\b)?\s*.{0,50}\b(?:taxed|tax|charged)\s+at\s+"
+                r"\d+(?:\.\d+)?\s*%"
+            )
+            rate_before_range = (
+                r"\b(?:tax\s+)?(?:rate|slab)\b.{0,24}\b\d+(?:\.\d+)?\s*%"
+                r".{0,30}\b(?:between|from)\s+(?:₹\s*)?\d[\d,]*(?:\.\d+)?\s*"
+                r"(?:(?:lakh|lac|crore)s?\b)?\s*(?:and|to)\s+(?:₹\s*)?"
+                r"\d[\d,]*(?:\.\d+)?\s*(?:(?:lakh|lac|crore)s?\b)?"
+            )
+            matched = matched or _has_unnegated_pattern(
+                answer,
+                r"\b(?:tax\s+)?slabs?\b.{0,40}\b\d+(?:\.\d+)?\s*%?|\b\d+(?:\.\d+)?\s*%?\b.{0,40}\b(?:tax\s+)?slabs?\b",
+            )
+            matched = matched or _has_unnegated_pattern(answer, range_with_rate)
+            matched = matched or _has_unnegated_pattern(answer, prose_range_with_rate)
+            matched = matched or _has_unnegated_pattern(answer, rate_before_range)
+        elif "any rebate threshold" in claim_text:
+            matched = matched or _has_unnegated_pattern(
+                answer,
+                r"(?:rebate|threshold).{0,40}\b\d+(?:\.\d+)?\b|\b\d+(?:\.\d+)?\b.{0,40}(?:rebate|threshold)",
+            )
+            matched = matched or _has_unnegated_pattern(
+                answer,
+                r"\b(?:income|taxable income|annual income|total income)\b.{0,40}"
+                r"\b(?:up to|below|under|less than|not exceeding)\b.{0,30}"
+                r"(?:₹\s*)?\d[\d,]*(?:\.\d+)?\s*(?:(?:lakh|lac|crore)s?\b)?"
+                r".{0,40}\b(?:tax[- ]free|zero tax|no tax|not taxable|rebate|exemption)\b",
+            )
+            matched = matched or _has_unnegated_pattern(
+                answer,
+                r"\b(?:up to|below|under|less than|not exceeding)\s*(?:₹\s*)?"
+                r"\d[\d,]*(?:\.\d+)?\s*(?:(?:lakh|lac|crore)s?\b)?\s+"
+                r"(?:annual\s+)?income\b.{0,40}\b(?:carries|has|incurs|attracts|is|gets)\s+"
+                r"(?:nil|no|zero)\s+tax\b",
+            )
+            matched = matched or _has_unnegated_pattern(
+                answer,
+                r"\b(?:no tax|zero tax|tax[- ]free|not taxable|tax(?:es)? do not apply|tax(?:es)? doesn't apply)\b"
+                r".{0,60}\b(?:on|for|if|when)?\s*(?:annual\s+)?income\b.{0,40}"
+                r"\b(?:up to|below|under|less than|not exceeding)\b.{0,30}"
+                r"(?:₹\s*)?\d[\d,]*(?:\.\d+)?\s*(?:(?:lakh|lac|crore)s?\b)?",
+            )
+        elif "tax calculation" in claim_text:
+            matched = matched or _has_unnegated_pattern(
+                answer, r"\b(?:tax calculation|tax amount|tax due|tax liability)\b"
+            )
+        elif "investment recommendation" in claim_text:
+            matched = matched or _has_unnegated_pattern(
+                answer, r"\b(?:recommend(?:s|ed|ation)?|invest in|buy|sell|allocate)\b"
+            )
+        elif "any sports result" in claim_text:
+            matched = matched or _has_unnegated_pattern(
+                answer, r"\b(?:won|winner|defeated|beat|score was|champion)\b"
+            )
+        elif "unsupported deduction" in claim_text:
+            matched = matched or _claims_unsupported_deduction(answer)
+        elif "unsupported acquisition condition claim" in claim_text:
+            matched = matched or _claims_acquisition_condition(answer)
+        elif "fabricated citation" in claim_text:
+            matched = matched or invalid_citation
+        if matched:
+            violations.append(index)
+    return violations
+
+
+def _provenance_metrics(
+    citations,
+    retrieved_by_id,
+    expected_provenance,
+    expected_manifest_sha256,
+    expected_jurisdiction,
+    as_of_date,
+):
+    if expected_provenance is None:
+        return {"source_trust": None, "source_identity": None, "source_freshness": None,
+                "manifest_binding_current": None,
+                "effective_period": None, "jurisdiction": None}
+    if not citations:
+        if not expected_provenance:
+            return {"source_trust": None, "source_identity": None, "source_freshness": None,
+                    "manifest_binding_current": None,
+                    "effective_period": None, "jurisdiction": None}
+        return {"source_trust": 0.0, "source_identity": 0.0, "source_freshness": None,
+                "manifest_binding_current": 0.0,
+                "effective_period": 0.0, "jurisdiction": 0.0}
+    scores = {key: [] for key in ("source_trust", "source_identity", "manifest_binding_current", "effective_period", "jurisdiction")}
+    for citation in citations:
+        retrieved = retrieved_by_id.get(citation.chunk_id)
+        if retrieved is None:
+            for values in scores.values():
+                values.append(0.0)
+            continue
+        chunk = retrieved.chunk
+        metadata = chunk.metadata
+        custom = metadata.custom_metadata or {}
+        expected = expected_provenance.get(custom.get("document_key"))
+        if expected is None:
+            for values in scores.values():
+                values.append(0.0)
+            continue
+        identity_ok = (
+            metadata.source == expected.get("official_source_url")
+            and metadata.author == expected.get("publishing_authority")
+            and metadata.publication_date == expected.get("publication_date")
+            and metadata.effective_date == expected.get("effective_from")
+            and custom.get("effective_to") == expected.get("effective_to")
+            and custom.get("content_sha256") == expected.get("content_sha256")
+            and custom.get("document_revision") == expected.get("document_version")
+            and _exact_citation_identity(citation, retrieved)
+        )
+        active = getattr(chunk, "lifecycle_state", None) == "ACTIVE"
+        manifest_ok = (
+            custom.get("corpus_manifest_sha256") == expected_manifest_sha256
+            and custom.get("corpus_manifest_sha256") == expected.get("_manifest_sha256")
+        )
+        effective_from = date.fromisoformat(expected["effective_from"])
+        effective_to = date.fromisoformat(expected["effective_to"]) if expected.get("effective_to") else None
+        effective_ok = effective_from <= as_of_date and (effective_to is None or as_of_date <= effective_to)
+        scores["source_trust"].append(float(metadata.source_trust_tier == expected.get("trust_tier") == "government_official"))
+        scores["source_identity"].append(float(identity_ok))
+        scores["manifest_binding_current"].append(float(active and manifest_ok))
+        scores["effective_period"].append(float(effective_ok and metadata.effective_date == expected.get("effective_from")))
+        scores["jurisdiction"].append(float(expected.get("jurisdiction") == expected_jurisdiction))
+    result = {key: round(sum(values) / len(values), 4) if values else None for key, values in scores.items()}
+    result["source_freshness"] = None
+    return result
+
+
 class RAGEvaluator:
     """Evaluation engine that keeps retrieval, citations, support, and abstention distinct."""
 
@@ -43,6 +293,12 @@ class RAGEvaluator:
         ground_truth_chunk_ids: Optional[Set[str]] = None,
         k: int = 4,
         expected_abstention: Optional[bool] = None,
+        required_facts: Optional[List[str]] = None,
+        forbidden_claims: Optional[List[str]] = None,
+        expected_provenance: Optional[Dict[str, Dict[str, Any]]] = None,
+        expected_manifest_sha256: Optional[str] = None,
+        expected_jurisdiction: Optional[str] = None,
+        as_of_date: Optional[date] = None,
     ) -> Dict[str, Any]:
         """
         Evaluate one response without treating citation validity as factual entailment.
@@ -85,9 +341,59 @@ class RAGEvaluator:
             compute_grounding_score(response.answer, retrieved_texts)
             if response.grounded else None
         )
-        abstention_correctness = (
+        abstention_correctness = None if expected_abstention is None else (
             (not response.grounded and not response.citations)
-            if expected_abstention else None
+            if expected_abstention else (response.grounded and bool(response.citations))
+        )
+        required_facts = required_facts or []
+        forbidden_claims = forbidden_claims or []
+        retrieved_by_id = {item.chunk.chunk_id: item for item in response.retrieved_chunks}
+        cited_by_id = {citation.chunk_id: citation for citation in response.citations}
+        citation_numbering_valid = _citation_numbering_valid(response.citations)
+        answer_citation_references = _answer_citation_references(response.answer)
+        citation_reference_validity = (
+            float(bool(response.citations) and all(
+                reference in {citation.citation_id for citation in response.citations}
+                for reference in answer_citation_references
+            ))
+            if answer_citation_references else None
+        )
+        citation_identity_scores = [
+            float(citation_numbering_valid and _exact_citation_identity(
+                citation, retrieved_by_id.get(citation.chunk_id),
+            ))
+            for citation in response.citations
+        ]
+        citation_identity_correctness = (
+            round(sum(citation_identity_scores) / len(citation_identity_scores), 4)
+            if citation_identity_scores else None
+        )
+        invalid_citation = (
+            (bool(response.citations)
+             and (not citation_numbering_valid or any(score == 0.0 for score in citation_identity_scores)))
+            or citation_reference_validity == 0.0
+        )
+        referenced_citation_ids = set(answer_citation_references)
+        citation_support = []
+        for fact in required_facts:
+            answer_support = _contains_phrase(response.answer, fact)
+            source_support = any(
+                _contains_phrase(cited_by_id[chunk_id].excerpt, fact)
+                and _contains_phrase(retrieved_by_id[chunk_id].chunk.content, fact)
+                for chunk_id in cited_by_id
+                if chunk_id in retrieved_by_id
+                and cited_by_id[chunk_id].citation_id in referenced_citation_ids
+            )
+            citation_support.append(float(answer_support and source_support))
+        factual_support = round(sum(citation_support) / len(citation_support), 4) if citation_support else None
+        forbidden_violations = _forbidden_claim_violations(response.answer, forbidden_claims, invalid_citation)
+        provenance = _provenance_metrics(
+            response.citations,
+            retrieved_by_id,
+            expected_provenance,
+            expected_manifest_sha256,
+            expected_jurisdiction,
+            as_of_date or date.today(),
         )
         retrieval_hit = (
             bool(set(retrieved_ids[:k]).intersection(gt_ids))
@@ -105,9 +411,15 @@ class RAGEvaluator:
                 "chunk_diversity": round(diversity, 4),
                 "retrieval_hit": retrieval_hit,
                 "citation_id_validity": round(citation_id_validity, 4) if citation_id_validity is not None else None,
-                "factual_support": None,
+                "citation_reference_validity": citation_reference_validity,
+                "citation_identity_correctness": citation_identity_correctness,
+                "factual_support": factual_support,
                 "lexical_support": round(lexical_support, 4) if lexical_support is not None else None,
                 "abstention_correctness": abstention_correctness,
+                "answerability_correctness": abstention_correctness,
+                "forbidden_claims_passed": not forbidden_violations,
+                "forbidden_claim_violation_count": len(forbidden_violations),
+                **provenance,
             },
             "retrieved_chunk_count": len(retrieved_ids),
             "citations_count": len(response.citations),
@@ -123,6 +435,12 @@ class RAGEvaluator:
         ground_truth_chunk_ids: Optional[Set[str]] = None,
         k: int = 4,
         expected_abstention: Optional[bool] = None,
+        required_facts: Optional[List[str]] = None,
+        forbidden_claims: Optional[List[str]] = None,
+        expected_provenance: Optional[Dict[str, Dict[str, Any]]] = None,
+        expected_manifest_sha256: Optional[str] = None,
+        expected_jurisdiction: Optional[str] = None,
+        as_of_date: Optional[date] = None,
     ) -> Path:
         """
         Evaluates query response and persists structured JSON evaluation report to evals_dir.
@@ -133,6 +451,12 @@ class RAGEvaluator:
             ground_truth_chunk_ids,
             k=k,
             expected_abstention=expected_abstention,
+            required_facts=required_facts,
+            forbidden_claims=forbidden_claims,
+            expected_provenance=expected_provenance,
+            expected_manifest_sha256=expected_manifest_sha256,
+            expected_jurisdiction=expected_jurisdiction,
+            as_of_date=as_of_date,
         )
 
         timestamp_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

@@ -248,6 +248,128 @@ test('strict live candidate evaluation rejects planner fallback instead of scori
   }), { code: 'EVOLUTION_PLANNER_REQUIRED' });
 });
 
+test('shadow PlanReview ignores caller-supplied tool overrides that can perform writes', async () => {
+  let mutationAttempted = false;
+  const runner = createPlanReviewScaffoldRunner({ dependencies: {
+    captureFinancialAuthority: async () => ({ authorityMeasurementState: 'MEASURED', allocation: [], suitability: 'Moderate' }),
+    plannerProvider: { generate: async () => ({ text: '{"checks":["get_current_profile_context"]}' }) },
+    explanationProviders: [],
+    onNodeProgress: async () => { mutationAttempted = true; },
+    researchAdaptiveEnabled: true,
+    researchProviders: [{ search: async () => { mutationAttempted = true; return {}; } }],
+    goalModel: {
+      find: () => {
+        mutationAttempted = true;
+        throw new Error('shadow evaluation attempted a production goal query');
+      },
+    },
+    toolOverrides: {
+      get_current_profile_context: async () => {
+        mutationAttempted = true;
+        return { status: 'AVAILABLE', profile: { riskTolerance: 'Aggressive' } };
+      },
+    },
+  } });
+
+  const result = await runner({
+    candidate: createScaffoldSpec({ version: 'shadow-capability-test' }),
+    caseDefinition: { fixture: { userId, profileId, context } },
+  });
+  assert.equal(mutationAttempted, false);
+  assert.ok(result.result);
+  assert.equal(result.result.review.goals.status, 'UNAVAILABLE');
+  assert.deepEqual(result.result.review.goals.items, []);
+  assert.equal(result.authorityMeasurementState, 'MEASURED');
+
+  await assert.rejects(() => runner({
+    candidate: createScaffoldSpec({ version: 'shadow-misbound-profile-test' }),
+    caseDefinition: {
+      fixture: { userId, profileId: '64b000000000000000000099', context: { ...context, goals: [
+        { profileId, userId, goal_name: 'Other profile goal' },
+      ] } },
+    },
+  }), { code: 'EVALUATION_FIXTURE_IDENTITY_MISMATCH' });
+  await assert.rejects(() => runner({
+    candidate: createScaffoldSpec({ version: 'shadow-misbound-user-test' }),
+    caseDefinition: {
+      fixture: { userId: '64b000000000000000000099', profileId, context },
+    },
+  }), { code: 'EVALUATION_FIXTURE_IDENTITY_MISMATCH' });
+  await assert.rejects(() => runner({
+    candidate: createScaffoldSpec({ version: 'shadow-conflicting-profile-alias-test' }),
+    caseDefinition: {
+      fixture: {
+        userId,
+        profileId,
+        context: {
+          ...context,
+          profile: { ...profile, profileId, _id: '64b000000000000000000099' },
+        },
+      },
+    },
+  }), { code: 'EVALUATION_FIXTURE_IDENTITY_MISMATCH' });
+  await assert.rejects(() => runner({
+    candidate: createScaffoldSpec({ version: 'shadow-malformed-profile-alias-test' }),
+    caseDefinition: {
+      fixture: {
+        userId,
+        profileId,
+        context: {
+          ...context,
+          profile: { ...profile, profileId, _id: { $oid: '64b000000000000000000099' } },
+        },
+      },
+    },
+  }), { code: 'EVALUATION_FIXTURE_IDENTITY_MISMATCH' });
+  await assert.rejects(() => runner({
+    candidate: createScaffoldSpec({ version: 'shadow-malformed-goal-owner-test' }),
+    caseDefinition: {
+      fixture: {
+        userId,
+        profileId,
+        context: { ...context, goals: [{ userId: { $oid: '64b000000000000000000099' }, profileId }] },
+      },
+    },
+  }), { code: 'EVALUATION_FIXTURE_IDENTITY_MISMATCH' });
+
+  const explicitEmptyGoals = await runner({
+    candidate: createScaffoldSpec({ version: 'shadow-empty-goals-test' }),
+    caseDefinition: { fixture: { userId, profileId, context: { ...context, goals: [] } } },
+  });
+  assert.equal(explicitEmptyGoals.result.review.goals.status, 'NONE');
+  assert.deepEqual(explicitEmptyGoals.result.review.goals.items, []);
+
+  const fixtureGoal = {
+    _id: 'fixture-goal-1', goal_name: 'Fixture goal', target_date: '2030-01-01',
+    priority: 'HIGH', current_savings: 10, target_amount: 100,
+  };
+  const suppliedFixtureGoals = await runner({
+    candidate: createScaffoldSpec({ version: 'shadow-fixture-goals-test' }),
+    caseDefinition: { fixture: { userId, profileId, context: { ...context, goals: [fixtureGoal] } } },
+  });
+  assert.equal(suppliedFixtureGoals.result.review.goals.status, 'AVAILABLE');
+  assert.equal(suppliedFixtureGoals.result.review.goals.items.length, 1);
+  assert.equal(suppliedFixtureGoals.result.review.goals.items[0].name, 'Fixture goal');
+});
+
+test('shadow runner reserves the aggregate token ceiling before provider execution', async () => {
+  let providerCalls = 0;
+  const runner = createPlanReviewScaffoldRunner({ dependencies: {
+    captureFinancialAuthority: async () => ({ authorityMeasurementState: 'MEASURED', allocation: [], suitability: 'Moderate' }),
+    plannerProvider: { generate: async () => { providerCalls += 1; return { text: '{"checks":["get_current_profile_context"]}' }; } },
+    explanationProviders: [],
+  } });
+  const evolutionTokenBudget = { maxTotalTokens: 1, reservedTokenUpperBound: 0 };
+
+  await assert.rejects(() => runner({
+    candidate: createScaffoldSpec({ version: 'shadow-token-budget-test' }),
+    caseDefinition: { fixture: { userId, profileId, context } },
+    evolutionTokenBudget,
+  }), { code: 'AGENT_BUDGET_EXCEEDED' });
+  assert.equal(providerCalls, 0);
+  assert.equal(evolutionTokenBudget.reservedTokenUpperBound, 0);
+});
+
 test('externally signed matching holdout can reach SHADOW_READY only after every governed gate passes', async () => {
   const baseSpec = createScaffoldSpec({ version: 'base' });
   const runner = createPlanReviewScaffoldRunner({ dependencies: {

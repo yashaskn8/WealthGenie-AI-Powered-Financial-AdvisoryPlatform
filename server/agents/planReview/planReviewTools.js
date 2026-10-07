@@ -283,7 +283,9 @@ export async function executePlanReviewTool(toolName, context) {
     error.code = 'TOOL_CAPABILITY_POLICY_INVALID';
     throw error;
   }
-  const override = context?.dependencies?.toolOverrides?.[toolName];
+  const override = context?.dependencies?.shadowExecution === true
+    ? null
+    : context?.dependencies?.toolOverrides?.[toolName];
   if (typeof override === 'function') return override(context);
   return tool.execute(context);
 }
