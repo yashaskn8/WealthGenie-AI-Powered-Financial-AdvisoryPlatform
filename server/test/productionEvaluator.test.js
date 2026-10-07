@@ -8,6 +8,7 @@ import {
   persistProductionAgentEvaluation,
   verifyProductionAgentEvaluationIntegrity,
 } from '../agents/evals/productionEvaluator.js';
+import { reconcileMissingTerminalEvaluations } from '../agents/evals/productionEvaluationQueue.js';
 
 const now = new Date('2026-10-06T12:00:00.000Z');
 
@@ -372,6 +373,56 @@ test('production evaluation persistence is idempotent, immutable, and fails clos
   assert.equal((await persistProductionAgentEvaluation(record, { model })).evaluationId, record.evaluationId);
   assert.equal(ProductionAgentEvaluation.schema.path('classification').options.immutable, true);
   await assert.rejects(persistProductionAgentEvaluation(record, { model: { create: async () => { throw new Error('store down'); } } }), /store down/);
+});
+
+test('terminal evaluation reconciliation persists missing diagnostics from committed run and event data', async () => {
+  const { run, durableEvents } = fixture();
+  let saved = null;
+  let pipeline;
+  const result = await reconcileMissingTerminalEvaluations({
+    runModel: {
+      aggregate: async value => {
+        pipeline = value;
+        return saved ? [] : [run];
+      },
+    },
+    eventModel: {
+      find: () => ({ sort() { return this; }, lean: async () => durableEvents }),
+    },
+    evaluationModel: {
+      collection: { name: 'productionagentevaluations' },
+      findOne: () => ({ lean: async () => saved }),
+      create: async ([record]) => { saved = record; return [record]; },
+    },
+    evaluatedAt: now,
+  });
+  assert.deepEqual(result, { scanned: 1, persisted: 1, failed: 0 });
+  assert.equal(run.status, 'COMPLETED', 'reconciliation is diagnostic and does not mutate terminal core state');
+  assert.equal(saved.runId, run.runId);
+  assert.equal(saved.classification, 'INSUFFICIENT_EVIDENCE');
+  assert.ok(pipeline.some(stage => stage.$lookup?.from === 'productionagentevaluations'));
+
+  const retried = await reconcileMissingTerminalEvaluations({
+    runModel: { aggregate: async () => [] },
+    eventModel: { find: () => ({ sort() { return this; }, lean: async () => durableEvents }) },
+    evaluationModel: { collection: { name: 'productionagentevaluations' }, create: async () => assert.fail('existing evaluation must be excluded') },
+  });
+  assert.deepEqual(retried, { scanned: 0, persisted: 0, failed: 0 });
+});
+
+test('terminal evaluation reconciliation contains evaluator-store outages without changing run state', async () => {
+  const { run, durableEvents } = fixture({ run: { status: 'FAILED' } });
+  const result = await reconcileMissingTerminalEvaluations({
+    runModel: { aggregate: async () => [run] },
+    eventModel: { find: () => ({ sort() { return this; }, lean: async () => durableEvents }) },
+    evaluationModel: {
+      collection: { name: 'productionagentevaluations' },
+      create: async () => { throw new Error('evaluation persistence unavailable'); },
+    },
+    evaluatedAt: now,
+  });
+  assert.deepEqual(result, { scanned: 1, persisted: 0, failed: 1 });
+  assert.equal(run.status, 'FAILED');
 });
 
 test('production evaluation integrity binds the evidence manifest and read access to the originating run owner', async () => {

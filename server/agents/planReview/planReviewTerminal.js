@@ -3,7 +3,7 @@ import AgentRunEvent from '../../models/AgentRunEvent.js';
 import AgentCheckpoint from '../../models/AgentCheckpoint.js';
 import AgentGraphCheckpoint from '../../models/AgentGraphCheckpoint.js';
 import ProductionAgentEvaluation from '../../models/ProductionAgentEvaluation.js';
-import { evaluateProductionAgentRun, persistProductionAgentEvaluation } from '../evals/productionEvaluator.js';
+import { scheduleTerminalEvaluationReconciliation } from '../evals/productionEvaluationQueue.js';
 import { PLAN_REVIEW_CHECKPOINT_RETENTION_MS } from './planReviewRuntime.js';
 
 async function inTransaction(model, callback) {
@@ -49,10 +49,14 @@ export async function terminalizePlanReviewRun({
     throw new TypeError('A valid PlanReview terminal transition is required.');
   }
   if (!session && model?.db) {
-    return inTransaction(model, transaction => terminalizePlanReviewRun({
+    const run = await inTransaction(model, transaction => terminalizePlanReviewRun({
       model, eventModel, checkpointModel, graphCheckpointModel, productionEvaluationModel, userId, runId,
       expectedStatuses, expectedPlanReviewSnapshotHash, status, reasonCode, node, now, session: transaction,
     }));
+    if (run && model === AgentRun && productionEvaluationModel) {
+      scheduleTerminalEvaluationReconciliation({ runModel: model, eventModel, evaluationModel: productionEvaluationModel });
+    }
+    return run;
   }
   const filter = { userId, runId, status: { $in: expectedStatuses } };
   if (expectedPlanReviewSnapshotHash) filter.planReviewSnapshotHash = expectedPlanReviewSnapshotHash;
@@ -95,21 +99,8 @@ export async function terminalizePlanReviewRun({
   const expiresAt = new Date(now.getTime() + PLAN_REVIEW_CHECKPOINT_RETENTION_MS);
   await checkpointModel.updateMany({ runId, userId }, { $set: { expiresAt } }, options);
   await graphCheckpointModel.updateMany({ runId, userId }, { $set: { expiresAt } }, options);
-  if (model === AgentRun && productionEvaluationModel) {
-    let durableEvents = [];
-    if (eventModel.find) {
-      const eventQuery = eventModel.find({ runId, userId });
-      eventQuery.session?.(session);
-      eventQuery.sort?.({ sequence: 1 });
-      durableEvents = await (eventQuery.lean ? eventQuery.lean() : eventQuery);
-    }
-    const evaluation = evaluateProductionAgentRun({
-      run,
-      durableEvents: durableEvents || [],
-      baselineVersion: process.env.WG_PRODUCTION_EVALUATION_BASELINE_VERSION || null,
-      evaluatedAt: now,
-    });
-    await persistProductionAgentEvaluation(evaluation, { model: productionEvaluationModel, session });
+  if (!session && run && model === AgentRun && productionEvaluationModel) {
+    scheduleTerminalEvaluationReconciliation({ runModel: model, eventModel, evaluationModel: productionEvaluationModel });
   }
   return run;
 }

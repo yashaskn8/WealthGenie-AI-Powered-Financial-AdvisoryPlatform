@@ -92,6 +92,7 @@ class MetricsCollector {
       agent_worker_poll_failures_total: 0,
       agent_worker_recovery_failures_total: 0,
       agent_live_eval_failures_total: 0,
+      agent_evaluation_reconciliation_failures_total: 0,
       mandates_created_total: 0,
       mandates_authorized_total: 0,
       mandates_rejected_total: 0,
@@ -364,6 +365,7 @@ class MetricsCollector {
       'agent_worker_poll_failures_total',
       'agent_worker_recovery_failures_total',
       'agent_live_eval_failures_total',
+      'agent_evaluation_reconciliation_failures_total',
       'post_commit_reconciled_to_newer_recommendation_total',
       'post_commit_reconciled_to_newer_profile_total',
     ];

@@ -981,14 +981,11 @@ test('expired runs at the retry ceiling are terminally recovered and not reclaim
   });
   assert.equal(events[0].rows[0].sequence, 5);
   assert.equal(events[0].rows[0].eventType, 'RUN_FAILED');
-  assert.equal(evaluations[0].rows[0].runId, candidate.runId);
-  assert.equal(evaluations[0].rows[0].executionGeneration, candidate.executionGeneration);
-  assert.doesNotMatch(evaluations[0].rows[0].qualitySignals.missingEvidence.join(','), /durableEventSequenceOrGeneration/);
-  assert.equal(evaluations[0].options.session, session);
+  assert.equal(evaluations.length, 0, 'diagnostic evaluation is not written inside terminal recovery transaction');
   assert.equal(writes.length, 2, 'terminal recovery schedules transient checkpoint expiry in the same transaction');
 });
 
-test('expired-run recovery aborts its transaction when immutable evaluation persistence fails', async () => {
+test('expired-run recovery commits terminal state independently of evaluator persistence', async () => {
   const candidate = {
     _id: '64b000000000000000000099', runId: 'run-expired-evaluation-failure', userId,
     workerId: 'old-worker', executionGeneration: 2, attempt: 2, eventSequence: 4,
@@ -1001,7 +998,7 @@ test('expired-run recovery aborts its transaction when immutable evaluation pers
     },
     async endSession() {},
   };
-  await assert.rejects(recoverExpiredPlanReviewRuns({
+  const recovered = await recoverExpiredPlanReviewRuns({
     model: { find: () => lean([candidate]), updateOne: async () => ({ modifiedCount: 1 }) },
     eventModel: { create: async rows => rows, find: () => ({ lean: async () => [] }) },
     checkpointModel: { updateMany: async () => ({ modifiedCount: 0 }) },
@@ -1009,8 +1006,9 @@ test('expired-run recovery aborts its transaction when immutable evaluation pers
     productionEvaluationModel: { create: async () => { throw new Error('evaluation persistence unavailable'); } },
     mongo: { startSession: async () => session },
     nowValue: new Date('2026-01-01T00:00:00.000Z'),
-  }), /evaluation persistence unavailable/);
-  assert.equal(transactionCommitted, false);
+  });
+  assert.equal(recovered, 1);
+  assert.equal(transactionCommitted, true);
 });
 
 test('expired-run recovery is repeated by its durable worker timer while the process remains alive', async () => {

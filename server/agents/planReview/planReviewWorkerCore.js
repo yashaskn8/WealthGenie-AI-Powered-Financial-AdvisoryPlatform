@@ -6,7 +6,7 @@ import UserIntentMandate from '../../models/UserIntentMandate.js';
 import AgentCheckpoint from '../../models/AgentCheckpoint.js';
 import AgentGraphCheckpoint from '../../models/AgentGraphCheckpoint.js';
 import AgentRunEvent from '../../models/AgentRunEvent.js';
-import { evaluateProductionAgentRun, persistProductionAgentEvaluation } from '../evals/productionEvaluator.js';
+import { scheduleTerminalEvaluationReconciliation } from '../evals/productionEvaluationQueue.js';
 import FinancialProfile from '../../models/FinancialProfile.js';
 import FinancialProfileState from '../../models/FinancialProfileState.js';
 import RecommendationState from '../../models/RecommendationState.js';
@@ -280,9 +280,8 @@ export async function recoverExpiredPlanReviewRuns({
         const expiresAt = new Date(nowValue.getTime() + PLAN_REVIEW_CHECKPOINT_RETENTION_MS);
         await checkpointModel.updateMany({ runId: candidate.runId, userId: candidate.userId }, { $set: { expiresAt } }, { session });
         await graphCheckpointModel.updateMany({ runId: candidate.runId, userId: candidate.userId }, { $set: { expiresAt } }, { session });
-        let recoveryEvent = null;
         if (eventModel?.create) {
-          [recoveryEvent] = await eventModel.create([{
+          await eventModel.create([{
             runId: candidate.runId,
             userId: candidate.userId,
             executionGeneration: candidate.executionGeneration,
@@ -292,41 +291,14 @@ export async function recoverExpiredPlanReviewRuns({
             data: { type: 'RUN_FAILED', code: 'INTERNAL_RUNTIME_FAILURE', at: nowValue.toISOString() },
           }], { session });
         }
-        if (productionEvaluationModel) {
-          let durableEvents = recoveryEvent ? [recoveryEvent] : [];
-          if (eventModel?.find) {
-            const eventQuery = eventModel.find({ runId: candidate.runId, userId: candidate.userId });
-            eventQuery.session?.(session);
-            eventQuery.sort?.({ sequence: 1 });
-            durableEvents = await (eventQuery.lean ? eventQuery.lean() : eventQuery);
-          }
-          const failureRun = {
-            ...candidate,
-            status: 'FAILED',
-            failure: { code: 'INTERNAL_RUNTIME_FAILURE', message: 'Worker lease expired after the maximum retry attempts.' },
-            eventSequence,
-            completedAt: nowValue,
-            trajectory: [...(candidate.trajectory || []), {
-              type: 'RUN_FAILED',
-              executionGeneration: candidate.executionGeneration,
-              at: nowValue.toISOString(),
-            }].slice(-100),
-            toolExecutionLedger: candidate.toolExecutionLedger || [],
-          };
-          const evaluation = evaluateProductionAgentRun({
-            run: failureRun,
-            durableEvents: durableEvents || [],
-            baselineVersion: process.env.WG_PRODUCTION_EVALUATION_BASELINE_VERSION || null,
-            evaluatedAt: nowValue,
-          });
-          await persistProductionAgentEvaluation(evaluation, {
-            model: productionEvaluationModel,
-            session,
-          });
-        }
         candidateRecovered = true;
       });
-      if (candidateRecovered) recovered += 1;
+      if (candidateRecovered) {
+        recovered += 1;
+        if (productionEvaluationModel) {
+          scheduleTerminalEvaluationReconciliation({ runModel: model, eventModel, evaluationModel: productionEvaluationModel });
+        }
+      }
     } finally {
       await session.endSession();
     }
@@ -392,6 +364,7 @@ class PlanReviewWorker {
     this.heartbeatTimer = null;
     this.mandateReconciliationTimer = null;
     this.expiredRunRecoveryTimer = null;
+    this.productionEvaluationReconciliationTimer = null;
     this.activePromise = null;
     this.activeRun = null;
     this.activeAbortController = null;
@@ -869,41 +842,6 @@ class PlanReviewWorker {
             data: { type: terminalEvent, node: 'persist_agent_run', at: now().toISOString() },
           }], { session });
         }
-        if (this.productionEvaluationModel) {
-          let durableEvents = [];
-          if (this.eventModel?.find) {
-            const eventQuery = this.eventModel.find({ runId: run.runId, userId: run.userId });
-            eventQuery.session?.(session);
-            eventQuery.sort?.({ sequence: 1 });
-            durableEvents = await (eventQuery.lean ? eventQuery.lean() : eventQuery);
-          }
-          const completedAt = update.$set.completedAt;
-          const evaluationRun = {
-            ...current,
-            ...update.$set,
-            runId: run.runId,
-            userId: run.userId,
-            executionGeneration: run.executionGeneration,
-            status,
-            eventSequence: terminalSequence,
-            trajectory: [...(current.trajectory || []), {
-              type: terminalEvent, node: 'persist_agent_run', executionGeneration: run.executionGeneration,
-              at: completedAt.toISOString(),
-            }].slice(-100),
-            toolExecutionLedger: current.toolExecutionLedger || [],
-          };
-          const evaluation = evaluateProductionAgentRun({
-            run: evaluationRun,
-            durableEvents: durableEvents || [],
-            afterStateBinding: { planReviewSnapshotHash: snapshot.planReviewSnapshotHash, sourceBinding: snapshot.sourceBinding },
-            baselineVersion: process.env.WG_PRODUCTION_EVALUATION_BASELINE_VERSION || null,
-            evaluatedAt: completedAt,
-          });
-          await persistProductionAgentEvaluation(evaluation, {
-            model: this.productionEvaluationModel,
-            session,
-          });
-        }
         if (status === 'COMPLETED') {
           const expiresAt = new Date(Date.now() + PLAN_REVIEW_CHECKPOINT_RETENTION_MS);
           await this.checkpointModel.updateMany({ runId: run.runId, userId: run.userId }, { $set: { expiresAt } }, { session });
@@ -915,6 +853,11 @@ class PlanReviewWorker {
       await session.endSession();
     }
     if (!committed) return { committed: false, status: null };
+    if (this.productionEvaluationModel) {
+      scheduleTerminalEvaluationReconciliation({
+        runModel: this.model, eventModel: this.eventModel, evaluationModel: this.productionEvaluationModel,
+      });
+    }
     if (status === 'COMPLETED') PrometheusMetrics.recordAgentRun('completed');
     return { committed: true, status, runId: run.runId };
   }
@@ -1025,45 +968,16 @@ class PlanReviewWorker {
           const expiresAt = new Date(Date.now() + PLAN_REVIEW_CHECKPOINT_RETENTION_MS);
           await this.checkpointModel.updateMany({ runId: run.runId, userId: run.userId }, { $set: { expiresAt } }, { session });
           await this.graphCheckpointModel.updateMany({ runId: run.runId, userId: run.userId }, { $set: { expiresAt } }, { session });
-          if (this.productionEvaluationModel) {
-            let durableEvents = [];
-            if (this.eventModel?.find) {
-              const eventQuery = this.eventModel.find({ runId: run.runId, userId: run.userId });
-              eventQuery.session?.(session);
-              eventQuery.sort?.({ sequence: 1 });
-              durableEvents = await (eventQuery.lean ? eventQuery.lean() : eventQuery);
-            }
-            const failureRun = {
-              ...current,
-              ...update.$set,
-              runId: run.runId,
-              userId: run.userId,
-              executionGeneration: run.executionGeneration,
-              status: update.$set.status,
-              eventSequence: persistedEventSequence,
-              completedAt: terminal || cancelled || budgetExceeded || superseded ? now() : null,
-              trajectory: [...(current.trajectory || []), {
-                type: superseded ? 'RUN_SUPERSEDED' : (cancelled ? 'RUN_CANCELLED' : (budgetExceeded ? 'RUN_BUDGET_EXCEEDED' : 'RUN_FAILED')),
-                executionGeneration: run.executionGeneration,
-                at: now().toISOString(),
-              }].slice(-100),
-              toolExecutionLedger: current.toolExecutionLedger || [],
-            };
-            const evaluation = evaluateProductionAgentRun({
-              run: failureRun,
-              durableEvents: durableEvents || [],
-              baselineVersion: process.env.WG_PRODUCTION_EVALUATION_BASELINE_VERSION || null,
-              evaluatedAt: now(),
-            });
-            await persistProductionAgentEvaluation(evaluation, {
-              model: this.productionEvaluationModel,
-              session,
-            });
-          }
+
         }
       });
     } finally {
       await session?.endSession();
+    }
+    if ((terminal || cancelled || budgetExceeded || superseded) && this.productionEvaluationModel) {
+      scheduleTerminalEvaluationReconciliation({
+        runModel: this.model, eventModel: this.eventModel, evaluationModel: this.productionEvaluationModel,
+      });
     }
     if (cancelled) PrometheusMetrics.inc('agent_cancellation_total');
     if (budgetExceeded) PrometheusMetrics.inc('agent_budget_exceeded_total');
@@ -1184,6 +1098,16 @@ class PlanReviewWorker {
       });
     }, 30000);
     this.mandateReconciliationTimer.unref?.();
+    if (this.productionEvaluationModel) {
+      const reconcileEvaluations = () => {
+        scheduleTerminalEvaluationReconciliation({
+          runModel: this.model, eventModel: this.eventModel, evaluationModel: this.productionEvaluationModel,
+        });
+      };
+      reconcileEvaluations();
+      this.productionEvaluationReconciliationTimer = this.setIntervalImpl(reconcileEvaluations, 30000);
+      this.productionEvaluationReconciliationTimer.unref?.();
+    }
     const recover = () => this.recoverExpiredRunsImpl({ model: this.model, eventModel: this.eventModel, checkpointModel: this.checkpointModel, graphCheckpointModel: this.graphCheckpointModel, productionEvaluationModel: this.productionEvaluationModel, mongo: this.mongo }).catch(error => {
       PrometheusMetrics.inc('agent_worker_recovery_failures_total');
       logger.error('PlanReview expired-run recovery failed', { code: error?.code || 'EXPIRED_RUN_RECOVERY_FAILED' });
@@ -1204,6 +1128,8 @@ class PlanReviewWorker {
     this.timer = null;
     if (this.mandateReconciliationTimer) this.clearIntervalImpl(this.mandateReconciliationTimer);
     this.mandateReconciliationTimer = null;
+    if (this.productionEvaluationReconciliationTimer) this.clearIntervalImpl(this.productionEvaluationReconciliationTimer);
+    this.productionEvaluationReconciliationTimer = null;
     if (this.expiredRunRecoveryTimer) this.clearIntervalImpl(this.expiredRunRecoveryTimer);
     this.expiredRunRecoveryTimer = null;
     if (this.activePromise) {
