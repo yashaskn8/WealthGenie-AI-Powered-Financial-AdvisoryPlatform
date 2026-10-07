@@ -2,14 +2,14 @@ import ProductionAgentEvaluation from '../../models/ProductionAgentEvaluation.js
 import AgentRun from '../../models/AgentRun.js';
 import { canonicalSha256 } from '../../utils/canonicalJson.js';
 import { loadBuildProvenance, verifyBuildProvenance } from '../../services/buildProvenance.js';
+import { validateTypedFinancialClaims } from '../../services/typedFinancialClaims.js';
 import { PLAN_REVIEW_TOOL_CAPABILITIES, SAFE_PLAN_REVIEW_TOOLS } from '../planReview/planReviewSchemas.js';
 
-export const PRODUCTION_EVALUATOR_VERSION = 'production-agent-evaluator-1.0.0';
-export const PRODUCTION_EVALUATION_POLICY_VERSION = 'production-evaluation-policy-1.0.0';
+export const PRODUCTION_EVALUATOR_VERSION = 'production-agent-evaluator-1.1.0';
+export const PRODUCTION_EVALUATION_POLICY_VERSION = 'production-evaluation-policy-1.1.0';
 const ALLOWED_PLAN_REVIEW_ACTIONS = new Set(['NONE', 'REVIEW_PROFILE', 'RECOMPUTE_PLAN', 'REVIEW_GOALS', 'INSUFFICIENT_EVIDENCE']);
 const PRIVATE_VALUE_PATTERN = /\b[A-Z]{5}\d{4}[A-Z]\b|\b\d{4}[ -]?\d{4}[ -]?\d{4}\b|\b[\w.+-]+@[\w.-]+\.[A-Z]{2,}\b|(?<!\d)(?:\+?91[ -]?)?[6-9]\d{9}(?!\d)|\b(?:account|acct)[ _-]?(?:number|no\.?|#)?\s*[:=]?\s*\d{9,18}\b|\b[a-f0-9]{24}\b/i;
 const PRIVATE_FIELD_PATTERN = /["'](?:user|profile|account)[_-]?id["']\s*:/i;
-const FINANCIAL_NUMBER_PATTERN = /(?:₹\s*\d|\b\d+(?:\.\d+)?\s*%|\b\d{4,}\b)/;
 
 function safeDigest(value) {
   return typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value) ? value.toLowerCase() : null;
@@ -166,7 +166,11 @@ export function evaluateProductionAgentRun({ run, durableEvents = [], afterState
     .filter(value => typeof value === 'string').join('\n');
   const serializedResult = JSON.stringify(run?.result || {});
   const privateDataLeak = PRIVATE_FIELD_PATTERN.test(serializedResult) || PRIVATE_VALUE_PATTERN.test(serializedResult);
-  const unboundNumericClaim = FINANCIAL_NUMBER_PATTERN.test(narrative);
+  const typedClaimValidation = validateTypedFinancialClaims({
+    claims: run?.result?.financialClaims ?? [],
+    narrative,
+    evidenceEntries: run?.result?.evidence?.entries || [],
+  });
   const ledgerEventsMatch = toolEventsMatchLedger(events, run?.toolExecutionLedger, run);
   // Evidence currently carries mutable URL and freshness labels, not an
   // authenticated provider-fetch attestation. Those labels cannot prove source
@@ -253,7 +257,12 @@ export function evaluateProductionAgentRun({ run, durableEvents = [], afterState
     sourceBinding: { passed: sourceBindingHash === beforeStateHash && Boolean(afterStateHash) },
     stateRevisionInvariant: { passed: validRevisions && Number(beforeRevision) === Number(afterRevision) && beforeStateHash === afterStateHash },
     privateDataLeakage: { passed: !privateDataLeak },
-    typedNumericClaims: { passed: !unboundNumericClaim, status: unboundNumericClaim ? 'UNVERIFIED_TYPED_NUMERIC_CLAIM' : 'NO_NUMERIC_CLAIM' },
+    typedNumericClaims: {
+      passed: typedClaimValidation.passed,
+      status: typedClaimValidation.status,
+      claimCount: typedClaimValidation.claimCount,
+      errors: typedClaimValidation.errors,
+    },
     sourceFreshnessAndJurisdiction: {
       passed: sourceEvidenceFresh,
       status: 'UNVERIFIED',

@@ -8,7 +8,7 @@ import {
 } from '../services/providerAbstraction.js';
 import {
   buildGroundedEvidencePacket,
-  makeEvidenceEntry,
+  evidenceEntryFromOfficialRate,
 } from '../services/groundedEvidence.js';
 import {
   parseGroundedModelJson,
@@ -31,22 +31,43 @@ function evidencePacket() {
       investmentGoals: ['Wealth Growth'],
       suitabilityReasonCodes: ['PREFERENCE_CAP'],
     },
-    additionalEntries: [makeEvidenceEntry('E_TEST_RATE', 'PRODUCT_FACT', {
-      ratePct: 7.1,
-      effectiveFrom: '2026-07-01',
-    }, {
-      dataClass: 'QUARTERLY_OFFICIAL_RATE',
+    additionalEntries: [{
+      ...evidenceEntryFromOfficialRate({
+        id: 'government:india-post:ppf',
+        name: 'Public Provident Fund',
+        source: { provider: 'GOVERNMENT_OF_INDIA', url: 'https://www.indiapost.gov.in/banking-services/savings', publicationDate: '2026-07-01' },
+        officialRate: {
+          value: 7.1,
+          basis: 'OFFICIAL_NOMINAL_RATE_PER_ANNUM',
+          effectiveFrom: '2026-07-01',
+          effectiveTo: '2026-12-31',
+          dataClass: 'QUARTERLY_OFFICIAL_RATE',
+        },
+      }),
+      id: 'E_TEST_RATE',
       displayValue: 'Official rate 7.1% effective 2026-07-01',
-      source: { provider: 'GOVERNMENT_OF_INDIA', url: 'https://official.example/rate', publicationDate: '2026-07-01' },
-    })],
+    }],
   });
 }
 
-function candidate(text = 'The official rate is 7.1% effective 2026-07-01 [E_TEST_RATE].') {
+const VALID_RATE_STATEMENT = 'The official rate is 7.1% p.a. effective 2026-07-01 [E_TEST_RATE].';
+
+function candidate(text = VALID_RATE_STATEMENT) {
   return {
     text,
     evidenceIdsUsed: ['E_TEST_RATE'],
     claims: [{ text, evidenceIds: ['E_TEST_RATE'] }],
+    financialClaims: text === VALID_RATE_STATEMENT ? [{
+      type: 'CURRENT_RATE',
+      value: 7.1,
+      unit: 'PERCENT_PER_ANNUM',
+      timePeriod: '2026-07-01/2026-12-31',
+      source: 'GOVERNMENT_OF_INDIA',
+      evidenceId: 'E_TEST_RATE',
+      jurisdiction: 'IN',
+      effectivePeriod: { from: '2026-07-01', to: '2026-12-31' },
+      statement: text,
+    }] : [],
     unavailableFacts: [],
   };
 }

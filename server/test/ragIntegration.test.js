@@ -199,7 +199,7 @@ describe('Phase 1 Architecture Truth — RAG Chat Integration Tests', () => {
             tokens_used: 45,
             provider: 'DETERMINISTIC_TEMPLATE',
             grounding_version: 'grounded-financial-evidence-1.0.0',
-            prompt_version: 'grounded-financial-explanation-prompt-1.0.0',
+            prompt_version: 'grounded-financial-explanation-prompt-1.1.0',
             evidence_ids_used: ['E_TAX_INPUT_BOUNDARY'],
             validation_status: 'PASS',
             fallback_used: true,

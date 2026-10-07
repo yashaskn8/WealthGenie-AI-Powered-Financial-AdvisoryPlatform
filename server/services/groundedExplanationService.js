@@ -18,7 +18,7 @@ import {
 import { compareVerifiedFixedIncomeProducts } from './fixedIncomeProductRanking.js';
 import { PrometheusMetrics } from './metricsCollector.js';
 
-export const GROUNDED_EXPLANATION_PROMPT_VERSION = 'grounded-financial-explanation-prompt-1.0.0';
+export const GROUNDED_EXPLANATION_PROMPT_VERSION = 'grounded-financial-explanation-prompt-1.1.0';
 export const GROUNDED_LLM_TOOL_ALLOWLIST = Object.freeze([]);
 // Matches the existing default PlanReview execution timeout; provider failover
 // is not allowed to stack three independent 20–30s adapter timeouts.
@@ -54,7 +54,8 @@ Do not calculate financial values. Do not infer missing facts. Do not translate 
 Use only evidence IDs present in the packet and cite every factual claim inline as [E_ID].
 Never invent a number, date, percentage, rupee value, rate, NAV, allocation, source, or URL.
 Return one JSON object only with this exact shape:
-{"text":"...","evidenceIdsUsed":["E_ID"],"claims":[{"text":"... [E_ID]","evidenceIds":["E_ID"]}],"unavailableFacts":["..."]}
+{"text":"...","evidenceIdsUsed":["E_ID"],"claims":[{"text":"... [E_ID]","evidenceIds":["E_ID"]}],"financialClaims":[{"type":"CURRENT_RATE|HISTORICAL_RETURN|EXPECTED_RETURN|PROJECTED_RETURN|POST_TAX_RETURN|ALLOCATION_WEIGHT|TAX_RATE|CURRENT_COUPON|MATURITY_AMOUNT|CONTRIBUTION|RISK_SCORE","value":0,"unit":"PERCENT|PERCENT_PER_ANNUM|INR|INR_PER_MONTH|SCORE","timePeriod":"...","source":"...","evidenceId":"E_ID","jurisdiction":null,"effectivePeriod":null,"statement":"exact numeric sentence from text with [E_ID]"}],"unavailableFacts":["..."]}
+For financialClaims, copy facts only from one cited evidence entry. Include every numeric financial statement exactly once. If the evidence does not explicitly support a listed type, omit that statement and report the fact as unavailable. Never convert historical returns into expected returns or model assumptions into provider forecasts.
 Keep the response concise. Do not reveal chain-of-thought.`;
 }
 
@@ -107,13 +108,14 @@ function deterministicCandidate(packet) {
   }
   if (selected.length === 0) selected.push(packet.entries.find(item => item.id === 'E_REGULATORY_NOTICE'));
   const claims = selected.filter(Boolean).map(item => ({
-    text: `The authoritative backend reports: ${item.displayValue} [${item.id}]`,
+    text: `The authoritative backend reports ${item.kind.toLowerCase().replace(/_/g, ' ')} evidence [${item.id}]`,
     evidenceIds: [item.id],
   }));
   return {
     text: claims.map(claim => claim.text).join(' '),
     evidenceIdsUsed: claims.flatMap(claim => claim.evidenceIds),
     claims,
+    financialClaims: [],
     unavailableFacts: packet.unavailableFacts,
   };
 }
@@ -124,6 +126,7 @@ function outputResult({ candidate, packet, provider, model, latencyMs, tokensUse
     ...candidate,
     evidenceIdsUsed: [...new Set([...(candidate.evidenceIdsUsed || []), regulatory?.id].filter(Boolean))],
     claims: [...(candidate.claims || [])],
+    financialClaims: [...(candidate.financialClaims || [])],
   };
   if (regulatory && !String(normalizedCandidate.text || '').includes(`[${regulatory.id}]`)) {
     const disclosure = `${regulatory.value} [${regulatory.id}]`;
@@ -151,6 +154,7 @@ function outputResult({ candidate, packet, provider, model, latencyMs, tokensUse
     text: normalizedCandidate.text,
     evidenceIdsUsed: validation.evidenceIdsUsed,
     claims: normalizedCandidate.claims,
+    financialClaims: normalizedCandidate.financialClaims,
     unavailableFacts: [...new Set([...(packet.unavailableFacts || []), ...(normalizedCandidate.unavailableFacts || [])])],
     citations: validation.evidenceIdsUsed.map(id => evidenceById.get(id)).filter(Boolean).map(citationFor),
     generatedAt: new Date().toISOString(),

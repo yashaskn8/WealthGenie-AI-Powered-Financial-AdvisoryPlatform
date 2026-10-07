@@ -358,6 +358,51 @@ test('wrong source binding, unsupported numeric claim, private identifier, and s
   }
 });
 
+test('production typed-claim gate validates meaning and exact authority evidence independently', () => {
+  const evidence = {
+    id: 'E_RATE',
+    kind: 'PRODUCT_FACT',
+    dataClass: 'OFFICIAL_BANK_PUBLISHED_RATE',
+    value: {
+      productId: 'deposit:sbi:retail-domestic:1y:public',
+      ratePctPerAnnum: 7.25,
+      rateBasis: 'OFFICIAL_NOMINAL_CARD_RATE_PER_ANNUM',
+      effectiveFrom: '2026-10-01',
+      effectiveTo: '2026-12-31',
+    },
+    source: { provider: 'SBI' },
+    authority: 'WEALTHGENIE_BACKEND',
+  };
+  const claim = {
+    type: 'CURRENT_RATE',
+    value: 7.25,
+    unit: 'PERCENT_PER_ANNUM',
+    timePeriod: '2026-10-01/2026-12-31',
+    source: 'SBI',
+    evidenceId: 'E_RATE',
+    jurisdiction: 'IN',
+    effectivePeriod: { from: '2026-10-01', to: '2026-12-31' },
+    statement: 'The current rate is 7.25% p.a. [E_RATE].',
+  };
+  const valid = evaluate({ run: { result: {
+    recommendedAction: 'NONE',
+    summary: claim.statement,
+    financialClaims: [claim],
+    evidence: { status: 'AVAILABLE', entries: [evidence] },
+  } } });
+  assert.equal(valid.hardGateResults.typedNumericClaims.passed, true);
+  assert.equal(valid.hardGateResults.typedNumericClaims.status, 'TYPED_FINANCIAL_CLAIMS_VERIFIED');
+
+  const relabelled = evaluate({ run: { result: {
+    recommendedAction: 'NONE',
+    summary: 'The expected return is 7.25% p.a. [E_RATE].',
+    financialClaims: [{ ...claim, statement: 'The expected return is 7.25% p.a. [E_RATE].' }],
+    evidence: { status: 'AVAILABLE', entries: [evidence] },
+  } } });
+  assert.equal(relabelled.hardGateResults.typedNumericClaims.passed, false);
+  assert.ok(relabelled.hardGateResults.typedNumericClaims.errors.includes('CLAIM_SEMANTIC_TYPE_MISMATCH'));
+});
+
 test('production evaluation persistence is idempotent, immutable, and fails closed when its store is down', async () => {
   const record = evaluate();
   await new ProductionAgentEvaluation(record).validate();

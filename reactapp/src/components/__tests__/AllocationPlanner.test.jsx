@@ -109,7 +109,7 @@ describe('AllocationPlanner', () => {
 
   it('runs a read-only review and exposes only returned evidence in the dialog', async () => {
     vi.spyOn(api, 'runPlanReview').mockResolvedValue({
-      version: 'plan-review-1.0.0',
+      version: 'plan-review-1.1.0',
       runId: '4f4f4f4f-1111-4111-8111-111111111111',
       currentStateMatch: true,
       status: 'COMPLETED',
@@ -138,7 +138,7 @@ describe('AllocationPlanner', () => {
 
   it('keeps recompute as an explicit authoritative parent action', async () => {
     vi.spyOn(api, 'runPlanReview').mockResolvedValue({
-      version: 'plan-review-1.0.0',
+      version: 'plan-review-1.1.0',
       runId: '4f4f4f4f-1111-4111-8111-111111111111',
       currentStateMatch: true,
       status: 'WAITING_FOR_APPROVAL',
@@ -162,7 +162,7 @@ describe('AllocationPlanner', () => {
 
   it('does not display a completed review that is bound to a superseded financial state', async () => {
     vi.spyOn(api, 'getCurrentPlanReviewRun').mockResolvedValue({
-      version: 'plan-review-1.0.0',
+      version: 'plan-review-1.1.0',
       runId: '5f5f5f5f-1111-4111-8111-111111111111',
       currentStateMatch: false,
       status: 'COMPLETED',
@@ -179,14 +179,14 @@ describe('AllocationPlanner', () => {
   it('reloads the review when the canonical allocation revision changes without a profile version change', async () => {
     vi.spyOn(api, 'getCurrentPlanReviewRun')
       .mockResolvedValueOnce({
-        version: 'plan-review-1.0.0',
+        version: 'plan-review-1.1.0',
         runId: '6f6f6f6f-1111-4111-8111-111111111111',
         currentStateMatch: true,
         status: 'COMPLETED',
         result: { recommendedAction: 'NONE', summary: 'Review for allocation revision one.' },
       })
       .mockResolvedValueOnce({
-        version: 'plan-review-1.0.0',
+        version: 'plan-review-1.1.0',
         runId: '7f7f7f7f-1111-4111-8111-111111111111',
         currentStateMatch: true,
         status: 'COMPLETED',
@@ -229,7 +229,7 @@ describe('AllocationPlanner', () => {
     rerender(<AllocationPlanner profile={nextProfile} recommendations={recommendations} recommendationMeta={recommendationMeta} />);
     await act(async () => {
       finishReview({
-        version: 'plan-review-1.0.0',
+        version: 'plan-review-1.1.0',
         runId: '4f4f4f4f-1111-4111-8111-111111111111',
         currentStateMatch: true,
         status: 'COMPLETED',
@@ -246,7 +246,7 @@ describe('AllocationPlanner', () => {
 
   it('does not request recompute approval unless the server run is waiting for approval', async () => {
     vi.spyOn(api, 'runPlanReview').mockResolvedValue({
-      version: 'plan-review-1.0.0',
+      version: 'plan-review-1.1.0',
       runId: '4f4f4f4f-1111-4111-8111-111111111111',
       currentStateMatch: true,
       status: 'COMPLETED',

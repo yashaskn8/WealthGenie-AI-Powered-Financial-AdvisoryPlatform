@@ -2,13 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildRecommendationProfileHash } from '../services/recommendationProfile.js';
 import { invokePlanReviewGraph } from '../agents/planReview/planReviewGraph.js';
-import { deriveRecommendedAction, policyGuardReview, safeFallbackAfterPolicyRejection } from '../agents/planReview/planReviewPolicy.js';
+import { buildSafeReview, deriveRecommendedAction, policyGuardReview, safeFallbackAfterPolicyRejection } from '../agents/planReview/planReviewPolicy.js';
 import { hashGroundedEvidence } from '../services/groundedEvidence.js';
 import { advancePlanReviewStep } from '../agents/planReview/planReviewGraph.js';
 import { createModelGateway } from '../agents/modelGateway.js';
 import { loadPlanReviewContext } from '../agents/planReview/planReviewTools.js';
 import { buildPlanReviewSnapshotBinding, hashPlanReviewSnapshot } from '../agents/planReview/planReviewRuntime.js';
-import { PLAN_REVIEW_TOOL_CAPABILITIES } from '../agents/planReview/planReviewSchemas.js';
+import { PLAN_REVIEW_TOOL_CAPABILITIES, validatePlanReviewResponse } from '../agents/planReview/planReviewSchemas.js';
 
 const profileId = '64b000000000000000000001';
 const userId = '64b000000000000000000010';
@@ -515,7 +515,7 @@ test('cross-user profile lookup does not disclose or load another user profile',
 test('policy guard rejects fabricated evidence and guaranteed returns', () => {
   const evidencePacket = { entries: [{ id: 'E_PROFILE_AGE', value: 32 }], unavailableFacts: [] };
   const review = {
-    version: 'plan-review-1.0.0',
+    version: 'plan-review-1.1.0',
     runId: '4f4f4f4f-1111-4111-8111-111111111111',
     status: 'COMPLETED',
     recommendedAction: 'NONE',
@@ -531,6 +531,19 @@ test('policy guard rejects fabricated evidence and guaranteed returns', () => {
   assert.equal(result.allowed, false);
   assert.ok(result.reasonCodes.includes('UNSAFE_REVIEW_LANGUAGE'));
   assert.ok(result.reasonCodes.includes('UNKNOWN_EVIDENCE_ID'));
+});
+
+test('PlanReview schema continues to accept persisted 1.0 results without typed claims', () => {
+  const current = buildSafeReview({
+    runId: '4f4f4f4f-1111-4111-8111-111111111111',
+    profile,
+    freshness: { fresh: true, reasonCodes: [] },
+    goalSummary: { status: 'NONE', items: [] },
+    evidence: { status: 'AVAILABLE', entries: [], unavailableFacts: [] },
+  });
+  const legacy = { ...current, version: 'plan-review-1.0.0' };
+  delete legacy.financialClaims;
+  assert.equal(validatePlanReviewResponse(legacy).error, undefined);
 });
 
 test('policy rejection has a safe no-mutation fallback', () => {

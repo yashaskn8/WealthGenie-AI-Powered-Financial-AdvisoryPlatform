@@ -109,6 +109,7 @@ export function buildSafeReview({ runId, profile, freshness, goalSummary, eviden
       entries: Array.isArray(evidence?.entries) ? evidence.entries : [],
       unavailableFacts: [...new Set(evidence?.unavailableFacts || [])],
     },
+    financialClaims: [],
     provider: {
       name: provider?.provider || provider?.name || 'DETERMINISTIC_FALLBACK',
       model: provider?.model || null,

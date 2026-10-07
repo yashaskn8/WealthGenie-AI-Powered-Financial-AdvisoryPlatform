@@ -221,8 +221,8 @@ export function evidenceEntryFromProjectionAssumption(instrumentId, assumption) 
   if (!assumption) return null;
   return entry(`E_PROJECTION_ASSUMPTION_${String(instrumentId).replace(/[^A-Za-z0-9]/g, '_').toUpperCase()}`, 'PROJECTION', {
     instrumentId,
-    annualReturnAssumptionPct: Number.isFinite(Number(assumption.mean)) ? Number(assumption.mean) * 100 : null,
-    annualVolatilityAssumptionPct: Number.isFinite(Number(assumption.stdDev)) ? Number(assumption.stdDev) * 100 : null,
+    annualReturnAssumptionPct: typeof assumption.mean === 'number' && Number.isFinite(assumption.mean) ? assumption.mean * 100 : null,
+    annualVolatilityAssumptionPct: typeof assumption.stdDev === 'number' && Number.isFinite(assumption.stdDev) ? assumption.stdDev * 100 : null,
     assumptionVersion: assumption.assumptionVersion,
     providerForecast: false,
   }, {

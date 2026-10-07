@@ -639,7 +639,7 @@ async function synthesizeNode(state, dependencies) {
     toolCallCount: state.toolCallCount,
   });
   const review = explanation?.text && !explanation.fallback
-    ? { ...base, summary: explanation.text, provider }
+    ? { ...base, summary: explanation.text, provider, financialClaims: explanation.financialClaims || [] }
     : base;
   const tokenUsage = dependencies.modelBudget?.accountedTokens ?? Number(state.tokenUsage || 0);
   review.execution = { ...review.execution, modelCallCount, tokenUsage };
@@ -669,6 +669,7 @@ async function validateAgentOutputNode(state, dependencies = {}) {
     text: state.explanation.text,
     evidenceIdsUsed: state.explanation.evidenceIdsUsed,
     claims: state.explanation.claims,
+    financialClaims: state.explanation.financialClaims || [],
     unavailableFacts: state.explanation.unavailableFacts,
   };
   const validation = validateGroundedExplanation(candidate, state.evidencePacket);

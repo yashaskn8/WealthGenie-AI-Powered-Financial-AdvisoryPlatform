@@ -1,3 +1,5 @@
+import { validateTypedFinancialClaims } from './typedFinancialClaims.js';
+
 const CITATION_PATTERN = /\[(E_[A-Z0-9_:-]+)\]/g;
 const URL_PATTERN = /https?:\/\/[^\s)\]}]+/gi;
 const NUMBER_PATTERN = /(?<![A-Za-z_])[-+]?\d[\d,]*(?:\.\d+)?(?![A-Za-z_])/g;
@@ -177,7 +179,21 @@ export function validateGroundedExplanation(candidate, packet) {
   }
 
   const { numberKinds, dates, urls } = collectAllowedFacts(packet);
-  const content = [candidate.text, ...(candidate.claims || []).map(claim => claim?.text || '')].join('\n');
+  const contentParts = [candidate.text || ''];
+  for (const claim of candidate.claims || []) {
+    const claimText = typeof claim?.text === 'string' ? claim.text : '';
+    // Structured claims commonly repeat sentences already present in the
+    // narrative. Do not count that same sentence twice when checking that
+    // every financial number has exactly one typed claim binding.
+    if (claimText && !contentParts.some(part => part.includes(claimText))) contentParts.push(claimText);
+  }
+  const content = contentParts.join('\n');
+  const typedClaimValidation = validateTypedFinancialClaims({
+    claims: candidate.financialClaims ?? [],
+    narrative: content,
+    evidenceEntries: packet?.entries || [],
+  });
+  if (!typedClaimValidation.passed) errors.push(...typedClaimValidation.errors);
   if (UNSUPPORTED_ABSOLUTE_FINANCIAL_CLAIMS.test(content)) {
     errors.push('UNSUPPORTED_ABSOLUTE_FINANCIAL_CLAIM');
   }

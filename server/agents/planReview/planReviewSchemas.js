@@ -1,7 +1,9 @@
 import Joi from 'joi';
 import { PLAN_REVIEW_BUDGETS } from './planReviewRuntime.js';
+import { FINANCIAL_CLAIM_TYPES, FINANCIAL_CLAIM_UNITS } from '../../services/typedFinancialClaims.js';
 
-export const PLAN_REVIEW_VERSION = 'plan-review-1.0.0';
+export const PLAN_REVIEW_VERSION = 'plan-review-1.1.0';
+export const SUPPORTED_PLAN_REVIEW_VERSIONS = Object.freeze(['plan-review-1.0.0', PLAN_REVIEW_VERSION]);
 export const PLAN_REVIEW_PLANNER_VERSION = 'plan-review-planner-1.0.0';
 export const PLAN_REVIEW_POLICY_VERSION = 'plan-review-policy-1.0.0';
 
@@ -82,8 +84,23 @@ const findingSchema = Joi.object({
   evidenceIds: Joi.array().items(Joi.string().pattern(/^E_[A-Z0-9_:-]+$/)).max(20).default([]),
 }).unknown(false);
 
+const financialClaimSchema = Joi.object({
+  type: Joi.string().valid(...FINANCIAL_CLAIM_TYPES).required(),
+  value: Joi.number().required(),
+  unit: Joi.string().valid(...FINANCIAL_CLAIM_UNITS).required(),
+  timePeriod: Joi.string().trim().min(1).max(80).required(),
+  source: Joi.string().trim().min(1).max(120).required(),
+  evidenceId: Joi.string().pattern(/^E_[A-Z0-9_:-]+$/).required(),
+  jurisdiction: Joi.string().pattern(/^[A-Z]{2,3}$/).allow(null).required(),
+  effectivePeriod: Joi.object({
+    from: Joi.string().isoDate().required(),
+    to: Joi.string().isoDate().allow(null).required(),
+  }).unknown(false).allow(null).required(),
+  statement: Joi.string().trim().min(1).max(500).required(),
+}).unknown(false);
+
 export const planReviewResponseSchema = Joi.object({
-  version: Joi.string().valid(PLAN_REVIEW_VERSION).required(),
+  version: Joi.string().valid(...SUPPORTED_PLAN_REVIEW_VERSIONS).required(),
   runId: Joi.string().guid({ version: ['uuidv4'] }).required(),
   status: Joi.string().valid('COMPLETED', 'FAILED', 'FEATURE_UNAVAILABLE').required(),
   recommendedAction: Joi.string().valid(...PLAN_REVIEW_ACTIONS).required(),
@@ -102,6 +119,7 @@ export const planReviewResponseSchema = Joi.object({
     entries: Joi.array().max(40).required(),
     unavailableFacts: Joi.array().items(Joi.string().max(120)).max(20).required(),
   }).unknown(false).required(),
+  financialClaims: Joi.array().items(financialClaimSchema).max(40).default([]),
   provider: Joi.object({
     name: Joi.string().max(80).required(),
     model: Joi.string().max(160).allow(null).required(),

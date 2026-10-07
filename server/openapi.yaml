@@ -927,7 +927,7 @@ components:
       type: object
       required: [version, runId, status, recommendedAction, summary, findings, freshness, goals, evidence, provider]
       properties:
-        version: { type: string, const: plan-review-1.0.0 }
+        version: { type: string, enum: [plan-review-1.0.0, plan-review-1.1.0] }
         runId: { type: string, format: uuid }
         status: { type: string, enum: [COMPLETED, FAILED, FEATURE_UNAVAILABLE] }
         recommendedAction: { type: string, enum: [NONE, REVIEW_PROFILE, RECOMPUTE_PLAN, REVIEW_GOALS, INSUFFICIENT_EVIDENCE] }
@@ -936,6 +936,31 @@ components:
         freshness: { type: object, additionalProperties: true }
         goals: { type: object, additionalProperties: true }
         evidence: { type: object, additionalProperties: true }
+        financialClaims:
+          type: array
+          maxItems: 40
+          items:
+            type: object
+            required: [type, value, unit, timePeriod, source, evidenceId, jurisdiction, effectivePeriod, statement]
+            properties:
+              type: { type: string, enum: [CURRENT_RATE, HISTORICAL_RETURN, EXPECTED_RETURN, PROJECTED_RETURN, POST_TAX_RETURN, ALLOCATION_WEIGHT, TAX_RATE, CURRENT_COUPON, MATURITY_AMOUNT, CONTRIBUTION, RISK_SCORE] }
+              value: { type: number }
+              unit: { type: string, enum: [PERCENT, PERCENT_PER_ANNUM, INR, INR_PER_MONTH, SCORE] }
+              timePeriod: { type: string, minLength: 1, maxLength: 80 }
+              source: { type: string, minLength: 1, maxLength: 120 }
+              evidenceId: { type: string, pattern: '^E_[A-Z0-9_:-]+$' }
+              jurisdiction: { type: [string, 'null'], pattern: '^[A-Z]{2,3}$' }
+              effectivePeriod:
+                oneOf:
+                  - type: 'null'
+                  - type: object
+                    required: [from, to]
+                    properties:
+                      from: { type: string, format: date }
+                      to: { type: [string, 'null'], format: date }
+                    additionalProperties: false
+              statement: { type: string, minLength: 1, maxLength: 500 }
+            additionalProperties: false
         provider: { type: object, additionalProperties: true }
       additionalProperties: false
     PlanReviewRun:
