@@ -4,6 +4,8 @@ import { AGENT_EVALUATION_VERSION, evaluateHoldoutCandidateAsync } from './evalu
 
 export const HOLDOUT_BUNDLE_SCHEMA_VERSION = 'wealthgenie-holdout-bundle/v1';
 export const HOLDOUT_ATTESTATION_SCHEMA_VERSION = 'wealthgenie-holdout-attestation/v1';
+export const HOLDOUT_MINIMUM_CASES = 10;
+export const HOLDOUT_MAXIMUM_CASES = 128;
 
 const GRADING_FIELD = /^(?:partition|.*expected.*|answerkey|groundtruth|grader.*|.*grader.*|grading.*|.*grading.*|targetlabel|evaluation(?:label|result|outcome|evidence|score).*|scorecard.*|correct(?:answer|action|output|result|outcome)|reference(?:answer|action|output|result|outcome)|oracle.*|gold(?:label|answer|result)?.*|rubric.*|scoring.*)$/i;
 const CANDIDATE_CONTEXT_FIELDS = new Set([
@@ -84,8 +86,9 @@ export function hashHoldoutCases(cases) {
 }
 
 function validateAttestationInputs({ cases, datasetVersion, attestedAt, keyId }) {
-  if (!Array.isArray(cases) || cases.length === 0 || cases.some(item => item?.partition !== 'holdout')) {
-    throw holdoutError('HOLDOUT_DATA_INVALID', 'Attestation can only bind a non-empty holdout partition.');
+  if (!Array.isArray(cases) || cases.length < HOLDOUT_MINIMUM_CASES
+      || cases.length > HOLDOUT_MAXIMUM_CASES || cases.some(item => item?.partition !== 'holdout')) {
+    throw holdoutError('HOLDOUT_DATA_INVALID', `Attestation requires ${HOLDOUT_MINIMUM_CASES}–${HOLDOUT_MAXIMUM_CASES} holdout cases.`);
   }
   if (typeof datasetVersion !== 'string' || !datasetVersion.trim() || datasetVersion.length > 128) {
     throw holdoutError('HOLDOUT_ATTESTATION_INVALID', 'A bounded dataset version is required.');
@@ -160,7 +163,7 @@ function verifyBundle(bundle, trustedKey, { expectedDatasetHash, expectedDataset
     throw holdoutError('HOLDOUT_ATTESTATION_INVALID', 'Holdout bundle schema is unsupported.');
   }
   const cases = bundle.cases;
-  if (!Array.isArray(cases) || cases.length === 0 || cases.some(item => (
+  if (!Array.isArray(cases) || cases.length < HOLDOUT_MINIMUM_CASES || cases.length > HOLDOUT_MAXIMUM_CASES || cases.some(item => (
     item?.partition !== 'holdout'
       || typeof item.expectedAction !== 'string'
       || item.expectedAction.trim().length === 0
@@ -279,6 +282,8 @@ export async function evaluateCandidateOnHoldout({
   loadHoldoutCases,
   expectedDatasetHash = null,
   expectedDatasetVersion = null,
+  optimizerCases = [],
+  maxMetricCalls = HOLDOUT_MAXIMUM_CASES,
 } = {}) {
   if (typeof runner !== 'function' || typeof loadHoldoutCases !== 'function') {
     throw holdoutError('HOLDOUT_VERIFIER_UNAVAILABLE', 'A holdout loader and real candidate runner are required.');
@@ -289,6 +294,20 @@ export async function evaluateCandidateOnHoldout({
   const bundle = await loadHoldoutCases();
   const verified = verifyBundle(bundle, trustedKey, { expectedDatasetHash, expectedDatasetVersion });
   const visibleCases = verified.cases.map(candidateVisibleCase);
+  if (!Number.isSafeInteger(maxMetricCalls) || maxMetricCalls < 0 || visibleCases.length > maxMetricCalls) {
+    return unverifiedResult(candidateId, 'HOLDOUT_METRIC_BUDGET_EXCEEDED');
+  }
+  const optimizerFixtureHashes = new Set(optimizerCases
+    .map(item => item?.fixture?.context)
+    .filter(value => value && typeof value === 'object')
+    .map(value => canonicalSha256(value)));
+  const holdoutFixtureHashes = visibleCases.map(item => canonicalSha256(item.fixture.context));
+  if (new Set(holdoutFixtureHashes).size !== holdoutFixtureHashes.length) {
+    return unverifiedResult(candidateId, 'HOLDOUT_DUPLICATE_CASE_FIXTURE');
+  }
+  if (visibleCases.some(item => optimizerFixtureHashes.has(canonicalSha256(item.fixture.context)))) {
+    return unverifiedResult(candidateId, 'HOLDOUT_PARTITION_OVERLAP');
+  }
   const visibleBySource = new WeakMap(verified.cases.map((item, index) => [item, visibleCases[index]]));
   const evaluation = await evaluateHoldoutCandidateAsync({
     candidateId,

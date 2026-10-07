@@ -435,6 +435,8 @@ test('live search metadata cannot forge publisher identity or freshness', async 
   assert.equal(result.artifact.evidenceUnits[0].publicationDate, null);
   assert.equal(result.artifact.claims[0].freshnessStatus, 'UNKNOWN');
   assert.equal(result.artifact.claims[0].supportStatus, 'UNVERIFIED');
+  assert.equal(result.artifact.status, 'INSUFFICIENT_EVIDENCE');
+  assert.equal(result.verification.verifiedClaims.length, 0);
   const trustedMetadataVerification = verifyResearchArtifact(result.artifact, {
     brief: sourceBrief,
     requireIndependentSourceMetadata: true,
@@ -517,6 +519,25 @@ test('fixture research produces a hashed, independently verified artifact', asyn
   assert.ok(result.verification.verifiedClaims.length >= 1);
   const changedBrief = brief({ question: 'What is a different RBI policy question?' });
   assert.ok(verifyResearchArtifact(result.artifact, { brief: changedBrief }).errors.includes('RESEARCH_BRIEF_HASH_MISMATCH'));
+});
+
+test('research completion requires verified coverage for every requested fact type', async () => {
+  const provider = new FixtureResearchSearchProvider({ documents: [{
+    url: 'https://rbi.org.in/press-releases/one-fact-type',
+    title: 'Public facts fixture',
+    publicationDate: nowIso(),
+    factType: 'regulatory_context',
+    content: 'The Reserve Bank of India policy rate is 6.50% as of this public fixture date.',
+  }] });
+  const result = await runResearch({
+    brief: brief({ requestedFactTypes: ['regulatory_context', 'public_market_context'] }),
+    provider,
+    documentFetcher: { fetchDocument: async () => { throw new Error('fixture content should not fetch'); } },
+  });
+  assert.equal(result.artifact.status, 'INSUFFICIENT_EVIDENCE');
+  assert.equal(result.verification.valid, true);
+  assert.ok(result.artifact.unresolvedGaps.some(gap => gap.factType === 'public_market_context'
+    && gap.reasonCode === 'REQUESTED_FACT_TYPE_UNVERIFIED'));
 });
 
 test('research deadline covers non-cooperative search and progress providers', async () => {

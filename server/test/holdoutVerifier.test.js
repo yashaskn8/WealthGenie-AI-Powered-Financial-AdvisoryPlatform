@@ -16,11 +16,12 @@ const datasetVersion = 'governed-self-evolution-1.0.0';
 const attestedAt = '2026-09-25T12:00:00.000Z';
 
 function signedBundleWithCanonicalBytes(cases) {
+  const attestedCases = cases.length === 1 ? sampleCases(cases[0]) : cases;
   const keyId = holdoutPublicKeyId(signer.publicKey);
-  const payload = buildHoldoutAttestationSigningPayload({ cases, datasetVersion, attestedAt, keyId });
+  const payload = buildHoldoutAttestationSigningPayload({ cases: attestedCases, datasetVersion, attestedAt, keyId });
   return {
     schemaVersion: HOLDOUT_BUNDLE_SCHEMA_VERSION,
-    cases,
+    cases: attestedCases,
     attestation: {
       ...payload.claims,
       signature: crypto.sign(null, payload.signingBytes, signer.privateKey).toString('base64'),
@@ -44,6 +45,22 @@ function sampleCase(overrides = {}) {
   };
 }
 
+function sampleCases(sourceCase = sampleCase(), count = 10) {
+  return Array.from({ length: count }, (_, index) => {
+    const fixture = sourceCase.fixture;
+    const context = fixture?.context;
+    const profile = context?.profile;
+    const uniqueContext = profile && typeof profile === 'object'
+      ? { ...context, profile: { ...profile, age: Number(profile.age || 0) + index } }
+      : context;
+    return {
+      ...sourceCase,
+      id: `${sourceCase.id || 'case'}-${index + 1}`,
+      ...(fixture ? { fixture: { ...fixture, ...(uniqueContext ? { context: uniqueContext } : {}) } } : {}),
+    };
+  });
+}
+
 async function evaluateCandidateOnHoldout(options) {
   const { trustedPublicKey: testKey = trustedPublicKey, ...verifierInput } = options;
   const previousKey = process.env.AGENT_HOLDOUT_TRUSTED_PUBLIC_KEY;
@@ -58,16 +75,18 @@ async function evaluateCandidateOnHoldout(options) {
 }
 
 test('trusted signed holdout runs only the sanitized candidate fixture and verifies exact data lineage', async () => {
-  const sourceCase = sampleCase();
+  const sourceCases = sampleCases();
   let candidateInput;
+  let runnerCalls = 0;
   const evaluation = await evaluateCandidateOnHoldout({
     candidateId: 'candidate-1',
     trustedPublicKey,
-    expectedDatasetHash: hashHoldoutCases([sourceCase]),
+    expectedDatasetHash: hashHoldoutCases(sourceCases),
     expectedDatasetVersion: datasetVersion,
-    loadHoldoutCases: async () => signedBundleWithCanonicalBytes([sourceCase]),
+    loadHoldoutCases: async () => signedBundleWithCanonicalBytes(sourceCases),
     runner: async ({ caseDefinition }) => {
-      candidateInput = caseDefinition;
+      candidateInput ||= caseDefinition;
+      runnerCalls += 1;
       return {
         result: { recommendedAction: 'NONE', financialAuthorityDelta: 0, authorityMeasurementState: 'MEASURED' },
         trajectory: [],
@@ -85,8 +104,58 @@ test('trusted signed holdout runs only the sanitized candidate fixture and verif
   assert.equal(evaluation.scoreCards[0].scores.actionCorrect, true);
   assert.equal(evaluation.passed, true);
   assert.equal(evaluation.holdoutAttestation, 'VERIFIED');
-  assert.equal(evaluation.datasetHash, hashHoldoutCases([sourceCase]));
+  assert.equal(evaluation.scoreCards.length, 10);
+  assert.equal(runnerCalls, 10);
+  assert.equal(evaluation.datasetHash, hashHoldoutCases(sourceCases));
   assert.equal(evaluation.datasetVersion, datasetVersion);
+});
+
+test('holdout case limits, partition overlap, and metric budget prevent evaluator amplification', async () => {
+  const sourceCases = sampleCases();
+  let runnerCalls = 0;
+  const runner = async () => {
+    runnerCalls += 1;
+    return { result: { recommendedAction: 'NONE', financialAuthorityDelta: 0, authorityMeasurementState: 'MEASURED' }, trajectory: [] };
+  };
+  const budgetRejected = await evaluateCandidateOnHoldout({
+    candidateId: 'candidate-budget-limit',
+    trustedPublicKey,
+    maxMetricCalls: 9,
+    loadHoldoutCases: async () => signedBundleWithCanonicalBytes(sourceCases),
+    runner,
+  });
+  assert.equal(budgetRejected.holdoutFailureCode, 'HOLDOUT_METRIC_BUDGET_EXCEEDED');
+  assert.equal(runnerCalls, 0);
+
+  const overlapRejected = await evaluateCandidateOnHoldout({
+    candidateId: 'candidate-overlap',
+    trustedPublicKey,
+    optimizerCases: [{ fixture: sourceCases[0].fixture }],
+    loadHoldoutCases: async () => signedBundleWithCanonicalBytes(sourceCases),
+    runner,
+  });
+  assert.equal(overlapRejected.holdoutFailureCode, 'HOLDOUT_PARTITION_OVERLAP');
+  assert.equal(runnerCalls, 0);
+
+  const duplicateCases = Array.from({ length: 10 }, (_, index) => ({
+    ...sampleCase(),
+    id: `duplicate-${index}`,
+  }));
+  const duplicateRejected = await evaluateCandidateOnHoldout({
+    candidateId: 'candidate-duplicate-holdout',
+    trustedPublicKey,
+    loadHoldoutCases: async () => signedBundleWithCanonicalBytes(duplicateCases),
+    runner,
+  });
+  assert.equal(duplicateRejected.holdoutFailureCode, 'HOLDOUT_DUPLICATE_CASE_FIXTURE');
+  assert.equal(runnerCalls, 0);
+
+  assert.throws(() => buildHoldoutAttestationSigningPayload({
+    cases: Array.from({ length: 129 }, (_, index) => sampleCase({ id: `oversized-${index}` })),
+    datasetVersion,
+    attestedAt,
+    keyId: holdoutPublicKeyId(signer.publicKey),
+  }), error => error.code === 'HOLDOUT_DATA_INVALID');
 });
 
 test('missing trusted key leaves holdout unverified without loading data or invoking the candidate', async () => {
@@ -201,20 +270,24 @@ test('wrong signing key, dataset binding, and unsupported version fail before ru
 
 test('attestation signer binds case count and only canonical ISO time', () => {
   const sourceCase = sampleCase();
+  const sourceCases = sampleCases(sourceCase);
   const payload = buildHoldoutAttestationSigningPayload({
-    cases: [sourceCase],
+    cases: sourceCases,
     datasetVersion,
     attestedAt,
     keyId: holdoutPublicKeyId(signer.publicKey),
   });
   assert.equal(payload.claims.schemaVersion, HOLDOUT_ATTESTATION_SCHEMA_VERSION);
-  assert.equal(payload.claims.caseCount, 1);
-  assert.equal(payload.claims.datasetHash, hashHoldoutCases([sourceCase]));
+  assert.equal(payload.claims.caseCount, 10);
+  assert.equal(payload.claims.datasetHash, hashHoldoutCases(sourceCases));
   assert.equal(crypto.verify(null, payload.signingBytes, signer.publicKey,
     crypto.sign(null, payload.signingBytes, signer.privateKey)), true);
   assert.throws(() => buildHoldoutAttestationSigningPayload({
-    cases: [sourceCase], datasetVersion, attestedAt: '2026-09-25T12:00:00Z', keyId: holdoutPublicKeyId(signer.publicKey),
+    cases: sourceCases, datasetVersion, attestedAt: '2026-09-25T12:00:00Z', keyId: holdoutPublicKeyId(signer.publicKey),
   }), error => error.code === 'HOLDOUT_ATTESTATION_INVALID');
+  assert.throws(() => buildHoldoutAttestationSigningPayload({
+    cases: [sourceCase], datasetVersion, attestedAt, keyId: holdoutPublicKeyId(signer.publicKey),
+  }), error => error.code === 'HOLDOUT_DATA_INVALID');
 });
 
 test('signed holdout hash canonically binds Dates and rejects non-JSON cycles', () => {

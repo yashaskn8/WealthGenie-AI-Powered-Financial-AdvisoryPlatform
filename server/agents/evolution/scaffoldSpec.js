@@ -172,6 +172,9 @@ export class ScaffoldRegistry {
 
   rollback({ authorization } = {}) {
     if (!isVerifiedPromotionAuthorization(authorization) || !authorization?.verified || authorization.method !== 'WEBAUTHN' || !authorization.approvalId) throw new Error('Cryptographic WebAuthn human approval is required to rollback a scaffold.');
+    if (authorization.action !== 'ROLLBACK_AGENT_SCAFFOLD') {
+      throw new Error('Rollback requires an independently verified rollback authorization; promotion approval cannot authorize rollback.');
+    }
     const previous = [...this.versions.values()].filter(item => item !== this.champion).at(-1);
     if (!previous) throw new Error('No previous scaffold version is available for rollback.');
     this.champion = previous;

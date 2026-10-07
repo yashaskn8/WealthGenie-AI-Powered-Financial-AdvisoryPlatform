@@ -263,7 +263,7 @@ export async function runResearch({
     : claims.length === 0
       ? (usage.exhausted ? 'BUDGET_EXHAUSTED' : 'INSUFFICIENT_EVIDENCE')
       : 'COMPLETED';
-  const artifact = buildFailureArtifact({
+  let artifact = buildFailureArtifact({
     brief: safeBrief,
     taskId,
     artifactId,
@@ -278,7 +278,49 @@ export async function runResearch({
   });
   await awaitWithAbort(onProgress({ type: 'RESEARCH_VERIFYING', claimCount: claims.length }), operationSignal);
   throwIfAborted(operationSignal);
-  const verification = verifyResearchArtifact(artifact, { brief: safeBrief, now });
+  let verification = verifyResearchArtifact(artifact, { brief: safeBrief, now });
+  if (artifact.status === 'COMPLETED') {
+    const verifiedFactTypes = new Set(verification.verifiedClaims.map(claim => claim.claimType));
+    const missingFactTypes = safeBrief.requestedFactTypes.filter(factType => !verifiedFactTypes.has(factType));
+    if (missingFactTypes.length > 0) {
+      const coveredGaps = missingFactTypes.map(factType => ({
+        gapId: stableResearchId('G', `${safeBrief.researchBriefId}:${factType}:unverified`),
+        factType,
+        status: 'UNRESOLVED',
+        reasonCode: 'REQUESTED_FACT_TYPE_UNVERIFIED',
+      }));
+      artifact = buildFailureArtifact({
+        brief: safeBrief,
+        taskId,
+        artifactId,
+        usage,
+        status: usage.exhausted ? 'BUDGET_EXHAUSTED' : 'INSUFFICIENT_EVIDENCE',
+        unresolvedGaps: [...unresolvedGaps, ...coveredGaps],
+        claims,
+        evidenceUnits,
+        sources,
+        contradictions,
+        startedAt,
+      });
+      verification = verifyResearchArtifact(artifact, { brief: safeBrief, now });
+    }
+  }
+  if (artifact.status === 'COMPLETED' && verification.verifiedClaims.length === 0) {
+    artifact = buildFailureArtifact({
+      brief: safeBrief,
+      taskId,
+      artifactId,
+      usage,
+      status: 'INSUFFICIENT_EVIDENCE',
+      unresolvedGaps,
+      claims,
+      evidenceUnits,
+      sources,
+      contradictions,
+      startedAt,
+    });
+    verification = verifyResearchArtifact(artifact, { brief: safeBrief, now });
+  }
   if (!verification.valid) {
     PrometheusMetrics.inc('research_verification_failures_total');
     const error = new Error('Research artifact failed independent verification.');

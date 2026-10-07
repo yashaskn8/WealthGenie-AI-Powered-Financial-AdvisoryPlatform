@@ -8,7 +8,7 @@ const schema = new mongoose.Schema({
   candidateIds: { type: [String], default: [] },
   evaluationVersion: { type: String, required: true, immutable: true },
   datasetHash: { type: String, required: true, immutable: true },
-  holdoutHash: { type: String, required: true, immutable: true },
+  holdoutHash: { type: String, default: null, immutable: true },
   authorityMeasurementComplete: { type: Boolean, default: false, immutable: true },
   financialAuthorityDelta: { type: Number, min: 0, max: 0, default: null, immutable: true },
   optimizerType: { type: String, default: 'DSPY_GEPA', immutable: true },

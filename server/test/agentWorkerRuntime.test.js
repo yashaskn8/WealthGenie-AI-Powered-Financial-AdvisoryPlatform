@@ -931,6 +931,15 @@ test('expired runs at the retry ceiling are terminally recovered and not reclaim
     correlationId: 'corr-safe-id',
   };
   const writes = [];
+  const priorEvents = Array.from({ length: 4 }, (_, index) => ({
+      runId: candidate.runId,
+      userId,
+      executionGeneration: index < 2 ? 1 : 2,
+      sequence: index + 1,
+      eventType: 'NODE_COMPLETED',
+      node: 'previous_node',
+      data: { type: 'NODE_COMPLETED' },
+  }));
   const events = [];
   const evaluations = [];
   const session = { withTransaction: async callback => callback(), endSession: async () => {} };
@@ -949,7 +958,7 @@ test('expired runs at the retry ceiling are terminally recovered and not reclaim
         const query = {
           session() { return query; },
           sort() { return query; },
-          lean: async () => events.flatMap(event => event.rows),
+          lean: async () => [...priorEvents, ...events.flatMap(event => event.rows)],
         };
         return query;
       },

@@ -40,18 +40,26 @@ function buildCandidate({ baseSpec, proposal, index }) {
   return candidate;
 }
 
-function measureExecution(observations = []) {
+export function measureExecution(observations = []) {
   const results = observations.map(item => item.result || {});
   const latencies = observations.map(item => Number(item.durationMs)).filter(Number.isFinite);
-  const modelCalls = results.reduce((sum, item) => sum + Number(item.result?.modelCallCount || item.modelCallCount || 0), 0);
-  const explicitTokenValues = results
-    .map(item => item.result?.tokenUsage ?? item.result?.usage?.totalTokens ?? item.tokenUsage)
-    .map(Number)
-    .filter(Number.isFinite);
-  const tokenUsage = explicitTokenValues.length === results.length
-    ? explicitTokenValues.reduce((sum, value) => sum + value, 0)
-    : (modelCalls === 0 ? 0 : null);
-  const toolCalls = results.reduce((sum, item) => sum + Number(item.result?.toolCallCount || item.toolCallCount || 0), 0)
+  const executionFor = item => item.result?.review?.execution || item.result?.execution || item.execution || {};
+  const modelCalls = results.reduce((sum, item) => sum + Number(
+    executionFor(item).modelCallCount ?? item.result?.modelCallCount ?? item.modelCallCount ?? 0,
+  ), 0);
+  const explicitTokenValues = results.map(item => {
+    const execution = executionFor(item);
+    const value = execution.tokenUsage ?? item.result?.tokenUsage ?? item.result?.usage?.totalTokens ?? item.tokenUsage;
+    return value === null || value === undefined ? null : Number(value);
+  });
+  const tokenUsage = modelCalls === 0 && explicitTokenValues.every(value => value === null)
+    ? 0
+    : (explicitTokenValues.length === results.length && explicitTokenValues.every(Number.isFinite)
+      ? explicitTokenValues.reduce((sum, value) => sum + value, 0)
+      : null);
+  const toolCalls = results.reduce((sum, item) => sum + Number(
+    executionFor(item).toolCallCount ?? item.result?.toolCallCount ?? item.toolCallCount ?? 0,
+  ), 0)
     || observations.reduce((sum, item) => sum + (Array.isArray(item.result?.trajectory)
       ? item.result.trajectory.filter(event => event?.type === 'TOOL_SUCCEEDED' || event?.kind === 'TOOL_SUCCEEDED').length
       : 0), 0);
@@ -112,17 +120,25 @@ export async function runGovernedEvolution({
   const optimizerCases = [...manifest.partitions.train, ...manifest.partitions.validation];
   assertHoldoutIsolation(optimizerCases);
   const holdoutAvailable = typeof loadHoldoutCases === 'function';
+  const candidateReliabilityCalls = reliabilityScenarios.filter(scenario => scenario.executionMode !== 'SYSTEM_ONLY').length;
   if (typeof runner !== 'function') {
     const error = new Error('Governed evolution requires a real closed-loop PlanReview runner.');
     error.code = 'EVOLUTION_RUNNER_REQUIRED';
     throw error;
   }
   if (proposals.length > budget.maxCandidates) throw new Error('Candidate count exceeds the evolution budget.');
+  let activeCandidateRunner = null;
+  const fixtureSandboxMetricCalls = sandboxProvider ? 0 : 1;
   const provider = sandboxProvider || createEvolutionSandboxProvider({
     provider: 'fixture',
     execute: async ({ candidate }) => {
+      if (typeof activeCandidateRunner !== 'function') {
+        const error = new Error('Fixture sandbox execution was not bound to a budgeted candidate runner.');
+        error.code = 'EVOLUTION_RUNNER_BUDGET_BINDING_REQUIRED';
+        throw error;
+      }
       const firstCase = optimizerCases[0];
-      const closedLoop = await runner({ candidate, caseDefinition: firstCase });
+      const closedLoop = await activeCandidateRunner({ candidate, caseDefinition: firstCase });
       return {
         stdout: 'fixture-plan-review-closed-loop',
         testResults: { passed: true },
@@ -137,7 +153,8 @@ export async function runGovernedEvolution({
   let totalTokenUsage = 0;
   for (let index = 0; index < proposals.length; index += 1) {
     if (sandboxRuns >= budget.maxSandboxRuns || budget.maxSandboxMinutes === 0) break;
-    if (metricCalls + optimizerCases.length > budget.maxMetricCalls) break;
+    const minimumHoldoutCalls = holdoutAvailable ? 10 : 0;
+    if (metricCalls + fixtureSandboxMetricCalls + optimizerCases.length + candidateReliabilityCalls + minimumHoldoutCalls > budget.maxMetricCalls) break;
     const proposal = proposals[index];
     const candidate = buildCandidate({ baseSpec, proposal, index });
     const candidateId = candidate.contentHash;
@@ -150,24 +167,47 @@ export async function runGovernedEvolution({
       evaluationVersion: manifest.evaluationVersion,
       reliabilityVersion: 'reliability-lab-1.0.0',
     });
-    const sandbox = await provider.run({
-      manifest: sandboxManifest,
-      candidate,
-      fixture: optimizerCases[0]?.fixture || null,
-      workspaceFiles: buildCandidateSandboxWorkspace({ candidate, sandboxManifest }),
-      command: 'node --test candidate-evaluation',
-    });
+    const executionObservations = [];
+    const runCandidateInput = async input => {
+      const startedAt = Date.now();
+      try {
+        const result = await runner(input);
+        executionObservations.push({ result, durationMs: Math.max(0, Date.now() - startedAt) });
+        return result;
+      } catch (error) {
+        const usage = error?.planReviewUsage;
+        const modelCallCount = Number.isInteger(usage?.modelCallCount) && usage.modelCallCount >= 0
+          ? usage.modelCallCount
+          : 1;
+        const tokenUsage = Number.isInteger(usage?.tokenUsage) && usage.tokenUsage >= 0
+          ? usage.tokenUsage
+          : null;
+        executionObservations.push({
+          result: { execution: { modelCallCount, tokenUsage } },
+          durationMs: Math.max(0, Date.now() - startedAt),
+        });
+        throw error;
+      }
+    };
+    const runCandidateCase = caseDefinition => runCandidateInput({ candidate, caseDefinition });
+    activeCandidateRunner = runCandidateInput;
+    let sandbox;
+    try {
+      sandbox = await provider.run({
+        manifest: sandboxManifest,
+        candidate,
+        fixture: optimizerCases[0]?.fixture || null,
+        workspaceFiles: buildCandidateSandboxWorkspace({ candidate, sandboxManifest }),
+        command: 'node --test candidate-evaluation',
+      });
+    } finally {
+      activeCandidateRunner = null;
+    }
+    metricCalls += fixtureSandboxMetricCalls;
     const sandboxTestPassed = sandboxExecutionPassed(sandbox);
     sandboxRuns += 1;
     const sandboxDurationMs = Math.max(0, new Date(sandbox.completedAt).getTime() - new Date(sandbox.startedAt).getTime());
     if (Number.isFinite(sandboxDurationMs)) sandboxElapsedMs += sandboxDurationMs;
-    const executionObservations = [];
-    const runCandidateCase = async (caseDefinition) => {
-      const startedAt = Date.now();
-      const result = await runner({ candidate, caseDefinition });
-      executionObservations.push({ result, durationMs: Math.max(0, Date.now() - startedAt) });
-      return result;
-    };
     const evaluation = await evaluateCandidateAsync({
       candidateId,
       cases: optimizerCases,
@@ -176,7 +216,7 @@ export async function runGovernedEvolution({
     metricCalls += optimizerCases.length;
     const reliability = await runCandidateReliabilitySuite(reliabilityScenarios, {
       candidate,
-      runner,
+      runner: runCandidateInput,
       candidateCaseFactory,
       systemDependencies: reliabilityDependencies,
     });
@@ -188,6 +228,7 @@ export async function runGovernedEvolution({
     const reliabilityEvaluation = reliability.scorecards.length > 0
       ? reliabilityEvaluationBase
       : Object.freeze({ ...reliabilityEvaluationBase, passed: false, criticalFailures: ['RELIABILITY_SUITE_EMPTY'] });
+    metricCalls += candidateReliabilityCalls;
     let holdout = null;
     if (typeof loadHoldoutCases === 'function' && evaluation.passed && reliabilityEvaluation.passed) {
       holdout = await evaluateCandidateOnHoldout({
@@ -196,7 +237,10 @@ export async function runGovernedEvolution({
         loadHoldoutCases,
         expectedDatasetHash: expectedHoldoutHash,
         expectedDatasetVersion: manifest.datasetVersion,
+        optimizerCases,
+        maxMetricCalls: Math.max(0, budget.maxMetricCalls - metricCalls),
       });
+      metricCalls += holdout.scoreCards.length;
     }
     const authorityMeasurementComplete = evaluation.scoreCards.length > 0
       && evaluation.scoreCards.every(card => card.hardGates.authorityMeasurementComplete === true
@@ -206,7 +250,11 @@ export async function runGovernedEvolution({
       : null;
     const rawExecutionMetrics = measureExecution(executionObservations);
     if (rawExecutionMetrics.tokenUsage !== null) totalTokenUsage += rawExecutionMetrics.tokenUsage;
-    const budgetExceeded = totalTokenUsage > budget.maxTotalTokens || sandboxElapsedMs > budget.maxSandboxMinutes * 60 * 1000;
+    const tokenAccountingIncomplete = rawExecutionMetrics.modelCalls > 0 && rawExecutionMetrics.tokenUsage === null;
+    const budgetExceeded = tokenAccountingIncomplete
+      || totalTokenUsage > budget.maxTotalTokens
+      || metricCalls > budget.maxMetricCalls
+      || sandboxElapsedMs > budget.maxSandboxMinutes * 60 * 1000;
     const hardGatePassed = evaluation.passed
       && reliabilityEvaluation.passed
       && reliabilityEvaluation.candidateReliabilityCoverageComplete === true
@@ -231,16 +279,7 @@ export async function runGovernedEvolution({
     const holdoutSummary = holdout ? {
       passed: holdout.passed,
       attestation: holdout.holdoutAttestation,
-      datasetHash: holdout.datasetHash || null,
-      datasetVersion: holdout.datasetVersion || null,
-      attestationKeyId: holdout.attestationKeyId || null,
-      attestedAt: holdout.attestedAt || null,
       failureCode: holdout.holdoutFailureCode || null,
-      scoreCards: (holdout.scoreCards || []).map(card => ({
-        passed: card.passed,
-        scores: card.scores,
-        hardGates: card.hardGates,
-      })),
     } : null;
     const evaluationHash = canonicalSha256({ evaluation, reliability: reliabilityEvaluation, holdout: holdoutSummary });
     const metrics = {
@@ -342,6 +381,12 @@ export async function runGovernedEvolution({
     authorityMeasurementState: records.length > 0 && records.every(record => record.authorityMeasurementState === 'MEASURED')
       ? 'MEASURED'
       : 'INCOMPLETE',
+    metrics: {
+      metricCalls,
+      totalTokens: totalTokenUsage,
+      sandboxRuns,
+      sandboxElapsedMs,
+    },
   };
   if (typeof persistEvolutionRun === 'function') {
     await persistEvolutionRun({
@@ -352,7 +397,6 @@ export async function runGovernedEvolution({
       candidateIds: records.map(record => record.candidateId),
       evaluationVersion: manifest.evaluationVersion,
       datasetHash: manifest.datasetHash,
-      holdoutHash: manifest.holdoutHash,
       financialAuthorityDelta: report.financialAuthorityDelta,
       authorityMeasurementComplete: report.financialAuthorityMeasurementComplete,
       optimizerType: 'DSPY_GEPA',

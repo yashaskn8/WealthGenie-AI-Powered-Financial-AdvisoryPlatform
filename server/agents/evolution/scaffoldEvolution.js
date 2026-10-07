@@ -99,6 +99,5 @@ export function createOfflineEvolutionRun({ baseSpec, cases = [], enabled = fals
     evaluation,
     holdoutSealed: false,
     datasetHash: manifest.datasetHash,
-    holdoutHash: manifest.holdoutHash,
   };
 }

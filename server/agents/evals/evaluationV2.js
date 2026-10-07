@@ -89,19 +89,18 @@ export function createEvaluationManifest({ cases = [], datasetVersion = 'unspeci
 // hash/count are metadata only; a verifier in a separate module owns access.
 export function createOptimizerEvaluationManifest({ cases = [], datasetVersion = 'unspecified', source = 'local' } = {}) {
   const manifest = createEvaluationManifest({ cases, datasetVersion, source });
+  const optimizerCases = [...manifest.partitions.train, ...manifest.partitions.validation];
   return Object.freeze({
     evaluationVersion: manifest.evaluationVersion,
     datasetVersion: manifest.datasetVersion,
     source: manifest.source,
-    datasetHash: manifest.datasetHash,
-    partitionHashes: manifest.partitionHashes,
-    counts: Object.freeze({ train: manifest.counts.train, validation: manifest.counts.validation, holdout: manifest.counts.holdout }),
+    datasetHash: hashEvaluationData({ datasetVersion: manifest.datasetVersion, cases: optimizerCases }),
+    partitionHashes: Object.freeze({
+      train: manifest.partitionHashes.train,
+      validation: manifest.partitionHashes.validation,
+    }),
+    counts: Object.freeze({ train: manifest.counts.train, validation: manifest.counts.validation }),
     partitions: Object.freeze({ train: manifest.partitions.train, validation: manifest.partitions.validation }),
-    // This in-process projection omits holdout rows but is not proof of an
-    // independently trusted or sealed holdout source.
-    holdoutSealed: false,
-    holdoutAttestation: 'UNVERIFIED',
-    holdoutHash: manifest.partitionHashes.holdout,
   });
 }
 

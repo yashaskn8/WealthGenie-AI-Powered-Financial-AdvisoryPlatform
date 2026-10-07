@@ -120,6 +120,9 @@ test('production evaluator records deterministic hard gates but never fabricates
   assert.ok(result.qualitySignals.missingEvidence.includes('qualifiedSemanticEvaluation'));
   assert.equal(result.hardGateResults.stateRevisionInvariant.passed, true);
   assert.equal(result.hardGateResults.typedNumericClaims.passed, true);
+  assert.equal(result.hardGateResults.durableEventSequence.passed, true);
+  assert.equal(result.hardGateResults.provenanceCompleteness.passed, false);
+  assert.ok(result.hardGateResults.provenanceCompleteness.missing.includes('runtimeImageDigest'));
   assert.equal(Object.hasOwn(result.evidenceManifest, 'userId'), false);
 });
 
@@ -131,6 +134,8 @@ test('missing runtime manifest, ledger, event sequence, or baseline evidence nev
   assert.equal(missing.classification, 'INSUFFICIENT_EVIDENCE');
   assert.ok(missing.qualitySignals.missingEvidence.length > 0);
   assert.equal(missing.hardGateResults.tenantIsolation.passed, false);
+  assert.equal(missing.hardGateResults.durableEventSequence.passed, false);
+  assert.equal(missing.hardGateResults.provenanceCompleteness.passed, false);
 });
 
 test('stale-generation and cross-user durable events fail closed', () => {
@@ -143,6 +148,7 @@ test('stale-generation and cross-user durable events fail closed', () => {
   }] });
   assert.equal(staleGeneration.classification, 'INSUFFICIENT_EVIDENCE');
   assert.ok(staleGeneration.qualitySignals.missingEvidence.includes('durableEventSequenceOrGeneration'));
+  assert.equal(staleGeneration.hardGateResults.durableEventSequence.passed, false);
 
   const crossUser = evaluate({ durableEvents: [{
     runId: fixture().run.runId,
@@ -168,6 +174,21 @@ test('valid approval-waiting terminal runs bind to their durable event type', ()
   });
   assert.equal(waiting.qualitySignals.missingEvidence.includes('durableEventSequenceOrGeneration'), false);
   assert.equal(waiting.hardGateResults.tenantIsolation.passed, true);
+  assert.equal(waiting.hardGateResults.durableEventSequence.passed, true);
+});
+
+test('durable event sequences must be contiguous through the terminal sequence', () => {
+  const runId = fixture().run.runId;
+  const userId = fixture().run.userId;
+  const result = evaluate({
+    run: { eventSequence: 3 },
+    durableEvents: [
+      { runId, userId, executionGeneration: 2, sequence: 1, eventType: 'RUN_STARTED' },
+      { runId, userId, executionGeneration: 2, sequence: 3, eventType: 'RUN_COMPLETED' },
+    ],
+  });
+  assert.equal(result.qualitySignals.missingEvidence.includes('durableEventSequenceOrGeneration'), true);
+  assert.equal(result.hardGateResults.durableEventSequence.passed, false);
 });
 
 test('unchecked runtime environment hashes cannot stand in for build provenance', () => {
@@ -180,6 +201,7 @@ test('unchecked runtime environment hashes cannot stand in for build provenance'
     assert.equal(result.evidenceManifest.sourceSha, null);
     assert.equal(result.evidenceManifest.treeSha, null);
     assert.ok(result.qualitySignals.missingEvidence.includes('buildProvenanceSha256'));
+    assert.equal(result.hardGateResults.provenanceCompleteness.passed, false);
   } finally {
     if (priorSource === undefined) delete process.env.WG_RUNTIME_SOURCE_SHA;
     else process.env.WG_RUNTIME_SOURCE_SHA = priorSource;
@@ -221,6 +243,19 @@ test('durable tool events must match every requested, attempted, authorized, and
   }, durableEvents: [evidence.durableEvents.at(-1)] });
   assert.equal(terminalOnly.hardGateResults.executionLedgerCompleteness.passed, false);
   assert.equal(terminalOnly.classification, 'INSUFFICIENT_EVIDENCE');
+});
+
+test('durable tool capability effects must match the signed execution ledger', () => {
+  const evidence = safeToolEvidence();
+  const mismatchedEvents = evidence.durableEvents.map(event => event.sequence === 3
+    ? { ...event, data: { ...event.data, capabilityEffect: 'FINANCIAL_WRITE' } }
+    : event);
+  const result = evaluate({
+    run: { eventSequence: 4, toolCallCount: 1, toolExecutionLedger: evidence.ledger },
+    durableEvents: mismatchedEvents,
+  });
+  assert.equal(result.hardGateResults.executionLedgerCompleteness.passed, false);
+  assert.equal(result.hardGateResults.executionLedgerCompleteness.durableEventsMatch, false);
 });
 
 test('retry tool-call totals account for durable calls from prior generations', () => {
@@ -290,6 +325,24 @@ test('wrong source binding, unsupported numeric claim, private identifier, and s
     status: 'AVAILABLE', entries: [{ source: { provider: 'OFFICIAL', jurisdiction: 'US' }, freshness: { status: 'STALE' } }],
   } } } });
   assert.equal(staleSource.hardGateResults.sourceFreshnessAndJurisdiction.passed, false);
+
+  const spoofedFreshSource = evaluate({ run: { result: { recommendedAction: 'NONE', summary: '', evidence: {
+    status: 'AVAILABLE', entries: [{
+      source: { provider: 'attacker-controlled', instrumentId: 'nsc', url: 'https://example.invalid/fake' },
+      freshness: { status: 'FRESH' },
+    }],
+  } } } });
+  assert.equal(spoofedFreshSource.hardGateResults.sourceFreshnessAndJurisdiction.passed, false);
+
+  const callerLabeledFresh = evaluate({ run: { result: { recommendedAction: 'NONE', summary: '', evidence: {
+    status: 'AVAILABLE', entries: [{
+      source: { provider: 'RBI', jurisdiction: 'IN', instrumentId: 'government:rbi:frsb-2020-taxable', url: 'https://www.rbi.org.in/Scripts/BS_ViewBulletin.aspx' },
+      freshness: { status: 'FRESH' },
+    }],
+  } } } });
+  assert.equal(callerLabeledFresh.hardGateResults.sourceFreshnessAndJurisdiction.passed, false);
+  assert.equal(callerLabeledFresh.hardGateResults.sourceFreshnessAndJurisdiction.status, 'UNVERIFIED');
+  assert.equal(callerLabeledFresh.hardGateResults.sourceFreshnessAndJurisdiction.reason, 'SOURCE_FETCH_ATTESTATION_UNAVAILABLE');
 
   const emptyEvidence = evaluate({ run: { result: { recommendedAction: 'NONE', summary: '', evidence: { status: 'AVAILABLE', entries: [] } } } });
   assert.equal(emptyEvidence.hardGateResults.sourceFreshnessAndJurisdiction.passed, false);

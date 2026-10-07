@@ -48,8 +48,10 @@ test('evaluation v2 keeps holdout out of optimizer projection and enforces finan
   assert.equal(manifest.counts.holdout, 1);
   const optimizerManifest = createOptimizerEvaluationManifest({ cases, datasetVersion: 'dataset-1' });
   assert.equal(optimizerManifest.partitions.holdout, undefined);
-  assert.equal(optimizerManifest.holdoutSealed, false);
-  assert.equal(optimizerManifest.holdoutAttestation, 'UNVERIFIED');
+  assert.deepEqual(optimizerManifest.counts, { train: 1, validation: 1 });
+  assert.equal(Object.hasOwn(optimizerManifest, 'holdoutHash'), false);
+  assert.equal(Object.hasOwn(optimizerManifest, 'holdoutSealed'), false);
+  assert.notEqual(optimizerManifest.datasetHash, manifest.datasetHash);
   assert.match(hashEvaluationData(cases), /^[a-f0-9]{64}$/);
   assert.throws(() => hashEvaluationData([{ value: Number.NaN }]), /non-finite/i);
   assert.throws(() => hashEvaluationData([{ value: undefined }]), /JSON/i);
@@ -206,15 +208,39 @@ test('scaffold registry is immutable, read-only, and human-promotion gated', asy
     evaluation: { ...evaluation, candidateId: 'another-candidate' },
   }), /bound to this candidate/i);
   const promotionMandate = buildPromotionMandate({ candidate, baselineHash: base.contentHash, evaluation, reviewerId: 'reviewer' });
+  assert.match(promotionMandate.mandateHash, /^[a-f0-9]{64}$/);
+  const boundMandate = promotionMandate;
+  await assert.rejects(() => createPromotionAuthorization({
+    candidate,
+    baselineHash: base.contentHash,
+    evaluation,
+    reviewerId: 'attacker-reviewer',
+    mandate: boundMandate,
+    assertion: { credentialId: 'credential-1' },
+    approvalProvider: { verify: async () => ({ verified: true, method: 'WEBAUTHN', approvalId: 'approval-attack', credentialId: 'credential-1' }) },
+  }), /does not bind the supplied candidate, evaluation, reviewer, action, and live expiry/i);
+  await assert.rejects(() => createPromotionAuthorization({
+    candidate,
+    baselineHash: base.contentHash,
+    evaluation,
+    reviewerId: 'reviewer',
+    mandate: { ...promotionMandate, mandateId: 'substituted-mandate' },
+    assertion: { credentialId: 'credential-1' },
+    approvalProvider: { verify: async () => ({ verified: true, method: 'WEBAUTHN', approvalId: 'approval-tamper', credentialId: 'credential-1' }) },
+  }), /does not bind the supplied candidate, evaluation, reviewer, action, and live expiry/i);
   const authorization = await createPromotionAuthorization({
     candidate,
     baselineHash: base.contentHash,
     evaluation,
     reviewerId: 'reviewer',
-    mandate: { ...promotionMandate, mandateHash: 'mandate-hash-1' },
+    mandate: boundMandate,
     assertion: { credentialId: 'credential-1' },
     approvalProvider: { verify: async () => ({ verified: true, method: 'WEBAUTHN', approvalId: 'approval-1', credentialId: 'credential-1' }) },
   });
+  assert.equal(Object.isFrozen(authorization), true);
+  assert.equal(authorization.action, 'PROMOTE_AGENT_SCAFFOLD');
+  assert.throws(() => { authorization.expiresAt = '2099-01-01T00:00:00.000Z'; }, TypeError);
+  assert.throws(() => registry.rollback({ authorization }), /promotion approval cannot authorize rollback/i);
   registry.promote('plan-review', '1.1.0', { authorization, evaluation });
   assert.equal(registry.current().spec.version, '1.1.0');
 
@@ -241,7 +267,7 @@ test('scaffold registry is immutable, read-only, and human-promotion gated', asy
     baselineHash: base.contentHash,
     evaluation: nextEvaluation,
     reviewerId: 'reviewer',
-    mandate: { ...staleBaselineMandate, mandateHash: 'mandate-hash-stale-baseline' },
+    mandate: staleBaselineMandate,
     assertion: { credentialId: 'credential-1' },
     approvalProvider: { verify: async () => ({ verified: true, method: 'WEBAUTHN', approvalId: 'approval-2', credentialId: 'credential-1' }) },
   });
@@ -263,6 +289,7 @@ test('offline evolution never consumes holdout and trajectory mining excludes ra
     ],
   });
   assert.equal(result.holdoutSealed, false);
+  assert.equal(Object.hasOwn(result, 'holdoutHash'), false);
   assert.equal(result.evaluation.scoreCards.length, 2);
   const events = sanitizeTrajectory([{ type: 'TOOL_FAILED', node: 'execute_safe_tools', code: 'TOOL_TIMEOUT', value: 'sensitive' }]);
   assert.equal(events[0].value, undefined);

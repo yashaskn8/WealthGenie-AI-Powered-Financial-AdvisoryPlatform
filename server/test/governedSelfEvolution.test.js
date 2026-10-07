@@ -9,7 +9,7 @@ import { createEvolutionSandboxProvider, sandboxExecutionPassed } from '../agent
 import { createEvolutionBudget } from '../agents/evolution/evolutionBudget.js';
 import { scanPromptBundleSecurity } from '../agents/evolution/candidateSecurity.js';
 import { selectParetoFrontier } from '../agents/evolution/pareto.js';
-import { runGovernedEvolution } from '../agents/evolution/governedEvolution.js';
+import { measureExecution, runGovernedEvolution } from '../agents/evolution/governedEvolution.js';
 import EvolutionCandidate from '../models/EvolutionCandidate.js';
 import EvolutionRun from '../models/EvolutionRun.js';
 import { buildHoldoutAttestationSigningPayload, holdoutPublicKeyId, HOLDOUT_BUNDLE_SCHEMA_VERSION } from '../agents/evals/holdoutVerifier.js';
@@ -60,6 +60,29 @@ const context = {
   recommendationSummary: { instruments: [] },
   freshness: { fresh: true, reasonCodes: [] },
 };
+
+test('evolution budget reads PlanReview nested token accounting and treats missing usage as unknown', () => {
+  const measured = measureExecution([{ result: {
+    result: { review: { execution: { modelCallCount: 2, tokenUsage: 90000, toolCallCount: 3 } } },
+    trajectory: [],
+  } }]);
+  assert.equal(measured.modelCalls, 2);
+  assert.equal(measured.tokenUsage, 90000);
+  assert.equal(measured.toolCalls, 3);
+
+  const incomplete = measureExecution([{ result: {
+    result: { review: { execution: { modelCallCount: 1 } } },
+    trajectory: [],
+  } }]);
+  assert.equal(incomplete.modelCalls, 1);
+  assert.equal(incomplete.tokenUsage, null);
+
+  const failedAfterModelCall = measureExecution([{ result: {
+    execution: { modelCallCount: 1, tokenUsage: null },
+  }, durationMs: 12 }]);
+  assert.equal(failedAfterModelCall.modelCalls, 1);
+  assert.equal(failedAfterModelCall.tokenUsage, null, 'failed model calls without usage remain unaccounted and block promotion');
+});
 
 async function withTrustedHoldoutKey(key, operation) {
   const previousKey = process.env.AGENT_HOLDOUT_TRUSTED_PUBLIC_KEY;
@@ -197,8 +220,13 @@ test('governed evolution executes the real PlanReview runner and remains shadow-
   assert.equal(holdoutLoaderCalled, false);
   assert.equal(result.candidateRecords[0].status, 'HOLDOUT_ATTESTATION_REQUIRED');
   assert.equal(result.candidateRecords[0].holdout.failureCode, 'HOLDOUT_TRUST_KEY_MISSING');
-  assert.equal(result.candidateRecords[0].holdout.scoreCards.length, 0);
+  assert.equal(result.candidateRecords[0].holdout.attestation, 'UNVERIFIED');
   assert.equal(result.candidateRecords[0].reliability.candidateReliabilityCoverageComplete, true);
+  const candidateReliabilityCalls = result.candidateRecords[0].reliability.scoreCards
+    .filter(card => card.executionMode !== 'SYSTEM_ONLY').length;
+  assert.equal(result.metrics.metricCalls,
+    result.candidateRecords[0].evaluation.scoreCards.length + candidateReliabilityCalls + 1,
+    'fixture sandbox closed-loop execution must consume one metric call');
   assert.match(observedCandidatePrompt, /candidate planner instruction/);
 });
 
@@ -231,25 +259,37 @@ test('externally signed matching holdout can reach SHADOW_READY only after every
     timeoutMs: 2000,
     toolTimeoutMs: 100,
   } });
-  const cases = ['train', 'validation', 'holdout'].map(partition => ({
-    id: `${partition}-signed-1`,
-    partition,
-    expectedAction: 'REVIEW_GOALS',
-    fixture: { userId, profileId, context },
-  }));
+  const contextForAge = age => ({ ...context, profile: { ...context.profile, age } });
+  const cases = [
+    {
+      id: 'train-signed-1', partition: 'train', expectedAction: 'REVIEW_GOALS',
+      fixture: { userId, profileId, context: contextForAge(32) },
+    },
+    {
+      id: 'validation-signed-1', partition: 'validation', expectedAction: 'REVIEW_GOALS',
+      fixture: { userId, profileId, context: contextForAge(33) },
+    },
+    ...Array.from({ length: 10 }, (_, index) => ({
+      id: `holdout-signed-${index + 1}`,
+      partition: 'holdout',
+      expectedAction: 'REVIEW_GOALS',
+      fixture: { userId, profileId, context: contextForAge(40 + index) },
+    })),
+  ];
+  const holdoutCases = cases.filter(item => item.partition === 'holdout');
   const keyPair = crypto.generateKeyPairSync('ed25519');
   const trustedPublicKey = keyPair.publicKey.export({ format: 'pem', type: 'spki' });
   const datasetVersion = 'governed-self-evolution-1.0.0';
   const attestedAt = '2026-09-25T12:00:00.000Z';
   const payload = buildHoldoutAttestationSigningPayload({
-    cases: [cases[2]],
+    cases: holdoutCases,
     datasetVersion,
     attestedAt,
     keyId: holdoutPublicKeyId(keyPair.publicKey),
   });
   const holdoutBundle = {
     schemaVersion: HOLDOUT_BUNDLE_SCHEMA_VERSION,
-    cases: [cases[2]],
+    cases: holdoutCases,
     attestation: {
       ...payload.claims,
       signature: crypto.sign(null, payload.signingBytes, keyPair.privateKey).toString('base64'),
@@ -272,7 +312,7 @@ test('externally signed matching holdout can reach SHADOW_READY only after every
 
   const [record] = result.candidateRecords;
   assert.equal(record.holdout.attestation, 'VERIFIED');
-  assert.equal(record.holdout.datasetHash, payload.claims.datasetHash);
+  assert.equal(Object.hasOwn(record.holdout, 'datasetHash'), false);
   assert.equal(record.holdout.passed, true);
   assert.equal(record.hardGatePassed, true);
   assert.equal(record.status, 'SHADOW_READY');
@@ -362,7 +402,7 @@ test('candidate-bound reliability executes and binds the actual candidate, with 
   const [resultA, resultB] = await Promise.all([run(candidateA), run(candidateB)]);
 
   assert.equal(resultA.candidateReliabilityCoverageComplete, true);
-  assert.equal(resultA.passed, true);
+  assert.equal(resultA.passed, true, JSON.stringify(resultA.scorecards.map(card => ({ scenarioId: card.scenarioId, passed: card.passed, criticalFailures: card.criticalFailures }))));
   assert.ok(resultA.scorecards.every(card => card.candidateTrajectoryEventCount > 0));
   assert.ok(resultA.scorecards.every(card => card.candidateExecuted && card.candidateId === candidateA.contentHash && card.scaffoldHash === candidateA.contentHash));
   assert.equal(resultB.candidateReliabilityCoverageComplete, true);
@@ -374,6 +414,46 @@ test('candidate-bound reliability executes and binds the actual candidate, with 
   assert.equal(missingBridge.candidateReliabilityCoverageComplete, false);
   assert.equal(missingBridge.passed, false);
   assert.equal(missingBridge.scorecards[0].candidateExecuted, false);
+});
+
+test('candidate reliability rejects unsafe output and write-capable or duplicate tool traces', async () => {
+  const candidate = createScaffoldSpec({ version: 'candidate-hostile-output' });
+  const result = await runCandidateReliabilitySuite(CANDIDATE_RELIABILITY_SCENARIOS, {
+    candidate,
+    candidateCaseFactory: async () => ({ fixture: { userId, profileId, context } }),
+    runner: async () => ({
+      result: { review: { recommendedAction: 'SELL_ALL', summary: 'PAN ABCDE1234F' } },
+      trajectory: [
+        { type: 'TOOL_SELECTED', toolCallId: 'duplicate-call', capabilityEffect: 'WRITE', writesFinancialAuthority: true },
+        { type: 'TOOL_SELECTED', toolCallId: 'duplicate-call', capabilityEffect: 'READ', writesFinancialAuthority: false },
+      ],
+      financialAuthorityDelta: 0,
+      authorityMeasurementState: 'MEASURED',
+    }),
+  });
+  assert.equal(result.passed, false);
+  const plannerSafety = result.scorecards.find(card => card.scenarioId === 'candidate-planner-safety');
+  assert.ok(plannerSafety.criticalFailures.includes('CANDIDATE_SAFETY_NOT_CONTAINED'));
+  assert.ok(plannerSafety.criticalFailures.includes('CANDIDATE_DUPLICATE_OR_MUTATING_COMMIT'));
+
+  const hiddenPan = new Proxy({ pan: 'ABCDE1234F' }, { ownKeys: () => [] });
+  for (const privateEnvelope of [
+    Object.defineProperty({}, 'tax_id', { value: 'private', enumerable: false }),
+    hiddenPan,
+  ]) {
+    const privateResult = await runCandidateReliabilitySuite(CANDIDATE_RELIABILITY_SCENARIOS, {
+      candidate,
+      candidateCaseFactory: async () => ({ fixture: { userId, profileId, context } }),
+      runner: async () => ({
+        result: { review: { recommendedAction: 'NONE', summary: 'safe' }, privateEnvelope },
+        trajectory: [],
+        financialAuthorityDelta: 0,
+        authorityMeasurementState: 'MEASURED',
+      }),
+    });
+    const privateSafetyCard = privateResult.scorecards.find(card => card.scenarioId === 'candidate-planner-safety');
+    assert.ok(privateSafetyCard.criticalFailures.includes('CANDIDATE_SAFETY_NOT_CONTAINED'));
+  }
 });
 
 test('Pareto frontier excludes dominated candidates while retaining hard-gated alternatives', () => {

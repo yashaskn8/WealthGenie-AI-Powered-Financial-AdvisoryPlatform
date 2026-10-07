@@ -1,6 +1,9 @@
 import os
 import sys
 import tempfile
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 from types import SimpleNamespace
 
@@ -9,7 +12,13 @@ import pytest
 from agent_evolution.feedback import build_feedback
 from agent_evolution.cli import _open_input, _safe_path
 from agent_evolution.gepa_optimizer import DspyGepaOptimizer, GEPA_VERSION
-from agent_evolution.runner import FixtureGepaProposalProvider, _configure_gepa_cache, _load_live_dspy
+from agent_evolution.runner import (
+    FixtureGepaProposalProvider,
+    _BudgetedDspyLM,
+    _GepaTokenBudget,
+    _configure_gepa_cache,
+    _load_live_dspy,
+)
 from agent_evolution.schemas import EvolutionBudget, validate_gepa_input, validate_optimizer_dataset, validate_proposal_output
 from agent_evolution.security import assert_evolution_surface, assert_prompt_candidate_safe
 
@@ -143,6 +152,71 @@ def test_dspy_gepa_adapter_invokes_the_real_gepa_entrypoint(monkeypatch):
     assert compiled.named_predictors()[0][1].signature.instructions.startswith('optimized')
 
 
+def test_gepa_task_and_reflection_lms_share_a_hard_aggregate_token_and_call_budget():
+    class FakeLM:
+        def __init__(self):
+            self.history = []
+            self.calls = 0
+
+        def __call__(self, prompt, **kwargs):
+            self.calls += 1
+            self.history.append({'usage': {'prompt_tokens': 1900, 'completion_tokens': 600, 'total_tokens': 2500}})
+            return ['bounded response']
+
+    budget = _GepaTokenBudget(max_total_tokens=3000, max_task_calls=1, max_reflection_calls=1)
+    task_lm = FakeLM()
+    reflection_lm = FakeLM()
+    task = _BudgetedDspyLM(task_lm, budget, 'task')
+    reflection = _BudgetedDspyLM(reflection_lm, budget, 'reflection')
+
+    assert task('short prompt') == ['bounded response']
+    with pytest.raises(RuntimeError) as error:
+        reflection('another short prompt')
+    assert error.value.code == 'GEPA_TOKEN_BUDGET_EXCEEDED'
+    assert task_lm.calls == 1
+    assert reflection_lm.calls == 0
+
+
+
+def test_gepa_serializes_shared_lm_history_accounting_across_task_and_reflection_calls():
+    class FakeLM:
+        def __init__(self):
+            self.history = []
+            self.active = 0
+            self.max_active = 0
+            self.lock = threading.Lock()
+
+        def __call__(self, prompt, **kwargs):
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            time.sleep(0.03)
+            with self.lock:
+                self.history.append({'usage': {'total_tokens': 10}})
+                self.active -= 1
+            return ['bounded response']
+
+    lm = FakeLM()
+    budget = _GepaTokenBudget(max_total_tokens=10000, max_task_calls=1, max_reflection_calls=1)
+    task = _BudgetedDspyLM(lm, budget, 'task')
+    reflection = _BudgetedDspyLM(lm, budget, 'reflection')
+    start = threading.Barrier(3)
+
+    def invoke(model):
+        start.wait()
+        return model('short prompt')
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        task_call = executor.submit(invoke, task)
+        reflection_call = executor.submit(invoke, reflection)
+        start.wait()
+        assert task_call.result() == ['bounded response']
+        assert reflection_call.result() == ['bounded response']
+
+    assert lm.max_active == 1
+    assert budget.used_tokens == 20
+
+
 def test_live_dspy_disables_disk_cache_before_constructing_models(monkeypatch):
     calls = []
 
@@ -171,10 +245,11 @@ def test_live_dspy_disables_disk_cache_before_constructing_models(monkeypatch):
         'enable_memory_cache': True,
         'restrict_pickle': True,
     })
-    assert calls[1] == ('lm', 'task-model', {'api_key': 'test-only-key', 'cache': False})
-    assert calls[2] == ('lm', 'reflection-model', {'api_key': 'test-only-key', 'cache': False})
+    assert calls[1] == ('lm', 'task-model', {'api_key': 'test-only-key', 'cache': False, 'max_tokens': 512})
+    assert calls[2] == ('lm', 'reflection-model', {'api_key': 'test-only-key', 'cache': False, 'max_tokens': 512})
     assert calls[3][0] == 'configure'
-    assert reflection_lm == {'model': 'reflection-model', 'api_key': 'test-only-key', 'cache': False}
+    assert calls[3][1]['lm'].wrapped_lm == {'model': 'task-model', 'api_key': 'test-only-key', 'cache': False, 'max_tokens': 512}
+    assert reflection_lm.wrapped_lm == {'model': 'reflection-model', 'api_key': 'test-only-key', 'cache': False, 'max_tokens': 512}
 
 
 def test_installed_dspy_cache_is_memory_only(monkeypatch, tmp_path):
