@@ -19,7 +19,12 @@ import { verifyEvidencePacket } from '../agents/a2a/evidenceVerifier.js';
 import { buildPlanReviewA2UI, validateA2UIMessage } from '../agents/a2ui/a2uiSchemas.js';
 import { assertAgentCapability, createAgentIdentity } from '../agents/identity/agentIdentity.js';
 import { createAgentWorkflowBackend } from '../agents/workflows/agentWorkflowBackend.js';
-import { buildPromotionMandate, createPromotionAuthorization } from '../agents/evolution/promotionAuthorization.js';
+import {
+  buildPromotionMandate,
+  buildRollbackMandate,
+  createPromotionAuthorization,
+  createRollbackAuthorization,
+} from '../agents/evolution/promotionAuthorization.js';
 
 test('agent telemetry only permits bounded non-sensitive semantic attributes', () => {
   const safe = sanitizeAgentAttributes({
@@ -275,6 +280,145 @@ test('scaffold registry is immutable, read-only, and human-promotion gated', asy
     authorization: staleBaselineAuthorization,
     evaluation: nextEvaluation,
   }), /different active baseline/i);
+});
+
+test('scaffold rollback binds a WebAuthn approval to the active generation and prior activated release', async () => {
+  const base = createScaffoldSpec({ scaffoldId: 'plan-review', version: '1.0.0' });
+  const registry = new ScaffoldRegistry();
+  const mutableBase = structuredClone(base);
+  registry.register(mutableBase);
+  mutableBase.metadata.changedAfterRegistration = true;
+  assert.equal(registry.current().spec.metadata.changedAfterRegistration, undefined);
+  assert.ok(Object.isFrozen(registry.current().spec.metadata));
+
+  const makeEvaluation = candidate => ({
+    candidateId: candidate.contentHash,
+    passed: true,
+    scoreCards: [buildCandidateScoreCard({
+      candidateId: candidate.contentHash,
+      partition: 'validation',
+      caseDefinition: { expectedAction: 'NONE' },
+      result: { recommendedAction: 'NONE', financialAuthorityDelta: 0, authorityMeasurementState: 'MEASURED' },
+    })],
+  });
+  const promote = async candidate => {
+    const evaluation = makeEvaluation(candidate);
+    const mandate = buildPromotionMandate({
+      candidate,
+      baselineHash: registry.current().spec.contentHash,
+      evaluation,
+      activationGeneration: registry.activationGeneration,
+      reviewerId: 'reviewer',
+    });
+    const authorization = await createPromotionAuthorization({
+      candidate,
+      baselineHash: registry.current().spec.contentHash,
+      evaluation,
+      activationGeneration: registry.activationGeneration,
+      reviewerId: 'reviewer',
+      mandate,
+      assertion: { credentialId: 'credential-1' },
+      approvalProvider: { verify: async () => ({
+        verified: true,
+        method: 'WEBAUTHN',
+        approvalId: 'promotion-' + candidate.version,
+        credentialId: 'credential-1',
+      }) },
+    });
+    registry.promote(candidate.scaffoldId, candidate.version, { authorization, evaluation });
+  };
+
+  const first = createScaffoldSpec({ scaffoldId: 'plan-review', version: '1.1.0', parentVersion: '1.0.0' });
+  registry.register(first);
+  await promote(first);
+
+  const staleContext = registry.rollbackContext();
+  assert.equal(staleContext.current.version, '1.1.0');
+  assert.equal(staleContext.target.version, '1.0.0');
+  const staleMandate = buildRollbackMandate({ ...staleContext, reviewerId: 'reviewer' });
+  const staleAuthorization = await createRollbackAuthorization({
+    ...staleContext,
+    reviewerId: 'reviewer',
+    mandate: staleMandate,
+    assertion: { credentialId: 'credential-1' },
+    approvalProvider: { verify: async () => ({
+      verified: true,
+      method: 'WEBAUTHN',
+      approvalId: 'rollback-stale',
+      credentialId: 'credential-1',
+    }) },
+  });
+
+  const second = createScaffoldSpec({ scaffoldId: 'plan-review', version: '1.2.0', parentVersion: '1.1.0' });
+  registry.register(second);
+  const secondEvaluation = makeEvaluation(second);
+  const pendingPromotionMandate = buildPromotionMandate({
+    candidate: second,
+    baselineHash: registry.current().spec.contentHash,
+    evaluation: secondEvaluation,
+    activationGeneration: registry.activationGeneration,
+    reviewerId: 'reviewer',
+  });
+  const pendingPromotionAuthorization = await createPromotionAuthorization({
+    candidate: second,
+    baselineHash: registry.current().spec.contentHash,
+    evaluation: secondEvaluation,
+    activationGeneration: registry.activationGeneration,
+    reviewerId: 'reviewer',
+    mandate: pendingPromotionMandate,
+    assertion: { credentialId: 'credential-1' },
+    approvalProvider: { verify: async () => ({
+      verified: true,
+      method: 'WEBAUTHN',
+      approvalId: 'promotion-pending-second',
+      credentialId: 'credential-1',
+    }) },
+  });
+  await promote(second);
+  assert.throws(() => registry.rollback({ authorization: staleAuthorization }), /does not bind the current release/i);
+  assert.equal(registry.current().spec.version, '1.2.0');
+
+  const unpromoted = createScaffoldSpec({ scaffoldId: 'plan-review', version: '1.3.0', parentVersion: '1.2.0' });
+  registry.register(unpromoted);
+  const rollbackContext = registry.rollbackContext();
+  assert.equal(rollbackContext.current.version, '1.2.0');
+  assert.equal(rollbackContext.target.version, '1.1.0');
+  const mandate = buildRollbackMandate({ ...rollbackContext, reviewerId: 'reviewer' });
+  const authorization = await createRollbackAuthorization({
+    ...rollbackContext,
+    reviewerId: 'reviewer',
+    mandate,
+    assertion: { credentialId: 'credential-1' },
+    approvalProvider: { verify: async ({ mandate: verifiedMandate }) => {
+      assert.equal(verifiedMandate.targetHash, first.contentHash);
+      return {
+        verified: true,
+        method: 'WEBAUTHN',
+        approvalId: 'rollback-1',
+        credentialId: 'credential-1',
+      };
+    } },
+  });
+  const forged = { ...authorization };
+  for (const symbol of Object.getOwnPropertySymbols(authorization)) {
+    Object.defineProperty(forged, symbol, { value: authorization[symbol] });
+  }
+  assert.throws(() => registry.rollback({ authorization: forged }), /WebAuthn human approval/i);
+
+  const rolledBack = registry.rollback({ authorization });
+  assert.equal(rolledBack.spec.version, '1.1.0');
+  assert.equal(registry.current().spec.contentHash, first.contentHash);
+  assert.equal(registry.activationGeneration, 4);
+  assert.equal(registry.history.at(-1).activeHash, first.contentHash);
+  assert.throws(() => registry.promote('plan-review', '1.2.0', {
+    authorization: pendingPromotionAuthorization,
+    evaluation: secondEvaluation,
+  }), /different active generation/i);
+  assert.equal(registry.current().spec.contentHash, first.contentHash);
+  assert.throws(() => registry.rollback({ authorization }), /No previously activated scaffold release|already been consumed/i);
+
+  const altered = { ...second, version: '1.4.0' };
+  assert.throws(() => registry.register(altered), error => error.code === 'SCAFFOLD_HASH_MISMATCH');
 });
 
 test('offline evolution never consumes holdout and trajectory mining excludes raw content', () => {

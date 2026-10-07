@@ -1,6 +1,12 @@
 import crypto from 'node:crypto';
 import { SAFE_PLAN_REVIEW_TOOLS } from '../planReview/planReviewSchemas.js';
-import { assertPromotionEvaluation, isVerifiedPromotionAuthorization, verifyPromotionAuthorization } from './promotionAuthorization.js';
+import {
+  assertPromotionEvaluation,
+  isVerifiedPromotionAuthorization,
+  ROLLBACK_ACTION,
+  verifyPromotionAuthorization,
+  verifyRollbackAuthorization,
+} from './promotionAuthorization.js';
 import { CURRENT_PROMPT_BUNDLE, verifyPromptBundleHash } from './promptBundle.js';
 
 export const SCAFFOLD_SPEC_VERSION = 'scaffold-spec-1.0.0';
@@ -129,27 +135,58 @@ export class ScaffoldRegistry {
   constructor() {
     this.versions = new Map();
     this.champion = null;
+    this.activationStack = [];
+    this.activationGeneration = 0;
+    this.usedApprovalIds = new Set();
     this.history = [];
   }
 
   register(spec, { source = 'human', evaluation = null, lifecycle = null } = {}) {
     assertScaffoldSpecSafe(spec);
-    const key = `${spec.scaffoldId}@${spec.version}`;
-    if (this.versions.has(key)) return this.versions.get(key);
+    const snapshot = structuredClone(spec);
+    const declaredHash = snapshot.contentHash;
+    delete snapshot.contentHash;
+    const computedHash = crypto.createHash('sha256').update(canonical(snapshot)).digest('hex');
+    if (!/^[a-f0-9]{64}$/.test(declaredHash || '') || declaredHash !== computedHash) {
+      const error = new Error('Scaffold content hash does not match the registered release contents.');
+      error.code = 'SCAFFOLD_HASH_MISMATCH';
+      throw error;
+    }
+    snapshot.contentHash = declaredHash;
+    deepFreeze(snapshot);
+    const key = String(snapshot.scaffoldId) + '@' + String(snapshot.version);
+    if (this.versions.has(key)) {
+      const existing = this.versions.get(key);
+      if (existing.spec.contentHash !== snapshot.contentHash) throw new Error('A scaffold version cannot be rebound to different contents.');
+      return existing;
+    }
+    const evaluationSnapshot = evaluation ? deepFreeze(structuredClone(evaluation)) : null;
     const record = Object.freeze({
-      spec,
+      spec: snapshot,
       source,
       lifecycle: lifecycle || (this.champion ? 'CHALLENGER' : 'CHAMPION'),
-      evaluation: evaluation || null,
+      evaluation: evaluationSnapshot,
       registeredAt: new Date().toISOString(),
     });
     this.versions.set(key, record);
-    if (!this.champion) this.champion = record;
+    if (!this.champion) {
+      this.champion = record;
+      this.activationStack.push(record);
+      this.activationGeneration = 1;
+    }
     return record;
   }
 
-  get(scaffoldId, version) { return this.versions.get(`${scaffoldId}@${version}`) || null; }
+  get(scaffoldId, version) { return this.versions.get(String(scaffoldId) + '@' + String(version)) || null; }
   current() { return this.champion; }
+  rollbackContext() {
+    const target = this.activationStack.at(-2) || null;
+    return Object.freeze({
+      current: this.champion?.spec || null,
+      target: target?.spec || null,
+      activationGeneration: this.activationGeneration,
+    });
+  }
   shadowCandidates() { return [...this.versions.values()].filter(item => item !== this.champion); }
 
   shadowEvaluate(candidate, evaluation) {
@@ -161,25 +198,65 @@ export class ScaffoldRegistry {
     const record = this.get(scaffoldId, version);
     if (!record) throw new Error('Scaffold version is not registered.');
     assertPromotionEvaluation({ candidate: record.spec, evaluation });
-    if (!this.champion || record === this.champion || record.spec.parentVersion !== this.champion.spec.version) {
+    if (!this.champion || record === this.champion
+        || record.spec.scaffoldId !== this.champion.spec.scaffoldId
+        || record.spec.parentVersion !== this.champion.spec.version) {
       throw new Error('Candidate does not target the current active baseline.');
     }
-    verifyPromotionAuthorization({ authorization, candidate: record.spec, baselineHash: this.champion.spec.contentHash, evaluation });
+    if (this.usedApprovalIds.has(authorization?.approvalId)) throw new Error('Approval has already been consumed.');
+    verifyPromotionAuthorization({ authorization, candidate: record.spec, baselineHash: this.champion.spec.contentHash, evaluation, activationGeneration: this.activationGeneration });
+    const previous = this.champion;
     this.champion = record;
-    this.history.push({ action: 'PROMOTE', scaffoldId, version, reviewerId: authorization.reviewerId, approvalId: authorization.approvalId, at: new Date().toISOString() });
+    this.activationStack.push(record);
+    this.activationGeneration += 1;
+    this.usedApprovalIds.add(authorization.approvalId);
+    this.history.push({
+      action: 'PROMOTE',
+      scaffoldId,
+      version,
+      previousHash: previous.spec.contentHash,
+      activeHash: record.spec.contentHash,
+      activationGeneration: this.activationGeneration,
+      reviewerId: authorization.reviewerId,
+      approvalId: authorization.approvalId,
+      at: new Date().toISOString(),
+    });
     return record;
   }
 
   rollback({ authorization } = {}) {
-    if (!isVerifiedPromotionAuthorization(authorization) || !authorization?.verified || authorization.method !== 'WEBAUTHN' || !authorization.approvalId) throw new Error('Cryptographic WebAuthn human approval is required to rollback a scaffold.');
-    if (authorization.action !== 'ROLLBACK_AGENT_SCAFFOLD') {
+    if (!isVerifiedPromotionAuthorization(authorization) || !authorization?.verified || authorization.method !== 'WEBAUTHN' || !authorization.approvalId) {
+      throw new Error('Cryptographic WebAuthn human approval is required to rollback a scaffold.');
+    }
+    if (authorization.action !== ROLLBACK_ACTION) {
       throw new Error('Rollback requires an independently verified rollback authorization; promotion approval cannot authorize rollback.');
     }
-    const previous = [...this.versions.values()].filter(item => item !== this.champion).at(-1);
-    if (!previous) throw new Error('No previous scaffold version is available for rollback.');
-    this.champion = previous;
-    this.history.push({ action: 'ROLLBACK', version: previous.spec.version, reviewerId: authorization.reviewerId, approvalId: authorization.approvalId, at: new Date().toISOString() });
-    return previous;
+    const target = this.activationStack.at(-2) || null;
+    if (!target || !this.champion) throw new Error('No previously activated scaffold release is available for rollback.');
+    if (this.usedApprovalIds.has(authorization.approvalId)) throw new Error('Approval has already been consumed.');
+    verifyRollbackAuthorization({
+      authorization,
+      current: this.champion.spec,
+      target: target.spec,
+      activationGeneration: this.activationGeneration,
+    });
+    this.activationStack.pop();
+    const previous = this.champion;
+    this.champion = target;
+    this.activationGeneration += 1;
+    this.usedApprovalIds.add(authorization.approvalId);
+    this.history.push({
+      action: 'ROLLBACK',
+      scaffoldId: target.spec.scaffoldId,
+      version: target.spec.version,
+      previousHash: previous.spec.contentHash,
+      activeHash: target.spec.contentHash,
+      activationGeneration: this.activationGeneration,
+      reviewerId: authorization.reviewerId,
+      approvalId: authorization.approvalId,
+      at: new Date().toISOString(),
+    });
+    return target;
   }
 }
 
