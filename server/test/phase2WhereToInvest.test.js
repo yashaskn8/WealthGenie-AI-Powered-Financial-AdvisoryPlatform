@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { parseAmfiNavHistoryReport } from '../services/marketData/AmfiNavHistoryProvider.js';
+import AmfiNavHistoryProvider from '../services/marketData/AmfiNavHistoryProvider.js';
 import {
   HISTORICAL_RETURN_BASIS,
   MUTUAL_FUND_RANKING_VERSION,
@@ -111,6 +112,46 @@ test('AMFI historical parser follows the live header contract and picks the obse
   assert.equal(snapshot.facts[0].observedDate, '2025-09-08');
   assert.equal(snapshot.facts[0].historicalContext.plan, 'Direct Plan');
   assert.equal(snapshot.facts[0].historicalContext.option, 'Growth Option');
+});
+
+test('AMFI historical duplicates deduplicate only identical observations and conflicting values fail closed through ranking', async () => {
+  const header = 'Scheme Code;NAV Name;Plan;Option;ISIN Div Payout/ISIN Growth;ISIN Div Reinvestment;Net Asset Value;Date';
+  const identicalReport = [
+    header,
+    'Open Ended Schemes ( Equity Scheme - Large Cap Fund )',
+    'Example Mutual Fund',
+    '101;Example Fund;Direct Plan;Growth Option;INF000A01010;;100.00;07-Sep-2025',
+    '101;Example Fund;Direct Plan;Growth Option;INF000A01010;;100.00;07-Sep-2025',
+  ].join('\n');
+  const identical = parseAmfiNavHistoryReport(identicalReport, {
+    targetDate: '2025-09-07', fetchedAt: FETCHED_AT, now: new Date(FETCHED_AT),
+  });
+  assert.equal(identical.status, 'AVAILABLE');
+  assert.equal(identical.facts.length, 1);
+  assert.equal(identical.facts[0].value, 100);
+
+  const conflictingReport = identicalReport.replace(
+    '101;Example Fund;Direct Plan;Growth Option;INF000A01010;;100.00;07-Sep-2025\n101;Example Fund;Direct Plan;Growth Option;INF000A01010;;100.00;07-Sep-2025',
+    '101;Example Fund;Direct Plan;Growth Option;INF000A01010;;100.00;07-Sep-2025\n101;Example Fund;Direct Plan;Growth Option;INF000A01010;;101.00;07-Sep-2025',
+  );
+  const provider = new AmfiNavHistoryProvider({
+    clock: () => new Date(FETCHED_AT),
+    httpClient: { get: async () => ({ data: conflictingReport }) },
+  });
+  const conflicted = await provider.getSnapshot({ targetDate: '2025-09-07', forceRefresh: true });
+  assert.equal(conflicted.status, 'SOURCE_ERROR');
+  assert.equal(conflicted.availableFactCount, 0);
+  assert.equal(conflicted.facts.length, 0);
+
+  const { current } = snapshots();
+  const result = rankVerifiedMutualFundProducts({
+    parentInstrumentId: 'large_cap_mf',
+    currentSnapshot: current,
+    historicalSnapshot: conflicted,
+    now: new Date(FETCHED_AT),
+  });
+  assert.notEqual(result.ranking.status, 'EVIDENCE_RANKED');
+  assert.ok(result.products.every(product => product.historicalReturn === null));
 });
 
 test('Phase 2 ranks at most five exact-category Direct Growth options by verified historical return only', () => {

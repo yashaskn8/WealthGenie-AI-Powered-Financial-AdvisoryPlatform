@@ -65,6 +65,16 @@ function distanceFromTarget(observedAt, targetDate) {
   return Math.abs(Date.parse(observedAt) - Date.parse(targetDate));
 }
 
+function sameObservation(left, right) {
+  const factFields = [
+    'canonicalProductId', 'sourceInstrumentId', 'sourceProvider', 'observedAt',
+    'observedDate', 'value', 'currency', 'unit',
+  ];
+  const contextFields = ['targetDate', 'schemeName', 'providerName', 'schemeCategory', 'plan', 'option'];
+  return factFields.every(field => left[field] === right[field])
+    && contextFields.every(field => left.historicalContext?.[field] === right.historicalContext?.[field]);
+}
+
 /**
  * Parse the official AMFI date-range report and retain one observation per
  * scheme: the reported NAV closest to the requested historical target date.
@@ -152,6 +162,14 @@ export function parseAmfiNavHistoryReport(text, {
     const existing = closestByProduct.get(identity.canonicalProductId);
     const candidateDistance = distanceFromTarget(observedAt, target);
     const existingDistance = existing ? distanceFromTarget(existing.observedAt, target) : Infinity;
+    if (existing && existing.observedAt === fact.observedAt) {
+      if (!sameObservation(existing, fact)) {
+        throw Object.assign(new Error('AMFI historical NAV report contains conflicting observations.'), {
+          code: 'AMFI_HISTORY_CONFLICTING_OBSERVATION',
+        });
+      }
+      continue;
+    }
     if (!existing || candidateDistance < existingDistance
         || (candidateDistance === existingDistance && observedAt > existing.observedAt)) {
       closestByProduct.set(identity.canonicalProductId, fact);
@@ -202,6 +220,7 @@ export default class AmfiNavHistoryProvider extends MarketDataProvider {
             sourceUrl,
           });
         } catch (error) {
+          const conflictingObservation = error?.code === 'AMFI_HISTORY_CONFLICTING_OBSERVATION';
           return {
             schemaVersion: MARKET_DATA_SCHEMA_VERSION,
             provider: PROVIDERS.AMFI,
@@ -213,8 +232,10 @@ export default class AmfiNavHistoryProvider extends MarketDataProvider {
             products: [],
             facts: [],
             error: {
-              code: 'AMFI_HISTORY_FETCH_FAILED',
-              message: error?.message || 'AMFI historical NAV request failed.',
+              code: conflictingObservation ? error.code : 'AMFI_HISTORY_FETCH_FAILED',
+              message: conflictingObservation
+                ? 'AMFI historical NAV report contains conflicting observations.'
+                : error?.message || 'AMFI historical NAV request failed.',
             },
           };
         }
