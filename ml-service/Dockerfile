@@ -9,9 +9,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
-# Install lightweight CPU-only PyTorch wheel first, then remaining dependencies
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
-    pip install --no-cache-dir -r requirements.txt
+# Install only the exact artifacts recorded in the universal Python 3.12 lock export.
+RUN python -m pip install --no-cache-dir --require-hashes -r requirements.txt && \
+    python -c "import torch; assert torch.__version__ == '2.6.0+cpu' and torch.version.cuda is None"
 
 COPY . .
 

@@ -1,0 +1,56 @@
+[project]
+name = "wealthgenie-ml-service"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi==0.141.1",
+  "starlette==1.3.1",
+  "uvicorn[standard]==0.30.0",
+  "scikit-learn==1.5.2",
+  "hmmlearn==0.3.3",
+  "pandas==2.2.3",
+  "numpy==1.26.4",
+  "joblib==1.4.2",
+  "pydantic==2.13.5",
+  "python-dotenv==1.2.2",
+  "shap==0.46.0",
+  "pytest==9.0.3",
+  "pytest-asyncio==1.4.0",
+  "httpx==0.28.1",
+  "torch==2.6.0+cpu",
+  "matplotlib>=3.8.0",
+  "sentence-transformers>=5.7.0,<6.0.0",
+  "pyarrow>=14.0.0",
+  "faiss-cpu>=1.7.4",
+  "pymongo>=4.6.0",
+  "mongomock>=4.1.2",
+  "opentelemetry-api>=1.24.0",
+  "opentelemetry-sdk>=1.24.0",
+  "opentelemetry-instrumentation-fastapi>=0.45b0",
+  "transformers==5.16.1",
+  "dspy==3.3.1",
+  "litellm==1.102.0",
+  "huggingface-hub>=1.5.0,<2.0.0",
+  "peft>=0.20.0,<0.21.0",
+  "accelerate==1.15.0",
+  "pypdf>=4.0.0",
+]
+
+[dependency-groups]
+agent-evolution-tests = ["pytest==9.0.3"]
+ci-audit-tools = ["pip==26.2.1", "pip-audit==2.10.1"]
+
+[tool.uv]
+package = false
+required-environments = [
+  "sys_platform == 'win32' and platform_machine == 'AMD64'",
+  "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
