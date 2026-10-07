@@ -4,7 +4,10 @@ import { redisClient, redisAvailable } from '../config/redis.js';
 import { checkMLHealth } from '../services/mlClient.js';
 import { asyncHandler } from '../middleware/errorHandler.js';
 import logger from '../utils/logger.js';
-import { verifyPersistenceIndexes } from '../services/persistenceIndexReadiness.js';
+import {
+  verifyMarketDataPersistenceIndexes,
+  verifyPersistenceIndexes,
+} from '../services/persistenceIndexReadiness.js';
 import { verifyAgentRuntimePersistence } from '../services/planHealthPersistence.js';
 import { normalizeBuildSha } from '../../shared/buildIdentity.js';
 import { REDIS_PROBE_TIMEOUT_MS } from '../../shared/demoPreflightContracts.js';
@@ -48,6 +51,8 @@ export function createHealthRouter({
   verifyMongoTransaction = verifyConnectedMongoTransaction,
   verifyDemoEnvironmentSentinel = verifyConnectedDemoEnvironmentSentinel,
   verifyRedisConnection = verifyConnectedRedis,
+  verifyFinancialIndexes = verifyPersistenceIndexes,
+  verifyMarketDataIndexes = verifyMarketDataPersistenceIndexes,
   isMongoConnected = () => mongoose.connection.readyState === 1,
   getMongoDatabaseName = () => mongoose.connection.db?.databaseName || null,
   getMongoHost = () => mongoose.connection.host || null,
@@ -156,8 +161,9 @@ export function createHealthRouter({
  */
   router.get('/ready', asyncHandler(async (_req, res) => {
     const reasons = [];
+    const mongoConnected = isMongoConnected();
     if (runtimeState && !runtimeState.isReady()) reasons.push(`Application lifecycle is ${runtimeState.snapshot().phase}`);
-    if (mongoose.connection.readyState !== 1) reasons.push('Database not connected');
+    if (!mongoConnected) reasons.push('Database not connected');
     const demoIdentityConfigured = expectedDemoDatabase !== undefined
       || expectedDemoDatabaseHost !== undefined
       || expectedDemoDatabasePort !== undefined
@@ -193,11 +199,16 @@ export function createHealthRouter({
         reasons.push('Required MCP runtime or distributed capacity/auth controls are not ready');
       }
     }
-    if (mongoose.connection.readyState === 1) {
+    if (mongoConnected) {
       try {
-        await verifyPersistenceIndexes();
+        await verifyFinancialIndexes();
       } catch {
         reasons.push('Required persistence indexes are not ready');
+      }
+      try {
+        await verifyMarketDataIndexes({ force: true });
+      } catch {
+        reasons.push('Required market-data persistence indexes are not ready');
       }
       if (requireAgentRuntimePersistence) {
         try {

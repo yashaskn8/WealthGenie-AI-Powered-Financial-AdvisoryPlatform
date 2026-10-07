@@ -226,6 +226,8 @@ test('readiness fails when configured isolated Mongo identity is not the connect
     getMongoHost: () => 'production.cluster.example',
     getMongoPort: () => 27017,
     isMongoConnected: () => true,
+    verifyFinancialIndexes: async () => {},
+    verifyMarketDataIndexes: async () => {},
     verifyMongoTransaction: async () => { transactionCalls += 1; return true; },
     verifyDemoEnvironmentSentinel: async () => false,
   }, async baseUrl => {
@@ -268,4 +270,35 @@ test('readiness fails closed when the exact demo database sentinel is absent', a
     assert.doesNotMatch(JSON.stringify(body), /cluster\.demo|wealthgenie_demo|11111111/);
   });
   assert.equal(sentinelCalls, 1);
+});
+
+test('readiness fails closed when financial or market-data persistence indexes are missing', async t => {
+  for (const missing of ['financial', 'market-data']) {
+    await t.test(`${missing} index verification failure`, async () => {
+      let financialCalls = 0;
+      let marketDataCalls = 0;
+      await withVerificationServer({
+        isMongoConnected: () => true,
+        verifyFinancialIndexes: async () => {
+          financialCalls += 1;
+          if (missing === 'financial') throw new Error('missing');
+        },
+        verifyMarketDataIndexes: async ({ force } = {}) => {
+          marketDataCalls += 1;
+          assert.equal(force, true);
+          if (missing === 'market-data') throw new Error('missing');
+        },
+      }, async baseUrl => {
+        const response = await fetch(`${baseUrl}/health/ready`);
+        const body = await response.json();
+        assert.equal(response.status, 503);
+        assert.equal(body.status, 'NOT_READY');
+        assert.ok(body.reasons.includes(missing === 'financial'
+          ? 'Required persistence indexes are not ready'
+          : 'Required market-data persistence indexes are not ready'));
+      });
+      assert.equal(financialCalls, 1);
+      assert.equal(marketDataCalls, 1);
+    });
+  }
 });
