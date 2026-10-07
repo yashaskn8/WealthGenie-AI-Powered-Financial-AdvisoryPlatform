@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
 import { hashResearchBrief, verifyArtifactContentHash } from './researchArtifact.js';
 import {
-  lexicalTokens,
   normalizeResearchFacts,
+  orderedLexicalTokens,
   researchFactsMatch,
   researchNegatedPhraseOverlapsClaim,
   textHasNegation,
@@ -127,14 +127,19 @@ export function verifyResearchArtifact(artifact, {
     if (evidence.length !== claim.supportingEvidenceIds.length) claimErrors.push('CLAIM_EVIDENCE_MISSING');
     if (UNSAFE_LANGUAGE.test(claim.text) || containsPrescriptiveAdvice(claim.text)) claimErrors.push('UNSAFE_CLAIM_LANGUAGE');
     const claimFacts = normalizeResearchFacts(claim.text);
-    const claimTokens = lexicalTokens(claim.text);
+    const claimTokens = orderedLexicalTokens(claim.text);
     const evidenceChecks = evidence.map(item => {
       const evidenceFacts = normalizeResearchFacts(item.supportingExcerpt);
-      const evidenceTokens = new Set(lexicalTokens(item.supportingExcerpt));
-      const factSupport = claimFacts.every(fact => evidenceFacts.some(candidate => researchFactsMatch(fact, candidate)));
-      const lexicalSupport = claimTokens.length === 0
-        ? claimFacts.length > 0 && factSupport
-        : claimTokens.every(token => evidenceTokens.has(token));
+      const evidenceTokens = orderedLexicalTokens(item.supportingExcerpt);
+      const factSupport = claimFacts.length === evidenceFacts.length
+        && claimFacts.every((fact, index) => researchFactsMatch(fact, evidenceFacts[index]));
+      // Without a qualified semantic entailment model, only accept the same
+      // ordered substantive wording and the same ordered typed facts. Set-based
+      // token overlap accepts subject/object reversals such as "bank lends RBI"
+      // when the source says "RBI lends bank".
+      const lexicalSupport = claimTokens.length > 0
+        && claimTokens.length === evidenceTokens.length
+        && claimTokens.every((token, index) => token === evidenceTokens[index]);
       const negationConflict = textHasNegation(claim.text) !== textHasNegation(item.supportingExcerpt)
         || researchNegatedPhraseOverlapsClaim(claim.text, item.supportingExcerpt);
       return { factSupport, lexicalSupport, negationConflict };

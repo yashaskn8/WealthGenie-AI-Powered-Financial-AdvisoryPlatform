@@ -21,6 +21,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from model.artifacts.bundle import canonical_json_bytes, read_verified_evaluation_report
+from model.registry.promotion_policy import (
+    check_promotion_gate,
+    has_complete_promotion_metrics,
+    metrics_from_verified_evaluation_report,
+)
 
 _DEFAULT_DB_PATH = Path(__file__).resolve().parent / "model_registry.db"
 _SCHEMA_VERSION = 2
@@ -112,6 +117,9 @@ class ModelRegistry:
             "evaluation_report_sha256": "TEXT",
             "trusted_baseline": "INTEGER NOT NULL DEFAULT 0",
             "validation_evidence_id": "TEXT",
+            "validation_evidence_sha256": "TEXT",
+            "validation_baseline_version_id": "TEXT",
+            "validation_baseline_generation": "INTEGER",
         }
         for name, declaration in optional_columns.items():
             if name not in columns:
@@ -169,14 +177,15 @@ class ModelRegistry:
             report = read_verified_evaluation_report(verified)
             if report.get("evaluation_run_id") != manifest["evaluation_report_id"]:
                 raise ValueError("evaluation report does not match trusted manifest")
-            prepared.append((architecture, manifest, manifest_hash, materialized / member["filename"], member["sha256"], report))
+            baseline_metrics = metrics_from_verified_evaluation_report(report)
+            prepared.append((architecture, manifest, manifest_hash, materialized / member["filename"], member["sha256"], report, baseline_metrics))
 
         conn = self._get_conn()
         now = datetime.now(timezone.utc).isoformat()
         records = {}
         try:
             conn.execute("BEGIN IMMEDIATE")
-            for architecture, manifest, manifest_hash, artifact_path, artifact_hash, report in prepared:
+            for architecture, manifest, manifest_hash, artifact_path, artifact_hash, report, baseline_metrics in prepared:
                 active_row = conn.execute(
                     "SELECT * FROM model_versions WHERE model_architecture = ? AND is_active = 1",
                     (architecture,),
@@ -185,6 +194,12 @@ class ModelRegistry:
                     active = self._row_to_dict(active_row)
                     if active.get("bundle_id") != manifest["bundle_id"] or active.get("bundle_manifest_sha256") != manifest_hash:
                         raise RuntimeError(f"refusing to replace existing active {architecture} model")
+                    if not has_complete_promotion_metrics(active.get("metrics")) and has_complete_promotion_metrics(baseline_metrics):
+                        conn.execute(
+                            "UPDATE model_versions SET metrics=? WHERE version_id=? AND is_active=1",
+                            (json.dumps(baseline_metrics, sort_keys=True), active["version_id"]),
+                        )
+                        active = self.get_version(active["version_id"])
                     records[architecture] = active
                     continue
                 existing = conn.execute(
@@ -196,8 +211,8 @@ class ModelRegistry:
                     if record.get("bundle_manifest_sha256") != manifest_hash:
                         raise RuntimeError("bundle ID is already registered with a different hash")
                     conn.execute(
-                        "UPDATE model_versions SET is_active=1,lifecycle_state='ACTIVE',activation_generation=1,trusted_baseline=1 WHERE version_id=? AND is_active=0",
-                        (record["version_id"],),
+                        "UPDATE model_versions SET is_active=1,lifecycle_state='ACTIVE',activation_generation=1,trusted_baseline=1,metrics=? WHERE version_id=? AND is_active=0",
+                        (json.dumps(baseline_metrics, sort_keys=True), record["version_id"]),
                     )
                     records[architecture] = self.get_version(record["version_id"])
                     continue
@@ -216,7 +231,7 @@ class ModelRegistry:
                     (
                         version_id, architecture, manifest["training_data_hash"], manifest["training_timestamp"],
                         json.dumps({"feature_schema_version": manifest["feature_schema_version"], "feature_names": manifest["feature_names"], "target_classes": manifest["target_classes"]}),
-                        json.dumps(report.get("metrics", {})), str(artifact_path), artifact_hash,
+                        json.dumps(baseline_metrics, sort_keys=True), str(artifact_path), artifact_hash,
                         None, now, "Explicit trusted serving bundle bootstrap", manifest["bundle_id"],
                         manifest_hash, str(materialized), f"local/{manifest['bundle_id']}",
                         "local_filesystem", manifest["model_version"], manifest["feature_schema_version"],
@@ -371,7 +386,7 @@ class ModelRegistry:
         try:
             conn.execute("BEGIN IMMEDIATE")
             candidate = conn.execute(
-                "SELECT lifecycle_state,bundle_id,bundle_manifest_sha256 FROM model_versions WHERE version_id=?",
+                "SELECT * FROM model_versions WHERE version_id=?",
                 (version_id,),
             ).fetchone()
             if (
@@ -383,9 +398,23 @@ class ModelRegistry:
                 or candidate["lifecycle_state"] != "SHADOW"
             ):
                 raise ValueError("evaluation evidence does not match the current SHADOW candidate")
+            active_row = conn.execute(
+                "SELECT * FROM model_versions WHERE model_architecture=? AND is_active=1",
+                (candidate["model_architecture"],),
+            ).fetchone()
+            if not active_row:
+                raise ValueError("candidate validation requires an active baseline")
+            active = self._row_to_dict(active_row)
+            gate = check_promotion_gate(evidence["metrics"], active.get("metrics"))
+            if not gate["gate_passed"]:
+                raise ValueError("candidate evaluation metrics regress against active baseline")
             result = conn.execute(
-                "UPDATE model_versions SET lifecycle_state='VALIDATED',metrics=?,validation_evidence_id=? WHERE version_id=? AND lifecycle_state='SHADOW'",
-                (json.dumps(evidence["metrics"], sort_keys=True), evaluation_run_id, version_id),
+                "UPDATE model_versions SET lifecycle_state='VALIDATED',metrics=?,validation_evidence_id=?,validation_evidence_sha256=?,validation_baseline_version_id=?,validation_baseline_generation=? WHERE version_id=? AND lifecycle_state='SHADOW'",
+                (
+                    json.dumps(evidence["metrics"], sort_keys=True), evaluation_run_id,
+                    evidence["evidence_sha256"], active["version_id"],
+                    int(active.get("activation_generation", 0)), version_id,
+                ),
             )
             if result.rowcount != 1:
                 raise RuntimeError("candidate lifecycle changed before validation")
@@ -555,6 +584,26 @@ class ModelRegistry:
                 raise RuntimeError("active model changed before activation")
             if expected_activation_generation is not None and generation != expected_activation_generation:
                 raise RuntimeError("active model generation changed before activation")
+            if target.get("lifecycle_state") == "VALIDATED":
+                if (
+                    not target.get("validation_evidence_id")
+                    or not target.get("validation_evidence_sha256")
+                    or target.get("validation_baseline_version_id") != active_id
+                    or int(target.get("validation_baseline_generation") or 0) != generation
+                ):
+                    raise RuntimeError("validated candidate baseline changed before activation")
+                evidence = self.get_evaluation_evidence(target["validation_evidence_id"])
+                if (
+                    not evidence
+                    or evidence.get("evidence_sha256") != target["validation_evidence_sha256"]
+                    or evidence.get("candidate_version_id") != version_id
+                    or evidence.get("candidate_bundle_hash") != target.get("bundle_manifest_sha256")
+                    or evidence.get("metrics") != target.get("metrics")
+                ):
+                    raise RuntimeError("validated candidate evidence changed before activation")
+                gate = check_promotion_gate(target.get("metrics"), active.get("metrics") if active else None)
+                if not gate["gate_passed"]:
+                    raise RuntimeError("candidate evaluation metrics regress against active baseline")
             if active_id != version_id:
                 conn.execute(
                     "UPDATE model_versions SET is_active=0,lifecycle_state='ROLLED_BACK' WHERE model_architecture=? AND is_active=1",

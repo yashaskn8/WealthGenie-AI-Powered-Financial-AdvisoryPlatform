@@ -50,7 +50,9 @@ def test_concurrent_model_activation_is_atomic_and_expected_version_fenced(tmp_p
             candidates.append(first.register_verified_bundle(bundle, first.artifact_store))
             database["model_versions"].update_one(
                 {"version_id": candidates[-1]["version_id"], "lifecycle_state": "CANDIDATE"},
-                {"$set": {"lifecycle_state": "VALIDATED"}},
+                # Exercise the activation CAS/rollback path without fabricating
+                # evaluator evidence for a promotion-ready VALIDATED state.
+                {"$set": {"lifecycle_state": "ROLLED_BACK"}},
             )
 
         barrier = Barrier(2)

@@ -97,7 +97,21 @@ def _is_negated_claim(answer: str, position: int) -> bool:
         re.I,
     )
     no_actor_can = re.search(r"\b(?:no one|nobody|no taxpayer|no investor)\s+(?:(?:can|may|should|will)\s*)?$", preceding, re.I)
-    return bool(direct_negation or uncertainty_frame or no_actor_can)
+    denial_frame = re.search(
+        r"\b(?:(?:it|this|that)\s+)?(?:is|was)\s+"
+        r"(?:not\s+true|false|incorrect|wrong|untrue)\s+that\s+[^.!?;]{0,100}$",
+        preceding,
+        re.I,
+    )
+    rejection_frame = re.search(
+        r"\b(?:i|we|they|the\s+author|the\s+answer)\s+"
+        r"(?:(?:do|does|did)\s+not\s+agree|don't\s+agree|doesn't\s+agree|"
+        r"deny|denies|dispute|disputes|reject|rejects|challenge|challenges)\s+"
+        r"(?:with\s+)?(?:the\s+claim\s+that\s+|that\s+)?[^.!?;]{0,100}$",
+        preceding,
+        re.I,
+    )
+    return bool(direct_negation or uncertainty_frame or no_actor_can or denial_frame or rejection_frame)
 
 
 def _has_unnegated_pattern(answer: str, pattern: str) -> bool:
@@ -110,6 +124,30 @@ def _has_unnegated_phrase(answer: str, phrase: str) -> bool:
         return False
     pattern = r"\b" + r"\W+".join(re.escape(word) for word in words) + r"\b"
     return _has_unnegated_pattern(answer, pattern)
+
+
+def _has_postposed_contradiction(answer: str, phrase: str) -> bool:
+    words = _normalized_phrase(phrase).split()
+    if not words:
+        return False
+    pattern = r"\b" + r"\W+".join(re.escape(word) for word in words) + r"\b"
+    denial = re.compile(
+        r"\b(?:false|incorrect|wrong|untrue|not\s+the\s+case|not\s+true|"
+        r"does\s+not|doesn't|is\s+not|isn't|was\s+not|wasn't|"
+        r"will\s+not|won't|never|no\s+longer|unsupported|disputed|"
+        r"retract(?:ed|s|ing)?|withdraw(?:n|s|ing)?|disavow(?:ed|s|ing)?|"
+        r"incorrectly\s+stated)\b",
+        re.I,
+    )
+    for match in re.finditer(pattern, answer or "", re.I):
+        # A short forward window catches explicit correction clauses such as
+        # "The rule takes effect on 1 April 2026, but that date is false" and
+        # adjacent-sentence walk-backs. Unknown paraphrases remain outside the
+        # lexical evaluator's claimed coverage.
+        following = (answer or "")[match.end():match.end() + 180]
+        if denial.search(following):
+            return True
+    return False
 
 
 def _claims_unsupported_deduction(answer: str) -> bool:
@@ -376,7 +414,11 @@ class RAGEvaluator:
         referenced_citation_ids = set(answer_citation_references)
         citation_support = []
         for fact in required_facts:
-            answer_support = _contains_phrase(response.answer, fact)
+            answer_support = (
+                _contains_phrase(response.answer, fact)
+                and _has_unnegated_phrase(response.answer, fact)
+                and not _has_postposed_contradiction(response.answer, fact)
+            )
             source_support = any(
                 _contains_phrase(cited_by_id[chunk_id].excerpt, fact)
                 and _contains_phrase(retrieved_by_id[chunk_id].chunk.content, fact)

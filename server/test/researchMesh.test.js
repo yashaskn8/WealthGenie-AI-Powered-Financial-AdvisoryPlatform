@@ -402,10 +402,19 @@ test('research claim verification rejects sign, unit, qualifier, date, and negat
   const equivalentCurrency = verifyRewrite({
     excerpt: 'The minimum balance is Rs 100000 for this account.',
     claimText: 'The minimum balance is ₹1,00,000 for this account.',
-    candidate: 'Rs 100000',
+    candidate: 'The minimum balance is Rs 100000 for this account.',
   });
   assert.equal(equivalentCurrency.claimAudits[0]?.finalDecision, 'SUPPORTED');
   assert.equal(equivalentCurrency.verifiedClaims.length, 1);
+
+  const reversedFinancialRoles = verifyRewrite({
+    excerpt: 'RBI lends bank ₹1000.',
+    claimText: 'Bank lends RBI ₹1000.',
+    candidate: 'RBI lends bank ₹1000.',
+  });
+  assert.equal(reversedFinancialRoles.claimAudits[0]?.finalDecision, 'UNVERIFIED');
+  assert.ok(reversedFinancialRoles.errors.some(code => code.startsWith('CLAIM_NOT_ENTAILED_BY_EVIDENCE_')));
+  assert.equal(reversedFinancialRoles.verifiedClaims.length, 0);
 });
 
 test('live search metadata cannot forge publisher identity or freshness', async () => {

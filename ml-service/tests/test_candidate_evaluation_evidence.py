@@ -154,3 +154,118 @@ def test_sqlite_evaluation_report_and_evidence_are_immutable(tmp_path):
     store._get_conn().commit()
     with pytest.raises(RuntimeError, match="report hash mismatch|evidence hash mismatch"):
         store.get_evaluation_evidence("eval-immutable-1")
+
+
+def _register_shadow_with_evidence(tmp_path, store, artifact_store, metrics, run_id):
+    source = Path(__file__).resolve().parents[1] / "model" / "bundles" / "random_forest"
+    manifest = json.loads((source / "bundle.manifest.json").read_text(encoding="utf-8"))
+    verified = verify_bundle(source, manifest["bundle_manifest_sha256"])
+    verified["bundle_dir"] = source
+    candidate = store.register_verified_bundle(verified, artifact_store)
+    store.update_lifecycle_state(candidate["version_id"], "SHADOW")
+    report = {
+        "evaluation_run_id": run_id,
+        "candidate_version_id": candidate["version_id"],
+        "candidate_bundle_id": candidate["bundle_id"],
+        "candidate_bundle_hash": candidate["bundle_manifest_sha256"],
+        "evaluation_dataset_hash": "3" * 64,
+        "evaluator_version": "candidate-heldout-evaluator-v1",
+        "evaluator_git_sha": "b" * 40,
+        "metrics": metrics,
+    }
+    report_bytes = json.dumps(report, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    evidence = {
+        **report,
+        "timestamp": "2026-09-25T00:00:00+00:00",
+        "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+        "report": report,
+    }
+    store.record_evaluation_evidence(evidence)
+    return candidate, evidence
+
+
+def _register_active_legacy_baseline(tmp_path, store, metrics, suffix):
+    artifact = tmp_path / f"{suffix}.pkl"
+    artifact.write_bytes(f"{suffix}-baseline".encode())
+    return store.register_model(
+        model_architecture="RandomForest",
+        artifact_path=artifact,
+        training_data_hash="4" * 64,
+        training_timestamp="2026-09-24T12:00:00+00:00",
+        hyperparameters={},
+        metrics=metrics,
+        set_active=True,
+    )
+
+
+def test_sqlite_candidate_validation_rejects_regression_against_active_baseline(tmp_path):
+    from model.registry.promotion_policy import PROMOTION_TRACKED_METRICS
+
+    active_metrics = {name: 0.9 for name in PROMOTION_TRACKED_METRICS}
+    candidate_metrics = {name: 0.0 for name in PROMOTION_TRACKED_METRICS}
+    store = ModelRegistry(tmp_path / "registry.sqlite")
+    artifact_store = LocalArtifactStore(tmp_path / "artifacts")
+    _register_active_legacy_baseline(tmp_path, store, active_metrics, "active")
+    candidate, evidence = _register_shadow_with_evidence(
+        tmp_path, store, artifact_store, candidate_metrics, "eval-regressing-candidate",
+    )
+
+    with pytest.raises(ValueError, match="regress against active baseline"):
+        store.validate_version_with_evidence(candidate["version_id"], evidence["evaluation_run_id"])
+
+    assert store.get_version(candidate["version_id"])["lifecycle_state"] == "SHADOW"
+    assert store.get_active_model("RandomForest")["metrics"] == active_metrics
+
+
+def test_sqlite_promotion_binds_validation_to_baseline_and_rechecks_before_activation(tmp_path):
+    from model.registry.promotion_policy import PROMOTION_TRACKED_METRICS
+
+    active_metrics = {name: 0.9 for name in PROMOTION_TRACKED_METRICS}
+    passing_metrics = {name: 0.89 for name in PROMOTION_TRACKED_METRICS}
+    store = ModelRegistry(tmp_path / "registry.sqlite")
+    artifact_store = LocalArtifactStore(tmp_path / "artifacts")
+    baseline_id = _register_active_legacy_baseline(tmp_path, store, active_metrics, "active")
+    baseline = store.get_version(baseline_id)
+    candidate, evidence = _register_shadow_with_evidence(
+        tmp_path, store, artifact_store, passing_metrics, "eval-passing-candidate",
+    )
+
+    validated = store.validate_version_with_evidence(candidate["version_id"], evidence["evaluation_run_id"])
+    assert validated["lifecycle_state"] == "VALIDATED"
+    assert validated["validation_baseline_version_id"] == baseline_id
+    assert validated["validation_baseline_generation"] == baseline["activation_generation"]
+    active = store.activate_version(
+        candidate["version_id"],
+        expected_active_version_id=baseline_id,
+        expected_activation_generation=baseline["activation_generation"],
+    )
+    assert active["lifecycle_state"] == "ACTIVE"
+    stored_evidence = store.get_evaluation_evidence(evidence["evaluation_run_id"])
+    assert active["validation_evidence_sha256"] == stored_evidence["evidence_sha256"]
+
+
+def test_sqlite_promotion_rejects_candidate_validated_against_stale_baseline(tmp_path):
+    from model.registry.promotion_policy import PROMOTION_TRACKED_METRICS
+
+    metrics = {name: 0.9 for name in PROMOTION_TRACKED_METRICS}
+    store = ModelRegistry(tmp_path / "registry.sqlite")
+    artifact_store = LocalArtifactStore(tmp_path / "artifacts")
+    first_baseline_id = _register_active_legacy_baseline(tmp_path, store, metrics, "first-active")
+    first_baseline = store.get_version(first_baseline_id)
+    candidate, evidence = _register_shadow_with_evidence(
+        tmp_path, store, artifact_store, metrics, "eval-stale-baseline-candidate",
+    )
+    store.validate_version_with_evidence(candidate["version_id"], evidence["evaluation_run_id"])
+
+    replacement_baseline_id = _register_active_legacy_baseline(tmp_path, store, metrics, "replacement-active")
+    replacement_baseline = store.get_version(replacement_baseline_id)
+    with pytest.raises(RuntimeError, match="baseline changed before activation"):
+        store.activate_version(
+            candidate["version_id"],
+            expected_active_version_id=replacement_baseline_id,
+            expected_activation_generation=replacement_baseline["activation_generation"],
+        )
+
+    assert store.get_version(candidate["version_id"])["lifecycle_state"] == "VALIDATED"
+    assert store.get_active_model("RandomForest")["version_id"] == replacement_baseline_id
+    assert first_baseline["version_id"] != replacement_baseline_id

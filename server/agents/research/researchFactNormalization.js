@@ -301,9 +301,13 @@ export function researchNegatedPhraseOverlapsClaim(claimText, evidenceText) {
 }
 
 export function lexicalTokens(value) {
+  return [...new Set(orderedLexicalTokens(value))];
+}
+
+export function orderedLexicalTokens(value) {
   const stopWords = new Set(['the', 'and', 'for', 'from', 'with', 'this', 'that', 'was', 'were', 'are', 'is', 'has', 'have', 'had', 'does', 'did', 'not', 'now', 'then', 'into', 'onto', 'its', 'their', 'there', 'here']);
-  return [...new Set(String(value || '').normalize('NFKC').toLowerCase()
+  return String(value || '').normalize('NFKC').toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter(token => token.length > 2 && !stopWords.has(token) && !/^\d+$/.test(token))
-    .map(token => token.endsWith('ies') ? `${token.slice(0, -3)}y` : token.endsWith('s') ? token.slice(0, -1) : token.endsWith('ed') ? token.slice(0, -2) : token))];
+    .map(token => token.endsWith('ies') ? `${token.slice(0, -3)}y` : token.endsWith('s') ? token.slice(0, -1) : token.endsWith('ed') ? token.slice(0, -2) : token);
 }

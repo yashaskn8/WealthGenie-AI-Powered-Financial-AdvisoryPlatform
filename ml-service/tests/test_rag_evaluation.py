@@ -224,6 +224,37 @@ def test_rag_evaluator_scores_supported_required_facts_forbidden_claims_and_answ
     assert result["metrics"]["forbidden_claim_violation_count"] == 0
     assert result["metrics"]["answerability_correctness"] is True
 
+    walk_backs = (
+        ", but that date is false and the rule does not take effect then.",
+        ". However, I retract that statement.",
+        ". That claim is unsupported.",
+        ". This date is disputed.",
+        ". That date was incorrectly stated.",
+    )
+    denial_prefixes = (
+        "It is not true that ",
+        "It is false that ",
+        "I do not agree that ",
+        "I deny that ",
+        "I dispute that ",
+    )
+    for answer in [f"{content}{walk_back} [1]" for walk_back in walk_backs] + [
+        f"{prefix}{content} [1]" for prefix in denial_prefixes
+    ]:
+        contradicted_answer = RAGQueryResponse(
+            answer=answer,
+            citations=response.citations,
+            retrieved_chunks=response.retrieved_chunks,
+            grounded=True,
+        )
+        contradicted_result = RAGEvaluator().evaluate_query_response(
+            query="When does the rule take effect?",
+            response=contradicted_answer,
+            expected_abstention=False,
+            required_facts=[content],
+        )
+        assert contradicted_result["metrics"]["factual_support"] == 0.0
+
     false_abstention = RAGEvaluator().evaluate_query_response(
         query="When does the rule take effect?",
         response=RAGQueryResponse(answer="I cannot verify that.", grounded=False),

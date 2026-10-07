@@ -5,6 +5,7 @@ import os
 import numpy as np
 import pandas as pd
 import pytest
+import main
 from fastapi.testclient import TestClient
 
 from main import app
@@ -21,6 +22,8 @@ from model.registry.drift_monitor import (
     generate_synthetic_feature_batch,
 )
 from model.registry.router import check_promotion_gate, PROMOTION_TRACKED_METRICS, ValidateRequest
+from model.registry.registry_store import ModelRegistry
+from model.registry.promotion_policy import metrics_from_verified_evaluation_report
 from model.serving.registry import registry
 from pydantic import ValidationError
 
@@ -91,14 +94,34 @@ def test_promotion_gate_accepts_metric_parity_but_does_not_activate():
     assert result["gate_passed"] is True
 
 
+def test_trusted_baseline_report_metrics_match_the_candidate_evaluator_semantics():
+    report = {
+        "interpretation": "synthetic suitability-policy approximation fidelity; not investor outcomes or investment performance",
+        "metric_definitions": {
+            "accuracy": "fraction of split examples matching the synthetic policy label",
+        },
+        "test_metrics": {"accuracy": 0.91, "balanced_accuracy": 0.92, "macro_f1": 0.93},
+    }
+    assert metrics_from_verified_evaluation_report(report) == {
+        "rule_approximation_fidelity": 0.91,
+        "balanced_accuracy": 0.92,
+        "macro_f1": 0.93,
+    }
+    report["metric_definitions"]["accuracy"] = "unrelated accuracy metric"
+    assert metrics_from_verified_evaluation_report(report) == {}
+
+
 def test_operator_cannot_submit_free_floating_validation_metrics():
     with pytest.raises(ValidationError):
         ValidateRequest(metrics={name: 0.99 for name in PROMOTION_TRACKED_METRICS})
     assert ValidateRequest(evaluation_run_id="evaluator-run-1").evaluation_run_id == "evaluator-run-1"
 
 
-def test_unbundled_candidate_cannot_enter_shadow(tmp_path):
-    store = registry.get_version_registry()
+def test_unbundled_candidate_cannot_enter_shadow(tmp_path, monkeypatch, request):
+    store = ModelRegistry(tmp_path / "registry.sqlite")
+    monkeypatch.setattr(registry, "_version_registry", store)
+    monkeypatch.setattr(main, "get_model_registry", lambda: store)
+    request.addfinalizer(store.close)
     artifact = tmp_path / "raw-model.pkl"
     artifact.write_bytes(b"not-a-bundle")
     version_id = store.register_model(

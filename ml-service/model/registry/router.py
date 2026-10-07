@@ -13,24 +13,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Security, status
 from pydantic import BaseModel, Field
 
 from model.serving.registry import registry
+from model.registry.promotion_policy import (
+    PROMOTION_MAX_REGRESSION,
+    PROMOTION_TRACKED_METRICS,
+    check_promotion_gate,
+)
 from store_factory import get_model_registry
 from security import operator_key_header, verify_api_key, verify_operator_key
 
 logger = logging.getLogger("wealthgenie.registry.router")
 
 registry_router = APIRouter(prefix="/model/registry", tags=["Model Registry"], dependencies=[Depends(verify_api_key)])
-
-# ── Promotion Gate Configuration ──
-# Maximum allowed regression (as fraction) on any tracked metric before a candidate
-# is blocked from becoming active. 0.02 = candidate must be within 2% of the
-# current active version on every metric to pass.
-PROMOTION_MAX_REGRESSION = 0.02
-PROMOTION_TRACKED_METRICS = [
-    "rule_approximation_fidelity",
-    "balanced_accuracy",
-    "macro_f1",
-]
-
 
 async def verify_registry_operator(
     operator_key: Optional[str] = Security(operator_key_header),
@@ -59,88 +52,6 @@ def get_version_store():
         store = get_model_registry()
         registry.set_version_registry(store)
     return store
-
-
-def check_promotion_gate(
-    candidate_metrics: Dict[str, Any],
-    active_metrics: Dict[str, Any],
-    max_regression: float = PROMOTION_MAX_REGRESSION,
-    tracked_metrics: List[str] = None,
-) -> Dict[str, Any]:
-    """
-    Compares candidate metrics against active model metrics.
-    Returns a gate result dict with pass/fail status and per-metric details.
-
-    A candidate FAILS the gate if any tracked metric regresses by more than
-    `max_regression` (fraction) relative to the active model's value.
-
-    Example: active fidelity=0.95, max_regression=0.02
-      → candidate must have fidelity >= 0.95 * (1 - 0.02) = 0.931
-    """
-    if tracked_metrics is None:
-        tracked_metrics = PROMOTION_TRACKED_METRICS
-
-    gate_passed = True
-    per_metric = {}
-    failures = []
-
-    for metric_name in tracked_metrics:
-        active_val = active_metrics.get(metric_name)
-        candidate_val = candidate_metrics.get(metric_name)
-
-        if active_val is None or candidate_val is None:
-            per_metric[metric_name] = {
-                "status": "SKIPPED",
-                "reason": f"metric missing (active={active_val}, candidate={candidate_val})",
-            }
-            gate_passed = False
-            failures.append(f"{metric_name}: required validation evidence is missing")
-            continue
-
-        try:
-            active_number = float(active_val)
-            candidate_number = float(candidate_val)
-        except (TypeError, ValueError):
-            active_number = candidate_number = math.nan
-        if (
-            not math.isfinite(active_number)
-            or not math.isfinite(candidate_number)
-            or not 0.0 <= active_number <= 1.0
-            or not 0.0 <= candidate_number <= 1.0
-        ):
-            per_metric[metric_name] = {
-                "status": "FAIL",
-                "reason": "metric evidence must be finite and in [0, 1]",
-            }
-            gate_passed = False
-            failures.append(f"{metric_name}: invalid validation evidence")
-            continue
-
-        threshold = active_number * (1.0 - max_regression)
-        passed = candidate_number >= threshold
-
-        per_metric[metric_name] = {
-            "active_value": round(active_number, 4),
-            "candidate_value": round(candidate_number, 4),
-            "minimum_required": round(threshold, 4),
-            "regression_pct": round((1.0 - candidate_number / active_number) * 100, 2) if active_number > 0 else 0.0,
-            "status": "PASS" if passed else "FAIL",
-        }
-
-        if not passed:
-            gate_passed = False
-            failures.append(
-                f"{metric_name}: candidate={round(candidate_number, 4)} < "
-                f"minimum={round(threshold, 4)} (active={round(active_number, 4)}, "
-                f"max_regression={max_regression*100}%)"
-            )
-
-    return {
-        "gate_passed": gate_passed,
-        "max_regression_allowed": max_regression,
-        "per_metric": per_metric,
-        "failures": failures,
-    }
 
 
 class DriftCheckRequest(BaseModel):

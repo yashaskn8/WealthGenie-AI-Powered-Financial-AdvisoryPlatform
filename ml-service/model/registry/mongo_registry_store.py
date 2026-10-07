@@ -22,6 +22,11 @@ from pymongo import MongoClient, DESCENDING
 from pymongo.errors import ConnectionFailure, DuplicateKeyError, OperationFailure
 from model.migrations.phase3_state import verify_phase3_state
 from model.artifacts.bundle import canonical_json_bytes, read_verified_evaluation_report
+from model.registry.promotion_policy import (
+    check_promotion_gate,
+    has_complete_promotion_metrics,
+    metrics_from_verified_evaluation_report,
+)
 from mongo_database import resolve_mongo_database_name
 
 logger = logging.getLogger("wealthgenie.registry.mongo")
@@ -230,6 +235,7 @@ class MongoModelRegistry:
             role = {"RandomForest": "model", "PyTorch_MLP": "weights", "FT_Transformer": "weights"}[architecture]
             member = next(item for item in manifest["artifact_files"] if item["role"] == role)
             report = read_verified_evaluation_report(verified)
+            baseline_metrics = metrics_from_verified_evaluation_report(report)
             document = {
                 "version_id": str(uuid.uuid4()),
                 "model_architecture": architecture,
@@ -253,7 +259,7 @@ class MongoModelRegistry:
                     "feature_names": manifest["feature_names"],
                     "target_classes": manifest["target_classes"],
                 },
-                "metrics": report.get("metrics", {}),
+                "metrics": baseline_metrics,
                 "reference_distributions": None,
                 "is_active": True,
                 "lifecycle_state": "ACTIVE",
@@ -275,6 +281,12 @@ class MongoModelRegistry:
                     )
                     if active:
                         if active.get("bundle_id") == document["bundle_id"] and active.get("bundle_manifest_sha256") == document["bundle_manifest_sha256"]:
+                            if not has_complete_promotion_metrics(active.get("metrics")) and has_complete_promotion_metrics(document["metrics"]):
+                                self._collection.update_one(
+                                    {"version_id": active["version_id"], "is_active": True},
+                                    {"$set": {"metrics": document["metrics"]}},
+                                    session=session,
+                                )
                             document["version_id"] = active["version_id"]
                             continue
                         raise ModelActivationConflict(
@@ -295,6 +307,7 @@ class MongoModelRegistry:
                                 "activation_generation": 1,
                                 "activated_at": document["activated_at"],
                                 "trusted_baseline": True,
+                                "metrics": document["metrics"],
                             }},
                             session=session,
                         )
@@ -347,6 +360,26 @@ class MongoModelRegistry:
                     raise ModelActivationConflict("active model changed before activation; refresh the expected version")
                 if expected_activation_generation is not None and current_generation != expected_activation_generation:
                     raise ModelActivationConflict("active model generation changed before activation")
+                if target.get("lifecycle_state") == "VALIDATED":
+                    if (
+                        not target.get("validation_evidence_id")
+                        or not target.get("validation_evidence_sha256")
+                        or target.get("validation_baseline_version_id") != current_id
+                        or int(target.get("validation_baseline_generation") or 0) != current_generation
+                    ):
+                        raise ModelActivationConflict("validated candidate baseline changed before activation")
+                    evidence = self.get_evaluation_evidence(target["validation_evidence_id"], session=session)
+                    if (
+                        not evidence
+                        or evidence.get("evidence_sha256") != target["validation_evidence_sha256"]
+                        or evidence.get("candidate_version_id") != version_id
+                        or evidence.get("candidate_bundle_hash") != target.get("bundle_manifest_sha256")
+                        or evidence.get("metrics") != target.get("metrics")
+                    ):
+                        raise ModelActivationConflict("validated candidate evidence changed before activation")
+                    gate = check_promotion_gate(target.get("metrics"), current.get("metrics") if current else None)
+                    if not gate["gate_passed"]:
+                        raise ModelActivationConflict("candidate evaluation metrics regress against active baseline")
                 if current_id == version_id:
                     return self._clean_doc(current)
 
@@ -429,8 +462,10 @@ class MongoModelRegistry:
                 raise ModelActivationConflict("concurrent evaluation evidence identity conflict") from exc
         return self.get_evaluation_evidence(evidence["evaluation_run_id"])
 
-    def get_evaluation_evidence(self, evaluation_run_id: str) -> Optional[Dict[str, Any]]:
-        record = self._db["model_evaluation_evidence"].find_one({"evaluation_run_id": evaluation_run_id}, {"_id": 0})
+    def get_evaluation_evidence(self, evaluation_run_id: str, *, session=None) -> Optional[Dict[str, Any]]:
+        record = self._db["model_evaluation_evidence"].find_one(
+            {"evaluation_run_id": evaluation_run_id}, {"_id": 0}, session=session,
+        )
         if not record:
             return None
         payload = {key: value for key, value in record.items() if key not in {"evidence_sha256", "recorded_at"}}
@@ -458,6 +493,15 @@ class MongoModelRegistry:
                     or evidence.get("candidate_bundle_hash") != candidate.get("bundle_manifest_sha256")
                 ):
                     raise ModelActivationConflict("evaluation evidence is stale or belongs to another candidate")
+                active = self._collection.find_one(
+                    {"model_architecture": candidate["model_architecture"], "is_active": True},
+                    session=session,
+                )
+                if not active:
+                    raise ModelActivationConflict("candidate validation requires an active baseline")
+                gate = check_promotion_gate(evidence.get("metrics"), active.get("metrics"))
+                if not gate["gate_passed"]:
+                    raise ModelActivationConflict("candidate evaluation metrics regress against active baseline")
                 result = self._collection.update_one(
                     {
                         "version_id": version_id,
@@ -470,6 +514,8 @@ class MongoModelRegistry:
                         "metrics": evidence["metrics"],
                         "validation_evidence_id": evaluation_run_id,
                         "validation_evidence_sha256": evidence["evidence_sha256"],
+                        "validation_baseline_version_id": active["version_id"],
+                        "validation_baseline_generation": int(active.get("activation_generation", 0)),
                     }},
                     session=session,
                 )
