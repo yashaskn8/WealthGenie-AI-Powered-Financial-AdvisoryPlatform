@@ -8,11 +8,14 @@ import {
   createMarketFact,
 } from './contracts.js';
 import { readThroughMarketCache } from './requestCache.js';
-import GovernmentSmallSavingsProvider from './GovernmentSmallSavingsProvider.js';
+import GovernmentSmallSavingsProvider, {
+  GOVERNMENT_RATE_DATA_CLASS,
+  INDIA_POST_SAVINGS_URL,
+} from './GovernmentSmallSavingsProvider.js';
 
 export const RBI_FRSB_NOTIFICATION_URL = 'https://www.rbi.org.in/scripts/NotificationUser.aspx?Id=11924';
 export const RBI_RETAIL_DIRECT_URL = 'https://rbiretaildirect.org.in/index.html';
-export const RBI_FRSB_CACHE_KEY = `market:rbi:frsb-2020:${MARKET_DATA_SCHEMA_VERSION}`;
+export const RBI_FRSB_CACHE_KEY = `market:rbi:frsb-2020:${MARKET_DATA_SCHEMA_VERSION}:qualified-identities-2`;
 export const RBI_FRSB_CACHE_TTL_SECONDS = 12 * 60 * 60;
 export const RBI_FRSB_CANONICAL_PRODUCT_ID = 'government:rbi:frsb-2020-taxable';
 export const RBI_RATE_DATA_CLASS = 'OFFICIAL_RBI_FLOATING_COUPON_RATE';
@@ -96,21 +99,41 @@ export function parseRbiOperationalGuidelines(html, { sourceUrl = RBI_FRSB_NOTIF
   };
 }
 
+function isStrictCalendarDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
 export function findNscResetRateFact(nscFacts, resetDate) {
   if (!Array.isArray(nscFacts) || nscFacts.length === 0) return null;
   const candidates = nscFacts.filter(fact => {
     const isNsc = fact?.canonicalProductId === 'government:india-post:nsc'
       || fact?.source?.instrumentId === 'nsc';
     if (!isNsc) return false;
-    if (fact.availabilityStatus !== AVAILABILITY.AVAILABLE) return false;
-    if (!Number.isFinite(Number(fact.value))) return false;
-    const from = String(fact.effectiveFrom || '').slice(0, 10);
-    const to = String(fact.effectiveTo || '').slice(0, 10);
-    if (!from || !to) return false;
+    if (fact.schemaVersion !== MARKET_DATA_SCHEMA_VERSION
+        || fact.kind !== FACT_KINDS.SCHEME_INTEREST_RATE
+        || fact.canonicalProductId !== 'government:india-post:nsc'
+        || fact.availabilityStatus !== AVAILABILITY.AVAILABLE
+        || fact.source?.provider !== PROVIDERS.GOVERNMENT_OF_INDIA
+        || fact.source?.instrumentId !== 'nsc'
+        || fact.source?.url !== INDIA_POST_SAVINGS_URL
+        || fact.unit !== 'PERCENT_PER_ANNUM'
+        || fact.dataClass !== GOVERNMENT_RATE_DATA_CLASS
+        || fact.rateBasis !== 'OFFICIAL_NOMINAL_RATE_PER_ANNUM'
+        || fact.freshness?.status !== FRESHNESS.FRESH
+        || typeof fact.value !== 'number'
+        || !Number.isFinite(fact.value)
+        || fact.value <= 0) return false;
+    const from = fact.effectiveFrom;
+    const to = fact.effectiveTo;
+    if (!isStrictCalendarDate(from) || !isStrictCalendarDate(to)) return false;
     return from <= resetDate && to >= resetDate;
   });
-  if (candidates.length === 0) return null;
-  return candidates.sort((a, b) => String(b.effectiveFrom || '').localeCompare(String(a.effectiveFrom || '')))[0];
+  // More than one matching reset-period NSC fact is ambiguous; never pick
+  // whichever duplicate happens to appear first in a provider response.
+  if (candidates.length !== 1) return null;
+  return candidates[0];
 }
 
 export function deriveRbiFloatingRateSavingsBondSnapshot({
@@ -135,12 +158,29 @@ export function deriveRbiFloatingRateSavingsBondSnapshot({
     throw new Error('RBI_RULE_UNAVAILABLE');
   }
 
+  const qualifiedRbiRule = rule.ruleQualified === true
+    && rule.instrumentName === 'Floating Rate Savings Bonds, 2020 (Taxable)'
+    && rule.referenceRate === 'NSC'
+    && rule.spreadBps === RBI_FRSB_SPREAD_BPS
+    && rule.spreadPercent === RBI_FRSB_SPREAD_PERCENT
+    && rule.sourceUrl === RBI_FRSB_NOTIFICATION_URL
+    && rule.tenureMonths === 84
+    && rule.couponResetFrequency === 'SEMI_ANNUAL'
+    && rule.interestPaymentFrequency === 'SEMI_ANNUAL';
+  if (!qualifiedRbiRule) throw new Error('RBI_SCHEMA_MISMATCH:unqualified_rule');
+
   const { resetDate, effectiveFrom, effectiveTo } = calculateFrsbResetPeriod(nowDate);
 
   const nscFacts = Array.isArray(nscSnapshot?.facts)
     ? nscSnapshot.facts
     : (Array.isArray(nscSnapshot) ? nscSnapshot : []);
-  const nscFact = findNscResetRateFact(nscFacts, resetDate);
+  const nscSnapshotQualified = Array.isArray(nscSnapshot?.facts)
+    && nscSnapshot.schemaVersion === MARKET_DATA_SCHEMA_VERSION
+    && nscSnapshot.provider === PROVIDERS.GOVERNMENT_OF_INDIA
+    && [AVAILABILITY.AVAILABLE, AVAILABILITY.PARTIAL].includes(nscSnapshot.status)
+    && nscSnapshot.qualification === 'OFFICIAL_INDIA_POST_PUBLIC_RATE_TABLE_SCHEMA_VALIDATED'
+    && nscSnapshot.dataClass === GOVERNMENT_RATE_DATA_CLASS;
+  const nscFact = nscSnapshotQualified ? findNscResetRateFact(nscFacts, resetDate) : null;
 
   if (!nscFact || !Number.isFinite(Number(nscFact.value))) {
     return {
@@ -164,7 +204,7 @@ export function deriveRbiFloatingRateSavingsBondSnapshot({
   }
 
   const nscValue = Number(nscFact.value);
-  const spreadPercent = rule.spreadPercent ?? (rule.spreadBps / 100);
+  const spreadPercent = RBI_FRSB_SPREAD_PERCENT;
   const couponValue = Number((nscValue + spreadPercent).toFixed(4));
   const canonicalProductId = RBI_FRSB_CANONICAL_PRODUCT_ID;
 

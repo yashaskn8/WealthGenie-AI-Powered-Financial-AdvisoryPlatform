@@ -149,9 +149,7 @@ function exactCategoryKey(value) {
 }
 
 function establishedNumber(value) {
-  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 function sourceSchemeCode(product) {
@@ -425,13 +423,16 @@ export function rankVerifiedMutualFundProducts({
   const categoryKeys = new Set(categories.map(exactCategoryKey));
   const currentFacts = uniqueFactsByProduct(currentSnapshot?.facts);
   const historicalFacts = uniqueFactsByProduct(historicalSnapshot?.facts);
-  const currentSnapshotQualified = currentSnapshot?.provider === PROVIDERS.AMFI
+  const currentSnapshotQualified = currentSnapshot?.schemaVersion === MARKET_DATA_SCHEMA_VERSION
+    && currentSnapshot?.provider === PROVIDERS.AMFI
     && [AVAILABILITY.AVAILABLE, AVAILABILITY.PARTIAL].includes(currentSnapshot?.status);
-  const historicalSnapshotQualified = historicalSnapshot?.provider === PROVIDERS.AMFI
+  const historicalSnapshotQualified = historicalSnapshot?.schemaVersion === MARKET_DATA_SCHEMA_VERSION
+    && historicalSnapshot?.provider === PROVIDERS.AMFI
     && [AVAILABILITY.AVAILABLE, AVAILABILITY.PARTIAL].includes(historicalSnapshot?.status);
   const verifiedCategoryProducts = currentSnapshotQualified ? uniqueProducts((currentSnapshot?.products || [])
     .filter(product => (
-      product?.productType === 'MUTUAL_FUND'
+      product?.schemaVersion === MARKET_DATA_SCHEMA_VERSION
+        && product?.productType === 'MUTUAL_FUND'
         && product?.source?.provider === PROVIDERS.AMFI
         && /^\d+$/.test(sourceSchemeCode(product) || '')
         && product.canonicalProductId === `mf:amfi:${sourceSchemeCode(product)}`

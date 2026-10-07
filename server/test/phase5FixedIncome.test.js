@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  GOVERNMENT_SAVINGS_CACHE_KEY,
   parseIndiaPostSavingsBundle,
   governmentSavingsCacheKeyAt,
 } from '../services/marketData/GovernmentSmallSavingsProvider.js';
-import { parseSbiRetailTermDepositPage } from '../services/marketData/SbiTermDepositProvider.js';
+import {
+  parseSbiRetailTermDepositPage,
+  SBI_TERM_DEPOSIT_CACHE_KEY,
+} from '../services/marketData/SbiTermDepositProvider.js';
 import {
   compareVerifiedFixedIncomeProducts,
   selectCurrentEffectiveFact,
@@ -14,6 +18,7 @@ import { rankWhereToInvestBackend } from '../services/RecommendationPipeline.js'
 import { canonicalProfile } from './helpers/canonicalProfile.js';
 import {
   calculateFrsbResetPeriod,
+  RBI_FRSB_CACHE_KEY,
   rbiFrsbCacheKeyAt,
   deriveRbiFloatingRateSavingsBondSnapshot,
   parseRbiOperationalGuidelines,
@@ -75,6 +80,16 @@ test('official India Post parser preserves rate semantics and effective interval
     [...new Set(snapshot.facts.map(fact => fact.compoundingBasis).filter(Boolean))].sort(),
     ['Annually', 'Monthly and paid', 'Quarterly', 'Quarterly and Paid'].sort(),
   );
+});
+
+test('official India Post parser rejects a duplicate scheme identity even when row count matches', () => {
+  const duplicateNscRows = [
+    ...ROWS.slice(1),
+    { ...ROWS[8], slNo: '12.', interestRate: '99.0%' },
+  ];
+  assert.throws(() => parseIndiaPostSavingsBundle(governmentBundle(undefined, undefined, duplicateNscRows), {
+    fetchedAt: NOW.toISOString(), now: NOW,
+  }), /incomplete_rate_table/);
 });
 
 test('official India Post parser never converts negative or malformed rates into positive facts', () => {
@@ -145,6 +160,61 @@ test('multiple official intervals remain distinct and latest current fact is sel
   assert.equal(buildObservationOperations(current).length, ROWS.length);
 });
 
+test('fixed-income ranking rejects duplicate current facts and matching products in cached snapshots', () => {
+  const government = parseIndiaPostSavingsBundle(governmentBundle(), {
+    fetchedAt: NOW.toISOString(), now: NOW,
+  });
+  const ppfId = 'government:india-post:ppf';
+  const ppfFact = government.facts.find(fact => fact.canonicalProductId === ppfId);
+  const duplicateGovernmentFact = compareVerifiedFixedIncomeProducts({
+    parentInstrumentId: 'ppf',
+    snapshot: { ...government, facts: [...government.facts, { ...ppfFact, value: 99 }] },
+    profile: canonicalProfile(),
+    now: NOW,
+  });
+  assert.equal(duplicateGovernmentFact.ranking.status, 'UNAVAILABLE');
+  assert.equal(duplicateGovernmentFact.products.length, 0);
+
+  const duplicateGovernmentProduct = compareVerifiedFixedIncomeProducts({
+    parentInstrumentId: 'ppf',
+    snapshot: {
+      ...government,
+      products: [...government.products, { ...government.products.find(product => product.canonicalProductId === ppfId) }],
+    },
+    profile: canonicalProfile(),
+    now: NOW,
+  });
+  assert.equal(duplicateGovernmentProduct.ranking.status, 'UNAVAILABLE');
+  assert.equal(duplicateGovernmentProduct.products.length, 0);
+
+  const sbi = parseSbiRetailTermDepositPage(sbiPage(), {
+    fetchedAt: NOW.toISOString(), now: NOW,
+  });
+  const profile = canonicalProfile({ age: 35, investmentHorizonYears: 2 });
+  const twoYearProduct = sbi.products.find(product => product.canonicalProductId.includes(':2y-lt3y:public'));
+  const twoYearFact = sbi.facts.find(fact => fact.canonicalProductId === twoYearProduct.canonicalProductId);
+  const duplicateSbiFact = compareVerifiedFixedIncomeProducts({
+    parentInstrumentId: 'fd',
+    snapshot: { ...sbi, facts: [...sbi.facts, { ...twoYearFact, value: 99 }] },
+    profile,
+    now: NOW,
+  });
+  assert.equal(duplicateSbiFact.ranking.status, 'UNAVAILABLE');
+  assert.equal(duplicateSbiFact.products.length, 0);
+
+  const duplicateSbiProduct = compareVerifiedFixedIncomeProducts({
+    parentInstrumentId: 'fd',
+    snapshot: { ...sbi, products: [...sbi.products, { ...twoYearProduct }] },
+    profile,
+    now: NOW,
+  });
+  assert.equal(duplicateSbiProduct.ranking.status, 'UNAVAILABLE');
+  assert.equal(duplicateSbiProduct.products.length, 0);
+  assert.match(GOVERNMENT_SAVINGS_CACHE_KEY, /qualified-identities-2$/);
+  assert.match(SBI_TERM_DEPOSIT_CACHE_KEY, /qualified-identities-2$/);
+  assert.match(RBI_FRSB_CACHE_KEY, /qualified-identities-2$/);
+});
+
 test('stale or missing government source facts never become recommendations', () => {
   const stale = parseIndiaPostSavingsBundle(governmentBundle('01.04.2026', '30.06.2026'), {
     fetchedAt: NOW.toISOString(), now: NOW,
@@ -180,6 +250,9 @@ test('fixed-income comparison rejects provider, source, instrument, kind, unit, 
     mutatePpfFact(fact => ({ ...fact, source: { ...fact.source, url: 'https://example.com/rate' } })),
     mutatePpfFact(fact => ({ ...fact, kind: 'TERM_DEPOSIT_RATE' })),
     mutatePpfFact(fact => ({ ...fact, unit: 'PERCENT_PER_MONTH' })),
+    mutatePpfFact(fact => ({ ...fact, value: true })),
+    mutatePpfFact(fact => ({ ...fact, value: '7.1' })),
+    mutatePpfFact(fact => ({ ...fact, effectiveFrom: '2026-00-00', effectiveTo: '2026-99-99' })),
     {
       ...snapshot,
       products: snapshot.products.map(product => product.canonicalProductId === ppfId
@@ -281,6 +354,43 @@ test('SBI missing tenure and schema drift fail closed without static rates', () 
     fetchedAt: NOW.toISOString(), now: NOW,
   }), /tenure_rows/);
   assert.throws(() => parseSbiRetailTermDepositPage('<html>changed</html>'), /rate_header/);
+});
+
+test('SBI ranking rejects a source tenure identity paired with a different normalized range or label', () => {
+  const parsed = parseSbiRetailTermDepositPage(sbiPage(), {
+    fetchedAt: NOW.toISOString(), now: NOW,
+  });
+  const baseline = compareVerifiedFixedIncomeProducts({
+    parentInstrumentId: 'fd',
+    snapshot: parsed,
+    profile: canonicalProfile({ age: 35, investmentHorizonYears: 1 }),
+    now: NOW,
+  });
+  assert.equal(baseline.ranking.status, 'VERIFIED_COMPARABLE_OPTIONS');
+  const shortTenureProduct = parsed.products.find(product => product.canonicalProductId.includes(':7d-45d:public'));
+  shortTenureProduct.tenureMinDays = 365;
+  shortTenureProduct.tenureMaxDaysExclusive = 730;
+  shortTenureProduct.tenureLabel = '1 year to less than 2 years';
+
+  const result = compareVerifiedFixedIncomeProducts({
+    parentInstrumentId: 'fd',
+    snapshot: parsed,
+    profile: canonicalProfile({ age: 35, investmentHorizonYears: 1 }),
+    now: NOW,
+  });
+  assert.equal(result.ranking.status, 'UNAVAILABLE');
+  assert.equal(result.products.length, 0);
+});
+
+test('SBI parser rejects duplicate tenure identities even when the row count matches', () => {
+  const duplicateFiveToTenRows = [
+    ...SBI_TENURES.slice(0, 6),
+    SBI_TENURES[7],
+    ['5 years and up to 10 years', '99.0', '99.0', '99.0', '99.0'],
+  ];
+  assert.throws(() => parseSbiRetailTermDepositPage(sbiPage(duplicateFiveToTenRows), {
+    fetchedAt: NOW.toISOString(), now: NOW,
+  }), /tenure_rows/);
 });
 
 test('SBI parser rejects impossible effective and publication dates', () => {
@@ -434,7 +544,7 @@ test('TEST 7 — CRITICAL: An October NSC change does NOT mutate an already-esta
 
   const snapshotInOctober = deriveRbiFloatingRateSavingsBondSnapshot({
     rbiHtml: RBI_RULE_FIXTURE,
-    nscSnapshot: { facts: allNscFacts },
+    nscSnapshot: { ...julyNsc, facts: allNscFacts },
     fetchedAt: octDate.toISOString(),
     now: octDate,
   });
@@ -478,6 +588,83 @@ test('TEST 9: Malformed RBI source/rule fails closed', () => {
     () => parseRbiOperationalGuidelines('<html>Floating Rate Savings Bonds, 2020 (Taxable) National Savings Certificate (NSC) spread of 50 bps reset every six months tenure of 7 years</html>'),
     /RBI_SCHEMA_MISMATCH:unexpected_spread/,
   );
+});
+
+test('RBI FRSB refuses stale or unqualified NSC facts and contradictory spread rules', () => {
+  const qualifiedNsc = parseIndiaPostSavingsBundle(governmentBundle(), {
+    fetchedAt: NOW.toISOString(), now: NOW,
+  });
+  const nscFact = qualifiedNsc.facts.find(fact => fact.canonicalProductId === 'government:india-post:nsc');
+  const duplicateNscSnapshot = {
+    ...qualifiedNsc,
+    facts: [...qualifiedNsc.facts, { ...nscFact, value: 99 }],
+  };
+  const duplicateNscResult = deriveRbiFloatingRateSavingsBondSnapshot({
+    rbiHtml: RBI_RULE_FIXTURE,
+    nscSnapshot: duplicateNscSnapshot,
+    fetchedAt: NOW.toISOString(),
+    now: NOW,
+  });
+  assert.equal(duplicateNscResult.status, 'UNAVAILABLE');
+  assert.equal(duplicateNscResult.facts.length, 0);
+
+  const malformedFacts = [
+    { ...nscFact, schemaVersion: 'wrong-schema' },
+    { ...nscFact, source: { ...nscFact.source, provider: 'ATTACKER' } },
+    { ...nscFact, source: { ...nscFact.source, url: 'https://example.invalid/fake' } },
+    { ...nscFact, freshness: { ...nscFact.freshness, status: 'STALE' } },
+    { ...nscFact, value: true },
+    { ...nscFact, value: '7.7' },
+    { ...nscFact, effectiveFrom: '2026-00-00', effectiveTo: '2026-99-99' },
+  ];
+  for (const malformedFact of malformedFacts) {
+    const malformedSnapshot = {
+      ...qualifiedNsc,
+      facts: qualifiedNsc.facts.map(fact => fact === nscFact ? malformedFact : fact),
+    };
+    const unavailable = deriveRbiFloatingRateSavingsBondSnapshot({
+      rbiHtml: RBI_RULE_FIXTURE,
+      nscSnapshot: malformedSnapshot,
+      fetchedAt: NOW.toISOString(),
+      now: NOW,
+    });
+    assert.equal(unavailable.status, 'UNAVAILABLE');
+    assert.equal(unavailable.facts.length, 0);
+  }
+
+  const rule = parseRbiOperationalGuidelines(RBI_RULE_FIXTURE);
+  assert.throws(() => deriveRbiFloatingRateSavingsBondSnapshot({
+    rbiRule: { ...rule, spreadPercent: 5 },
+    nscSnapshot: qualifiedNsc,
+    fetchedAt: NOW.toISOString(),
+    now: NOW,
+  }), /unqualified_rule/);
+
+  const validSnapshot = deriveRbiFloatingRateSavingsBondSnapshot({
+    rbiRule: rule,
+    nscSnapshot: qualifiedNsc,
+    fetchedAt: NOW.toISOString(),
+    now: NOW,
+  });
+  const coercedBooleanReference = structuredClone(validSnapshot);
+  coercedBooleanReference.facts[0].referenceRateValue = true;
+  coercedBooleanReference.facts[0].value = 1.35;
+  const booleanRejected = compareVerifiedFixedIncomeProducts({
+    parentInstrumentId: 'rbi_bonds',
+    snapshot: coercedBooleanReference,
+    profile: canonicalProfile({ investmentHorizonYears: 10 }),
+    now: NOW,
+  });
+  assert.equal(booleanRejected.ranking.status, 'UNAVAILABLE');
+
+  validSnapshot.facts[0].value += 1;
+  const rejected = compareVerifiedFixedIncomeProducts({
+    parentInstrumentId: 'rbi_bonds',
+    snapshot: validSnapshot,
+    profile: canonicalProfile({ investmentHorizonYears: 10 }),
+    now: NOW,
+  });
+  assert.equal(rejected.ranking.status, 'UNAVAILABLE');
 });
 
 test('TEST 10: No static coupon fallback', () => {

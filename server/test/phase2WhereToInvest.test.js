@@ -64,6 +64,7 @@ function snapshots() {
   ];
   const currentValues = [125, 120, 115, 110, 105, 101, 500, 999];
   const current = {
+    schemaVersion: 'market-fact-1.0.0',
     provider: 'AMFI',
     status: 'AVAILABLE',
     fetchedAt: FETCHED_AT,
@@ -74,6 +75,7 @@ function snapshots() {
     )),
   };
   const historical = {
+    schemaVersion: 'market-fact-1.0.0',
     provider: 'AMFI',
     status: 'AVAILABLE',
     fetchedAt: FETCHED_AT,
@@ -140,6 +142,48 @@ test('Phase 2 ranks at most five exact-category Direct Growth options by verifie
   assert.equal(result.comparisonUniverse.verifiedCategoryProductCount, 7);
   assert.equal(result.comparisonUniverse.sourceEstablishedDirectPlanProductCount, 7);
   assert.equal(result.comparisonUniverse.historicalEvidenceProductCount, 6);
+});
+
+test('AMFI ranking fails closed when current or historical snapshot/product schema versions drift', () => {
+  const { current, historical } = snapshots();
+  const invalidProductSnapshot = {
+    ...current,
+    products: current.products.map((product, index) => index === 0
+      ? { ...product, schemaVersion: 'unqualified-schema' }
+      : product),
+  };
+  const invalidProductResult = rankVerifiedMutualFundProducts({
+    parentInstrumentId: 'large_cap_mf',
+    currentSnapshot: invalidProductSnapshot,
+    historicalSnapshot: historical,
+    now: new Date(FETCHED_AT),
+  });
+  assert.equal(invalidProductResult.ranking.status, 'EVIDENCE_RANKED');
+  assert.ok(invalidProductResult.products.every(product => product.id !== 'mf:amfi:101'));
+
+  const invalidCurrentSnapshot = {
+    ...current,
+    schemaVersion: 'unqualified-schema',
+    products: current.products.map(product => ({ ...product, schemaVersion: 'unqualified-schema' })),
+  };
+  const currentResult = rankVerifiedMutualFundProducts({
+    parentInstrumentId: 'large_cap_mf',
+    currentSnapshot: invalidCurrentSnapshot,
+    historicalSnapshot: historical,
+    now: new Date(FETCHED_AT),
+  });
+  assert.notEqual(currentResult.ranking.status, 'EVIDENCE_RANKED');
+  assert.equal(currentResult.products.length, 0);
+
+  const invalidHistoricalSnapshot = { ...historical, schemaVersion: 'unqualified-schema' };
+  const historicalResult = rankVerifiedMutualFundProducts({
+    parentInstrumentId: 'large_cap_mf',
+    currentSnapshot: current,
+    historicalSnapshot: invalidHistoricalSnapshot,
+    now: new Date(FETCHED_AT),
+  });
+  assert.notEqual(historicalResult.ranking.status, 'EVIDENCE_RANKED');
+  assert.ok(historicalResult.products.every(product => product.returnBasis !== HISTORICAL_RETURN_BASIS));
 });
 
 test('historical NAV ranking requires a recent query fetch and a fact bound to the requested date', () => {
@@ -289,6 +333,30 @@ test('unavailable, stale, mismatched, and unsupported evidence produces zero pro
   });
   assert.equal(unsupported.products.length, 0);
   assert.deepEqual(unsupported.ranking.reasonCodes, ['PRODUCT_CLASS_NOT_SUPPORTED_PHASE_2']);
+});
+
+test('AMFI NAV facts must contain numeric values and never coerce numeric strings', () => {
+  const currentString = snapshots();
+  currentString.current.facts[0] = { ...currentString.current.facts[0], value: '125' };
+  const currentResult = rankVerifiedMutualFundProducts({
+    parentInstrumentId: 'large_cap_mf',
+    currentSnapshot: currentString.current,
+    historicalSnapshot: currentString.historical,
+    now: new Date(FETCHED_AT),
+  });
+  assert.equal(currentResult.products.some(product => product.id === 'mf:amfi:101'), false);
+  assert.ok(currentResult.products.every(product => typeof product.nav.value === 'number'));
+
+  const historicalString = snapshots();
+  historicalString.historical.facts[0] = { ...historicalString.historical.facts[0], value: '100' };
+  const historicalResult = rankVerifiedMutualFundProducts({
+    parentInstrumentId: 'large_cap_mf',
+    currentSnapshot: historicalString.current,
+    historicalSnapshot: historicalString.historical,
+    now: new Date(FETCHED_AT),
+  });
+  assert.ok(historicalResult.products.every(product => product.historicalReturn === null
+    || (typeof product.historicalReturn.startNav === 'number' && typeof product.historicalReturn.endNav === 'number')));
 });
 
 test('AMFI ranking excludes duplicate and cross-instrument/provider NAV evidence', () => {

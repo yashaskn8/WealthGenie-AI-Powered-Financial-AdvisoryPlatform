@@ -9,7 +9,7 @@ import {
 import { readThroughMarketCache } from './requestCache.js';
 
 export const SBI_TERM_DEPOSIT_URL = 'https://sbi.bank.in/web/interest-rates/deposit-rates/retail-domestic-term-deposits';
-export const SBI_TERM_DEPOSIT_CACHE_KEY = `market:sbi:retail-term-deposits:${MARKET_DATA_SCHEMA_VERSION}`;
+export const SBI_TERM_DEPOSIT_CACHE_KEY = `market:sbi:retail-term-deposits:${MARKET_DATA_SCHEMA_VERSION}:qualified-identities-2`;
 export const SBI_TERM_DEPOSIT_CACHE_TTL_SECONDS = 12 * 60 * 60;
 export const SBI_TERM_DEPOSIT_FRESHNESS_SECONDS = 180 * 24 * 60 * 60;
 export const SBI_RATE_DATA_CLASS = 'OFFICIAL_BANK_PUBLISHED_RATE';
@@ -176,7 +176,14 @@ export function parseSbiRetailTermDepositPage(html, {
       facts.push(fact);
     }
   }
-  if (products.length !== 16) throw new Error('SBI_FD_SCHEMA_MISMATCH:tenure_rows');
+  const canonicalIds = products.map(product => product.canonicalProductId);
+  const factIds = facts.map(fact => fact.canonicalProductId);
+  const exactUniqueIdentitySet = canonicalIds.length === 16
+    && new Set(canonicalIds).size === 16
+    && factIds.length === 16
+    && new Set(factIds).size === 16
+    && factIds.every(id => canonicalIds.includes(id));
+  if (!exactUniqueIdentitySet) throw new Error('SBI_FD_SCHEMA_MISMATCH:tenure_rows');
   const availableFactCount = facts.filter(fact => fact.availabilityStatus === AVAILABILITY.AVAILABLE).length;
   return {
     schemaVersion: MARKET_DATA_SCHEMA_VERSION,

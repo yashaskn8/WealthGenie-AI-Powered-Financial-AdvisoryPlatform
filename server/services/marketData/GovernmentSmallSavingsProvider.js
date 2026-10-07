@@ -10,7 +10,7 @@ import {
 import { readThroughMarketCache } from './requestCache.js';
 
 export const INDIA_POST_SAVINGS_URL = 'https://www.indiapost.gov.in/banking-services/savings';
-export const GOVERNMENT_SAVINGS_CACHE_KEY = `market:government:small-savings:${MARKET_DATA_SCHEMA_VERSION}`;
+export const GOVERNMENT_SAVINGS_CACHE_KEY = `market:government:small-savings:${MARKET_DATA_SCHEMA_VERSION}:qualified-identities-2`;
 export const GOVERNMENT_SAVINGS_CACHE_TTL_SECONDS = 12 * 60 * 60;
 export const GOVERNMENT_RATE_DATA_CLASS = 'QUARTERLY_OFFICIAL_RATE';
 const INDIA_TIME_ZONE = 'Asia/Kolkata';
@@ -169,8 +169,18 @@ export function parseIndiaPostSavingsBundle(bundleText, {
     facts.push(fact);
   }
 
-  const expectedSchemeCount = Object.keys(SCHEME_IDENTITIES).length;
-  if (products.length !== expectedSchemeCount) {
+  const expectedCanonicalIds = Object.values(SCHEME_IDENTITIES)
+    .map(identity => `government:india-post:${identity.id}`)
+    .sort();
+  const productIds = products.map(product => product.canonicalProductId).sort();
+  const factIds = facts.map(fact => fact.canonicalProductId).sort();
+  const exactUniqueIdentitySet = productIds.length === expectedCanonicalIds.length
+    && new Set(productIds).size === productIds.length
+    && factIds.length === expectedCanonicalIds.length
+    && new Set(factIds).size === factIds.length
+    && productIds.every((id, index) => id === expectedCanonicalIds[index])
+    && factIds.every((id, index) => id === expectedCanonicalIds[index]);
+  if (!exactUniqueIdentitySet) {
     throw new Error('INDIA_POST_SCHEMA_MISMATCH:incomplete_rate_table');
   }
   const availableFactCount = facts.filter(fact => fact.availabilityStatus === AVAILABILITY.AVAILABLE).length;

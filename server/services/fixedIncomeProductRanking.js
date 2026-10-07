@@ -120,17 +120,24 @@ function indiaDateAt(value) {
   return `${fields.year}-${fields.month}-${fields.day}`;
 }
 
+function isStrictCalendarDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
 function isUsableFact(fact, now) {
   const today = indiaDateAt(now);
-  const effectiveFrom = fact?.effectiveFrom == null ? null : String(fact.effectiveFrom).slice(0, 10);
-  const effectiveTo = fact?.effectiveTo == null ? null : String(fact.effectiveTo).slice(0, 10);
-  const hasValidEffectivePeriod = (!effectiveFrom || /^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom))
-    && (!effectiveTo || /^\d{4}-\d{2}-\d{2}$/.test(effectiveTo))
+  const effectiveFrom = fact?.effectiveFrom ?? null;
+  const effectiveTo = fact?.effectiveTo ?? null;
+  const hasValidEffectivePeriod = (!effectiveFrom || isStrictCalendarDate(effectiveFrom))
+    && (!effectiveTo || isStrictCalendarDate(effectiveTo))
     && (!effectiveFrom || !effectiveTo || effectiveFrom <= effectiveTo);
   return fact?.availabilityStatus === AVAILABILITY.AVAILABLE
     && fact?.freshness?.status === FRESHNESS.FRESH
-    && Number.isFinite(Number(fact.value))
-    && Number(fact.value) > 0
+    && typeof fact.value === 'number'
+    && Number.isFinite(fact.value)
+    && fact.value > 0
     && today !== null
     && hasValidEffectivePeriod
     && (!effectiveFrom || today >= effectiveFrom)
@@ -165,16 +172,38 @@ function hasQualifiedProduct(product, { canonicalProductId, provider, productTyp
     && product.source?.url === sourceUrl;
 }
 
+const SBI_TENURE_CONTRACTS = Object.freeze({
+  '7d-45d': { minDays: 7, maxDaysExclusive: 46, label: '7 days to 45 days' },
+  '46d-179d': { minDays: 46, maxDaysExclusive: 180, label: '46 days to 179 days' },
+  '180d-210d': { minDays: 180, maxDaysExclusive: 211, label: '180 days to 210 days' },
+  '211d-lt1y': { minDays: 211, maxDaysExclusive: 365, label: '211 days to less than 1 year' },
+  '1y-lt2y': { minDays: 365, maxDaysExclusive: 730, label: '1 year to less than 2 years' },
+  '2y-lt3y': { minDays: 730, maxDaysExclusive: 1095, label: '2 years to less than 3 years' },
+  '3y-lt5y': { minDays: 1095, maxDaysExclusive: 1825, label: '3 years to less than 5 years' },
+  '5y-10y': { minDays: 1825, maxDaysExclusive: 3651, label: '5 years and up to 10 years' },
+});
+
+function normalizedTenureLabel(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
 export function selectCurrentEffectiveFact(facts, canonicalProductId, now = new Date()) {
-  return (facts || [])
+  if (!Array.isArray(facts)) return null;
+  const currentFacts = facts
     .filter(fact => fact.canonicalProductId === canonicalProductId && isUsableFact(fact, now))
-    .sort((left, right) => String(right.effectiveFrom || '').localeCompare(String(left.effectiveFrom || '')))[0] || null;
+  // Cached snapshots can outlive a parser contract. Two simultaneously
+  // effective facts for one canonical product are ambiguous, even if one is
+  // newer or the two values happen to match.
+  return currentFacts.length === 1 ? currentFacts[0] : null;
 }
 
 function selectGovernmentProduct(parentInstrumentId, snapshot, now) {
   const schemeId = GOVERNMENT_PARENT_SCHEMES[parentInstrumentId];
   const canonicalId = `government:india-post:${schemeId}`;
-  const product = (snapshot?.products || []).find(item => item.canonicalProductId === canonicalId);
+  const matchingProducts = Array.isArray(snapshot?.products)
+    ? snapshot.products.filter(item => item.canonicalProductId === canonicalId)
+    : [];
+  const product = matchingProducts.length === 1 ? matchingProducts[0] : null;
   const fact = selectCurrentEffectiveFact(snapshot?.facts, canonicalId, now);
   const productValid = hasQualifiedProduct(product, {
     canonicalProductId: canonicalId,
@@ -197,27 +226,31 @@ function selectComparableSbiProduct(profile, snapshot, now) {
   const horizonDays = Number(profile?.investmentHorizonYears) * 365;
   const depositorType = Number(profile?.age) >= 60 ? 'SENIOR_CITIZEN' : 'GENERAL_PUBLIC';
   if (!Number.isFinite(horizonDays) || horizonDays <= 0) return null;
-  const product = (snapshot?.products || []).find(item => (
+  const matchingProducts = (Array.isArray(snapshot?.products) ? snapshot.products : []).filter(item => (
     item.depositorType === depositorType
       && Number(item.tenureMinDays) <= horizonDays
       && horizonDays < Number(item.tenureMaxDaysExclusive)
   ));
-  const fact = product
-    ? (snapshot?.facts || []).find(item => item.canonicalProductId === product.canonicalProductId)
-    : null;
+  const product = matchingProducts.length === 1 ? matchingProducts[0] : null;
+  const fact = product ? selectCurrentEffectiveFact(snapshot?.facts, product.canonicalProductId, now) : null;
   const canonicalProductId = product?.canonicalProductId;
   const idMatch = typeof canonicalProductId === 'string'
     && /^deposit:sbi:retail-domestic:[a-z0-9-]+:(?:public|senior)$/.test(canonicalProductId);
   const depositorSlug = product?.depositorType === 'SENIOR_CITIZEN' ? 'senior' : 'public';
   const tenureId = idMatch ? canonicalProductId.match(/^deposit:sbi:retail-domestic:([a-z0-9-]+):/)[1] : null;
+  const tenureContract = tenureId ? SBI_TENURE_CONTRACTS[tenureId] : null;
   const expectedInstrumentId = tenureId ? `retail-domestic:${tenureId}:${depositorSlug}` : null;
   const productValid = idMatch
+    && Boolean(tenureContract)
     && product.schemaVersion === MARKET_DATA_SCHEMA_VERSION
     && product.productType === 'BANK_TERM_DEPOSIT'
     && product.providerName === 'State Bank of India'
     && product.source?.provider === PROVIDERS.SBI
     && product.source?.url === SBI_TERM_DEPOSIT_URL
     && product.externalIds?.some(item => item.source === 'SBI_TENURE_CLASS' && item.value === tenureId)
+    && Number(product.tenureMinDays) === tenureContract.minDays
+    && Number(product.tenureMaxDaysExclusive) === tenureContract.maxDaysExclusive
+    && normalizedTenureLabel(product.tenureLabel) === tenureContract.label
     && product.depositType === 'RETAIL_DOMESTIC_TERM_DEPOSIT_BELOW_INR_3_CRORE'
     && product.callability === 'CALLABLE_STANDARD_CARD_RATE';
   const factValid = isUsableFact(fact, now) && hasQualifiedFact(fact, {
@@ -234,7 +267,10 @@ function selectComparableSbiProduct(profile, snapshot, now) {
 
 function selectRbiProduct(snapshot, now) {
   const canonicalId = 'government:rbi:frsb-2020-taxable';
-  const product = (snapshot?.products || []).find(item => item.canonicalProductId === canonicalId);
+  const matchingProducts = Array.isArray(snapshot?.products)
+    ? snapshot.products.filter(item => item.canonicalProductId === canonicalId)
+    : [];
+  const product = matchingProducts.length === 1 ? matchingProducts[0] : null;
   const fact = selectCurrentEffectiveFact(snapshot?.facts, canonicalId, now);
   const productValid = hasQualifiedProduct(product, {
     canonicalProductId: canonicalId,
@@ -256,7 +292,11 @@ function selectRbiProduct(snapshot, now) {
     rateBasis: 'NSC_REFERENCE_RATE_PLUS_35_BPS',
   }) && fact.kind === FACT_KINDS.SCHEME_INTEREST_RATE
     && fact.referenceRate === 'NSC'
-    && fact.spreadBps === 35;
+    && fact.spreadBps === 35
+    && typeof fact.referenceRateValue === 'number'
+    && Number.isFinite(fact.referenceRateValue)
+    && fact.referenceRateValue > 0
+    && fact.value === Number((fact.referenceRateValue + 0.35).toFixed(4));
   return productValid && factValid ? { product, fact } : null;
 }
 

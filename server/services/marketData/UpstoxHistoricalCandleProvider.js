@@ -15,6 +15,7 @@ import { isoDateInIndia } from './indiaMarketTime.js';
 
 export const UPSTOX_HISTORICAL_CANDLE_V3_URL = 'https://api.upstox.com/v3/historical-candle';
 export const UPSTOX_HISTORY_CACHE_TTL_SECONDS = 6 * 60 * 60;
+export const UPSTOX_HISTORY_CACHE_QUALIFIER = 'unique-timestamps-2';
 export const UPSTOX_DAILY_HISTORY_FRESHNESS_SECONDS = 4 * 24 * 60 * 60;
 export const NIFTY_50_INSTRUMENT_KEY = 'NSE_INDEX|Nifty 50';
 
@@ -51,7 +52,7 @@ function cacheKeyFor(instrumentKey, toDate, fromDate) {
   const digest = crypto.createHash('sha256')
     .update(`${instrumentKey}\n${fromDate}\n${toDate}`)
     .digest('hex');
-  return `market:upstox:daily-candles:${MARKET_DATA_SCHEMA_VERSION}:${digest}`;
+  return `market:upstox:daily-candles:${MARKET_DATA_SCHEMA_VERSION}:${UPSTOX_HISTORY_CACHE_QUALIFIER}:${digest}`;
 }
 
 /**
@@ -71,24 +72,33 @@ export function parseUpstoxDailyCandles(payload, {
   if (!Array.isArray(rows)) throw new Error('UPSTOX_HISTORY_SCHEMA_MISMATCH:candles');
 
   const byTimestamp = new Map();
+  const seenByTimestamp = new Map();
   for (const row of rows) {
-    if (!Array.isArray(row) || row.length < 5) continue;
+    if (!Array.isArray(row)) continue;
     const timestamp = normalizeTimestamp(row[0]);
-    const open = finitePositive(row[1]);
-    const high = finitePositive(row[2]);
-    const low = finitePositive(row[3]);
-    const close = finitePositive(row[4]);
-    if (!timestamp || open === null || high === null || low === null || close === null
-        || high < low || high < open || high < close || low > open || low > close) continue;
-    byTimestamp.set(timestamp, {
+    if (!timestamp) continue;
+    const candle = {
       timestamp,
-      open,
-      high,
-      low,
-      close,
+      open: finitePositive(row[1]),
+      high: finitePositive(row[2]),
+      low: finitePositive(row[3]),
+      close: finitePositive(row[4]),
       volume: nullableFiniteNumber(row[5]),
       openInterest: nullableFiniteNumber(row[6]),
-    });
+    };
+    const previous = seenByTimestamp.get(timestamp);
+    if (previous) {
+      const sameCandle = ['open', 'high', 'low', 'close', 'volume', 'openInterest']
+        .every(field => previous[field] === candle[field]);
+      if (!sameCandle) throw new Error('UPSTOX_HISTORY_CONFLICTING_DUPLICATE_CANDLE');
+      continue;
+    }
+    seenByTimestamp.set(timestamp, candle);
+
+    const { open, high, low, close } = candle;
+    if (row.length < 5 || open === null || high === null || low === null || close === null
+        || high < low || high < open || high < close || low > open || low > close) continue;
+    byTimestamp.set(timestamp, candle);
   }
 
   const candles = [...byTimestamp.values()].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));

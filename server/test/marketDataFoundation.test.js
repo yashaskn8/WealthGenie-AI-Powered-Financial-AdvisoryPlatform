@@ -265,6 +265,25 @@ test('Upstox V3 historical candles are normalized, sorted, and source timestampe
   assert.match(snapshot.source.url, /^https:\/\/api\.upstox\.com\/v3\/historical-candle/);
 });
 
+test('Upstox duplicate timestamps deduplicate identical candles and reject conflicting prices', () => {
+  const candle = ['2026-09-07T00:00:00+05:30', 25000, 25200, 24900, 25100, 1000, 0];
+  const parse = candles => parseUpstoxDailyCandles({ data: { candles } }, {
+    instrumentKey: 'NSE_INDEX|Nifty 50',
+    fetchedAt: FIXED_NOW.toISOString(),
+    now: FIXED_NOW,
+    sourceUrl: 'https://api.upstox.com/v3/historical-candle/test',
+  });
+
+  const repeatedIdenticalCandle = parse([candle, [...candle]]);
+  assert.equal(repeatedIdenticalCandle.status, AVAILABILITY.AVAILABLE);
+  assert.equal(repeatedIdenticalCandle.candleCount, 1);
+
+  assert.throws(() => parse([
+    candle,
+    ['2026-09-07T00:00:00+05:30', 28000, 30000, 27900, 29900, 2000, 0],
+  ]), /UPSTOX_HISTORY_CONFLICTING_DUPLICATE_CANDLE/);
+});
+
 test('Upstox history returns PROVIDER_NOT_CONFIGURED without a request or fallback candles', async () => {
   let calls = 0;
   const provider = new UpstoxHistoricalCandleProvider({
@@ -324,6 +343,8 @@ test('Upstox history uses the shared Redis read-through cache instead of refetch
     assert.equal(second.cache.hit, true);
     assert.equal(second.cache.backend, 'REDIS');
     assert.equal(calls, 1);
+    assert.equal(values.size, 1);
+    assert.match([...values.keys()][0], /unique-timestamps-2/);
   } finally {
     setRedisAvailable(false);
     setRedisClient(null);
