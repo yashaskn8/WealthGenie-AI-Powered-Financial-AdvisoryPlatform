@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
+import os
 import re
 import subprocess
 import sys
@@ -16,8 +18,20 @@ from typing import Any
 
 
 REQUIREMENT_ID = re.compile(r"\b(?:DM|CORE)-[A-Z]+-\d{3}\b")
+PINNED_TCK_SHA = "263b9cfaf16a554bdfb166a7ba5b67716e946349"
 PINNED_TEST_CASE_COUNT = 235
 PINNED_SKIPPED_TEST_CASE_COUNT = 178
+PINNED_TEST_CASE_INVENTORY_SHA256 = "62cedc3216bb27545d2ede0bb8cf6588ef893e2f827b1de2ac4104a215122028"
+PINNED_TEST_INVENTORY_EVIDENCE = {
+    "tck_sha": PINNED_TCK_SHA,
+    "workflow_run_id": 37421617732,
+    "workflow_name": "A2A v1 MUST conformance",
+    "workflow_head_sha": "15454b98fa87ed29db7fd58eb21cbe29eb016678",
+    "workflow_head_is_ancestor_of_current_main": True,
+    "junit_report_sha256": "69b917d3c73c37c375c44b3a694ed7408b643733a7b271e67416a4b9c4f5ca4b",
+    "collected_identity_match": True,
+    "observed_skip_count": PINNED_SKIPPED_TEST_CASE_COUNT,
+}
 EXPECTED_UPSTREAM_ISSUES = {
     "https://github.com/a2aproject/a2a-tck/issues/229": "FIXTURE_APPLICABILITY",
     "https://github.com/a2aproject/a2a-tck/issues/202": "MISSING_EXPECTED_ERROR_ASSERTION",
@@ -89,6 +103,56 @@ def _policy_cases(policy: dict[str, Any], outcome: Outcome) -> dict[tuple[str, s
     return indexed
 
 
+
+def _policy_test_cases(policy: dict[str, Any], outcome: Outcome) -> dict[tuple[str, str], dict[str, Any]]:
+    raw_cases = policy.get("test_cases")
+    if not isinstance(raw_cases, list) or len(raw_cases) != PINNED_TEST_CASE_COUNT:
+        outcome.violations.append("policy must contain the exact pinned MUST testcase identity inventory")
+        return {}
+
+    indexed: dict[tuple[str, str], dict[str, Any]] = {}
+    for case in raw_cases:
+        if not isinstance(case, dict) or set(case) != {
+            "junit_classname", "junit_name", "expected_skip_reason",
+        }:
+            outcome.violations.append("policy testcase inventory contains a malformed entry")
+            continue
+        classname = case.get("junit_classname")
+        name = case.get("junit_name")
+        skip_reason = case.get("expected_skip_reason")
+        if not isinstance(classname, str) or not classname or not isinstance(name, str) or not name:
+            outcome.violations.append("policy testcase inventory is missing an exact JUnit identity")
+            continue
+        if skip_reason is not None and (not isinstance(skip_reason, str) or not skip_reason):
+            outcome.violations.append("policy testcase inventory contains a malformed expected skip reason")
+            continue
+        identity = (classname, name)
+        if identity in indexed:
+            outcome.violations.append(f"policy testcase inventory contains a duplicate identity: {classname}::{name}")
+            continue
+        indexed[identity] = case
+
+    canonical = "\n".join(
+        f'{case["junit_classname"]}::{case["junit_name"]}\t{case["expected_skip_reason"] or ""}'
+        for case in sorted(indexed.values(), key=lambda value: (value["junit_classname"], value["junit_name"]))
+    ).encode("utf-8")
+    inventory_hash = hashlib.sha256(canonical).hexdigest()
+    if (
+        len(indexed) != PINNED_TEST_CASE_COUNT
+        or inventory_hash != PINNED_TEST_CASE_INVENTORY_SHA256
+        or policy.get("test_case_inventory_sha256") != PINNED_TEST_CASE_INVENTORY_SHA256
+    ):
+        outcome.violations.append("policy testcase identities or skip reasons differ from the pinned exact inventory")
+
+    skip_count = sum(case["expected_skip_reason"] is not None for case in indexed.values())
+    if skip_count != PINNED_SKIPPED_TEST_CASE_COUNT:
+        outcome.violations.append("policy testcase inventory does not contain the pinned observed skip set")
+    if policy.get("skipped_test_case_count") != skip_count:
+        outcome.violations.append("policy skipped testcase inventory count does not match its exact skip set")
+    if policy.get("test_inventory_evidence") != PINNED_TEST_INVENTORY_EVIDENCE:
+        outcome.violations.append("policy testcase inventory provenance differs from the pinned successful TCK evidence")
+    return indexed
+
 def _status(case: ET.Element) -> tuple[str, list[ET.Element], list[ET.Element], list[ET.Element]]:
     failures = case.findall("failure")
     errors = case.findall("error")
@@ -110,7 +174,65 @@ def _failure_text(element: ET.Element) -> str:
 
 
 def _failure_body_matches(element: ET.Element, case: dict[str, str]) -> bool:
-    return "".join(element.itertext()) == case["failure_body"]
+    actual = "".join(element.itertext())
+    expected = case["failure_body"]
+    source_location = re.compile(r"(?m)^(?P<indent>[ \t]*)(?P<path>[^\r\n]*?\.py):(?P<line>\d+):")
+    def normalize(value: str) -> str:
+        return source_location.sub(
+            lambda match: (
+                f'{match.group("indent")}{match.group("path").replace(chr(92), "/")}:'
+                f'{match.group("line")}:'
+            ),
+            value,
+        )
+    return normalize(actual) == normalize(expected)
+
+
+def _skip_body_matches(element: ET.Element, expected_reason: str, tck_dir: Path) -> bool:
+    body = "".join(element.itertext()).strip()
+    if not body:
+        return True
+    if "\n" in body or "\r" in body:
+        return False
+    normalized = body.replace("\\", "/")
+    match = re.fullmatch(r"(?P<location>.+\.py):(?P<line>[1-9]\d*): (?P<reason>.+)", normalized)
+    if not match or match.group("reason") != expected_reason:
+        return False
+
+    location = match.group("location")
+    marker = "/tests/compatibility/"
+    if location.startswith("tests/compatibility/"):
+        prefix = ""
+        relative = location
+    else:
+        marker_index = location.rfind(marker)
+        if marker_index < 0:
+            return False
+        prefix = location[:marker_index].rstrip("/")
+        relative = location[marker_index + 1:]
+        expected_root = str(tck_dir.resolve()).replace("\\", "/").rstrip("/")
+        if os.name == "nt":
+            if prefix.casefold() != expected_root.casefold():
+                return False
+        elif prefix != expected_root:
+            return False
+
+    source_path = PurePosixPath(relative)
+    if not (
+        source_path.parts[:2] == ("tests", "compatibility")
+        and all(part not in ("", ".", "..") for part in source_path.parts)
+        and source_path.suffix == ".py"
+    ):
+        return False
+    source_file = (tck_dir / Path(*source_path.parts)).resolve()
+    root = tck_dir.resolve()
+    if not source_file.is_relative_to(root) or not source_file.is_file():
+        return False
+    try:
+        source_lines = source_file.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return False
+    return int(match.group("line")) <= len(source_lines)
 
 
 def _validate_checkout(
@@ -162,14 +284,12 @@ def evaluate_report(
         outcome.violations.append(f"could not read valid A2A policy: {error}")
         return outcome, {}
 
-    if policy.get("policy_schema_version") != 4:
+    if policy.get("policy_schema_version") != 5:
         outcome.violations.append("unsupported A2A policy schema version")
     if policy.get("test_case_count") != PINNED_TEST_CASE_COUNT:
         outcome.violations.append(f"policy test_case_count must equal pinned test_case_count {PINNED_TEST_CASE_COUNT}")
-    if policy.get("skipped_test_case_count") != PINNED_SKIPPED_TEST_CASE_COUNT:
-        outcome.violations.append(f"policy skipped_test_case_count must equal pinned skipped_test_case_count {PINNED_SKIPPED_TEST_CASE_COUNT}")
     pinned_sha = policy.get("tck_sha")
-    if not isinstance(pinned_sha, str) or tck_sha.lower() != pinned_sha.lower():
+    if not isinstance(pinned_sha, str) or pinned_sha.lower() != PINNED_TCK_SHA or tck_sha.lower() != PINNED_TCK_SHA:
         outcome.violations.append("supplied TCK SHA does not match the policy pin")
     if policy.get("tck_repository") != "a2aproject/a2a-tck":
         outcome.violations.append("policy TCK repository is not the official upstream repository")
@@ -207,6 +327,7 @@ def evaluate_report(
         outcome.violations.append("policy acceptance rules differ from the fail-closed gate contract")
 
     cases = _policy_cases(policy, outcome)
+    test_case_inventory = _policy_test_cases(policy, outcome)
     allowed_untracked = tuple(policy.get("acceptance", {}).get("allow_untracked_tck_paths", []))
     if any(not isinstance(item, str) for item in allowed_untracked):
         outcome.violations.append("policy contains malformed untracked-path allowances")
@@ -235,6 +356,7 @@ def evaluate_report(
 
     seen: set[tuple[str, str]] = set()
     known_seen: set[tuple[str, str]] = set()
+    inventory_seen: set[tuple[str, str]] = set()
     for case in testcases:
         classname = case.attrib.get("classname", "")
         name = case.attrib.get("name", "")
@@ -247,6 +369,11 @@ def evaluate_report(
             outcome.violations.append(f"JUnit report contains duplicate testcase identity: {display_id}")
             continue
         seen.add(identity)
+        expected_case = test_case_inventory.get(identity)
+        if expected_case is None:
+            outcome.violations.append(f"JUnit report contains an identity outside the pinned MUST testcase inventory: {display_id}")
+        else:
+            inventory_seen.add(identity)
         allowed_children = {"failure", "error", "skipped", "system-out", "system-err"}
         if any(child.tag not in allowed_children or len(child) for child in case):
             outcome.violations.append(f"JUnit testcase has nested or unexpected result elements: {display_id}")
@@ -262,6 +389,17 @@ def evaluate_report(
             outcome.skipped += 1
             if known:
                 outcome.violations.append(f"known upstream testcase was skipped instead of executed: {known['node_id']}")
+            expected_reason = expected_case.get("expected_skip_reason") if expected_case else None
+            actual_reason = skipped[0].attrib.get("message", "") if len(skipped) == 1 else ""
+            if expected_reason is None:
+                outcome.violations.append(f"JUnit testcase skip is not in the pinned skip inventory: {display_id}")
+            elif actual_reason != expected_reason:
+                outcome.violations.append(f"JUnit testcase skip reason differs from pinned evidence: {display_id}")
+            elif (len(skipped) != 1
+                  or set(skipped[0].attrib) not in ({"message"}, {"message", "type"})
+                  or ("type" in skipped[0].attrib and skipped[0].attrib["type"] != "pytest.skip")
+                  or not _skip_body_matches(skipped[0], expected_reason, tck_dir)):
+                outcome.violations.append(f"JUnit testcase skip representation is not exact: {display_id}")
         elif status == "error":
             outcome.errors += 1
             outcome.violations.append(f"JUnit testcase errored (errors are never excepted): {display_id}")
@@ -287,9 +425,12 @@ def evaluate_report(
     missing_known = set(cases) - known_seen
     for identity in sorted(missing_known):
         outcome.violations.append(f"expected known testcase did not execute: {cases[identity]['node_id']}")
-    if isinstance(expected_skipped, int) and outcome.skipped != expected_skipped:
+    missing_inventory = set(test_case_inventory) - inventory_seen
+    for identity in sorted(missing_inventory):
+        outcome.violations.append(f"expected pinned MUST testcase did not execute: {identity[0]}::{identity[1]}")
+    if outcome.skipped > expected_skipped:
         outcome.violations.append(
-            f"JUnit skipped testcase count changed: expected {expected_skipped}, found {outcome.skipped}"
+            f"JUnit skipped testcase count exceeds the pinned eligible skip set: maximum {expected_skipped}, found {outcome.skipped}"
         )
 
     suites = list(root.iter("testsuite"))

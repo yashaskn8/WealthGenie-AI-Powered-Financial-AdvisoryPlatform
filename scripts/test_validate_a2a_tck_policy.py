@@ -20,6 +20,7 @@ POLICY_PATH = ROOT / ".github" / "a2a-tck-known-blockers.json"
 POLICY = json.loads(POLICY_PATH.read_text(encoding="utf-8"))
 PIN = POLICY["tck_sha"]
 CASES = POLICY["known_failures"]
+TEST_CASES = POLICY["test_cases"]
 EXPECTED_FAILURE_BODY_SHA256 = {
     "tests/compatibility/core_operations/test_artifacts.py::TestTextArtifact::test_task_has_text_artifact[http_json]": "1913ad5a59baa06c15763564e7fa1684c584bc2d658a3ed47c149f3f43164e5a",
     "tests/compatibility/core_operations/test_artifacts.py::TestFileArtifact::test_task_has_file_artifact[http_json]": "89c2e2a2fc5db262e2d8b568fe25e94a49b15edca1157911a7586fa78c44d078",
@@ -40,56 +41,103 @@ def git_runner(status: str = ""):
     return run
 
 
-def make_xml(failed_ids: set[int] = frozenset(), skipped_ids: set[int] = frozenset(), unknown_failure: bool = False,
-             changed_reason: int | None = None, extra_error: bool = False,
-             failure_status: tuple[int, int] | None = None,
-             generic_skipped_count: int = 178) -> str:
-    failures = []
-    skipped = []
-    known_passes = []
-    generic_passed = 51 - int(unknown_failure) - int(extra_error)
-    for index, case in enumerate(CASES):
-        if index in failed_ids:
-            fragment = case["failure_signature"]
-            if failure_status and failure_status[0] == index:
+
+def make_xml(failed_ids: set[int] = frozenset(), skipped_ids: set[int] = frozenset(),
+             unknown_failure: bool = False, changed_reason: int | None = None,
+             extra_error: bool = False, failure_status: tuple[int, int] | None = None,
+             resolve_skip_ids: set[int] = frozenset(), additional_skip_id: int | None = None,
+             wrong_skip_reason_id: int | None = None, replace_pass_identity: bool = False,
+             omit_test_index: int | None = None, extra_skip_type_id: int | None = None,
+             skip_body_id: int | None = None) -> str:
+    known_by_identity = {
+        (case["junit_classname"], case["junit_name"]): index
+        for index, case in enumerate(CASES)
+    }
+    skip_indices = [
+        index for index, case in enumerate(TEST_CASES)
+        if case["expected_skip_reason"] is not None
+    ]
+    expected_results = []
+    normal_passes = []
+
+    for index, case in enumerate(TEST_CASES):
+        if index == omit_test_index:
+            continue
+        identity = (case["junit_classname"], case["junit_name"])
+        classname = case["junit_classname"]
+        name = case["junit_name"]
+        known_index = known_by_identity.get(identity)
+        if known_index is not None and known_index in failed_ids:
+            fragment = CASES[known_index]["failure_signature"]
+            if failure_status and failure_status[0] == known_index:
                 expected_status, actual_status = "[400]", f"[{failure_status[1]}]"
                 fragment = fragment.replace(expected_status, actual_status, 1)
-            reason = "Different failure reason" if changed_reason == index else fragment
-            failure_body = case["failure_body"]
-            failures.append(
-                f'<testcase classname="{case["junit_classname"]}" name="{case["junit_name"]}">'
-                f'<failure message={quoteattr(reason)}>{escape(failure_body)}</failure></testcase>'
+            reason = "Different failure reason" if changed_reason == known_index else fragment
+            body = CASES[known_index]["failure_body"]
+            item = (
+                f'<testcase classname="{classname}" name="{name}">'
+                f'<failure message={quoteattr(reason)}>{escape(body)}</failure></testcase>'
             )
-        elif index in skipped_ids:
-            skipped.append(
-                f'<testcase classname="{case["junit_classname"]}" name="{case["junit_name"]}"><skipped /></testcase>'
+            expected_results.append(item)
+        elif known_index is not None and known_index in skipped_ids:
+            expected_results.append(
+                f'<testcase classname="{classname}" name="{name}"><skipped message="forced skip" /></testcase>'
+            )
+        elif case["expected_skip_reason"] is not None and index not in resolve_skip_ids:
+            skip_reason = (
+                "changed skip reason" if wrong_skip_reason_id == index
+                else case["expected_skip_reason"]
+            )
+            skip_type = ' type="UNEXPECTED"' if extra_skip_type_id == index else ""
+            skip_body = "Actual skip details: hidden regression" if skip_body_id == index else ""
+            expected_results.append(
+                f'<testcase classname="{classname}" name="{name}"><skipped message={quoteattr(skip_reason)}{skip_type}>{escape(skip_body)}</skipped></testcase>'
+            )
+        elif index == additional_skip_id:
+            expected_results.append(
+                f'<testcase classname="{classname}" name="{name}"><skipped message="unexpected conditional skip" /></testcase>'
             )
         else:
-            known_passes.append(
-                f'<testcase classname="{case["junit_classname"]}" name="{case["junit_name"]}" />'
-            )
+            item = f'<testcase classname="{classname}" name="{name}" />'
+            expected_results.append(item)
+            if known_index is None:
+                normal_passes.append(index)
+
     if unknown_failure:
-        failures.append('<testcase classname="tests.compatibility.other.TestOther" name="test_unexpected"><failure message="DM-ART-001 unexpected regression">failed</failure></testcase>')
+        target = normal_passes[0]
+        case = TEST_CASES[target]
+        expected_results[target] = (
+            f'<testcase classname="{case["junit_classname"]}" name="{case["junit_name"]}">'
+            '<failure message="DM-ART-001 unexpected regression">unexpected failure</failure></testcase>'
+        )
     if extra_error:
-        failures.append('<testcase classname="tests.compatibility.other.TestOther" name="test_error"><error message="runner error">error</error></testcase>')
-    skipped.extend(
-        f'<testcase classname="tests.compatibility.other.TestSkipped" name="test_skip_{index}"><skipped /></testcase>'
-        for index in range(generic_skipped_count)
-    )
-    known_passed = sum(1 for index in range(len(CASES)) if index not in failed_ids and index not in skipped_ids)
-    passed = generic_passed + known_passed
-    total = passed + len(failures) + len(skipped)
-    errors = 1 if extra_error else 0
-    failures_count = len(failures) - errors
-    skipped_count = len(skipped)
-    testcase_xml = "".join(failures + skipped + known_passes)
-    testcase_xml += "".join(
-        f'<testcase classname="tests.compatibility.other.TestPass" name="test_{index}" />'
-        for index in range(generic_passed)
-    )
+        target = normal_passes[-1]
+        case = TEST_CASES[target]
+        expected_results[target] = (
+            f'<testcase classname="{case["junit_classname"]}" name="{case["junit_name"]}">'
+            '<error message="runner error">error</error></testcase>'
+        )
+    if replace_pass_identity:
+        target = normal_passes[0]
+        case = TEST_CASES[target]
+        expected_results[target] = (
+            '<testcase classname="tests.compatibility.other.TestOther" name="test_unexpected_pass" />'
+        )
+
+    if additional_skip_id is not None and skip_indices:
+        resolved = skip_indices[0]
+        if resolved != additional_skip_id:
+            case = TEST_CASES[resolved]
+            expected_results[resolved] = f'<testcase classname="{case["junit_classname"]}" name="{case["junit_name"]}" />'
+
+    failures = sum("<failure " in item for item in expected_results)
+    errors = sum("<error " in item for item in expected_results)
+    skipped_count = sum("<skipped " in item for item in expected_results)
+    total = len(expected_results)
+    testcase_xml = "".join(expected_results)
     return (
-        f'<testsuites tests="{total}" failures="{failures_count}" errors="{errors}" skipped="{skipped_count}">'
-        f'<testsuite name="must" tests="{total}" failures="{failures_count}" errors="{errors}" skipped="{skipped_count}">'
+        f'<testsuites tests="{total}" failures="{failures}" errors="{errors}" skipped="{skipped_count}">'
+        f'<testsuite name="must" tests="{total}" failures="{failures}" errors="{errors}" skipped="{skipped_count}">'
         f'{testcase_xml}</testsuite></testsuites>'
     )
 
@@ -101,11 +149,16 @@ def policy_copy() -> dict:
 class A2ATckPolicyTests(unittest.TestCase):
     def evaluate(self, xml: str | None, *, sha: str = PIN, raw_exit: int = 1, status: str = "",
                  started_at: float = 0.0, valid_report: bool = True,
-                 policy_data: dict | None = None):
+                 policy_data: dict | None = None,
+                 source_files: dict[str, str] | None = None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             report = root / "reports" / "junitreport.xml"
             report.parent.mkdir()
+            for relative_path, contents in (source_files or {}).items():
+                source = root / relative_path
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(contents, encoding="utf-8")
             policy_path = POLICY_PATH
             if policy_data is not None:
                 policy_path = root / "policy.json"
@@ -327,7 +380,7 @@ class A2ATckPolicyTests(unittest.TestCase):
 
     def test_legacy_policy_schema_version_fails(self):
         changed_policy = policy_copy()
-        changed_policy["policy_schema_version"] = 3
+        changed_policy["policy_schema_version"] = 4
         result = self.evaluate(make_xml(failed_ids=set(range(6))), policy_data=changed_policy)
         self.assertFalse(result.accepted)
         self.assertIn("unsupported A2A policy schema version", " ".join(result.violations))
@@ -386,15 +439,118 @@ class A2ATckPolicyTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertIn("was skipped instead of executed", " ".join(result.violations))
 
-    def test_unexpected_additional_skip_fails_even_when_known_cases_match(self):
-        result = self.evaluate(make_xml(failed_ids=set(range(6)), generic_skipped_count=179))
-        self.assertFalse(result.accepted)
-        self.assertIn("skipped testcase count changed: expected 178, found 179", " ".join(result.violations))
+    def test_pinned_failure_traceback_accepts_windows_source_path_separators(self):
+        xml = make_xml(failed_ids=set(range(6))).replace(
+            "tests/compatibility/", "tests\\compatibility\\",
+        )
+        result = self.evaluate(xml)
+        self.assertTrue(result.accepted, result.violations)
 
-    def test_missing_expected_skip_fails_closed(self):
-        result = self.evaluate(make_xml(failed_ids=set(range(6)), generic_skipped_count=177))
+    def test_expected_skip_accepts_only_its_tck_source_location_and_exact_reason(self):
+        skip_index = next(index for index, case in enumerate(TEST_CASES) if case["expected_skip_reason"] is not None)
+        case = TEST_CASES[skip_index]
+        reason = case["expected_skip_reason"]
+        xml = make_xml(failed_ids=set(range(6)))
+        old = (
+            f'<testcase classname="{case["junit_classname"]}" name="{case["junit_name"]}">'
+            f'<skipped message={quoteattr(reason)}></skipped></testcase>'
+        )
+        body = f'tests\\compatibility\\_test_helpers.py:86: {reason}'
+        new = (
+            f'<testcase classname="{case["junit_classname"]}" name="{case["junit_name"]}">'
+            f'<skipped message={quoteattr(reason)}>{escape(body)}</skipped></testcase>'
+        )
+        self.assertIn(old, xml)
+        source = "\n".join(["# source"] * 85 + ["pytest.skip(reason)"]) + "\n"
+        result = self.evaluate(
+            xml.replace(old, new, 1),
+            source_files={"tests/compatibility/_test_helpers.py": source},
+        )
+        self.assertTrue(result.accepted, result.violations)
+
+    def test_expected_skip_accepts_pytest_skip_type_but_no_other_type(self):
+        skip_index = next(index for index, case in enumerate(TEST_CASES) if case["expected_skip_reason"] is not None)
+        case = TEST_CASES[skip_index]
+        reason = case["expected_skip_reason"]
+        xml = make_xml(failed_ids=set(range(6)))
+        old = (
+            f'<testcase classname="{case["junit_classname"]}" name="{case["junit_name"]}">'
+            f'<skipped message={quoteattr(reason)}></skipped></testcase>'
+        )
+        new = (
+            f'<testcase classname="{case["junit_classname"]}" name="{case["junit_name"]}">'
+            f'<skipped message={quoteattr(reason)} type="pytest.skip"></skipped></testcase>'
+        )
+        self.assertIn(old, xml)
+        result = self.evaluate(xml.replace(old, new, 1))
+        self.assertTrue(result.accepted, result.violations)
+
+    def test_expected_skip_rejects_traceback_location_outside_the_pinned_tck(self):
+        skip_index = next(index for index, case in enumerate(TEST_CASES) if case["expected_skip_reason"] is not None)
+        case = TEST_CASES[skip_index]
+        reason = case["expected_skip_reason"]
+        xml = make_xml(failed_ids=set(range(6)))
+        old = (
+            f'<testcase classname="{case["junit_classname"]}" name="{case["junit_name"]}">'
+            f'<skipped message={quoteattr(reason)}></skipped></testcase>'
+        )
+        body = f'C:\\\\outside\\\\a2a-tck\\\\tests\\\\compatibility\\\\_test_helpers.py:86: {reason}'
+        new = (
+            f'<testcase classname="{case["junit_classname"]}" name="{case["junit_name"]}">'
+            f'<skipped message={quoteattr(reason)}>{escape(body)}</skipped></testcase>'
+        )
+        result = self.evaluate(xml.replace(old, new, 1))
         self.assertFalse(result.accepted)
-        self.assertIn("skipped testcase count changed: expected 178, found 177", " ".join(result.violations))
+        self.assertIn("skip representation is not exact", " ".join(result.violations))
+
+    def test_unexpected_additional_skip_fails_even_when_skip_count_is_preserved(self):
+        known_ids = {(known["junit_classname"], known["junit_name"]) for known in CASES}
+        extra_skip_index = next(
+            index for index, case in enumerate(TEST_CASES)
+            if case["expected_skip_reason"] is None
+            and (case["junit_classname"], case["junit_name"]) not in known_ids
+        )
+        result = self.evaluate(make_xml(
+            failed_ids=set(range(6)),
+            additional_skip_id=extra_skip_index,
+        ))
+        self.assertFalse(result.accepted)
+        self.assertIn("not in the pinned skip inventory", " ".join(result.violations))
+
+    def test_resolved_expected_skip_may_pass_without_changing_the_inventory(self):
+        first_skip = next(index for index, case in enumerate(TEST_CASES) if case["expected_skip_reason"] is not None)
+        result = self.evaluate(make_xml(failed_ids=set(range(6)), resolve_skip_ids={first_skip}))
+        self.assertTrue(result.accepted, result.violations)
+        self.assertEqual(result.skipped, 177)
+
+    def test_skip_reason_must_match_the_pinned_observed_reason(self):
+        skip_index = next(index for index, case in enumerate(TEST_CASES) if case["expected_skip_reason"] is not None)
+        result = self.evaluate(make_xml(failed_ids=set(range(6)), wrong_skip_reason_id=skip_index))
+        self.assertFalse(result.accepted)
+        self.assertIn("skip reason differs from pinned evidence", " ".join(result.violations))
+
+    def test_skip_type_attribute_and_body_text_cannot_hide_a_regression(self):
+        skip_index = next(index for index, case in enumerate(TEST_CASES) if case["expected_skip_reason"] is not None)
+        result = self.evaluate(make_xml(
+            failed_ids=set(range(6)),
+            extra_skip_type_id=skip_index,
+            skip_body_id=skip_index,
+        ))
+        self.assertFalse(result.accepted)
+        self.assertIn("skip representation is not exact", " ".join(result.violations))
+
+    def test_unexpected_junit_identity_cannot_replace_a_pinned_must_case(self):
+        result = self.evaluate(make_xml(failed_ids=set(range(6)), replace_pass_identity=True))
+        self.assertFalse(result.accepted)
+        self.assertTrue(any("outside the pinned MUST testcase inventory" in item for item in result.violations))
+        self.assertTrue(any("did not execute" in item for item in result.violations))
+
+    def test_tampered_skip_inventory_fails_its_compiled_digest(self):
+        changed_policy = policy_copy()
+        changed_policy["test_cases"][0]["expected_skip_reason"] = "forged"
+        result = self.evaluate(make_xml(failed_ids=set(range(6))), policy_data=changed_policy)
+        self.assertFalse(result.accepted)
+        self.assertIn("differ from the pinned exact inventory", " ".join(result.violations))
 
     def test_tck_sha_mismatch_fails(self):
         result = self.evaluate(make_xml(failed_ids=set(range(6))), sha="f" * 40)
@@ -473,11 +629,14 @@ class A2ATckPolicyTests(unittest.TestCase):
         self.assertIn("raw TCK exit code", " ".join(result.violations))
 
     def test_incomplete_report_fails_even_if_known_cases_match(self):
-        xml = make_xml(failed_ids=set(range(6))).replace(
-            '<testcase classname="tests.compatibility.other.TestPass" name="test_50" />',
-            "",
-            1,
+        omitted = next(
+            index for index, case in enumerate(TEST_CASES)
+            if case["expected_skip_reason"] is None
+            and (case["junit_classname"], case["junit_name"]) not in {
+                (known["junit_classname"], known["junit_name"]) for known in CASES
+            }
         )
+        xml = make_xml(failed_ids=set(range(6)), omit_test_index=omitted)
         result = self.evaluate(xml)
         self.assertFalse(result.accepted)
         self.assertIn("incomplete", " ".join(result.violations))

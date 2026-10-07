@@ -1,5 +1,5 @@
 {
-  "policy_schema_version": 4,
+  "policy_schema_version": 5,
   "tck_repository": "a2aproject/a2a-tck",
   "tck_sha": "263b9cfaf16a554bdfb166a7ba5b67716e946349",
   "classification": "KNOWN_UPSTREAM_TCK_EXCEPTIONS",
@@ -17,7 +17,7 @@
       "rationale": "CORE-SEND-003 describes the required ContentTypeNotSupportedError but omits expected_error in its test data; the shared TCK validator consequently reports the correct non-2xx protocol error as an operation failure."
     }
   ],
-  "rationale": "This policy accepts only exact failures from the pinned, unmodified TCK, each tied to a reviewed upstream issue and an exact failure signature. It does not alter product behavior, protocol validation, authentication, or the TCK.",
+  "rationale": "This policy accepts only exact failures from the pinned, unmodified TCK, each tied to a reviewed upstream issue and exact failure signature. The complete MUST testcase identity set and observed skip reasons are pinned from a successful pristine TCK run; only those skip identities/reasons are eligible, and a resolved skip may pass. The policy does not alter product behavior, protocol validation, authentication, or the TCK.",
   "known_failures": [
     {
       "node_id": "tests/compatibility/core_operations/test_artifacts.py::TestTextArtifact::test_task_has_text_artifact[http_json]",
@@ -91,5 +91,1193 @@
       "reports/junitreport.xml",
       "reports/tck_report.html"
     ]
-  }
+  },
+  "test_case_inventory_sha256": "62cedc3216bb27545d2ede0bb8cf6588ef893e2f827b1de2ac4104a215122028",
+  "test_inventory_evidence": {
+    "tck_sha": "263b9cfaf16a554bdfb166a7ba5b67716e946349",
+    "workflow_run_id": 37421617732,
+    "workflow_name": "A2A v1 MUST conformance",
+    "workflow_head_sha": "15454b98fa87ed29db7fd58eb21cbe29eb016678",
+    "workflow_head_is_ancestor_of_current_main": true,
+    "junit_report_sha256": "69b917d3c73c37c375c44b3a694ed7408b643733a7b271e67416a4b9c4f5ca4b",
+    "collected_identity_match": true,
+    "observed_skip_count": 178
+  },
+  "test_cases": [
+    {
+      "junit_classname": "tests.compatibility.agent_card.test_agent_card.TestAgentCardDiscovery",
+      "junit_name": "test_agent_card_retrievable",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.agent_card.test_agent_card.TestAgentCardStructure",
+      "junit_name": "test_agent_card_validates_against_schema",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.agent_card.test_agent_card.TestAgentCardStructure",
+      "junit_name": "test_required_fields_present",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.agent_card.test_agent_card.TestAgentCardProtocol",
+      "junit_name": "test_supported_interfaces_non_empty",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.agent_card.test_agent_card.TestAgentCardProtocol",
+      "junit_name": "test_each_interface_validates_against_schema",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.agent_card.test_agent_card.TestBindingFieldDeclaration",
+      "junit_name": "test_all_protocols_declared",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestTextArtifact",
+      "junit_name": "test_task_has_text_artifact[grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestTextArtifact",
+      "junit_name": "test_task_has_text_artifact[jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestTextArtifact",
+      "junit_name": "test_task_has_text_artifact[http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestFileArtifact",
+      "junit_name": "test_task_has_file_artifact[grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestFileArtifact",
+      "junit_name": "test_task_has_file_artifact[jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestFileArtifact",
+      "junit_name": "test_task_has_file_artifact[http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestFileUrlArtifact",
+      "junit_name": "test_task_has_file_url_artifact[grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestFileUrlArtifact",
+      "junit_name": "test_task_has_file_url_artifact[jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestFileUrlArtifact",
+      "junit_name": "test_task_has_file_url_artifact[http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestDataArtifact",
+      "junit_name": "test_task_has_data_artifact[grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestDataArtifact",
+      "junit_name": "test_task_has_data_artifact[jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestDataArtifact",
+      "junit_name": "test_task_has_data_artifact[http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestMessageResponse",
+      "junit_name": "test_returns_message_with_text_part[grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestMessageResponse",
+      "junit_name": "test_returns_message_with_text_part[jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_artifacts.TestMessageResponse",
+      "junit_name": "test_returns_message_with_text_part[http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_data_model.TestSendMessageResponseSchema",
+      "junit_name": "test_response_validates_against_schema",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_data_model.TestCamelCaseFieldNames",
+      "junit_name": "test_no_snake_case_keys",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_data_model.TestEnumSerialization",
+      "junit_name": "test_enum_values_are_strings",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_data_model.TestTimestampFormat",
+      "junit_name": "test_timestamps_are_iso8601_utc",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestCoreErrorStructure",
+      "junit_name": "test_error_has_code_and_message_jsonrpc",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestCoreErrorStructure",
+      "junit_name": "test_error_has_code_and_message_rest",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestCoreInputValidation",
+      "junit_name": "test_malformed_request_rejected_jsonrpc",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestCoreInputValidation",
+      "junit_name": "test_malformed_request_rejected_rest",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestCapabilityPushNotifications",
+      "junit_name": "test_push_not_supported_jsonrpc",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestCapabilityPushNotifications",
+      "junit_name": "test_push_not_supported_rest",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestCapabilityStreaming",
+      "junit_name": "test_streaming_not_supported_jsonrpc",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestCapabilityExtensionRequired",
+      "junit_name": "test_missing_required_extension_returns_error_jsonrpc",
+      "expected_skip_reason": "Agent card does not declare urn:a2a:tck:required-extension as required"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestCapabilityExtensionRequired",
+      "junit_name": "test_missing_required_extension_returns_error_http_json",
+      "expected_skip_reason": "Agent card does not declare urn:a2a:tck:required-extension as required"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestCapabilityExtendedCard",
+      "junit_name": "test_extended_card_not_supported_jsonrpc",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestExtendedCardNotConfigured",
+      "junit_name": "test_extended_card_not_configured_jsonrpc",
+      "expected_skip_reason": "Agent does not declare extendedAgentCard capability"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestExtendedCardNotConfigured",
+      "junit_name": "test_extended_card_not_configured_http_json",
+      "expected_skip_reason": "Agent does not declare extendedAgentCard capability"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestExtendedCardNotConfigured",
+      "junit_name": "test_extended_card_not_configured_grpc",
+      "expected_skip_reason": "Agent does not declare extendedAgentCard capability"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestExtendedCardRequiresAuth",
+      "junit_name": "test_extended_card_requires_auth_jsonrpc",
+      "expected_skip_reason": "Agent does not declare extendedAgentCard capability"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestExtendedCardRequiresAuth",
+      "junit_name": "test_extended_card_requires_auth_http_json",
+      "expected_skip_reason": "Agent does not declare extendedAgentCard capability"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestExtendedCardRequiresAuth",
+      "junit_name": "test_extended_card_requires_auth_grpc",
+      "expected_skip_reason": "Agent does not declare extendedAgentCard capability"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestVersionErrors",
+      "junit_name": "test_unsupported_version_returns_error_jsonrpc",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestVersionErrors",
+      "junit_name": "test_unsupported_version_returns_error_rest",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestVersionErrors",
+      "junit_name": "test_empty_version_treated_as_default_jsonrpc",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestJsonRpcErrorStructure",
+      "junit_name": "test_error_object_structure",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestJsonRpcErrorStructure",
+      "junit_name": "test_a2a_error_codes_in_range",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestJsonRpcErrorStructure",
+      "junit_name": "test_a2a_error_type_mappings",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestJsonRpcErrorStructure",
+      "junit_name": "test_error_data_contains_error_info",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestRestErrorStructure",
+      "junit_name": "test_error_uses_aip193_format",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestRestErrorStructure",
+      "junit_name": "test_a2a_error_info_in_details",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_error_handling.TestGrpcErrorStructure",
+      "junit_name": "test_grpc_error_for_nonexistent_task",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_multi_stream.TestMultiStreamOrdering",
+      "junit_name": "test_events_broadcast_to_all_streams[grpc]",
+      "expected_skip_reason": "Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_multi_stream.TestMultiStreamOrdering",
+      "junit_name": "test_events_broadcast_to_all_streams[jsonrpc]",
+      "expected_skip_reason": "Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_multi_stream.TestMultiStreamOrdering",
+      "junit_name": "test_events_broadcast_to_all_streams[http_json]",
+      "expected_skip_reason": "Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_multi_stream.TestMultiStreamOrdering",
+      "junit_name": "test_streams_receive_same_events_in_order[grpc]",
+      "expected_skip_reason": "Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_multi_stream.TestMultiStreamOrdering",
+      "junit_name": "test_streams_receive_same_events_in_order[jsonrpc]",
+      "expected_skip_reason": "Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_multi_stream.TestMultiStreamOrdering",
+      "junit_name": "test_streams_receive_same_events_in_order[http_json]",
+      "expected_skip_reason": "Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_multi_stream.TestMultiStreamOrdering",
+      "junit_name": "test_closing_one_stream_does_not_affect_others[grpc]",
+      "expected_skip_reason": "Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_multi_stream.TestMultiStreamOrdering",
+      "junit_name": "test_closing_one_stream_does_not_affect_others[jsonrpc]",
+      "expected_skip_reason": "Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_multi_stream.TestMultiStreamOrdering",
+      "junit_name": "test_closing_one_stream_does_not_affect_others[http_json]",
+      "expected_skip_reason": "Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_create_push_config[grpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_create_push_config[jsonrpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_create_push_config[http_json]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_config_persists[grpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_config_persists[jsonrpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_config_persists[http_json]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_get_push_config[grpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_get_push_config[jsonrpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_get_push_config[http_json]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_get_nonexistent_config_returns_error[grpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_get_nonexistent_config_returns_error[jsonrpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_get_nonexistent_config_returns_error[http_json]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_list_push_configs[grpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_list_push_configs[jsonrpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_list_push_configs[http_json]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_delete_push_config[grpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_delete_push_config[jsonrpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_delete_push_config[http_json]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_delete_is_idempotent[grpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_delete_is_idempotent[jsonrpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationCrud",
+      "junit_name": "test_delete_is_idempotent[http_json]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationDelivery",
+      "junit_name": "test_delivery_includes_auth[grpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationDelivery",
+      "junit_name": "test_delivery_includes_auth[jsonrpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationDelivery",
+      "junit_name": "test_delivery_includes_auth[http_json]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationDelivery",
+      "junit_name": "test_delivery_at_least_once[grpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationDelivery",
+      "junit_name": "test_delivery_at_least_once[jsonrpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationDelivery",
+      "junit_name": "test_delivery_at_least_once[http_json]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationDelivery",
+      "junit_name": "test_delivery_payload_format[grpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationDelivery",
+      "junit_name": "test_delivery_payload_format[jsonrpc]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_push_notifications.TestPushNotificationDelivery",
+      "junit_name": "test_delivery_payload_format[http_json]",
+      "expected_skip_reason": "Agent does not support push notifications"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-SEND-001-grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-SEND-001-jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-SEND-001-http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-SEND-003-grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-SEND-003-jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-SEND-003-http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-STREAM-001-grpc]",
+      "expected_skip_reason": "Agent card does not declare capabilities for: ['streaming']"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-STREAM-001-jsonrpc]",
+      "expected_skip_reason": "Agent card does not declare capabilities for: ['streaming']"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-STREAM-001-http_json]",
+      "expected_skip_reason": "Agent card does not declare capabilities for: ['streaming']"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-STREAM-002-grpc]",
+      "expected_skip_reason": "Agent card does not declare capabilities for: ['streaming']"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-STREAM-002-jsonrpc]",
+      "expected_skip_reason": "Agent card does not declare capabilities for: ['streaming']"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-STREAM-002-http_json]",
+      "expected_skip_reason": "Agent card does not declare capabilities for: ['streaming']"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-STREAM-003-grpc]",
+      "expected_skip_reason": "Agent card does not declare capabilities for: ['streaming']"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-STREAM-003-jsonrpc]",
+      "expected_skip_reason": "Agent card does not declare capabilities for: ['streaming']"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-STREAM-003-http_json]",
+      "expected_skip_reason": "Agent card does not declare capabilities for: ['streaming']"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-GET-002-grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-GET-002-jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-GET-002-http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-LIST-001-grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-LIST-001-jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-LIST-001-http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-LIST-002-grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-LIST-002-jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-LIST-002-http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-LIST-003-grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-LIST-003-jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-LIST-003-http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-LIST-004-grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-LIST-004-jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-LIST-004-http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-LIST-005-grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-LIST-005-jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-LIST-005-http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-CANCEL-003-grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-CANCEL-003-jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-CANCEL-003-http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-EXECUTION-MODE-001-grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-EXECUTION-MODE-001-jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-EXECUTION-MODE-001-http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-EXECUTION-MODE-002-grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-EXECUTION-MODE-002-jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-EXECUTION-MODE-002-http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-MULTI-001a-grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-MULTI-001a-jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-MULTI-001a-http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-MULTI-002a-grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-MULTI-002a-jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-MULTI-002a-http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-MULTI-003-grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-MULTI-003-jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-MULTI-003-http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-MULTI-004-grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-MULTI-004-jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured (filtered by --transport)"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[CORE-MULTI-004-http_json]",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[STREAM-SUB-004-grpc]",
+      "expected_skip_reason": "Agent card does not declare capabilities for: ['streaming']"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[STREAM-SUB-004-jsonrpc]",
+      "expected_skip_reason": "Agent card does not declare capabilities for: ['streaming']"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_requirements",
+      "junit_name": "test_must_requirement[STREAM-SUB-004-http_json]",
+      "expected_skip_reason": "Agent card does not declare capabilities for: ['streaming']"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_stream_ordering.TestStreamEventOrdering",
+      "junit_name": "test_streaming_event_ordering[grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_stream_ordering.TestStreamEventOrdering",
+      "junit_name": "test_streaming_event_ordering[jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_stream_ordering.TestStreamEventOrdering",
+      "junit_name": "test_streaming_event_ordering[http_json]",
+      "expected_skip_reason": "Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_history.TestHistoryLengthLimit",
+      "junit_name": "test_get_task_history_does_not_exceed_limit[grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_history.TestHistoryLengthLimit",
+      "junit_name": "test_get_task_history_does_not_exceed_limit[jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_history.TestHistoryLengthLimit",
+      "junit_name": "test_get_task_history_does_not_exceed_limit[http_json]",
+      "expected_skip_reason": "Expected task state 'TASK_STATE_INPUT_REQUIRED' but got 'TASK_STATE_FAILED'"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestGetTask",
+      "junit_name": "test_get_task_returns_current_state[grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestGetTask",
+      "junit_name": "test_get_task_returns_current_state[jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestGetTask",
+      "junit_name": "test_get_task_returns_current_state[http_json]",
+      "expected_skip_reason": "Expected task state 'TASK_STATE_COMPLETED' but got 'TASK_STATE_FAILED'"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestCancelTask",
+      "junit_name": "test_cancel_task_returns_updated_state[grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestCancelTask",
+      "junit_name": "test_cancel_task_returns_updated_state[jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestCancelTask",
+      "junit_name": "test_cancel_task_returns_updated_state[http_json]",
+      "expected_skip_reason": "Expected task state 'TASK_STATE_INPUT_REQUIRED' but got 'TASK_STATE_FAILED'"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestCancelTask",
+      "junit_name": "test_cancel_terminal_task_returns_error[grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestCancelTask",
+      "junit_name": "test_cancel_terminal_task_returns_error[jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestCancelTask",
+      "junit_name": "test_cancel_terminal_task_returns_error[http_json]",
+      "expected_skip_reason": "Expected task state 'TASK_STATE_COMPLETED' but got 'TASK_STATE_FAILED'"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestMultiTurn",
+      "junit_name": "test_send_message_to_terminal_task[grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestMultiTurn",
+      "junit_name": "test_send_message_to_terminal_task[jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestMultiTurn",
+      "junit_name": "test_send_message_to_terminal_task[http_json]",
+      "expected_skip_reason": "Expected task state 'TASK_STATE_COMPLETED' but got 'TASK_STATE_FAILED'"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestMultiTurn",
+      "junit_name": "test_infer_context_from_task[grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestMultiTurn",
+      "junit_name": "test_infer_context_from_task[jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestMultiTurn",
+      "junit_name": "test_infer_context_from_task[http_json]",
+      "expected_skip_reason": "Expected task state 'TASK_STATE_INPUT_REQUIRED' but got 'TASK_STATE_FAILED'"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestMultiTurn",
+      "junit_name": "test_reject_mismatching_context[grpc]",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestMultiTurn",
+      "junit_name": "test_reject_mismatching_context[jsonrpc]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestMultiTurn",
+      "junit_name": "test_reject_mismatching_context[http_json]",
+      "expected_skip_reason": "Expected task state 'TASK_STATE_COMPLETED' but got 'TASK_STATE_FAILED'"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestSubscribeLifecycle",
+      "junit_name": "test_subscribe_terminates_at_terminal_state[grpc]",
+      "expected_skip_reason": "Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestSubscribeLifecycle",
+      "junit_name": "test_subscribe_terminates_at_terminal_state[jsonrpc]",
+      "expected_skip_reason": "Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestSubscribeLifecycle",
+      "junit_name": "test_subscribe_terminates_at_terminal_state[http_json]",
+      "expected_skip_reason": "Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestSubscribeLifecycle",
+      "junit_name": "test_subscribe_rejects_terminal_task[grpc]",
+      "expected_skip_reason": "Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestSubscribeLifecycle",
+      "junit_name": "test_subscribe_rejects_terminal_task[jsonrpc]",
+      "expected_skip_reason": "Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_task_lifecycle.TestSubscribeLifecycle",
+      "junit_name": "test_subscribe_rejects_terminal_task[http_json]",
+      "expected_skip_reason": "Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_transport_behavior.TestJsonRpcFormat",
+      "junit_name": "test_response_validates_jsonrpc_envelope",
+      "expected_skip_reason": "JSON-RPC transport not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_transport_behavior.TestJsonRpcFormat",
+      "junit_name": "test_content_type_is_application_json",
+      "expected_skip_reason": "JSON-RPC transport not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_transport_behavior.TestJsonRpcMethodNames",
+      "junit_name": "test_bindings_use_spec_method_names",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_transport_behavior.TestJsonRpcServiceParams",
+      "junit_name": "test_extensions_header_accepted",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_transport_behavior.TestJsonRpcStreaming",
+      "junit_name": "test_streaming_content_type",
+      "expected_skip_reason": "JSON-RPC transport not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_transport_behavior.TestRestFormat",
+      "junit_name": "test_response_content_type",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_transport_behavior.TestRestFormat",
+      "junit_name": "test_response_validates_against_schema",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_transport_behavior.TestRestServiceParams",
+      "junit_name": "test_extensions_header_accepted",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_transport_behavior.TestRestUrlPatterns",
+      "junit_name": "test_url_patterns_defined",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_transport_behavior.TestRestUrlPatterns",
+      "junit_name": "test_http_methods_correct",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_transport_behavior.TestRestQueryParams",
+      "junit_name": "test_query_params_are_camel_case",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_transport_behavior.TestRestStreaming",
+      "junit_name": "test_streaming_content_type",
+      "expected_skip_reason": "Streaming not supported: [400] Agent does not support streaming"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_transport_behavior.TestGrpcService",
+      "junit_name": "test_grpc_response_validates_against_proto",
+      "expected_skip_reason": "gRPC transport not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_transport_behavior.TestGrpcProto3",
+      "junit_name": "test_response_uses_proto3",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_transport_behavior.TestGrpcServiceParams",
+      "junit_name": "test_extensions_metadata_accepted",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.core_operations.test_transport_behavior.TestGrpcStreaming",
+      "junit_name": "test_grpc_streaming_works",
+      "expected_skip_reason": "gRPC transport not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.grpc.test_status_codes.TestGrpcStatusCodes",
+      "junit_name": "test_task_not_found_returns_not_found",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.grpc.test_status_codes.TestGrpcStatusCodes",
+      "junit_name": "test_task_not_cancelable_returns_failed_precondition",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.grpc.test_status_codes.TestGrpcStatusCodes",
+      "junit_name": "test_unsupported_operation_returns_unimplemented",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.grpc.test_status_codes.TestGrpcStatusCodes",
+      "junit_name": "test_push_not_supported_returns_unimplemented",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.grpc.test_status_codes.TestGrpcStatusCodes",
+      "junit_name": "test_version_not_supported_returns_unimplemented",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.grpc.test_status_codes.TestGrpcErrorInfo",
+      "junit_name": "test_error_info_in_status_details",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.grpc.test_streaming.TestGrpcStreaming",
+      "junit_name": "test_streaming_response_type",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.grpc.test_streaming.TestGrpcStreaming",
+      "junit_name": "test_streaming_message_structure",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.grpc.test_streaming.TestGrpcStreaming",
+      "junit_name": "test_streaming_cancellation",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.grpc.test_streaming.TestGrpcStreaming",
+      "junit_name": "test_streaming_error_propagation",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.grpc.test_streaming.TestGrpcStreaming",
+      "junit_name": "test_subscribe_first_event_is_task",
+      "expected_skip_reason": "Transport 'grpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.http_json.test_http_status.TestHttpJsonStatusCodes",
+      "junit_name": "test_task_not_found_returns_404",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.http_json.test_http_status.TestHttpJsonStatusCodes",
+      "junit_name": "test_task_not_cancelable_returns_409",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.http_json.test_http_status.TestHttpJsonStatusCodes",
+      "junit_name": "test_unsupported_operation_returns_400",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.http_json.test_http_status.TestHttpJsonStatusCodes",
+      "junit_name": "test_content_type_not_supported_returns_415",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.http_json.test_http_status.TestHttpJsonStatusCodes",
+      "junit_name": "test_push_not_supported_returns_400",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.http_json.test_http_status.TestHttpJsonStatusCodes",
+      "junit_name": "test_version_not_supported_returns_400",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.http_json.test_http_status.TestHttpJsonStatusCodes",
+      "junit_name": "test_success_returns_2xx",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.http_json.test_problem_details.TestAIP193ErrorFormat",
+      "junit_name": "test_error_content_type",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.http_json.test_problem_details.TestAIP193ErrorFormat",
+      "junit_name": "test_error_object_present",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.http_json.test_problem_details.TestAIP193ErrorFormat",
+      "junit_name": "test_code_field_matches_http_status",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.http_json.test_problem_details.TestAIP193ErrorFormat",
+      "junit_name": "test_message_field_is_string",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.http_json.test_problem_details.TestAIP193ErrorInfo",
+      "junit_name": "test_details_contains_error_info",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.http_json.test_problem_details.TestAIP193ErrorInfo",
+      "junit_name": "test_error_info_valid",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.http_json.test_problem_details.TestAIP193ErrorInfo",
+      "junit_name": "test_error_info_reason_matches_condition",
+      "expected_skip_reason": null
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_error_codes.TestJsonRpcErrorCodeMappings",
+      "junit_name": "test_task_not_found_error",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_error_codes.TestJsonRpcErrorCodeMappings",
+      "junit_name": "test_task_not_cancelable_error",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_error_codes.TestJsonRpcErrorCodeMappings",
+      "junit_name": "test_push_notification_not_supported_error",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_error_codes.TestJsonRpcErrorCodeMappings",
+      "junit_name": "test_unsupported_operation_error",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_error_codes.TestJsonRpcErrorCodeMappings",
+      "junit_name": "test_content_type_not_supported_error",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_error_codes.TestJsonRpcErrorCodeMappings",
+      "junit_name": "test_version_not_supported_error",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_error_codes.TestJsonRpcErrorCodeRange",
+      "junit_name": "test_error_code_in_valid_range[GetTask-nonexistent]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_error_codes.TestJsonRpcErrorCodeRange",
+      "junit_name": "test_error_code_in_valid_range[CancelTask-nonexistent]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_error_codes.TestJsonRpcErrorCodeRange",
+      "junit_name": "test_error_code_in_valid_range[SendMessage-bad-version]",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_error_info.TestJsonRpcErrorInfo",
+      "junit_name": "test_error_data_is_array",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_error_info.TestJsonRpcErrorInfo",
+      "junit_name": "test_data_contains_error_info",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_error_info.TestJsonRpcErrorInfo",
+      "junit_name": "test_error_info_valid",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_error_info.TestJsonRpcErrorInfo",
+      "junit_name": "test_error_info_reason_matches_condition",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_sse_streaming.TestSseStreamingFormat",
+      "junit_name": "test_streaming_events_have_jsonrpc_envelope",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_sse_streaming.TestSseStreamingFormat",
+      "junit_name": "test_streaming_events_contain_stream_response",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_sse_streaming.TestSseSubscribeToTask",
+      "junit_name": "test_subscribe_nonexistent_task_returns_error",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    },
+    {
+      "junit_classname": "tests.compatibility.jsonrpc.test_sse_streaming.TestSseSubscribeToTask",
+      "junit_name": "test_subscribe_first_event_is_task",
+      "expected_skip_reason": "Transport 'jsonrpc' not configured"
+    }
+  ]
 }

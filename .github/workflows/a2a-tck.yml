@@ -28,6 +28,11 @@ jobs:
         with:
           python-version: '3.12'
 
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: '0.12.10'
+          enable-cache: false
+
       - name: Install WealthGenie server dependencies
         run: npm ci --prefix server
 
@@ -89,9 +94,7 @@ jobs:
 
       - name: Install TCK dependencies
         working-directory: .a2a-tck
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e .
+        run: uv sync --locked --no-dev --python 3.12
 
       - name: Verify pinned TCK checkout is pristine before test execution
         run: |
@@ -117,7 +120,7 @@ jobs:
         run: |
           tck_started_at=$(date +%s.%N)
           set +e
-          python run_tck.py --sut-host http://127.0.0.1:5088 --transport http_json --level must
+          uv run --locked python run_tck.py --sut-host http://127.0.0.1:5088 --transport http_json --level must
           raw_tck_exit_code=$?
           set -e
           echo "RAW_TCK_EXIT_CODE=$raw_tck_exit_code"
