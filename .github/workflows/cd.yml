@@ -57,7 +57,7 @@ jobs:
         uses: helm/kind-action@0025e74a8c7512023d06dc019c617aa3cf561fde # v1.10.0
         with:
           cluster_name: kind
-          version: v0.31.0
+          version: v0.32.0
           node_image: kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256
           wait: 120s
 
@@ -124,13 +124,13 @@ jobs:
             node server/scripts/createBuildProvenance.js
           node -e 'const p = require("./build/provenance.json"); for (const [name, value] of Object.entries({provenance_sha256:p.provenanceSha256, frontend_artifact_set_sha256:p.frontendArtifactSetSha256, git_tree_sha:p.gitTreeSha, server_image_id:p.serverImageIdentity, frontend_image_id:p.frontendImageIdentity, ml_image_id:p.mlImageIdentity})) console.log(`${name}=${value}`)' >> "$GITHUB_OUTPUT"
           {
-            echo '### Immutable build identities'
-            echo "- Commit: `$GITHUB_SHA`"
-            echo "- Tree: `$(git rev-parse 'HEAD^{tree}')`"
-            echo "- Provenance SHA-256: `$(node -p 'require("./build/provenance.json").provenanceSha256')`"
-            echo "- Frontend artifact set SHA-256: `$(node -p 'require("./build/provenance.json").frontendArtifactSetSha256')`"
-            echo "- Docker image IDs: server `$SERVER_IMAGE_ID`, frontend `$FRONTEND_IMAGE_ID`, ML `$ML_IMAGE_ID`"
-            echo '- Docker image IDs are local image identities; no registry digest is asserted.'
+            printf '%s\n' '### Immutable build identities'
+            printf -- '- Commit: `%s`\n' "$GITHUB_SHA"
+            printf -- '- Tree: `%s`\n' "$(git rev-parse 'HEAD^{tree}')"
+            printf -- '- Provenance SHA-256: `%s`\n' "$(node -p 'require("./build/provenance.json").provenanceSha256')"
+            printf -- '- Frontend artifact set SHA-256: `%s`\n' "$(node -p 'require("./build/provenance.json").frontendArtifactSetSha256')"
+            printf -- '- Docker image IDs: server `%s`, frontend `%s`, ML `%s`\n' "$SERVER_IMAGE_ID" "$FRONTEND_IMAGE_ID" "$ML_IMAGE_ID"
+            printf '%s\n' '- Docker image IDs are local image identities; no registry digest is asserted.'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Load Images into Kind Cluster

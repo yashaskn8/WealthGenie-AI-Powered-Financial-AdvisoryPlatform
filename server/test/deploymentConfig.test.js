@@ -186,12 +186,16 @@ test('production template filter accepts only the checked-in non-deployable imag
   assert.equal(result.stdout, manifest);
 });
 
-test('Kind CD verifies the fixed Metrics Server manifest digest on a compatible Kubernetes node image', () => {
+test('Kind CD uses a containerd-v4-compatible release and verifies the fixed Metrics Server manifest digest', () => {
   const workflow = fs.readFileSync(path.join(repositoryRoot, '.github/workflows/cd.yml'), 'utf8');
   const parsed = parse(workflow);
-  assert.match(workflow, /version:\s*v0\.31\.0/);
+  const steps = parsed.jobs['deploy-and-verify-kind'].steps;
+  const build = steps.find(step => step.name === 'Build Docker Container Images');
+  assert.match(workflow, /version:\s*v0\.32\.0/);
   assert.equal(parsed.jobs['deploy-and-verify-kind'].steps
     .find(step => step.name === 'Create Kind Kubernetes Cluster').with.node_image, 'kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256');
+  assert.match(build.run, /printf -- '- Commit: `%s`\\n' "\$GITHUB_SHA"/);
+  assert.doesNotMatch(build.run, /echo\s+"[^"]*`/, 'Markdown backticks must not trigger shell command substitution');
   assert.match(workflow, /releases\/download\/v0\.9\.0\/components\.yaml/);
   assert.match(workflow, /1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b/);
   assert.match(workflow, /sha256sum --check/);
