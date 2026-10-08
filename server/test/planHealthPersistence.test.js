@@ -309,3 +309,24 @@ test('migration fails closed on ambiguous identity without deleting evidence', a
   assert.equal(fixture.eventRows.length, 1);
   assert.equal(fixture.eventRows[0].profileId, null);
 });
+
+
+test('ambiguous later Plan Health identity is rejected before any migration write or index change', async () => {
+  const validFirst = legacyEvent('event-1');
+  const invalidLater = legacyEvent('event-2', { reason: 'ZZZ_INVALID', status: 'INVALID' });
+  const fixture = persistenceFixture({
+    legacyFingerprintIndex: true,
+    legacyEvents: [validFirst, invalidLater],
+  });
+
+  await assert.rejects(
+    migratePlanHealthPersistence(fixture),
+    error => error.code === 'PHASE5_PLAN_HEALTH_DUPLICATE_IDENTITY_AMBIGUOUS',
+  );
+
+  assert.equal(fixture.legacyLease.status, undefined);
+  assert.equal(fixture.priorityBackfill, null);
+  assert.deepEqual(fixture.droppedEventIndexes, []);
+  assert.deepEqual(fixture.eventUpdates, []);
+  assert.equal(fixture.eventRows[0].fingerprint, 'legacy-event-1');
+});

@@ -116,6 +116,33 @@ function identityKey(identity) {
   return JSON.stringify(identity);
 }
 
+async function preflightLegacyPlanHealthEvents(eventModel) {
+  const cursor = eventModel.collection.find({}).sort({
+    userId: 1,
+    profileId: 1,
+    recommendationId: 1,
+    reason: 1,
+    monitorVersion: 1,
+    _id: 1,
+  });
+  let groupKey = null;
+  let groupSize = 0;
+  for await (const row of cursor) {
+    const nextKey = identityKey(eventIdentity(row));
+    if (groupKey !== nextKey) {
+      groupKey = nextKey;
+      groupSize = 0;
+    }
+    groupSize += 1;
+    if (groupSize > MAX_DUPLICATE_EVENT_GROUP_SIZE) {
+      throw persistenceUnavailable(
+        'Legacy Plan Health duplicate group exceeds the safe migration bound; operator reconciliation is required.',
+        'PHASE5_PLAN_HEALTH_DUPLICATE_IDENTITY_AMBIGUOUS',
+      );
+    }
+  }
+}
+
 function activeWinner(rows) {
   const rank = { ACKNOWLEDGED: 0, OPEN: 1, READ: 2, UNREAD: 3 };
   return rows.filter(row => ACTIVE_EVENT_STATUSES.includes(row.status)).sort((left, right) => (
@@ -236,6 +263,9 @@ export async function migratePlanHealthPersistence({
   admissionModel = AgentQueueAdmission,
   agentRunModel = AgentRun,
 } = {}) {
+  // Validate the complete legacy event stream before creating collections,
+  // backfilling scheduler/queue state, or changing indexes or event rows.
+  await preflightLegacyPlanHealthEvents(eventModel);
   await ensureCollection(eventModel);
   await ensureCollection(leaseModel);
   await ensureCollection(fenceModel);
