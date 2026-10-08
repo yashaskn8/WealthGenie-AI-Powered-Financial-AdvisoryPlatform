@@ -7,7 +7,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { matchesBuildSha } from '../../shared/buildIdentity.js';
 import {
+  isSafeFrontendArtifactPath,
+  MAX_FRONTEND_ARTIFACT_BYTES,
   MAX_FRONTEND_ARTIFACT_COUNT,
+  MAX_FRONTEND_ARTIFACT_SET_BYTES,
+  MAX_FRONTEND_PROVENANCE_BYTES,
   verifyBuildProvenance,
 } from '../services/buildProvenance.js';
 import {
@@ -109,9 +113,130 @@ function frontendArtifactUrl(origin, artifactPath) {
   return new URL('/' + encodedPath, origin).toString();
 }
 
+async function cancelResponseBody(response) {
+  try {
+    await response?.body?.cancel();
+  } catch {
+    // A response may already have been consumed or cancelled.
+  }
+}
+
+async function readBoundedFetchResponse(fetcher, requestUrl, expectedOrigin, {
+  maxBytes,
+  expectedArtifact = null,
+  collectBytes = false,
+  timeoutMs = LOGIN_BROWSER_TIMEOUT_MS,
+} = {}) {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(requestUrl);
+  } catch {
+    return null;
+  }
+  if (typeof fetcher !== 'function'
+      || parsedUrl.origin !== expectedOrigin
+      || parsedUrl.search
+      || parsedUrl.hash
+      || !Number.isSafeInteger(maxBytes)
+      || maxBytes < 0
+      || (expectedArtifact && (!Number.isSafeInteger(expectedArtifact.byteLength)
+        || expectedArtifact.byteLength < 0
+        || expectedArtifact.byteLength > maxBytes))) return null;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let response;
+  try {
+    response = await fetcher(parsedUrl.toString(), {
+      redirect: 'manual',
+      signal: controller.signal,
+      headers: { 'accept-encoding': 'identity' },
+    });
+    if (!response || response.ok !== true || response.redirected === true || !response.body) {
+      await cancelResponseBody(response);
+      return null;
+    }
+    if (response.url) {
+      const finalUrl = new URL(response.url);
+      if (finalUrl.origin !== expectedOrigin || finalUrl.href !== parsedUrl.href) {
+        await cancelResponseBody(response);
+        return null;
+      }
+    }
+    const encoding = response.headers?.get?.('content-encoding');
+    if (encoding && encoding.toLowerCase() !== 'identity') {
+      await cancelResponseBody(response);
+      return null;
+    }
+    const contentLength = response.headers?.get?.('content-length');
+    if (contentLength !== null && contentLength !== undefined) {
+      if (!/^(0|[1-9]\d*)$/.test(contentLength)) {
+        await cancelResponseBody(response);
+        return null;
+      }
+      const declaredLength = Number(contentLength);
+      if (!Number.isSafeInteger(declaredLength)
+          || declaredLength > maxBytes
+          || (expectedArtifact && declaredLength !== expectedArtifact.byteLength)) {
+        await cancelResponseBody(response);
+        return null;
+      }
+    }
+
+    const reader = response.body.getReader();
+    const hash = createHash('sha256');
+    const chunks = collectBytes ? [] : null;
+    let byteLength = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        byteLength += value.byteLength;
+        if (byteLength > maxBytes || (expectedArtifact && byteLength > expectedArtifact.byteLength)) {
+          await reader.cancel();
+          return null;
+        }
+        hash.update(value);
+        if (chunks) chunks.push(Buffer.from(value));
+      }
+    } catch {
+      try { await reader.cancel(); } catch { /* The stream may already be closed. */ }
+      return null;
+    } finally {
+      try { reader.releaseLock(); } catch { /* The reader may have been released. */ }
+    }
+    const digest = hash.digest('hex');
+    if ((expectedArtifact && byteLength !== expectedArtifact.byteLength)
+        || (expectedArtifact && digest !== expectedArtifact.sha256)) return null;
+    return {
+      status: response.status,
+      headers: response.headers,
+      byteLength,
+      sha256: digest,
+      bytes: chunks ? Buffer.concat(chunks, byteLength) : null,
+    };
+  } catch {
+    await cancelResponseBody(response);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function responseBodyMatchesArtifact(response, expectedArtifact) {
   try {
-    if (!responseOk(response) || typeof response.body !== 'function') return false;
+    if (!responseOk(response)
+        || !expectedArtifact
+        || !Number.isSafeInteger(expectedArtifact.byteLength)
+        || expectedArtifact.byteLength < 0
+        || expectedArtifact.byteLength > MAX_FRONTEND_ARTIFACT_BYTES
+        || typeof response.body !== 'function') return false;
+    const headers = typeof response.headers === 'function' ? response.headers() : null;
+    const encoding = headers?.['content-encoding'];
+    const contentLength = headers?.['content-length'];
+    if ((encoding && encoding.toLowerCase() !== 'identity')
+        || (contentLength !== undefined && (!/^(0|[1-9]\d*)$/.test(contentLength)
+          || Number(contentLength) !== expectedArtifact.byteLength))) return false;
     const contents = await response.body();
     if (!(contents instanceof Uint8Array) || contents.byteLength !== expectedArtifact.byteLength) return false;
     const digest = createHash('sha256').update(contents).digest('hex');
@@ -121,43 +246,82 @@ async function responseBodyMatchesArtifact(response, expectedArtifact) {
   }
 }
 
-async function servedArtifactMatches(request, url, expectedArtifact) {
-  try {
-    const response = await request.get(url, {
-      timeout: LOGIN_BROWSER_TIMEOUT_MS,
-      maxRedirects: 0,
-    });
-    return await responseBodyMatchesArtifact(response, expectedArtifact);
-  } catch {
-    return false;
-  }
+async function servedArtifactMatches(fetcher, url, expectedArtifact, origin) {
+  const result = await readBoundedFetchResponse(fetcher, url, origin, {
+    maxBytes: MAX_FRONTEND_ARTIFACT_BYTES,
+    expectedArtifact,
+    timeoutMs: LOGIN_BROWSER_TIMEOUT_MS,
+  });
+  return Boolean(result);
 }
 
 const MAX_SERVED_FRONTEND_ARTIFACT_CONCURRENCY = 8;
 
-export async function verifyServedFrontendArtifacts(inventory, request, origin) {
+function isValidServedFrontendInventory(inventory) {
+  if (!Array.isArray(inventory) || inventory.length === 0 || inventory.length > MAX_FRONTEND_ARTIFACT_COUNT) return false;
+  let totalBytes = 0;
+  const paths = new Set();
+  for (const artifact of inventory) {
+    if (!artifact || typeof artifact !== 'object' || Array.isArray(artifact)
+        || !isSafeFrontendArtifactPath(artifact.path)
+        || !/^[a-f0-9]{64}$/.test(artifact.sha256 || '')
+        || !Number.isSafeInteger(artifact.byteLength)
+        || artifact.byteLength < 0
+        || artifact.byteLength > MAX_FRONTEND_ARTIFACT_BYTES
+        || paths.has(artifact.path)) return false;
+    totalBytes += artifact.byteLength;
+    if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_FRONTEND_ARTIFACT_SET_BYTES) return false;
+    paths.add(artifact.path);
+  }
+  return true;
+}
+
+export async function verifyServedFrontendArtifacts(inventory, fetcher, origin) {
+  let parsedOrigin;
+  try {
+    parsedOrigin = new URL(origin);
+  } catch {
+    return false;
+  }
   if (!Array.isArray(inventory)
-      || inventory.length === 0
-      || inventory.length > MAX_FRONTEND_ARTIFACT_COUNT
-      || typeof request?.get !== 'function'
-      || typeof origin !== 'string') return false;
+      || !isValidServedFrontendInventory(inventory)
+      || typeof fetcher !== 'function'
+      || parsedOrigin.origin !== origin
+      || !['http:', 'https:'].includes(parsedOrigin.protocol)) return false;
   for (let index = 0; index < inventory.length; index += MAX_SERVED_FRONTEND_ARTIFACT_CONCURRENCY) {
     const batch = inventory.slice(index, index + MAX_SERVED_FRONTEND_ARTIFACT_CONCURRENCY);
     const results = await Promise.all(batch.map(artifact => servedArtifactMatches(
-      request,
+      fetcher,
       frontendArtifactUrl(origin, artifact.path),
-      artifact
+      artifact,
+      origin,
     )));
     if (results.some(matches => !matches)) return false;
   }
   return true;
 }
-async function servedFrontendBuildMatches({ page, request, documentResponse, observedBrowserResponses, expectedBuildSha, expectedGitTreeSha, expectedProvenanceSha256, expectedFrontendArtifactSetSha256, origin }) {
+
+function createSemaphore(limit) {
+  let active = 0;
+  const waiters = [];
+  return async action => {
+    if (active >= limit) await new Promise(resolve => waiters.push(resolve));
+    active += 1;
+    try {
+      return await action();
+    } finally {
+      active -= 1;
+      waiters.shift()?.();
+    }
+  };
+}
+
+async function servedFrontendBuildMatches({ page, fetcher, documentResponse, observedBrowserResponses, expectedBuildSha, expectedGitTreeSha, expectedProvenanceSha256, expectedFrontendArtifactSetSha256, origin }) {
   if (!matchesBuildSha(expectedBuildSha, expectedBuildSha)
       || !/^[a-f0-9]{40}$/i.test(expectedGitTreeSha || '')
       || !/^[a-f0-9]{64}$/.test(expectedProvenanceSha256 || '')
       || !/^[a-f0-9]{64}$/.test(expectedFrontendArtifactSetSha256 || '')
-      || typeof request?.get !== 'function'
+      || typeof fetcher !== 'function'
       || !(observedBrowserResponses instanceof Map)) return false;
   try {
     const runtime = await page.evaluate(() => ({
@@ -171,12 +335,14 @@ async function servedFrontendBuildMatches({ page, request, documentResponse, obs
         || runtime.scripts.length === 0
         || !Array.isArray(runtime?.stylesheets)) return false;
 
-    const response = await request.get(new URL('/build-provenance/provenance.json', origin).toString(), {
-      timeout: LOGIN_BROWSER_TIMEOUT_MS,
-      maxRedirects: 0,
-    });
-    if (!responseOk(response)) return false;
-    const manifest = await response.json();
+    const manifestResult = await readBoundedFetchResponse(
+      fetcher,
+      new URL('/build-provenance/provenance.json', origin).toString(),
+      origin,
+      { maxBytes: MAX_FRONTEND_PROVENANCE_BYTES, collectBytes: true },
+    );
+    if (!manifestResult) return false;
+    const manifest = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(manifestResult.bytes));
     if (!['serverImageIdentity', 'frontendImageIdentity', 'mlImageIdentity']
       .every(field => /^sha256:[a-f0-9]{64}$/.test(manifest?.[field] || ''))
       || !verifyBuildProvenance(manifest, {
@@ -200,13 +366,13 @@ async function servedFrontendBuildMatches({ page, request, documentResponse, obs
 
     const indexArtifact = inventoryByPath.get('index.html');
     if (!await responseBodyMatchesArtifact(documentResponse, indexArtifact)) return false;
-    if (!await verifyServedFrontendArtifacts(inventory, request, origin)) return false;
+    if (!await verifyServedFrontendArtifacts(inventory, fetcher, origin)) return false;
 
     for (const assetPath of new Set(loadedAssetPaths)) {
       const expectedArtifact = inventoryByPath.get(assetPath);
-      const observedResponses = observedBrowserResponses.get(assetPath);
-      if (!Array.isArray(observedResponses) || observedResponses.length === 0) return false;
-      for (const observedResponse of observedResponses) {
+      const observedResponsesForPath = observedBrowserResponses.get(assetPath);
+      if (!Array.isArray(observedResponsesForPath) || observedResponsesForPath.length === 0) return false;
+      for (const observedResponse of observedResponsesForPath) {
         if (!await responseBodyMatchesArtifact(observedResponse, expectedArtifact)) return false;
       }
     }
@@ -215,7 +381,6 @@ async function servedFrontendBuildMatches({ page, request, documentResponse, obs
     return false;
   }
 }
-
 const TRUSTED_TAX_SOURCE_HOSTS = Object.freeze([
   'incometax.gov.in',
   'incometaxindia.gov.in',
@@ -1089,7 +1254,7 @@ export async function checkBrowserAndFinancialFlow(reporter, {
   expectedProvenanceSha256 = process.env.DEMO_EXPECTED_BUILD_PROVENANCE_SHA256,
   expectedFrontendArtifactSetSha256 = process.env.DEMO_EXPECTED_FRONTEND_ARTIFACT_SET_SHA256,
   trustedRemoteOrigins = process.env.DEMO_TRUSTED_REMOTE_ORIGINS,
-}, { launchBrowser, onTiming } = {}) {
+}, { launchBrowser, onTiming, fetcher = globalThis.fetch } = {}) {
   if (!frontendUrl || !email || !password) {
     reporter.add('Critical browser path', false, 'browser launch/navigation NOT_EVALUATED because demo browser configuration is missing');
     reporter.notEvaluated('Profile completion/auth', 'demo identity configuration is missing');
@@ -1133,14 +1298,45 @@ export async function checkBrowserAndFinancialFlow(reporter, {
       }
       browserLaunched = true;
       context = await browser.newContext({ serviceWorkers: 'block' });
-      const allowedBrowserOrigins = new Set([new URL(frontendUrl).origin, new URL(apiBase).origin]);
       if (typeof context.route !== 'function') {
         throw Object.assign(new Error('Browser request-origin guard is unavailable.'), { code: 'BROWSER_ORIGIN_GUARD_UNAVAILABLE' });
       }
+      const withFrontendRouteSlot = createSemaphore(4);
+      let frontendRouteBytes = 0;
       await context.route('**/*', async route => {
         try {
-          if (allowedBrowserOrigins.has(new URL(route.request().url()).origin)) await route.continue();
-          else await route.abort('blockedbyclient');
+          const requestUrl = route.request().url();
+          const routeOrigin = new URL(requestUrl).origin;
+          if (routeOrigin === new URL(apiBase).origin) {
+            await route.continue();
+            return;
+          }
+          if (routeOrigin !== frontend.origin) {
+            await route.abort('blockedbyclient');
+            return;
+          }
+          const result = await withFrontendRouteSlot(() => readBoundedFetchResponse(
+            fetcher,
+            requestUrl,
+            frontend.origin,
+            { maxBytes: MAX_FRONTEND_ARTIFACT_BYTES, collectBytes: true },
+          ));
+          if (!result || frontendRouteBytes + result.byteLength > MAX_FRONTEND_ARTIFACT_SET_BYTES) {
+            await route.abort('blockedbyclient');
+            return;
+          }
+          frontendRouteBytes += result.byteLength;
+          const responseHeaders = {};
+          for (const name of [
+            'cache-control', 'content-security-policy', 'content-type', 'cross-origin-resource-policy',
+            'etag', 'last-modified', 'permissions-policy', 'referrer-policy', 'vary',
+            'x-content-type-options', 'x-frame-options',
+          ]) {
+            const value = result.headers?.get?.(name);
+            if (value) responseHeaders[name] = value;
+          }
+          responseHeaders['content-length'] = String(result.byteLength);
+          await route.fulfill({ status: result.status, headers: responseHeaders, body: result.bytes });
         } catch {
           await route.abort('blockedbyclient');
         }
@@ -1185,7 +1381,7 @@ export async function checkBrowserAndFinancialFlow(reporter, {
       ].map(locator => locator.waitFor({ state: 'visible', timeout: loginReadyTimeoutMs })));
       frontendBuildVerified = await servedFrontendBuildMatches({
         page,
-        request: context.request,
+        fetcher,
         documentResponse: frontendResponse,
         observedBrowserResponses,
         expectedBuildSha,

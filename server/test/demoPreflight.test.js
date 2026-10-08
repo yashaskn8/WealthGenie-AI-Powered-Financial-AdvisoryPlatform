@@ -38,6 +38,7 @@ import { indiaClockParts, isoDateInIndia } from '../services/marketData/indiaMar
 import { previousNseTradingDate } from '../services/marketData/nseTradingCalendar.js';
 import {
   BUILD_PROVENANCE_SCHEMA,
+  MAX_FRONTEND_ARTIFACT_BYTES,
   MAX_FRONTEND_ARTIFACT_COUNT,
   canonicalJson,
 } from '../services/buildProvenance.js';
@@ -56,26 +57,62 @@ test('served frontend artifact verification physically bounds concurrent request
       };
     });
     const artifactsByPath = new Map(artifacts.map(artifact => [artifact.path, artifact]));
-    const request = {
-      async get(url, options) {
-        assert.equal(options.maxRedirects, 0);
-        active += 1;
-        peak = Math.max(peak, active);
-        await new Promise(resolve => setTimeout(resolve, 2));
-        active -= 1;
-        const artifactPath = decodeURIComponent(new URL(url).pathname.slice(1));
-        const artifact = artifactsByPath.get(artifactPath);
-        return {
-          ok: () => Boolean(artifact),
-          body: async () => artifact?.bytes,
-        };
-      },
+    const fetcher = async (url, options) => {
+      assert.equal(options.redirect, 'manual');
+      assert.ok(options.signal instanceof AbortSignal);
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise(resolve => setTimeout(resolve, 2));
+      active -= 1;
+      const artifactPath = decodeURIComponent(new URL(url).pathname.slice(1));
+      const artifact = artifactsByPath.get(artifactPath);
+      return new Response(artifact?.bytes ?? null, { status: artifact ? 200 : 404 });
     };
 
-    assert.equal(await verifyServedFrontendArtifacts(artifacts, request, 'https://frontend.example'), true);
+    assert.equal(await verifyServedFrontendArtifacts(artifacts, fetcher, 'https://frontend.example'), true);
     assert.ok(peak <= 8, count + ' artifacts produced peak concurrency ' + peak);
     assert.equal(peak, Math.min(count, 8));
   }
+});
+
+test('served frontend artifact verification bounds streamed bytes and fails closed on encoding or redirects', async () => {
+  const expectedBytes = Buffer.from('small');
+  const artifact = {
+    path: 'assets/small.js',
+    sha256: createHash('sha256').update(expectedBytes).digest('hex'),
+    byteLength: expectedBytes.byteLength,
+  };
+  let streamCancelled = false;
+  const oversizedStreamFetcher = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.from('small plus an unbounded tail'));
+    },
+    cancel() {
+      streamCancelled = true;
+    },
+  }), { status: 200 });
+  assert.equal(await verifyServedFrontendArtifacts([artifact], oversizedStreamFetcher, 'https://frontend.example'), false);
+  assert.equal(streamCancelled, true, 'oversized response stream should be cancelled as soon as the expected byte budget is exceeded');
+
+  const compressedFetcher = async () => new Response(expectedBytes, {
+    status: 200,
+    headers: { 'content-encoding': 'gzip', 'content-length': String(expectedBytes.byteLength) },
+  });
+  assert.equal(await verifyServedFrontendArtifacts([artifact], compressedFetcher, 'https://frontend.example'), false);
+
+  const redirectedFetcher = async () => new Response(null, {
+    status: 302,
+    headers: { location: 'https://other.example/asset.js' },
+  });
+  assert.equal(await verifyServedFrontendArtifacts([artifact], redirectedFetcher, 'https://frontend.example'), false);
+
+  let calls = 0;
+  const oversizedInventory = [{ ...artifact, byteLength: MAX_FRONTEND_ARTIFACT_BYTES + 1 }];
+  assert.equal(await verifyServedFrontendArtifacts(oversizedInventory, async () => {
+    calls += 1;
+    return new Response(expectedBytes);
+  }, 'https://frontend.example'), false);
+  assert.equal(calls, 0, 'invalid byte inventory should be rejected before network access');
 });
 
 test('served frontend artifact verification stops after a failed batch and fails closed on malformed requests', async () => {
@@ -89,33 +126,22 @@ test('served frontend artifact verification stops after a failed batch and fails
     };
   });
   let calls = 0;
-  const failedBatchRequest = {
-    async get(url) {
-      calls += 1;
-      const artifact = artifacts.find(candidate => url.endsWith(candidate.path));
-      return {
-        ok: () => artifact?.path !== 'assets/02.js',
-        body: async () => artifact?.bytes,
-      };
-    },
+  const failedBatchFetcher = async url => {
+    calls += 1;
+    const artifact = artifacts.find(candidate => url.endsWith(candidate.path));
+    return new Response(artifact?.bytes ?? null, { status: artifact?.path === 'assets/02.js' ? 503 : artifact ? 200 : 404 });
   };
-  assert.equal(await verifyServedFrontendArtifacts(artifacts, failedBatchRequest, 'https://frontend.example'), false);
+  assert.equal(await verifyServedFrontendArtifacts(artifacts, failedBatchFetcher, 'https://frontend.example'), false);
   assert.equal(calls, 8, 'a failed first batch must not launch later artifact requests');
 
-  const timeoutRequest = {
-    async get(_url, options) {
-      assert.equal(options.timeout, LOGIN_BROWSER_TIMEOUT_MS);
-      throw Object.assign(new Error('request timeout'), { code: 'ETIMEDOUT' });
-    },
+  const timeoutFetcher = async (_url, options) => {
+    assert.ok(options.signal instanceof AbortSignal);
+    throw Object.assign(new Error('request timeout'), { code: 'ETIMEDOUT' });
   };
-  assert.equal(await verifyServedFrontendArtifacts(artifacts, timeoutRequest, 'https://frontend.example'), false);
+  assert.equal(await verifyServedFrontendArtifacts(artifacts, timeoutFetcher, 'https://frontend.example'), false);
 
-  const malformedRequest = {
-    async get() {
-      return { ok: () => true };
-    },
-  };
-  assert.equal(await verifyServedFrontendArtifacts(artifacts, malformedRequest, 'https://frontend.example'), false);
+  const malformedFetcher = async () => new Response(null, { status: 200 });
+  assert.equal(await verifyServedFrontendArtifacts(artifacts, malformedFetcher, 'https://frontend.example'), false);
 });
 
 function makeTestFrontendArtifacts(commitSha, overrides = {}) {
@@ -513,7 +539,37 @@ function browserFlowFixture(scenario = {}) {
     },
     async close() {},
   };
-  return { browser, launchBrowser: scenario.launchError ? async () => { throw scenario.launchError; } : async () => browser };
+  const fetcher = async url => {
+    if (url.endsWith('/build-provenance/provenance.json')) {
+      let manifest;
+      if (scenario.frontendProvenanceMismatch) {
+        const alternate = makeTestFrontendArtifacts('c'.repeat(40), { indexSuffix: '<!--different valid artifact set-->' });
+        manifest = makeTestBuildManifest('c'.repeat(40), {
+          frontendArtifactInventory: alternate.inventory,
+          frontendArtifactSetSha256: artifactSetSha256(alternate.inventory),
+        });
+      } else {
+        manifest = makeTestBuildManifest('c'.repeat(40));
+      }
+      return new Response(JSON.stringify(manifest), { status: 200 });
+    }
+    const artifacts = makeTestFrontendArtifacts('c'.repeat(40), {
+      scriptSha: scenario.frontendAssetShaMismatch ? 'd'.repeat(40) : 'c'.repeat(40),
+      scriptSuffix: scenario.frontendAssetBytesTampered ? ' window.extra = true;' : '',
+      cssSuffix: scenario.frontendCssTampered ? ' .tampered { display: block; }' : '',
+      indexSuffix: scenario.frontendIndexTampered ? '<!-- same build marker, changed document -->' : '',
+    });
+    const artifactPath = decodeURIComponent(new URL(url).pathname.replace(/^\/+/, ''));
+    const resolvedPath = artifactPath === 'login' ? 'index.html' : artifactPath;
+    const bytes = artifacts.contents.get(resolvedPath);
+    const missing = scenario.frontendMissingArtifact && resolvedPath === 'assets/app.css';
+    return new Response(bytes && !missing ? bytes : null, { status: bytes && !missing ? 200 : 404 });
+  };
+  return {
+    browser,
+    fetcher,
+    launchBrowser: scenario.launchError ? async () => { throw scenario.launchError; } : async () => browser,
+  };
 }
 
 async function runBrowserFlow(scenario = {}) {

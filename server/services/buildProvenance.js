@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { lstat, readdir, readFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { lstat, opendir, readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -8,6 +9,11 @@ const SHA40 = /^[a-f0-9]{40}$/;
 const SHA64 = /^[a-f0-9]{64}$/;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 export const MAX_FRONTEND_ARTIFACT_COUNT = 2048;
+export const MAX_FRONTEND_ARTIFACT_BYTES = 16 * 1024 * 1024;
+export const MAX_FRONTEND_ARTIFACT_SET_BYTES = 64 * 1024 * 1024;
+export const MAX_FRONTEND_PROVENANCE_BYTES = 4 * 1024 * 1024;
+const MAX_FRONTEND_ARTIFACT_DEPTH = 32;
+const MAX_FRONTEND_ARTIFACT_ENTRY_COUNT = 4096;
 const LOCK_FILES = Object.freeze({
   serverLockSha256: 'server/package-lock.json',
   frontendLockSha256: 'reactapp/package-lock.json',
@@ -28,13 +34,15 @@ function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function isSafeFrontendArtifactPath(value) {
+export function isSafeFrontendArtifactPath(value) {
   return typeof value === 'string'
     && value.length > 0
     && value.length <= 1024
+    && !/^[a-z]:/i.test(value)
+    && !/[%](?:2e|2f|5c)/i.test(value)
+    && !/[\u0000-\u001f\u007f\u2028\u2029\u2044\u2215\uff0f\uff3c]/u.test(value)
     && !value.startsWith('/')
     && !value.includes('\\')
-    && !value.includes(String.fromCharCode(0))
     && !value.split('/').some(segment => !segment || segment === '.' || segment === '..')
     && path.posix.normalize(value) === value;
 }
@@ -42,6 +50,7 @@ function isSafeFrontendArtifactPath(value) {
 function isValidFrontendArtifactInventory(value) {
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_FRONTEND_ARTIFACT_COUNT) return false;
   let previousPath = null;
+  let totalBytes = 0;
   const paths = new Set();
   for (const entry of value) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
@@ -51,33 +60,62 @@ function isValidFrontendArtifactInventory(value) {
         || !SHA64.test(entry.sha256 || '')
         || !Number.isSafeInteger(entry.byteLength)
         || entry.byteLength < 0
+        || entry.byteLength > MAX_FRONTEND_ARTIFACT_BYTES
         || paths.has(entry.path)
         || (previousPath !== null && previousPath >= entry.path)) return false;
+    totalBytes += entry.byteLength;
+    if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_FRONTEND_ARTIFACT_SET_BYTES) return false;
     paths.add(entry.path);
     previousPath = entry.path;
   }
   return paths.has('index.html');
 }
 
+async function hashFrontendArtifactFile(filePath, maxBytes) {
+  const hash = createHash('sha256');
+  let byteLength = 0;
+  for await (const chunk of createReadStream(filePath, { highWaterMark: 64 * 1024 })) {
+    byteLength += chunk.byteLength;
+    if (byteLength > maxBytes) throw new Error('Frontend artifact exceeds the configured byte budget.');
+    hash.update(chunk);
+  }
+  return { sha256: hash.digest('hex'), byteLength };
+}
+
 async function collectFrontendArtifacts(root) {
   const rootInfo = await lstat(root);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error('Frontend artifact root must be a real directory.');
   const entries = [];
+  let entryCount = 0;
+  let totalBytes = 0;
   async function walk(directory, relativeDirectory = '') {
-    const children = await readdir(directory, { withFileTypes: true });
-    children.sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
-    for (const child of children) {
+    const depth = relativeDirectory ? relativeDirectory.split('/').length : 0;
+    const children = await opendir(directory);
+    for await (const child of children) {
+      entryCount += 1;
+      if (entryCount > MAX_FRONTEND_ARTIFACT_ENTRY_COUNT) throw new Error('Frontend artifact tree exceeds the configured entry limit.');
+      const childDepth = depth + 1;
+      if (childDepth > MAX_FRONTEND_ARTIFACT_DEPTH) throw new Error('Frontend artifact tree exceeds the configured depth limit.');
       const absolutePath = path.join(directory, child.name);
-      const relativePath = relativeDirectory ? `${relativeDirectory}/${child.name}` : child.name;
+      const relativePath = relativeDirectory ? relativeDirectory + '/' + child.name : child.name;
+      const normalizedPath = relativePath.replace(/\\/g, '/');
+      if (!isSafeFrontendArtifactPath(normalizedPath)) throw new Error('Frontend artifact path is unsafe.');
       const info = await lstat(absolutePath);
       if (info.isSymbolicLink()) throw new Error('Frontend artifacts may not contain symbolic links.');
       if (info.isDirectory()) {
-        await walk(absolutePath, relativePath);
+        await walk(absolutePath, normalizedPath);
         continue;
       }
       if (!info.isFile()) throw new Error('Frontend artifacts may contain only regular files.');
-      const contents = await readFile(absolutePath);
-      entries.push({ path: relativePath.replace(/\\/g, '/'), sha256: sha256(contents), byteLength: contents.byteLength });
+      if (entries.length >= MAX_FRONTEND_ARTIFACT_COUNT) throw new Error('Frontend artifact inventory exceeds the configured count limit.');
+      if (info.size > MAX_FRONTEND_ARTIFACT_BYTES) throw new Error('Frontend artifact exceeds the per-file byte budget.');
+      if (!Number.isSafeInteger(info.size) || totalBytes + info.size > MAX_FRONTEND_ARTIFACT_SET_BYTES) {
+        throw new Error('Frontend artifact set exceeds the aggregate byte budget.');
+      }
+      const digest = await hashFrontendArtifactFile(absolutePath, Math.min(MAX_FRONTEND_ARTIFACT_BYTES, MAX_FRONTEND_ARTIFACT_SET_BYTES - totalBytes));
+      if (digest.byteLength !== info.size) throw new Error('Frontend artifact changed while it was being hashed.');
+      totalBytes += digest.byteLength;
+      entries.push({ path: normalizedPath, sha256: digest.sha256, byteLength: digest.byteLength });
     }
   }
   await walk(root);
@@ -85,7 +123,6 @@ async function collectFrontendArtifacts(root) {
   if (!isValidFrontendArtifactInventory(entries)) throw new Error('Frontend artifacts must include a valid index.html inventory.');
   return entries;
 }
-
 function validateBuildTimestamp(value) {
   return typeof value === 'string'
     && Number.isFinite(Date.parse(value))

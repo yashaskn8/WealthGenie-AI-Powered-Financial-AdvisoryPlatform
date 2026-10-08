@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, truncate, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -127,6 +127,84 @@ test('provenance rejects tampered or unsafe frontend artifact inventories', asyn
     const unsafePathResult = verifyBuildProvenance(rehashManifest(unsafePath));
     assert.equal(unsafePathResult.valid, false);
     assert.ok(unsafePathResult.errors.includes('FRONTEND_ARTIFACT_INVENTORY_INVALID'));
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test('provenance rejects drive-letter, encoded-delimiter, and Unicode-separator artifact paths', async () => {
+  const fixture = await createFixture();
+  try {
+    for (const unsafePath of [
+      'C:/outside.js',
+      'assets/%2e%2e/escape.js',
+      'assets/name%2fescape.js',
+      'assets/name%5c..%5cescape.js',
+      'assets/a\u2215b.js',
+      'assets/a\u2044b.js',
+      'assets/a\uFF0Fb.js',
+      'assets/a\uFF3Cb.js',
+    ]) {
+      const manifest = structuredClone(fixture.provenance);
+      manifest.frontendArtifactInventory[0].path = unsafePath;
+      manifest.frontendArtifactInventory.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+      manifest.frontendArtifactSetSha256 = createHash('sha256')
+        .update(canonicalJson(manifest.frontendArtifactInventory)).digest('hex');
+      delete manifest.provenanceSha256;
+      manifest.provenanceSha256 = createHash('sha256').update(canonicalJson(manifest)).digest('hex');
+      const result = verifyBuildProvenance(manifest);
+      assert.equal(result.valid, false, unsafePath);
+      assert.ok(result.errors.includes('FRONTEND_ARTIFACT_INVENTORY_INVALID'), unsafePath);
+    }
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test('provenance rejects per-artifact and aggregate frontend byte budgets above measured limits', async () => {
+  const fixture = await createFixture();
+  try {
+    const reseal = manifest => {
+      manifest.frontendArtifactInventory.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+      manifest.frontendArtifactSetSha256 = createHash('sha256')
+        .update(canonicalJson(manifest.frontendArtifactInventory)).digest('hex');
+      delete manifest.provenanceSha256;
+      manifest.provenanceSha256 = createHash('sha256').update(canonicalJson(manifest)).digest('hex');
+      return manifest;
+    };
+    const oversizedFile = structuredClone(fixture.provenance);
+    oversizedFile.frontendArtifactInventory[0].byteLength = 16 * 1024 * 1024 + 1;
+    assert.ok(verifyBuildProvenance(reseal(oversizedFile)).errors.includes('FRONTEND_ARTIFACT_INVENTORY_INVALID'));
+
+    const oversizedSet = structuredClone(fixture.provenance);
+    oversizedSet.frontendArtifactInventory = [
+      ...Array.from({ length: 5 }, (_, index) => ({
+        path: 'assets/large-' + index + '.bin',
+        sha256: String(index + 1).repeat(64),
+        byteLength: 16 * 1024 * 1024,
+      })),
+      ...oversizedSet.frontendArtifactInventory,
+    ];
+    const aggregateResult = verifyBuildProvenance(reseal(oversizedSet));
+    assert.equal(aggregateResult.valid, false);
+    assert.ok(aggregateResult.errors.includes('FRONTEND_ARTIFACT_INVENTORY_INVALID'));
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test('frontend provenance collection rejects an oversized file before hashing it', async () => {
+  const fixture = await createFixture();
+  try {
+    const oversizedPath = path.join(fixture.frontend, 'assets', 'oversized.bin');
+    await writeFile(oversizedPath, Buffer.alloc(0));
+    await truncate(oversizedPath, 16 * 1024 * 1024 + 1);
+    await assert.rejects(createBuildProvenance({
+      repositoryRoot: REPO_ROOT,
+      frontendArtifactDirectory: fixture.frontend,
+      gitCommitSha: SOURCE_SHA,
+      gitTreeSha: TREE_SHA,
+    }), /frontend artifact.*(size|limit|budget)/i);
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
   }
