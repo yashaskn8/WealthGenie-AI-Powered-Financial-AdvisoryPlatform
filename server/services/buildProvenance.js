@@ -7,7 +7,7 @@ export const BUILD_PROVENANCE_SCHEMA = 'wealthgenie.build-provenance.v2';
 const SHA40 = /^[a-f0-9]{40}$/;
 const SHA64 = /^[a-f0-9]{64}$/;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
-const MAX_FRONTEND_ARTIFACT_COUNT = 2048;
+export const MAX_FRONTEND_ARTIFACT_COUNT = 2048;
 const LOCK_FILES = Object.freeze({
   serverLockSha256: 'server/package-lock.json',
   frontendLockSha256: 'reactapp/package-lock.json',

@@ -29,13 +29,94 @@ import {
   qualifiesWtiResponse,
   qualifiesCalculatedNiftyEtfTax,
   runDemoPreflight,
+  verifyServedFrontendArtifacts,
   WTI_USER_FLOW_TIMEOUT_MS,
 } from '../scripts/demoPreflight.js';
 import { calculateProductPostTaxOutcome } from '../services/productPostTaxCalculator.js';
 import { getProductTaxMetadata } from '../services/productTaxAuthority.js';
 import { indiaClockParts, isoDateInIndia } from '../services/marketData/indiaMarketTime.js';
 import { previousNseTradingDate } from '../services/marketData/nseTradingCalendar.js';
-import { BUILD_PROVENANCE_SCHEMA, canonicalJson } from '../services/buildProvenance.js';
+import {
+  BUILD_PROVENANCE_SCHEMA,
+  MAX_FRONTEND_ARTIFACT_COUNT,
+  canonicalJson,
+} from '../services/buildProvenance.js';
+
+test('served frontend artifact verification physically bounds concurrent requests at eight', async () => {
+  for (const count of [1, 8, 9, 100, MAX_FRONTEND_ARTIFACT_COUNT]) {
+    let active = 0;
+    let peak = 0;
+    const artifacts = Array.from({ length: count }, (_, index) => {
+      const bytes = Buffer.from('artifact-' + index);
+      return {
+        path: 'assets/' + String(index).padStart(4, '0') + '.js',
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        byteLength: bytes.byteLength,
+        bytes,
+      };
+    });
+    const artifactsByPath = new Map(artifacts.map(artifact => [artifact.path, artifact]));
+    const request = {
+      async get(url, options) {
+        assert.equal(options.maxRedirects, 0);
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise(resolve => setTimeout(resolve, 2));
+        active -= 1;
+        const artifactPath = decodeURIComponent(new URL(url).pathname.slice(1));
+        const artifact = artifactsByPath.get(artifactPath);
+        return {
+          ok: () => Boolean(artifact),
+          body: async () => artifact?.bytes,
+        };
+      },
+    };
+
+    assert.equal(await verifyServedFrontendArtifacts(artifacts, request, 'https://frontend.example'), true);
+    assert.ok(peak <= 8, count + ' artifacts produced peak concurrency ' + peak);
+    assert.equal(peak, Math.min(count, 8));
+  }
+});
+
+test('served frontend artifact verification stops after a failed batch and fails closed on malformed requests', async () => {
+  const artifacts = Array.from({ length: 17 }, (_, index) => {
+    const bytes = Buffer.from('artifact-' + index);
+    return {
+      path: 'assets/' + String(index).padStart(2, '0') + '.js',
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      byteLength: bytes.byteLength,
+      bytes,
+    };
+  });
+  let calls = 0;
+  const failedBatchRequest = {
+    async get(url) {
+      calls += 1;
+      const artifact = artifacts.find(candidate => url.endsWith(candidate.path));
+      return {
+        ok: () => artifact?.path !== 'assets/02.js',
+        body: async () => artifact?.bytes,
+      };
+    },
+  };
+  assert.equal(await verifyServedFrontendArtifacts(artifacts, failedBatchRequest, 'https://frontend.example'), false);
+  assert.equal(calls, 8, 'a failed first batch must not launch later artifact requests');
+
+  const timeoutRequest = {
+    async get(_url, options) {
+      assert.equal(options.timeout, LOGIN_BROWSER_TIMEOUT_MS);
+      throw Object.assign(new Error('request timeout'), { code: 'ETIMEDOUT' });
+    },
+  };
+  assert.equal(await verifyServedFrontendArtifacts(artifacts, timeoutRequest, 'https://frontend.example'), false);
+
+  const malformedRequest = {
+    async get() {
+      return { ok: () => true };
+    },
+  };
+  assert.equal(await verifyServedFrontendArtifacts(artifacts, malformedRequest, 'https://frontend.example'), false);
+});
 
 function makeTestFrontendArtifacts(commitSha, overrides = {}) {
   const contents = new Map([

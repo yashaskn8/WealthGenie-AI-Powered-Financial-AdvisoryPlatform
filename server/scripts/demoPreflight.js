@@ -6,7 +6,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { matchesBuildSha } from '../../shared/buildIdentity.js';
-import { verifyBuildProvenance } from '../services/buildProvenance.js';
+import {
+  MAX_FRONTEND_ARTIFACT_COUNT,
+  verifyBuildProvenance,
+} from '../services/buildProvenance.js';
 import {
   NIFTYBEES_PRODUCT_TAX_EVIDENCE,
   PRODUCT_TAX_CLASSES,
@@ -129,6 +132,26 @@ async function servedArtifactMatches(request, url, expectedArtifact) {
     return false;
   }
 }
+
+const MAX_SERVED_FRONTEND_ARTIFACT_CONCURRENCY = 8;
+
+export async function verifyServedFrontendArtifacts(inventory, request, origin) {
+  if (!Array.isArray(inventory)
+      || inventory.length === 0
+      || inventory.length > MAX_FRONTEND_ARTIFACT_COUNT
+      || typeof request?.get !== 'function'
+      || typeof origin !== 'string') return false;
+  for (let index = 0; index < inventory.length; index += MAX_SERVED_FRONTEND_ARTIFACT_CONCURRENCY) {
+    const batch = inventory.slice(index, index + MAX_SERVED_FRONTEND_ARTIFACT_CONCURRENCY);
+    const results = await Promise.all(batch.map(artifact => servedArtifactMatches(
+      request,
+      frontendArtifactUrl(origin, artifact.path),
+      artifact
+    )));
+    if (results.some(matches => !matches)) return false;
+  }
+  return true;
+}
 async function servedFrontendBuildMatches({ page, request, documentResponse, observedBrowserResponses, expectedBuildSha, expectedGitTreeSha, expectedProvenanceSha256, expectedFrontendArtifactSetSha256, origin }) {
   if (!matchesBuildSha(expectedBuildSha, expectedBuildSha)
       || !/^[a-f0-9]{40}$/i.test(expectedGitTreeSha || '')
@@ -177,15 +200,7 @@ async function servedFrontendBuildMatches({ page, request, documentResponse, obs
 
     const indexArtifact = inventoryByPath.get('index.html');
     if (!await responseBodyMatchesArtifact(documentResponse, indexArtifact)) return false;
-    const artifactChecks = inventory.map(artifact => servedArtifactMatches(
-      request,
-      frontendArtifactUrl(origin, artifact.path),
-      artifact
-    ));
-    for (let index = 0; index < artifactChecks.length; index += 8) {
-      const results = await Promise.all(artifactChecks.slice(index, index + 8));
-      if (results.some(matches => !matches)) return false;
-    }
+    if (!await verifyServedFrontendArtifacts(inventory, request, origin)) return false;
 
     for (const assetPath of new Set(loadedAssetPaths)) {
       const expectedArtifact = inventoryByPath.get(assetPath);
