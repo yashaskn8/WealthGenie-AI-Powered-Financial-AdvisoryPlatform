@@ -33,7 +33,7 @@ from rag.retrievers.base import BaseRetriever
 from rag.retrievers.bm25_retriever import BM25KeywordRetriever
 from rag.retrievers.dense_retriever import DenseRetriever
 from rag.retrievers.hybrid_retriever import HybridRetriever
-from rag.schema import RAGQueryRequest, RAGQueryResponse, RetrievedChunk
+from rag.schema import RAGQueryRequest, RAGQueryResponse, RAG_ABSTENTION_MESSAGE, RetrievedChunk
 from rag.vector_store.base import BaseVectorStore
 from rag.vector_store.memory_vector_store import PersistentVectorStore
 
@@ -45,12 +45,6 @@ _RELEVANCE_STOP_WORDS = {
     "the", "this", "that", "with", "from", "under", "about", "into", "for", "and",
     "can", "could", "would", "should", "much", "limit", "allowed",
 }
-ABSTENTION_MESSAGE = (
-    "I cannot find sufficiently trustworthy, relevant evidence in the approved knowledge base. "
-    "No financial or regulatory claim has been generated."
-)
-
-
 def _topic_terms(value: str) -> set[str]:
     """Normalize manifest topic labels for a conservative coverage check."""
     terms = {
@@ -434,7 +428,7 @@ class RAGPipeline:
         if generation_snapshot is not None:
             metrics.update(_generation_metrics(generation_snapshot))
         return RAGQueryResponse(
-            answer=ABSTENTION_MESSAGE,
+            answer=RAG_ABSTENTION_MESSAGE,
             citations=[],
             retrieved_chunks=[],
             metrics=metrics,

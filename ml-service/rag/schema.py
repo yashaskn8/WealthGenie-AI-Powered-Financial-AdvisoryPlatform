@@ -7,6 +7,11 @@ import json
 from typing import Dict, Any, List, Optional, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+RAG_ABSTENTION_MESSAGE = (
+    "I cannot find sufficiently trustworthy, relevant evidence in the approved knowledge base. "
+    "No financial or regulatory claim has been generated."
+)
+
 
 def is_scope_accessible(
     chunk_scope: Optional[str],

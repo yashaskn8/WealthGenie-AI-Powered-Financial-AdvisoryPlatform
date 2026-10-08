@@ -22,6 +22,7 @@ from rag.evaluation.metrics import (
 from rag.evaluation.evaluator import RAGEvaluator
 from rag.schema import (
     RAGQueryResponse,
+    RAG_ABSTENTION_MESSAGE,
     RetrievedChunk,
     TextChunk,
     ChunkMetadata,
@@ -155,7 +156,11 @@ def test_rag_evaluator_persistence(tmp_path):
 def test_evaluator_distinguishes_abstention_from_retrieval_metrics(tmp_path):
     evaluator = RAGEvaluator(evals_dir=tmp_path)
     response = RAGQueryResponse(
-        answer="No trustworthy evidence.", citations=[], retrieved_chunks=[], grounded=False
+        answer=RAG_ABSTENTION_MESSAGE,
+        citations=[],
+        retrieved_chunks=[],
+        metrics={"response_mode": "abstention"},
+        grounded=False,
     )
     result = evaluator.evaluate_query_response(
         query="Who won a football match?",
@@ -166,6 +171,28 @@ def test_evaluator_distinguishes_abstention_from_retrieval_metrics(tmp_path):
     assert result["metrics"]["answerability_correctness"] is True
     assert result["metrics"]["citation_id_validity"] is None
     assert result["metrics"]["factual_support"] is None
+
+
+def test_expected_abstention_does_not_accept_unverified_financial_claims():
+    evaluator = RAGEvaluator()
+    response = RAGQueryResponse(
+        answer="You can claim a deduction of ₹1,50,000.",
+        citations=[],
+        retrieved_chunks=[],
+        metrics={"response_mode": "abstention"},
+        grounded=False,
+    )
+
+    result = evaluator.evaluate_query_response(
+        query="Can I claim this deduction?",
+        response=response,
+        expected_abstention=True,
+        forbidden_claims=["unsupported deduction"],
+    )
+
+    assert result["metrics"]["forbidden_claims_passed"] is False
+    assert result["metrics"]["abstention_correctness"] is False
+    assert result["metrics"]["answerability_correctness"] is False
 
 
 def test_rag_evaluator_rejects_valid_citation_that_does_not_support_required_fact():

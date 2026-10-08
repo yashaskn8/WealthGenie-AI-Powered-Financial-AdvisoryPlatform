@@ -256,7 +256,7 @@ def run_benchmark() -> Dict[str, Any]:
     }
 
     report = {
-        "report_id": f"rag_eval_v2_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+        "report_id": f"rag_eval_v3_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "corpus_info": {
             "total_chunks_in_store": len(vector_store.get_chunks()),

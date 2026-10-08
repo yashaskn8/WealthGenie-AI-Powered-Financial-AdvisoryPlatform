@@ -22,7 +22,7 @@ from rag.evaluation.metrics import (
     compute_citation_accuracy,
     compute_grounding_score,
 )
-from rag.schema import RAGQueryResponse
+from rag.schema import RAGQueryResponse, RAG_ABSTENTION_MESSAGE
 
 EVALS_DIR = BASE_DIR / "reports" / "rag_evals"
 EVALS_DIR.mkdir(parents=True, exist_ok=True)
@@ -379,10 +379,6 @@ class RAGEvaluator:
             compute_grounding_score(response.answer, retrieved_texts)
             if response.grounded else None
         )
-        abstention_correctness = None if expected_abstention is None else (
-            (not response.grounded and not response.citations)
-            if expected_abstention else (response.grounded and bool(response.citations))
-        )
         required_facts = required_facts or []
         forbidden_claims = forbidden_claims or []
         retrieved_by_id = {item.chunk.chunk_id: item for item in response.retrieved_chunks}
@@ -429,6 +425,18 @@ class RAGEvaluator:
             citation_support.append(float(answer_support and source_support))
         factual_support = round(sum(citation_support) / len(citation_support), 4) if citation_support else None
         forbidden_violations = _forbidden_claim_violations(response.answer, forbidden_claims, invalid_citation)
+        if expected_abstention is None:
+            abstention_correctness = None
+        elif expected_abstention:
+            abstention_correctness = (
+                not response.grounded
+                and not response.citations
+                and response.metrics.get("response_mode") == "abstention"
+                and response.answer == RAG_ABSTENTION_MESSAGE
+                and not forbidden_violations
+            )
+        else:
+            abstention_correctness = response.grounded and bool(response.citations)
         provenance = _provenance_metrics(
             response.citations,
             retrieved_by_id,
