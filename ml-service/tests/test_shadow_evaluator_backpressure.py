@@ -75,8 +75,19 @@ class _FailOncePredictor:
     def predict(self, model_input):
         self.calls += 1
         if self.calls == 1:
-            raise RuntimeError("candidate inference failed")
+            raise RuntimeError("SENSITIVE_CANDIDATE_FAILURE_SENTINEL")
         return _active_result("ETF")
+
+
+class _BlockingFailurePredictor:
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def predict(self, model_input):
+        self.started.set()
+        self.release.wait(timeout=5)
+        raise RuntimeError("stale candidate inference failed")
 
 
 def _wait_for_evaluations(evaluator, expected, timeout=2.0):
@@ -183,22 +194,61 @@ def test_reconfigured_shadow_discards_old_in_flight_result():
             evaluator.clear_shadow()
 
 
-def test_shadow_worker_survives_candidate_inference_failure():
+def test_shadow_worker_survives_candidate_inference_failure(caplog):
     evaluator = ShadowEvaluator(history_capacity=4, queue_capacity=2)
     predictor = _FailOncePredictor()
     evaluator.configure_shadow("shadow-v1", "RandomForest", predictor)
     try:
+        pending_summary = evaluator.get_summary()
+        assert pending_summary["agreement_rate"] is None
+        assert pending_summary["evaluation_status"] == "PENDING"
+
         assert evaluator.evaluate(_active_result("FD"), np.asarray([[1.0]])) is True
         deadline = time.monotonic() + 2.0
-        while predictor.calls < 1 and time.monotonic() < deadline:
+        failure_summary = evaluator.get_summary()
+        while failure_summary.get("failed_evaluations") != 1 and time.monotonic() < deadline:
             time.sleep(0.01)
+            failure_summary = evaluator.get_summary()
         assert predictor.calls == 1
+        assert failure_summary["failed_evaluations"] == 1
+        assert failure_summary["agreement_rate"] is None
+        assert failure_summary["evaluation_status"] == "FAILED"
+        assert "Shadow candidate inference failed (error_type=RuntimeError)" in caplog.text
+        assert "SENSITIVE_CANDIDATE_FAILURE_SENTINEL" not in caplog.text
+
         assert evaluator.evaluate(_active_result("FD"), np.asarray([[2.0]])) is True
         summary = _wait_for_evaluations(evaluator, 1)
         assert summary["recent_sample_comparisons"][-1]["shadow_primary"] == "ETF"
+        assert summary["failed_evaluations"] == 1
+        assert summary["evaluation_status"] == "DEGRADED"
+        assert summary["agreement_rate"] == 0.0
     finally:
         shutdown = getattr(evaluator, "shutdown", None)
         if shutdown is not None:
             shutdown(timeout=1)
         else:
             evaluator.clear_shadow()
+
+
+def test_old_candidate_failure_is_not_attributed_to_reconfigured_candidate():
+    evaluator = ShadowEvaluator(history_capacity=4, queue_capacity=2)
+    old_predictor = _BlockingFailurePredictor()
+    new_predictor = _BlockingPredictor(_active_result("ETF"))
+    new_predictor.release.set()
+    evaluator.configure_shadow("old-v1", "RandomForest", old_predictor)
+    try:
+        assert evaluator.evaluate(_active_result("FD"), np.asarray([[1.0]])) is True
+        assert old_predictor.started.wait(timeout=2)
+        evaluator.configure_shadow("new-v1", "RandomForest", new_predictor)
+        old_predictor.release.set()
+        assert evaluator.evaluate(_active_result("FD"), np.asarray([[2.0]])) is True
+
+        summary = _wait_for_evaluations(evaluator, 1)
+        assert summary["shadow_version_id"] == "new-v1"
+        assert summary["failed_evaluations"] == 0
+        assert summary["evaluation_status"] == "HEALTHY"
+    finally:
+        old_predictor.release.set()
+        shutdown = getattr(evaluator, "shutdown", None)
+        if shutdown is not None:
+            shutdown(timeout=1)

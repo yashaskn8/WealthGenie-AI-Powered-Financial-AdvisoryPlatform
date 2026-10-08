@@ -39,6 +39,7 @@ class ShadowEvaluator:
         self._in_flight = 0
         self._dropped_evaluations = 0
         self._discarded_evaluations = 0
+        self._failed_evaluations = 0
         self._shutdown = False
         self._worker = threading.Thread(
             target=self._run_worker,
@@ -68,6 +69,7 @@ class ShadowEvaluator:
             self.disagreement_count = 0
             self._dropped_evaluations = 0
             self._discarded_evaluations = 0
+            self._failed_evaluations = 0
             self.history.clear()
             from datetime import datetime, timezone
             self.started_at = datetime.now(timezone.utc).isoformat()
@@ -144,8 +146,20 @@ class ShadowEvaluator:
                         "active_latency_ms": active_result.get("latency_ms", 0.0),
                         "shadow_latency_ms": shadow_latency,
                     }
-                except Exception:
-                    logger.debug("Shadow evaluation failed")
+                except Exception as exc:
+                    with self._lock:
+                        if (
+                            not self._shutdown
+                            and generation == self._generation
+                            and predictor is self.shadow_predictor
+                        ):
+                            self._failed_evaluations += 1
+                    # Exception messages may contain request/model details. Keep
+                    # the operational signal while avoiding sensitive payloads.
+                    logger.warning(
+                        "Shadow candidate inference failed (error_type=%s)",
+                        type(exc).__name__,
+                    )
                     continue
 
                 with self._lock:
@@ -210,12 +224,21 @@ class ShadowEvaluator:
                     "in_flight": self._in_flight,
                     "dropped_evaluations": self._dropped_evaluations,
                     "discarded_evaluations": self._discarded_evaluations,
+                    "failed_evaluations": self._failed_evaluations,
                 }
 
             agreement_rate = (
                 round(self.agreement_count / self.total_evaluations, 4)
-                if self.total_evaluations > 0 else 1.0
+                if self.total_evaluations > 0 else None
             )
+            if self._failed_evaluations:
+                evaluation_status = "DEGRADED" if self.total_evaluations else "FAILED"
+            elif self._dropped_evaluations:
+                evaluation_status = "BACKPRESSURED"
+            elif self.total_evaluations:
+                evaluation_status = "HEALTHY"
+            else:
+                evaluation_status = "PENDING"
 
             # Class breakdown
             class_agreements: Dict[str, Dict[str, int]] = {}
@@ -232,12 +255,14 @@ class ShadowEvaluator:
                 "status": "ACTIVE",
                 "shadow_version_id": self.shadow_version_id,
                 "shadow_architecture": self.shadow_architecture,
+                "evaluation_status": evaluation_status,
                 "started_at": self.started_at,
                 "total_evaluations": self.total_evaluations,
                 "pending": self._queue.qsize(),
                 "in_flight": self._in_flight,
                 "dropped_evaluations": self._dropped_evaluations,
                 "discarded_evaluations": self._discarded_evaluations,
+                "failed_evaluations": self._failed_evaluations,
                 "agreements": self.agreement_count,
                 "disagreements": self.disagreement_count,
                 "agreement_rate": agreement_rate,
