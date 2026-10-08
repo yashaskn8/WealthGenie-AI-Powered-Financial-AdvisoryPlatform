@@ -8,8 +8,11 @@ The production overlay deliberately rewrites all three application images and
 the MongoDB and Redis images present in the rendered topology to
 `registry-required.invalid/...@sha256:WEALTHGENIE_*_IMAGE_DIGEST_REQUIRED`
 sentinels. These are not deployable image identities. Do not apply the overlay
-directly. A release workspace must replace each sentinel with its fully
-qualified registry reference and verified `sha256:<64 lowercase hex>` digest.
+directly. A release workspace must replace each sentinel with its approved
+repository path and verified `sha256:<64 lowercase hex>` digest. The validator
+currently binds WealthGenie application images to `ghcr.io/yashaskn8/wealthgenie-*`
+and MongoDB/Redis to `docker.io/library/{mongo,redis}`. Other registry owners or
+mirrors fail closed and require an explicit release-policy and test update.
 Before apply, pipe the rendered overlay through the fail-closed image filter:
 
 ```sh

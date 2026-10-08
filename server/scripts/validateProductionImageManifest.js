@@ -11,6 +11,13 @@ const REQUIRED_PRODUCTION_IMAGES = new Set([
   'mongo',
   'redis',
 ]);
+const APPROVED_PRODUCTION_IMAGE_REPOSITORIES = new Map([
+  ['wealthgenie-server', 'ghcr.io/yashaskn8/wealthgenie-server'],
+  ['wealthgenie-frontend', 'ghcr.io/yashaskn8/wealthgenie-frontend'],
+  ['wealthgenie-ml-service', 'ghcr.io/yashaskn8/wealthgenie-ml-service'],
+  ['mongo', 'docker.io/library/mongo'],
+  ['redis', 'docker.io/library/redis'],
+]);
 const PRODUCTION_TEMPLATE_IMAGES = new Map([
   ['wealthgenie-server', 'registry-required.invalid/wealthgenie-server@sha256:WEALTHGENIE_SERVER_IMAGE_DIGEST_REQUIRED'],
   ['wealthgenie-frontend', 'registry-required.invalid/wealthgenie-frontend@sha256:WEALTHGENIE_FRONTEND_IMAGE_DIGEST_REQUIRED'],
@@ -18,6 +25,10 @@ const PRODUCTION_TEMPLATE_IMAGES = new Map([
   ['mongo', 'registry-required.invalid/mongo@sha256:WEALTHGENIE_MONGODB_IMAGE_DIGEST_REQUIRED'],
   ['redis', 'registry-required.invalid/redis@sha256:WEALTHGENIE_REDIS_IMAGE_DIGEST_REQUIRED'],
 ]);
+
+function imageRepository(reference) {
+  return reference.split('@', 1)[0];
+}
 
 function imageRepositoryName(reference) {
   const withoutDigest = reference.split('@', 1)[0];
@@ -102,6 +113,10 @@ export function validateProductionImageManifest(source, {
     }
     if (REQUIRED_PRODUCTION_IMAGES.has(name)) observed.add(name);
     if (!isImmutableRegistryReference(reference)) errors.push(`CONTAINER_IMAGE_MUST_USE_IMMUTABLE_REGISTRY_DIGEST:${name}`);
+    const approvedRepository = APPROVED_PRODUCTION_IMAGE_REPOSITORIES.get(name);
+    if (approvedRepository && imageRepository(reference) !== approvedRepository) {
+      errors.push(`UNAPPROVED_PRODUCTION_IMAGE_REPOSITORY:${name}`);
+    }
   }
 
   if (requireAllProductionImages && mode === 'release') {

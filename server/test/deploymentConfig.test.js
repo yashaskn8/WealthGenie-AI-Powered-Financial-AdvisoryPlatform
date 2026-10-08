@@ -115,6 +115,29 @@ test('production image filter accepts fully qualified registry digests for every
   assert.equal(result.stdout, manifest);
 });
 
+test('production image filter rejects unapproved repositories for every required image', () => {
+  const images = [
+    ['wealthgenie-server', 'ghcr.io/yashaskn8/wealthgenie-server'],
+    ['wealthgenie-frontend', 'ghcr.io/yashaskn8/wealthgenie-frontend'],
+    ['wealthgenie-ml-service', 'ghcr.io/yashaskn8/wealthgenie-ml-service'],
+    ['mongo', 'docker.io/library/mongo'],
+    ['redis', 'docker.io/library/redis'],
+  ];
+
+  for (const [name] of images) {
+    const manifest = `apiVersion: batch/v1\nkind: Job\nspec:\n  template:\n    spec:\n      containers:\n        - { name: migration, image: attacker.example/any-owner/${name}@sha256:${'a'.repeat(64)} }\n      restartPolicy: Never\n`;
+    const result = spawnSync(process.execPath, [productionImageValidatorPath, '--fragment'], {
+      encoding: 'utf8',
+      input: manifest,
+      timeout: 15000,
+    });
+
+    assert.notEqual(result.status, 0, `${name} must use its approved repository path`);
+    assert.match(result.stderr, /UNAPPROVED_PRODUCTION_IMAGE_REPOSITORY/);
+    assert.equal(result.stdout, '', 'invalid manifests must not be emitted to an apply pipeline');
+  }
+});
+
 test('production image filter rejects each missing application or infrastructure image', () => {
   const images = [
     ['wealthgenie-server', 'ghcr.io/yashaskn8/wealthgenie-server'],
