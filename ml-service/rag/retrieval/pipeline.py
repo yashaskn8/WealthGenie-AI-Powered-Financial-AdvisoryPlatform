@@ -138,6 +138,9 @@ class RAGPipeline:
 
     def query(self, request: RAGQueryRequest) -> RAGQueryResponse:
         """Return extractive evidence only when domain, trust, and relevance gates pass."""
+        if request.jurisdiction != "IN":
+            qu_result = self.query_understanding.process(request.question)
+            return self._abstain("unsupported_jurisdiction", qu_result, 0.0)
         effective_scope = request.scope or (f"user:{request.user_id}" if request.user_id else request.tenant_id)
         top_k = request.top_k or self.config.top_k
         try:
@@ -162,6 +165,7 @@ class RAGPipeline:
         cache_identity = {
             "scope": effective_scope,
             "question": request.question,
+            "jurisdiction": request.jurisdiction,
             "top_k": top_k,
             "citations": request.include_citations,
             "retrieval_strategy": self.config.retrieval_strategy,

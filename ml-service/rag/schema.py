@@ -138,6 +138,7 @@ class RAGQueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     question: str = Field(..., min_length=3, max_length=2000, description="User advisory question")
+    jurisdiction: str = Field("IN", min_length=2, max_length=2, pattern=r"^[A-Z]{2}$", description="ISO alpha-2 jurisdiction requested; only IN is currently supported")
     top_k: Optional[int] = Field(None, ge=1, le=20, description="Override default top-k retrieval count")
     tenant_id: str = Field("default", max_length=128, description="Tenant isolation scope identifier")
     user_id: Optional[str] = Field(None, max_length=128, description="Requesting user ID for scoped retrieval")

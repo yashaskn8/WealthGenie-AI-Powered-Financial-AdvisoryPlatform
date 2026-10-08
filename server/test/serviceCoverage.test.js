@@ -472,6 +472,7 @@ test('ragClient and mlClient propagate verified X-Verified-User-Id header downst
   assert.equal(ragCapturedUrl, 'http://rag-service:8000/rag/query');
   assert.equal(ragCapturedHeaders?.['X-Verified-User-Id'], testUserId);
   assert.equal(ragCapturedBody?.tenant_id, undefined, 'tenant_id must not be sent in RAG request body');
+  assert.equal(ragCapturedBody?.jurisdiction, 'IN', 'RAG requests default to the supported India corpus');
 
   // 2. Test mlClient getMLPrediction forwards verified user header
   const mlRes = await getMLPrediction(

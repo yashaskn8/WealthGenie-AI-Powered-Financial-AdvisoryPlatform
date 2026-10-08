@@ -71,6 +71,19 @@ def test_out_of_domain_query_abstains_without_retrieval_or_citations():
     assert response.metrics["abstention_reason"] == "out_of_domain"
 
 
+def test_unsupported_jurisdiction_abstains_before_retrieval():
+    response = _pipeline(UnavailableRetriever([])).query(
+        RAGQueryRequest(
+            question="What tax rules apply in the United States?",
+            jurisdiction="US",
+        )
+    )
+    assert response.grounded is False
+    assert response.retrieved_chunks == []
+    assert response.citations == []
+    assert response.metrics["abstention_reason"] == "unsupported_jurisdiction"
+
+
 def test_empty_low_confidence_and_untrusted_evidence_abstain():
     request = RAGQueryRequest(question="What deduction is available under Section 80C?")
     cases = [

@@ -40,8 +40,8 @@ function recordFailure() {
  * @param {string|null} correlationId - Optional correlation ID for tracing
  * @returns {Promise<Object|null>} Grounded RAG query response or null on failure
  */
-export async function queryRAG({ query, top_k = 4, userId = null, userRole = null }, correlationId = null) {
-  const request = buildRagQueryRequest({ query, top_k });
+export async function queryRAG({ query, top_k = 4, jurisdiction = "IN", userId = null, userRole = null }, correlationId = null) {
+  const request = buildRagQueryRequest({ query, top_k, jurisdiction });
   if (!request) {
     return null;
   }

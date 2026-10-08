@@ -54,6 +54,11 @@ test('RAG request carries query only in the body and identity in verified header
   assert.deepEqual(buildRagQueryRequest({ query: `  ${fixtures.rag_request.question}  `, top_k: 4 }), fixtures.rag_request);
   assert.equal(buildRagQueryRequest({ query: 'no', top_k: 4 }), null);
   assert.equal(buildRagQueryRequest({ query: fixtures.rag_request.question, top_k: 21 }), null);
+  assert.deepEqual(
+    buildRagQueryRequest({ query: fixtures.rag_request.question, jurisdiction: "us" }),
+    { ...fixtures.rag_request, jurisdiction: "US" },
+  );
+  assert.equal(buildRagQueryRequest({ query: fixtures.rag_request.question, jurisdiction: "USA" }), null);
   assert.equal('tenant_id' in fixtures.rag_request, false);
   assert.equal('user_id' in fixtures.rag_request, false);
 });

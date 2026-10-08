@@ -37,7 +37,8 @@
   },
   "rag_request": {
     "question": "What is the current Section 80C deduction limit?",
-    "top_k": 4
+    "top_k": 4,
+    "jurisdiction": "IN"
   },
   "rag_grounded_response": {
     "answer": "The retrieved regulatory evidence states the applicable Section 80C limit.",

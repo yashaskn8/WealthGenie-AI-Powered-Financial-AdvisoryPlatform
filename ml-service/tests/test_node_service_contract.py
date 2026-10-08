@@ -51,6 +51,11 @@ def test_express_rag_request_and_both_response_states_match_pydantic():
     grounded = RAGQueryResponse.model_validate(FIXTURES["rag_grounded_response"])
     abstention = RAGQueryResponse.model_validate(FIXTURES["rag_abstention_response"])
     assert request.top_k == 4
+    assert request.jurisdiction == "IN"
+    unsupported = RAGQueryRequest.model_validate({**FIXTURES["rag_request"], "jurisdiction": "US"})
+    assert unsupported.jurisdiction == "US"
+    with pytest.raises(ValidationError):
+        RAGQueryRequest.model_validate({**FIXTURES["rag_request"], "jurisdiction": "USA"})
     assert grounded.grounded is True and grounded.citations[0].chunk_id == "tax-80c#1"
     assert abstention.grounded is False and abstention.citations == []
 

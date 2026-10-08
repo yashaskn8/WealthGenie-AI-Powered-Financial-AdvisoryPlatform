@@ -100,11 +100,13 @@ export function normalizePredictionResponse(value) {
   };
 }
 
-export function buildRagQueryRequest({ query, top_k = 4 }) {
+export function buildRagQueryRequest({ query, top_k = 4, jurisdiction = "IN" }) {
   if (!nonEmptyString(query) || query.trim().length < 3) return null;
   const parsedTopK = Math.trunc(Number(top_k));
   if (!Number.isFinite(parsedTopK) || parsedTopK < 1 || parsedTopK > 20) return null;
-  return { question: query.trim(), top_k: parsedTopK };
+  const normalizedJurisdiction = typeof jurisdiction === "string" ? jurisdiction.trim().toUpperCase() : "";
+  if (!/^[A-Z]{2}$/.test(normalizedJurisdiction)) return null;
+  return { question: query.trim(), top_k: parsedTopK, jurisdiction: normalizedJurisdiction };
 }
 
 export function normalizeRagResponse(value) {
