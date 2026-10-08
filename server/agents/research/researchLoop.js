@@ -2,7 +2,7 @@ import { PrometheusMetrics } from '../../services/metricsCollector.js';
 import { boundedResearchBudget, emptyResearchBudgetUsage, stableResearchId } from './researchConstants.js';
 import { validateResearchBrief } from './researchSchemas.js';
 import { validatePublicUrl } from './safePublicDocumentFetcher.js';
-import { extractDocumentEvidence } from './documentEvidenceExtractor.js';
+import { extractDocumentEvidence, isCanonicalRetrievedAt } from './documentEvidenceExtractor.js';
 import { buildResearchArtifact } from './researchArtifact.js';
 import { detectResearchContradictions, verifyResearchArtifact } from './researchClaimVerifier.js';
 
@@ -197,6 +197,15 @@ export async function runResearch({
       const fixtureInlineContent = provider.name === 'fixture' && Boolean(candidate.content);
       if (!fixtureInlineContent) {
         const fetched = await awaitWithAbort(documentFetcher.fetchDocument(candidateUrl, { signal: operationSignal }), operationSignal);
+        if (!isCanonicalRetrievedAt(fetched?.retrievedAt)) {
+          unresolvedGaps.push({
+            gapId: stableResearchId('G', candidateUrl),
+            factType: safeBrief.requestedFactTypes[0],
+            status: 'UNRESOLVED',
+            reasonCode: 'RESEARCH_FETCH_TIMESTAMP_UNVERIFIED',
+          });
+          continue;
+        }
         // Search-provider labels and dates are discovery hints, not source provenance.
         // Only fixture documents may supply these fields; live evidence uses the URL
         // actually fetched and leaves legal/publication time unknown absent a parser.
@@ -214,7 +223,8 @@ export async function runResearch({
           ...document,
           url: document.url || candidateUrl,
           body: document.content || document.body,
-          retrievedAt: document.retrievedAt || new Date().toISOString(),
+          // Fixture content has no HTTP observation; synthetic time is confined to the explicit fixture path.
+          retrievedAt: document.retrievedAt || (fixtureInlineContent ? now.toISOString() : null),
         },
         factType: fixtureInlineContent && safeBrief.requestedFactTypes.includes(candidate.factType)
           ? candidate.factType

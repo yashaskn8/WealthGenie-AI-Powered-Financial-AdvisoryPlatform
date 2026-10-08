@@ -256,6 +256,30 @@ test('live/configured research results always pass through the safe document fet
   assert.equal(result.verification.valid, true);
 });
 
+test('live research rejects missing or noncanonical fetch times without substituting local now', async () => {
+  for (const retrievedAt of [undefined, 'not-a-canonical-timestamp']) {
+    const result = await runResearch({
+      brief: brief(),
+      provider: {
+        name: 'configured',
+        search: async () => [{ url: 'https://rbi.org.in/press-releases/missing-fetch-time' }],
+      },
+      documentFetcher: {
+        fetchDocument: async url => ({
+          url,
+          body: 'The Reserve Bank of India current policy rate is 6.50%.',
+          retrievedAt,
+        }),
+      },
+    });
+    assert.equal(result.artifact.status, 'INSUFFICIENT_EVIDENCE');
+    assert.deepEqual(result.artifact.evidenceUnits, []);
+    assert.deepEqual(result.artifact.sources, []);
+    assert.ok(result.artifact.unresolvedGaps.some(gap => gap.reasonCode === 'RESEARCH_FETCH_TIMESTAMP_UNVERIFIED'));
+    assert.equal(result.verification.valid, true);
+  }
+});
+
 test('research claim verification rejects sign, unit, qualifier, date, and negation contradictions after rehash', async () => {
   const sourceBrief = brief();
   const base = await runResearch({
@@ -502,6 +526,17 @@ test('untrusted webpage prompt injection is data and is rejected', () => {
   });
   assert.equal(result.promptInjectionDetected, true);
   assert.equal(result.evidenceUnits.length, 0);
+});
+
+test('evidence extraction rejects missing fetch time instead of inventing one', () => {
+  const result = extractDocumentEvidence({
+    document: {
+      url: 'https://rbi.org.in/public',
+      body: 'The Reserve Bank of India policy rate is 6.50%.',
+    },
+  });
+  assert.deepEqual(result.evidenceUnits, []);
+  assert.deepEqual(result.reasonCodes, ['RESEARCH_FETCH_TIMESTAMP_UNVERIFIED']);
 });
 
 test('fixture research produces a hashed, independently verified artifact', async () => {

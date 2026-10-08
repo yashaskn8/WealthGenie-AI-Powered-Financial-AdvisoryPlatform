@@ -9,6 +9,12 @@ function hash(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex');
 }
 
+export function isCanonicalRetrievedAt(value) {
+  if (typeof value !== 'string') return false;
+  const timestamp = new Date(value);
+  return Number.isFinite(timestamp.getTime()) && timestamp.toISOString() === value;
+}
+
 export function stripUntrustedDocumentMarkup(content) {
   return String(content || '')
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
@@ -29,9 +35,12 @@ export function extractDocumentEvidence({ document, sourceId = null, factType = 
   if (INJECTION_PATTERN.test(text)) {
     return { blocked: true, promptInjectionDetected: true, evidenceUnits: [], reasonCodes: ['PROMPT_INJECTION_IN_DOCUMENT'] };
   }
+  if (!isCanonicalRetrievedAt(document?.retrievedAt)) {
+    return { blocked: false, promptInjectionDetected: false, evidenceUnits: [], reasonCodes: ['RESEARCH_FETCH_TIMESTAMP_UNVERIFIED'] };
+  }
   const canonicalUrl = String(document?.url || document?.canonicalUrl || '');
   const resolvedSourceId = sourceId || stableResearchId('S', canonicalUrl);
-  const retrievedAt = document?.retrievedAt || new Date().toISOString();
+  const retrievedAt = document.retrievedAt;
   const sourceTrustTier = classifyResearchSource({ url: canonicalUrl, publisher });
   const sentences = text.split(/(?<=[.!?])\s+/).map(sentence => sentence.trim()).filter(Boolean).slice(0, 12);
   const evidenceUnits = sentences.map((sentence, index) => {
