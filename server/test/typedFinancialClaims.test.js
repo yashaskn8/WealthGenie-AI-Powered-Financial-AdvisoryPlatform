@@ -200,6 +200,79 @@ test('model return assumptions must be described as assumptions, never provider 
   assert.ok(result.errors.includes('CLAIM_SEMANTIC_TYPE_MISMATCH'));
 });
 
+test('model return assumptions cannot be presented as guaranteed or certain outcomes', () => {
+  const evidence = evidenceEntryFromProjectionAssumption('balanced', {
+    mean: 0.08,
+    stdDev: 0.16,
+    source: 'WEALTHGENIE_MODEL_POLICY',
+    assumptionVersion: 'wealthgenie-projection-assumptions-test',
+    providerForecast: false,
+  });
+  const statements = [
+    `The expected return assumption is guaranteed at 8% [${evidence.id}].`,
+    `The expected return assumption will deliver 8% [${evidence.id}].`,
+    `The expected return assumption is risk-free at 8% [${evidence.id}].`,
+  ];
+  for (const statement of statements) {
+    const claim = {
+      type: 'EXPECTED_RETURN',
+      value: 8,
+      unit: 'PERCENT',
+      timePeriod: 'ANNUAL_MODEL_ASSUMPTION',
+      source: 'WEALTHGENIE_MODEL_POLICY',
+      evidenceId: evidence.id,
+      jurisdiction: null,
+      effectivePeriod: null,
+      statement,
+    };
+    const result = validateTypedFinancialClaims({ claims: [claim], narrative: statement, evidenceEntries: [evidence] });
+    assert.equal(result.passed, false, statement);
+    assert.ok(result.errors.includes('CLAIM_SEMANTIC_TYPE_MISMATCH'), statement);
+  }
+});
+
+test('signed historical return mentions must match the signed evidence value', () => {
+  const positiveEvidence = {
+    id: 'E_HISTORY_POSITIVE', kind: 'HISTORICAL_RETURN', dataClass: 'VERIFIED_HISTORICAL_FACT',
+    value: { historicalReturnPct: 7.25, periodStart: '2025-10-01', periodEnd: '2026-10-01', basis: 'VERIFIED_NAV_PAIR' },
+    source: { provider: 'AMFI' },
+  };
+  const negativeStatement = `The historical return was -7.25% [${positiveEvidence.id}].`;
+  const mismatched = {
+    type: 'HISTORICAL_RETURN',
+    value: 7.25,
+    unit: 'PERCENT',
+    timePeriod: '2025-10-01/2026-10-01',
+    source: 'AMFI',
+    evidenceId: positiveEvidence.id,
+    jurisdiction: 'IN',
+    effectivePeriod: { from: '2025-10-01', to: '2026-10-01' },
+    statement: negativeStatement,
+  };
+  const mismatchResult = validateTypedFinancialClaims({
+    claims: [mismatched], narrative: negativeStatement, evidenceEntries: [positiveEvidence],
+  });
+  assert.equal(mismatchResult.passed, false);
+  assert.ok(mismatchResult.errors.includes('CLAIM_VALUE_OR_UNIT_MISMATCH'));
+
+  const negativeEvidence = {
+    ...positiveEvidence,
+    id: 'E_HISTORY_NEGATIVE',
+    value: { ...positiveEvidence.value, historicalReturnPct: -7.25 },
+  };
+  const validStatement = `The historical return was −7.25% [${negativeEvidence.id}].`;
+  const validClaim = {
+    ...mismatched,
+    value: -7.25,
+    evidenceId: negativeEvidence.id,
+    statement: validStatement,
+  };
+  const negativeResult = validateTypedFinancialClaims({
+    claims: [validClaim], narrative: validStatement, evidenceEntries: [negativeEvidence],
+  });
+  assert.equal(negativeResult.passed, true, negativeResult.errors.join(', '));
+});
+
 test('missing model assumptions stay unavailable and cannot be claimed as zero', () => {
   const evidence = evidenceEntryFromProjectionAssumption('balanced', {
     mean: null,

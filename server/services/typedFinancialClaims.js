@@ -1,5 +1,5 @@
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-const FINANCIAL_NUMBER = /(?:₹\s*\d[\d,]*(?:\.\d+)?|\b(?:INR|Rs\.?)\s*\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s*%|\b\d+(?:\.\d+)?\b)/gi;
+const FINANCIAL_NUMBER = /(?:[+\-−]\s*)?(?:₹\s*(?:[+\-−]\s*)?\d[\d,]*(?:\.\d+)?|\b(?:INR|Rs\.?)\s*(?:[+\-−]\s*)?\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s*%|\b\d+(?:\.\d+)?\b)/gi;
 const CLAIM_FIELDS = Object.freeze([
   'type', 'value', 'unit', 'timePeriod', 'source', 'evidenceId',
   'jurisdiction', 'effectivePeriod', 'statement',
@@ -209,9 +209,17 @@ function financialMentions(text) {
     const raw = match[0];
     const valueMatch = raw.match(/\d[\d,]*(?:\.\d+)?/);
     if (!valueMatch) continue;
+    const signCharacters = raw.match(/[+\-−]/g) || [];
+    if (signCharacters.length > 1) continue;
     const number = Number(valueMatch[0].replace(/,/g, ''));
     if (!Number.isFinite(number)) continue;
     const before = source.slice(Math.max(0, match.index - 42), match.index);
+    const rangeSeparator = signCharacters.length === 1
+      && /[-−]/.test(signCharacters[0])
+      && /\d[\d,]*(?:\.\d+)?\s*$/.test(before);
+    const signedNumber = signCharacters.length === 1 && /[-−]/.test(signCharacters[0]) && !rangeSeparator
+      ? -number
+      : number;
     const after = source.slice(match.index + raw.length, match.index + raw.length + 42);
     const markedCurrency = /₹|\bINR\s*|\bRs\.?\s*$/i.test(before);
     const markedPercent = /%/.test(raw);
@@ -222,7 +230,7 @@ function financialMentions(text) {
     const financialContext = Boolean(inferredType(context))
       || /\b(?:p\.a\.|per annum|per month|monthly|rupees?|amount|investment|corpus|savings|contribution|risk score|tax|rate|return|allocation|coupon|maturity)\b/i.test(context);
     if (!markedCurrency && !markedPercent && !decimalValue && !financialContext && (yearLike || integerDigits < 4)) continue;
-    mentions.push({ value: number, start: match.index, end: match.index + raw.length, raw });
+    mentions.push({ value: signedNumber, start: match.index, end: match.index + raw.length, raw });
   }
   FINANCIAL_NUMBER.lastIndex = 0;
   return mentions;
@@ -263,7 +271,9 @@ function claimMatchesExpected(claim, expected) {
 function semanticTypeMatches(claim) {
   if (inferredType(claim.statement) !== claim.type) return false;
   if (claim.type === 'EXPECTED_RETURN') {
-    return /\bexpected\s+(?:annual\s+)?return\s+assumption\b/i.test(claim.statement);
+    const statesAssumption = /\bexpected\s+(?:annual\s+)?return\s+assumption\b/i.test(claim.statement);
+    const assertsCertainty = /\b(?:is|are|will be|remains|stays)\s+(?:fully\s+)?(?:guaranteed|assured|fixed)\b|\b(?:guaranteed|assured)\s+(?:(?:expected|annual|model)\s+)*(?:return|rate|income|growth)\b|\b(?:return|rate|income|growth)\s+(?:is|are|remains|stays)\s+(?:fully\s+)?(?:guaranteed|assured|fixed)\b|\bwill\s+(?:earn|return|deliver|yield)\b|\brisk[- ]free\b/i.test(claim.statement);
+    return statesAssumption && !assertsCertainty;
   }
   return true;
 }
