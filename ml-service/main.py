@@ -357,7 +357,7 @@ def record_inference_features(features: dict) -> None:
 async def predict_enriched(data: PredictRequest):
     """
     Prediction endpoint serving recommendations using Random Forest + TreeSHAP explainability.
-    Buffers inference inputs for continuous drift monitoring and dual-evaluates shadow candidate if configured.
+    Buffers inference inputs for drift monitoring and non-blockingly queues a shadow candidate evaluation when configured.
     """
     features, model_input = build_model_input(data)
 
@@ -370,7 +370,7 @@ async def predict_enriched(data: PredictRequest):
 
     res = predictor.predict(model_input)
 
-    # 2. Evaluate shadow candidate if active (fire-and-forget, does not alter active response)
+    # 2. Queue shadow work without letting candidate inference delay the authoritative response.
     try:
         from model.registry.shadow_evaluator import shadow_evaluator
         if shadow_evaluator.is_active():
