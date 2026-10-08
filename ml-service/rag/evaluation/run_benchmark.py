@@ -24,10 +24,14 @@ if str(_ml_service_root) not in sys.path:
     sys.path.insert(0, str(_ml_service_root))
 
 from model.config import BASE_DIR
+from rag.chunking.fixed_chunker import FixedSizeChunker
 from rag.config import RAGConfig
 from rag.corpus_manifest import MANIFEST_FILENAME, current_documents, load_corpus_manifest
 from rag.embeddings.dense_embedding import get_embedding_provider
+from rag.ingestion.cleaner import clean_text
+from rag.ingestion.loaders import DocumentLoader
 from rag.evaluation.evaluator import RAGEvaluator
+from rag.evaluation.corpus_binding import validate_benchmark_index_binding
 from rag.evaluation.metrics import format_metric_value, summarize_metric_values
 from rag.retrieval.pipeline import RAGPipeline
 from rag.schema import RAGQueryRequest
@@ -108,7 +112,9 @@ def run_benchmark() -> Dict[str, Any]:
     questions = load_questions(QUESTIONS_FILE)
     corpus_dir = _ml_service_root / "rag" / "data" / "corpus"
     manifest = load_corpus_manifest(corpus_dir / MANIFEST_FILENAME, corpus_dir)
-    current_keys = {item["document_key"] for item in current_documents(manifest, as_of=date.today())}
+    evaluation_date = date.today()
+    current_entries = current_documents(manifest, as_of=evaluation_date)
+    current_keys = {item["document_key"] for item in current_entries}
     unknown_keys = {
         key for item in questions for key in item["relevant_document_keys"]
         if key not in current_keys
@@ -120,6 +126,18 @@ def run_benchmark() -> Dict[str, Any]:
     config = RAGConfig()
     embedder = get_embedding_provider(config)
     vector_store = PersistentVectorStore(index_path=config.vector_store_path)
+    loader = DocumentLoader()
+    chunker = FixedSizeChunker()
+    expected_chunk_ids_by_document = {}
+    for entry in current_entries:
+        document = loader.load_file(corpus_dir / entry["local_filename"])
+        document.content = clean_text(document.content)
+        expected_chunk_ids_by_document[entry["document_key"]] = {
+            chunk.chunk_id for chunk in chunker.chunk_document(document)
+        }
+    index_binding = validate_benchmark_index_binding(
+        vector_store, manifest, expected_chunk_ids_by_document, as_of=evaluation_date,
+    )
     pipeline = RAGPipeline(
         embedder=embedder,
         vector_store=vector_store,
@@ -128,7 +146,7 @@ def run_benchmark() -> Dict[str, Any]:
     evaluator = RAGEvaluator()
 
     logger.info(
-        f"Pipeline initialized: {len(vector_store.get_chunks())} chunks in store, "
+        f"Pipeline initialized: {index_binding['active_chunk_count']} verified active chunks, "
         f"strategy={config.retrieval_strategy}, reranker={config.reranker_strategy}"
     )
 
@@ -177,7 +195,7 @@ def run_benchmark() -> Dict[str, Any]:
             },
             expected_manifest_sha256=manifest["manifest_sha256"],
             expected_jurisdiction="IN",
-            as_of_date=date.today(),
+            as_of_date=evaluation_date,
             k=4,
         )
 
@@ -256,7 +274,7 @@ def run_benchmark() -> Dict[str, Any]:
     }
 
     report = {
-        "report_id": f"rag_eval_v3_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+        "report_id": f"rag_eval_v4_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "corpus_info": {
             "total_chunks_in_store": len(vector_store.get_chunks()),
@@ -264,6 +282,7 @@ def run_benchmark() -> Dict[str, Any]:
             "questions_file": str(QUESTIONS_FILE.name),
             "manifest_sha256": manifest["manifest_sha256"],
             "current_document_keys": sorted(current_keys),
+            "index_binding": index_binding,
         },
         "pipeline_config": {
             "retrieval_strategy": config.retrieval_strategy,
