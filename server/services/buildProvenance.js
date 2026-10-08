@@ -3,10 +3,11 @@ import { lstat, readdir, readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
-export const BUILD_PROVENANCE_SCHEMA = 'wealthgenie.build-provenance.v1';
+export const BUILD_PROVENANCE_SCHEMA = 'wealthgenie.build-provenance.v2';
 const SHA40 = /^[a-f0-9]{40}$/;
 const SHA64 = /^[a-f0-9]{64}$/;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
+const MAX_FRONTEND_ARTIFACT_COUNT = 2048;
 const LOCK_FILES = Object.freeze({
   serverLockSha256: 'server/package-lock.json',
   frontendLockSha256: 'reactapp/package-lock.json',
@@ -27,7 +28,38 @@ function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
-async function hashFrontendArtifacts(root) {
+function isSafeFrontendArtifactPath(value) {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= 1024
+    && !value.startsWith('/')
+    && !value.includes('\\')
+    && !value.includes(String.fromCharCode(0))
+    && !value.split('/').some(segment => !segment || segment === '.' || segment === '..')
+    && path.posix.normalize(value) === value;
+}
+
+function isValidFrontendArtifactInventory(value) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_FRONTEND_ARTIFACT_COUNT) return false;
+  let previousPath = null;
+  const paths = new Set();
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+    const keys = Object.keys(entry).sort();
+    if (keys.length !== 3 || keys[0] !== 'byteLength' || keys[1] !== 'path' || keys[2] !== 'sha256') return false;
+    if (!isSafeFrontendArtifactPath(entry.path)
+        || !SHA64.test(entry.sha256 || '')
+        || !Number.isSafeInteger(entry.byteLength)
+        || entry.byteLength < 0
+        || paths.has(entry.path)
+        || (previousPath !== null && previousPath >= entry.path)) return false;
+    paths.add(entry.path);
+    previousPath = entry.path;
+  }
+  return paths.has('index.html');
+}
+
+async function collectFrontendArtifacts(root) {
   const rootInfo = await lstat(root);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error('Frontend artifact root must be a real directory.');
   const entries = [];
@@ -50,7 +82,8 @@ async function hashFrontendArtifacts(root) {
   }
   await walk(root);
   entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
-  return sha256(canonicalJson(entries));
+  if (!isValidFrontendArtifactInventory(entries)) throw new Error('Frontend artifacts must include a valid index.html inventory.');
+  return entries;
 }
 
 function validateBuildTimestamp(value) {
@@ -79,7 +112,8 @@ export async function createBuildProvenance({
   for (const [field, relativePath] of Object.entries(LOCK_FILES)) {
     manifest[field] = sha256(await readFile(path.join(repositoryRoot, relativePath)));
   }
-  manifest.frontendArtifactSetSha256 = await hashFrontendArtifacts(frontendArtifactDirectory);
+  manifest.frontendArtifactInventory = await collectFrontendArtifacts(frontendArtifactDirectory);
+  manifest.frontendArtifactSetSha256 = sha256(canonicalJson(manifest.frontendArtifactInventory));
   manifest.serverImageIdentity = serverImageIdentity || null;
   manifest.frontendImageIdentity = frontendImageIdentity || null;
   manifest.mlImageIdentity = mlImageIdentity || null;
@@ -108,6 +142,11 @@ export function verifyBuildProvenance(manifest, expected = {}) {
     if (!SHA64.test(manifest[field] || '')) errors.push(`${field.toUpperCase()}_INVALID`);
   }
   if (!SHA64.test(manifest.frontendArtifactSetSha256 || '')) errors.push('FRONTEND_ARTIFACT_SHA_INVALID');
+  if (!isValidFrontendArtifactInventory(manifest.frontendArtifactInventory)) {
+    errors.push('FRONTEND_ARTIFACT_INVENTORY_INVALID');
+  } else if (sha256(canonicalJson(manifest.frontendArtifactInventory)) !== manifest.frontendArtifactSetSha256) {
+    errors.push('FRONTEND_ARTIFACT_SET_HASH_MISMATCH');
+  }
   for (const field of ['serverImageIdentity', 'frontendImageIdentity', 'mlImageIdentity']) {
     if (manifest[field] !== null && !IMAGE_ID.test(manifest[field] || '')) errors.push(`${field.toUpperCase()}_INVALID`);
   }

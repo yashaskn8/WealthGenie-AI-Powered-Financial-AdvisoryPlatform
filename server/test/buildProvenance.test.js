@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   buildProvenanceMatches,
+  canonicalJson,
   createBuildProvenance,
   serializeBuildProvenance,
   verifyBuildProvenance,
@@ -98,6 +100,33 @@ test('provenance rejects wrong image identities and frontend/backend manifests f
     });
     assert.equal(verifyBuildProvenance(otherBuild).valid, true);
     assert.equal(buildProvenanceMatches(fixture.provenance, otherBuild), false);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test('provenance rejects tampered or unsafe frontend artifact inventories', async () => {
+  const fixture = await createFixture();
+  try {
+    const rehashManifest = manifest => {
+      const unsigned = { ...manifest };
+      delete unsigned.provenanceSha256;
+      return {
+        ...manifest,
+        provenanceSha256: createHash('sha256').update(canonicalJson(unsigned)).digest('hex'),
+      };
+    };
+    const changedArtifact = structuredClone(fixture.provenance);
+    changedArtifact.frontendArtifactInventory[0].sha256 = 'e'.repeat(64);
+    const changedArtifactResult = verifyBuildProvenance(rehashManifest(changedArtifact));
+    assert.equal(changedArtifactResult.valid, false);
+    assert.ok(changedArtifactResult.errors.includes('FRONTEND_ARTIFACT_SET_HASH_MISMATCH'));
+
+    const unsafePath = structuredClone(fixture.provenance);
+    unsafePath.frontendArtifactInventory[0].path = '../escape.js';
+    const unsafePathResult = verifyBuildProvenance(rehashManifest(unsafePath));
+    assert.equal(unsafePathResult.valid, false);
+    assert.ok(unsafePathResult.errors.includes('FRONTEND_ARTIFACT_INVENTORY_INVALID'));
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
   }

@@ -37,7 +37,36 @@ import { indiaClockParts, isoDateInIndia } from '../services/marketData/indiaMar
 import { previousNseTradingDate } from '../services/marketData/nseTradingCalendar.js';
 import { BUILD_PROVENANCE_SCHEMA, canonicalJson } from '../services/buildProvenance.js';
 
+function makeTestFrontendArtifacts(commitSha, overrides = {}) {
+  const contents = new Map([
+    ['index.html', Buffer.from(
+      '<!doctype html><html data-build-sha="' + commitSha + '"><head>'
+        + '<link rel="stylesheet" href="/assets/app.css"></head><body>'
+        + '<script type="module" src="/assets/app.js"></script></body></html>'
+        + (overrides.indexSuffix || '')
+    )],
+    ['assets/app.css', Buffer.from('body { color: #fff; }' + (overrides.cssSuffix || ''))],
+    ['assets/app.js', Buffer.from(
+      "const buildIdentity = '" + (overrides.scriptSha || commitSha) + "';"
+        + (overrides.scriptSuffix || '')
+    )],
+  ]);
+  const inventory = [...contents.entries()]
+    .map(([artifactPath, bytes]) => ({
+      path: artifactPath,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      byteLength: bytes.byteLength,
+    }))
+    .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  return { contents, inventory };
+}
+
+function artifactSetSha256(inventory) {
+  return createHash('sha256').update(canonicalJson(inventory)).digest('hex');
+}
+
 function makeTestBuildManifest(commitSha, overrides = {}) {
+  const frontendArtifacts = makeTestFrontendArtifacts(commitSha);
   const manifest = {
     schemaVersion: BUILD_PROVENANCE_SCHEMA,
     gitCommitSha: commitSha,
@@ -45,10 +74,11 @@ function makeTestBuildManifest(commitSha, overrides = {}) {
     serverLockSha256: 'a'.repeat(64),
     frontendLockSha256: 'b'.repeat(64),
     mlRequirementsSha256: 'c'.repeat(64),
-    frontendArtifactSetSha256: 'd'.repeat(64),
-    serverImageIdentity: `sha256:${'1'.repeat(64)}`,
-    frontendImageIdentity: `sha256:${'2'.repeat(64)}`,
-    mlImageIdentity: `sha256:${'3'.repeat(64)}`,
+    frontendArtifactInventory: frontendArtifacts.inventory,
+    frontendArtifactSetSha256: artifactSetSha256(frontendArtifacts.inventory),
+    serverImageIdentity: 'sha256:' + '1'.repeat(64),
+    frontendImageIdentity: 'sha256:' + '2'.repeat(64),
+    mlImageIdentity: 'sha256:' + '3'.repeat(64),
     workflowRunId: null,
     workflowRunAttempt: null,
     buildTimestamp: null,
@@ -57,7 +87,6 @@ function makeTestBuildManifest(commitSha, overrides = {}) {
   manifest.provenanceSha256 = createHash('sha256').update(canonicalJson(manifest)).digest('hex');
   return manifest;
 }
-
 function publishTestBuildManifest(manifest) {
   return { status: 'VERIFIED', ...manifest };
 }
@@ -171,6 +200,7 @@ function fakeHttpResponse(status, body, { malformed = false } = {}) {
 function browserFlowFixture(scenario = {}) {
   let currentUrl = 'http://127.0.0.1:5173/login';
   let requestListener = null;
+  let responseListener = null;
   const recommendation = currentBinding();
   const rankBinding = {
     profileId: recommendation.profileId,
@@ -209,12 +239,24 @@ function browserFlowFixture(scenario = {}) {
     }),
   });
   const page = {
-    on(event, callback) { if (event === 'request') requestListener = callback; },
+    on(event, callback) {
+      if (event === 'request') requestListener = callback;
+      if (event === 'response') responseListener = callback;
+    },
     async goto(url) {
       if (url.endsWith('/login')) {
         currentUrl = url;
         if (scenario.loginNavigationStatus) return fakeHttpResponse(scenario.loginNavigationStatus, {});
-        return fakeHttpResponse(200, {});
+        const artifacts = makeTestFrontendArtifacts('c'.repeat(40), {
+          indexSuffix: scenario.frontendIndexTampered || scenario.browserLoadedDocumentTampered ? '<!-- same build marker, changed document -->' : '',
+        });
+        const response = {
+          ...fakeHttpResponse(200, {}),
+          url: () => url,
+          body: async () => artifacts.contents.get('index.html'),
+        };
+        responseListener?.(response);
+        return response;
       }
       currentUrl = url;
       if (url.endsWith('/profile')) {
@@ -295,7 +337,29 @@ function browserFlowFixture(scenario = {}) {
         };
       });
     },
-    async evaluate() { return { buildSha: scenario.frontendBuildSha ?? 'c'.repeat(40), scripts: ['http://127.0.0.1:5173/assets/app.js'] }; },
+    async evaluate() {
+      const artifacts = makeTestFrontendArtifacts('c'.repeat(40), {
+        scriptSha: scenario.frontendAssetShaMismatch ? 'd'.repeat(40) : 'c'.repeat(40),
+        scriptSuffix: scenario.frontendAssetBytesTampered || scenario.browserLoadedScriptTampered ? ' window.extra = true;' : '',
+        cssSuffix: scenario.frontendCssTampered || scenario.browserLoadedStylesheetTampered ? ' .tampered { display: block; }' : '',
+      });
+      for (const artifactPath of ['assets/app.js', 'assets/app.css']) {
+        const assetUrl = 'http://127.0.0.1:5173/' + artifactPath;
+        responseListener?.({
+          ...fakeHttpResponse(200, {}),
+          url: () => assetUrl,
+          body: async () => artifacts.contents.get(artifactPath),
+        });
+      }
+      return {
+        buildSha: scenario.frontendBuildSha ?? 'c'.repeat(40),
+        scripts: [
+          'http://127.0.0.1:5173/assets/app.js',
+          ...(scenario.frontendUnlistedScript ? ['http://127.0.0.1:5173/assets/unlisted.js'] : []),
+        ],
+        stylesheets: ['http://127.0.0.1:5173/assets/app.css'],
+      };
+    },
     url: () => currentUrl,
     request: {
       async post(url) {
@@ -335,13 +399,32 @@ function browserFlowFixture(scenario = {}) {
         request: {
           async get(url) {
             if (url.endsWith('/build-provenance/provenance.json')) {
-              const manifest = scenario.frontendProvenanceMismatch
-                ? makeTestBuildManifest('c'.repeat(40), { frontendArtifactSetSha256: 'e'.repeat(64) })
-                : makeTestBuildManifest('c'.repeat(40));
+              let manifest;
+              if (scenario.frontendProvenanceMismatch) {
+                const alternate = makeTestFrontendArtifacts('c'.repeat(40), { indexSuffix: '<!--different valid artifact set-->' });
+                manifest = makeTestBuildManifest('c'.repeat(40), {
+                  frontendArtifactInventory: alternate.inventory,
+                  frontendArtifactSetSha256: artifactSetSha256(alternate.inventory),
+                });
+              } else {
+                manifest = makeTestBuildManifest('c'.repeat(40));
+              }
               return { ok: () => true, json: async () => manifest };
             }
-            const assetSha = scenario.frontendAssetShaMismatch ? 'd'.repeat(40) : 'c'.repeat(40);
-            return { ok: () => true, text: async () => `const buildIdentity = '${assetSha}'` };
+            const artifacts = makeTestFrontendArtifacts('c'.repeat(40), {
+              scriptSha: scenario.frontendAssetShaMismatch ? 'd'.repeat(40) : 'c'.repeat(40),
+              scriptSuffix: scenario.frontendAssetBytesTampered ? ' window.extra = true;' : '',
+              cssSuffix: scenario.frontendCssTampered ? ' .tampered { display: block; }' : '',
+              indexSuffix: scenario.frontendIndexTampered ? '<!-- same build marker, changed document -->' : '',
+            });
+            const artifactPath = decodeURIComponent(new URL(url).pathname.replace(/^\/+/, ''));
+            const resolvedPath = artifactPath === 'login' ? 'index.html' : artifactPath;
+            const bytes = artifacts.contents.get(resolvedPath);
+            const missing = scenario.frontendMissingArtifact && resolvedPath === 'assets/app.css';
+            return {
+              ok: () => Boolean(bytes) && !missing,
+              body: async () => bytes || Buffer.alloc(0),
+            };
           },
         },
         cookies: async () => scenario.missingCsrfCookie ? [] : [{ name: 'wg_csrf', value: 'fake-csrf-value' }],
@@ -368,7 +451,7 @@ async function runBrowserFlow(scenario = {}) {
     expectedBuildSha: 'c'.repeat(40),
     expectedGitTreeSha: 'f'.repeat(40),
     expectedProvenanceSha256: makeTestBuildManifest('c'.repeat(40)).provenanceSha256,
-    expectedFrontendArtifactSetSha256: 'd'.repeat(64),
+    expectedFrontendArtifactSetSha256: makeTestBuildManifest('c'.repeat(40)).frontendArtifactSetSha256,
   }, fixture);
   return { ...reporter.finish(), lines };
 }
@@ -1657,6 +1740,23 @@ test('a mismatched served frontend asset is rejected before demo credentials are
   assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false);
   assert.match(result.checks.find(check => check.name === 'Critical browser path').detail, /FRONTEND_BUILD_IDENTITY_MISMATCH/);
   assert.equal(result.checks.find(check => check.name === 'Profile completion/auth').state, 'NOT_EVALUATED');
+});
+
+test('served frontend files that retain the build marker but change bytes are rejected before demo credentials are submitted', async () => {
+  for (const scenario of [
+    { frontendAssetBytesTampered: true },
+    { frontendCssTampered: true },
+    { frontendIndexTampered: true },
+    { browserLoadedDocumentTampered: true },
+    { browserLoadedScriptTampered: true },
+    { browserLoadedStylesheetTampered: true },
+    { frontendMissingArtifact: true },
+    { frontendUnlistedScript: true },
+  ]) {
+    const result = await runBrowserFlow(scenario);
+    assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false, JSON.stringify(scenario));
+    assert.equal(result.checks.find(check => check.name === 'Profile completion/auth').state, 'NOT_EVALUATED');
+  }
 });
 
 test('a served frontend from a different valid provenance manifest is rejected before demo credentials are submitted', async () => {

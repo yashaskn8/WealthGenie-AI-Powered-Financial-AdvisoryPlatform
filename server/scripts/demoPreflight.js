@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
@@ -89,52 +89,113 @@ export function isSafeDemoUrl(value, { api = false, remoteOrigins } = {}) {
   }
 }
 
-async function servedFrontendBuildMatches({ page, request, expectedBuildSha, expectedGitTreeSha, expectedProvenanceSha256, expectedFrontendArtifactSetSha256, origin }) {
-  if (!matchesBuildSha(expectedBuildSha, expectedBuildSha)) return false;
-  const runtime = await page.evaluate(() => ({
-    buildSha: globalThis.document.documentElement.dataset.buildSha || null,
-    scripts: [...globalThis.document.scripts].map(script => script.src).filter(Boolean),
-  }));
-  if (!matchesBuildSha(expectedBuildSha, runtime?.buildSha) || !Array.isArray(runtime?.scripts)) return false;
-  const firstPartyScripts = runtime.scripts.filter(source => {
-    try {
-      const url = new URL(source);
-      return url.origin === origin && ['http:', 'https:'].includes(url.protocol)
-        && !url.username && !url.password && !url.search && !url.hash && url.pathname.endsWith('.js');
-    } catch {
-      return false;
-    }
-  });
-  if (firstPartyScripts.length === 0 || typeof request?.get !== 'function') return false;
-  let scriptMatches = false;
-  for (const source of firstPartyScripts) {
-    try {
-      const response = await request.get(source, { timeout: LOGIN_BROWSER_TIMEOUT_MS });
-      if (responseOk(response) && (await response.text()).includes(expectedBuildSha.toLowerCase())) {
-        scriptMatches = true;
-        break;
-      }
-    } catch {
-      // A served-asset fetch failure is a failed attestation, not a reason to authenticate.
-    }
-  }
-  if (!scriptMatches) return false;
-  if (!/^[a-f0-9]{64}$/.test(expectedProvenanceSha256 || '')
-      || !/^[a-f0-9]{64}$/.test(expectedFrontendArtifactSetSha256 || '')) return false;
+function frontendArtifactPathFromUrl(source, origin) {
   try {
+    const url = new URL(source, origin);
+    if (url.origin !== origin || !['http:', 'https:'].includes(url.protocol)
+        || url.username || url.password || url.search || url.hash) return null;
+    const decodedPath = decodeURIComponent(url.pathname.replace(/^\/+/, ''));
+    return decodedPath || 'index.html';
+  } catch {
+    return null;
+  }
+}
+
+function frontendArtifactUrl(origin, artifactPath) {
+  const encodedPath = artifactPath.split('/').map(segment => encodeURIComponent(segment)).join('/');
+  return new URL('/' + encodedPath, origin).toString();
+}
+
+async function responseBodyMatchesArtifact(response, expectedArtifact) {
+  try {
+    if (!responseOk(response) || typeof response.body !== 'function') return false;
+    const contents = await response.body();
+    if (!(contents instanceof Uint8Array) || contents.byteLength !== expectedArtifact.byteLength) return false;
+    const digest = createHash('sha256').update(contents).digest('hex');
+    return digest === expectedArtifact.sha256;
+  } catch {
+    return false;
+  }
+}
+
+async function servedArtifactMatches(request, url, expectedArtifact) {
+  try {
+    const response = await request.get(url, {
+      timeout: LOGIN_BROWSER_TIMEOUT_MS,
+      maxRedirects: 0,
+    });
+    return await responseBodyMatchesArtifact(response, expectedArtifact);
+  } catch {
+    return false;
+  }
+}
+async function servedFrontendBuildMatches({ page, request, documentResponse, observedBrowserResponses, expectedBuildSha, expectedGitTreeSha, expectedProvenanceSha256, expectedFrontendArtifactSetSha256, origin }) {
+  if (!matchesBuildSha(expectedBuildSha, expectedBuildSha)
+      || !/^[a-f0-9]{40}$/i.test(expectedGitTreeSha || '')
+      || !/^[a-f0-9]{64}$/.test(expectedProvenanceSha256 || '')
+      || !/^[a-f0-9]{64}$/.test(expectedFrontendArtifactSetSha256 || '')
+      || typeof request?.get !== 'function'
+      || !(observedBrowserResponses instanceof Map)) return false;
+  try {
+    const runtime = await page.evaluate(() => ({
+      buildSha: globalThis.document.documentElement.dataset.buildSha || null,
+      scripts: [...globalThis.document.scripts].map(script => script.src).filter(Boolean),
+      stylesheets: [...globalThis.document.querySelectorAll('link[rel~="stylesheet"]')]
+        .map(link => link.href).filter(Boolean),
+    }));
+    if (!matchesBuildSha(expectedBuildSha, runtime?.buildSha)
+        || !Array.isArray(runtime?.scripts)
+        || runtime.scripts.length === 0
+        || !Array.isArray(runtime?.stylesheets)) return false;
+
     const response = await request.get(new URL('/build-provenance/provenance.json', origin).toString(), {
       timeout: LOGIN_BROWSER_TIMEOUT_MS,
+      maxRedirects: 0,
     });
     if (!responseOk(response)) return false;
     const manifest = await response.json();
-    return ['serverImageIdentity', 'frontendImageIdentity', 'mlImageIdentity']
+    if (!['serverImageIdentity', 'frontendImageIdentity', 'mlImageIdentity']
       .every(field => /^sha256:[a-f0-9]{64}$/.test(manifest?.[field] || ''))
-      && verifyBuildProvenance(manifest, {
-      gitCommitSha: expectedBuildSha.toLowerCase(),
-      gitTreeSha: expectedGitTreeSha.toLowerCase(),
-      frontendArtifactSetSha256: expectedFrontendArtifactSetSha256.toLowerCase(),
-      provenanceSha256: expectedProvenanceSha256.toLowerCase(),
-      }).valid;
+      || !verifyBuildProvenance(manifest, {
+        gitCommitSha: expectedBuildSha.toLowerCase(),
+        gitTreeSha: expectedGitTreeSha.toLowerCase(),
+        frontendArtifactSetSha256: expectedFrontendArtifactSetSha256.toLowerCase(),
+        provenanceSha256: expectedProvenanceSha256.toLowerCase(),
+      }).valid) return false;
+
+    const inventory = manifest.frontendArtifactInventory;
+    const inventoryByPath = new Map(inventory.map(entry => [entry.path, entry]));
+    const loadedAssetPaths = [...runtime.scripts, ...runtime.stylesheets]
+      .map(source => frontendArtifactPathFromUrl(source, origin));
+    if (loadedAssetPaths.some(assetPath => !assetPath || !inventoryByPath.has(assetPath))) return false;
+
+    const pageUrl = typeof page.url === 'function' ? page.url() : null;
+    const documentUrl = typeof documentResponse?.url === 'function' ? documentResponse.url() : null;
+    if (typeof pageUrl !== 'string' || typeof documentUrl !== 'string'
+        || new URL(pageUrl).origin !== origin
+        || new URL(documentUrl).origin !== origin) return false;
+
+    const indexArtifact = inventoryByPath.get('index.html');
+    if (!await responseBodyMatchesArtifact(documentResponse, indexArtifact)) return false;
+    const artifactChecks = inventory.map(artifact => servedArtifactMatches(
+      request,
+      frontendArtifactUrl(origin, artifact.path),
+      artifact
+    ));
+    for (let index = 0; index < artifactChecks.length; index += 8) {
+      const results = await Promise.all(artifactChecks.slice(index, index + 8));
+      if (results.some(matches => !matches)) return false;
+    }
+
+    for (const assetPath of new Set(loadedAssetPaths)) {
+      const expectedArtifact = inventoryByPath.get(assetPath);
+      const observedResponses = observedBrowserResponses.get(assetPath);
+      if (!Array.isArray(observedResponses) || observedResponses.length === 0) return false;
+      for (const observedResponse of observedResponses) {
+        if (!await responseBodyMatchesArtifact(observedResponse, expectedArtifact)) return false;
+      }
+    }
+    return true;
   } catch {
     return false;
   }
@@ -1070,6 +1131,19 @@ export async function checkBrowserAndFinancialFlow(reporter, {
         }
       });
       page = await context.newPage();
+      const observedBrowserResponses = new Map();
+      page.on('response', response => {
+        try {
+          const assetPath = frontendArtifactPathFromUrl(response.url(), frontend.origin);
+          if (!assetPath) return;
+          const normalizedPath = assetPath === 'login' ? 'index.html' : assetPath;
+          const responseList = observedBrowserResponses.get(normalizedPath) || [];
+          responseList.push(response);
+          observedBrowserResponses.set(normalizedPath, responseList);
+        } catch {
+          // An uninspectable browser response cannot be used as artifact evidence.
+        }
+      });
       page.on('request', request => {
         try {
           const providerRequest = isFinancialProviderRequestUrl(request.url());
@@ -1097,6 +1171,8 @@ export async function checkBrowserAndFinancialFlow(reporter, {
       frontendBuildVerified = await servedFrontendBuildMatches({
         page,
         request: context.request,
+        documentResponse: frontendResponse,
+        observedBrowserResponses,
         expectedBuildSha,
         expectedGitTreeSha,
         expectedProvenanceSha256,
