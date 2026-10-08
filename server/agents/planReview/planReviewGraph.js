@@ -174,7 +174,11 @@ export async function planWithProvider({ freshness, profileContext, provider, to
     error.rejectedToolRequestCount = Math.min(ungrantedChecks.length, MAX_TOOL_CALLS);
     throw error;
   }
-  return { ...validation.value, provider: response.provider || provider.name, model: response.model || null, fallback: false };
+  const tokensUsed = response.tokensUsed !== undefined && response.tokensUsed !== null
+      && Number.isSafeInteger(Number(response.tokensUsed)) && Number(response.tokensUsed) >= 0
+    ? Number(response.tokensUsed)
+    : null;
+  return { ...validation.value, provider: response.provider || provider.name, model: response.model || null, tokensUsed, fallback: false };
 }
 
 async function loadContextNode(state, dependencies) {
