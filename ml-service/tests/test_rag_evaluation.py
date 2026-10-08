@@ -223,6 +223,36 @@ def test_rag_evaluator_rejects_valid_citation_that_does_not_support_required_fac
     assert result["metrics"]["answerability_correctness"] is True
 
 
+def test_negated_citation_and_source_do_not_support_a_positive_required_fact():
+    content = "The official notice says the deduction is not allowed."
+    metadata = ChunkMetadata(
+        chunk_id="deduction#0", document_id="deduction", chunk_index=0,
+        title="Official notice", source="official-notice",
+    )
+    retrieved = RetrievedChunk(chunk=TextChunk(
+        chunk_id="deduction#0", document_id="deduction", content=content, metadata=metadata,
+    ), score=0.95, rank=1)
+    response = RAGQueryResponse(
+        answer="The deduction is allowed [1].",
+        citations=[Citation(
+            citation_id=1, document_title="Official notice", source="official-notice",
+            chunk_id="deduction#0", excerpt=content, relevance_score=0.95,
+        )],
+        retrieved_chunks=[retrieved],
+        grounded=True,
+    )
+
+    result = RAGEvaluator().evaluate_query_response(
+        query="Is the deduction allowed?",
+        response=response,
+        expected_abstention=False,
+        required_facts=["allowed"],
+    )
+
+    assert result["metrics"]["citation_id_validity"] == 1.0
+    assert result["metrics"]["factual_support"] == 0.0
+
+
 def test_rag_evaluator_scores_supported_required_facts_forbidden_claims_and_answerable_abstention():
     content = "The rule takes effect on 1 April 2026."
     metadata = ChunkMetadata(

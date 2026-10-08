@@ -194,7 +194,8 @@ def test_audit_logger_buffer_rotation():
 
 
 def test_rate_limiter_allows_requests():
-    rl = TokenBucketRateLimiter(max_tokens=10, refill_rate_per_second=100.0)
+    # Isolate burst-capacity exhaustion; refill timing is covered separately below.
+    rl = TokenBucketRateLimiter(max_tokens=10, refill_rate_per_second=0.0)
     for _ in range(10):
         assert rl.allow_request("tenant_a")
     # 11th should fail (no time to refill)

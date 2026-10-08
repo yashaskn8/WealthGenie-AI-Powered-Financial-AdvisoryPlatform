@@ -126,6 +126,14 @@ def _has_unnegated_phrase(answer: str, phrase: str) -> bool:
     return _has_unnegated_pattern(answer, pattern)
 
 
+def _has_uncontradicted_phrase(text: str, phrase: str) -> bool:
+    return (
+        _contains_phrase(text, phrase)
+        and _has_unnegated_phrase(text, phrase)
+        and not _has_postposed_contradiction(text, phrase)
+    )
+
+
 def _has_postposed_contradiction(answer: str, phrase: str) -> bool:
     words = _normalized_phrase(phrase).split()
     if not words:
@@ -410,14 +418,10 @@ class RAGEvaluator:
         referenced_citation_ids = set(answer_citation_references)
         citation_support = []
         for fact in required_facts:
-            answer_support = (
-                _contains_phrase(response.answer, fact)
-                and _has_unnegated_phrase(response.answer, fact)
-                and not _has_postposed_contradiction(response.answer, fact)
-            )
+            answer_support = _has_uncontradicted_phrase(response.answer, fact)
             source_support = any(
-                _contains_phrase(cited_by_id[chunk_id].excerpt, fact)
-                and _contains_phrase(retrieved_by_id[chunk_id].chunk.content, fact)
+                _has_uncontradicted_phrase(cited_by_id[chunk_id].excerpt, fact)
+                and _has_uncontradicted_phrase(retrieved_by_id[chunk_id].chunk.content, fact)
                 for chunk_id in cited_by_id
                 if chunk_id in retrieved_by_id
                 and cited_by_id[chunk_id].citation_id in referenced_citation_ids
