@@ -149,19 +149,32 @@ export function createPhase15CiFixtures() {
   };
 }
 
-async function verifyExactCiBuild(environment) {
-  const source = await readLocalBuildIdentity();
-  if (source.clean !== true || source.sha !== environment.GITHUB_SHA) return false;
+export async function verifyExactCiBuild(environment, {
+  readSourceIdentity = readLocalBuildIdentity,
+  readTreeIdentity = () => execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: REPOSITORY_ROOT, encoding: 'utf8' }).trim(),
+  readManifest = () => readFile(path.join(REPOSITORY_ROOT, 'build', 'provenance.json'), 'utf8'),
+} = {}) {
+  const errors = [];
+  let source;
+  try {
+    source = await readSourceIdentity();
+  } catch {
+    errors.push('SOURCE_IDENTITY_UNAVAILABLE');
+  }
+  if (source?.clean !== true) errors.push('SOURCE_TREE_NOT_CLEAN');
+  if (source?.sha !== environment.GITHUB_SHA) errors.push('CHECKED_OUT_COMMIT_MISMATCH');
+
   let treeSha;
   try {
-    treeSha = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: REPOSITORY_ROOT, encoding: 'utf8' }).trim();
+    treeSha = await readTreeIdentity();
   } catch {
-    return false;
+    errors.push('GIT_TREE_IDENTITY_UNAVAILABLE');
   }
-  if (treeSha !== environment.DEMO_EXPECTED_BUILD_TREE_SHA) return false;
+  if (treeSha && treeSha !== environment.DEMO_EXPECTED_BUILD_TREE_SHA) errors.push('GIT_TREE_MISMATCH');
+
   try {
-    const manifest = JSON.parse(await readFile(path.join(REPOSITORY_ROOT, 'build', 'provenance.json'), 'utf8'));
-    return verifyBuildProvenance(manifest, {
+    const manifest = JSON.parse(await readManifest());
+    const verification = verifyBuildProvenance(manifest, {
       gitCommitSha: environment.GITHUB_SHA,
       gitTreeSha: treeSha,
       provenanceSha256: environment.DEMO_EXPECTED_BUILD_PROVENANCE_SHA256,
@@ -171,10 +184,12 @@ async function verifyExactCiBuild(environment) {
       mlImageIdentity: environment.EXPECTED_ML_IMAGE_ID,
       workflowRunId: environment.GITHUB_RUN_ID,
       workflowRunAttempt: environment.GITHUB_RUN_ATTEMPT,
-    }).valid;
+    });
+    errors.push(...verification.errors);
   } catch {
-    return false;
+    errors.push('PROVENANCE_MANIFEST_UNREADABLE');
   }
+  return { valid: errors.length === 0, errors: [...new Set(errors)] };
 }
 
 async function registerSyntheticAccount(apiBase, identity, fetcher = globalThis.fetch) {
@@ -211,15 +226,19 @@ export async function runPhase15CiPreflight({
     write(`FAIL Phase 15 CI safety configuration — ${configuration.errors.join('; ')}`);
     return { exitCode: 1, doctor: null, preflight: null, registration: null };
   }
-  let sourceVerified;
+  let buildVerification;
   try {
-    sourceVerified = await (dependencies.verifyBuild || verifyExactCiBuild)(environment);
+    buildVerification = await (dependencies.verifyBuild || verifyExactCiBuild)(environment);
   } catch (error) {
     write(`FAIL Phase 15 CI source/provenance verification threw — ${formatSafePhase15CiError(error, environment)}`);
     return { exitCode: 1, doctor: null, preflight: null, registration: null };
   }
+  const sourceVerified = buildVerification === true || buildVerification?.valid === true;
   if (!sourceVerified) {
-    write('FAIL Phase 15 CI source/provenance binding — checked-out SHA, tree, manifest, image identities, or workflow run did not match the build outputs');
+    const errors = Array.isArray(buildVerification?.errors)
+      ? buildVerification.errors.filter(error => /^[A-Z][A-Z0-9_]{0,95}$/.test(error))
+      : [];
+    write(`FAIL Phase 15 CI source/provenance binding — ${errors.length ? [...new Set(errors)].join(', ') : 'BUILD_BINDING_MISMATCH'}`);
     return { exitCode: 1, doctor: null, preflight: null, registration: null };
   }
   write('PASS Phase 15 CI source/provenance binding — exact clean source, manifest, image identities, and workflow run match');

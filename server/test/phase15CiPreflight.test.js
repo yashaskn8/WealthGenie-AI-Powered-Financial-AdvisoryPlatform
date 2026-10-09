@@ -10,6 +10,7 @@ import {
   formatSafePhase15CiError,
   runPhase15CiPreflight,
   validatePhase15CiEnvironment,
+  verifyExactCiBuild,
 } from '../scripts/runPhase15CiPreflight.js';
 
 function validEnvironment() {
@@ -69,6 +70,44 @@ test('CI safety validation rejects the default database and untrusted or split b
   assert.equal(validatePhase15CiEnvironment({ ...environment, DEMO_EXPECTED_MONGODB_DATABASE: 'wealthgenie' }).valid, false);
   assert.equal(validatePhase15CiEnvironment({ ...environment, DEMO_BACKEND_HEALTH_URL: 'https://external.example' }).valid, false);
   assert.equal(validatePhase15CiEnvironment({ ...environment, DEMO_API_BASE_URL: 'https://127.0.0.1:5000/api', DEMO_FRONTEND_URL: 'https://127.0.0.1:5000' }).valid, false);
+});
+
+test('exact CI build verifier identifies dirty source and commit binding mismatches without exposing values', async () => {
+  const environment = validEnvironment();
+  const result = await verifyExactCiBuild(environment, {
+    async readSourceIdentity() { return { clean: false, sha: 'f'.repeat(40) }; },
+    async readTreeIdentity() { return environment.DEMO_EXPECTED_BUILD_TREE_SHA; },
+    async readManifest() { return JSON.stringify({}); },
+  });
+
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.includes('SOURCE_TREE_NOT_CLEAN'));
+  assert.ok(result.errors.includes('CHECKED_OUT_COMMIT_MISMATCH'));
+  assert.equal(JSON.stringify(result).includes('f'.repeat(40)), false);
+});
+
+test('Phase 15 runner logs exact safe build-binding failure codes before any account mutation', async () => {
+  const environment = validEnvironment();
+  const output = [];
+  let registrationCalls = 0;
+  const result = await runPhase15CiPreflight({
+    environment,
+    write: line => output.push(line),
+    dependencies: {
+      async verifyBuild() {
+        return verifyExactCiBuild(environment, {
+          async readSourceIdentity() { return { clean: false, sha: 'f'.repeat(40) }; },
+          async readTreeIdentity() { return environment.DEMO_EXPECTED_BUILD_TREE_SHA; },
+          async readManifest() { return JSON.stringify({}); },
+        });
+      },
+      async registerAccount() { registrationCalls += 1; return { passed: true }; },
+    },
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.match(output.join('\n'), /SOURCE_TREE_NOT_CLEAN, CHECKED_OUT_COMMIT_MISMATCH/);
+  assert.equal(registrationCalls, 0);
 });
 
 test('failed read-only doctor prevents CI registration and authenticated preflight', async () => {
