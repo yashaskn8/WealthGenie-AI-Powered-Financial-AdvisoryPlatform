@@ -214,7 +214,10 @@ test('Kind CD uses a containerd-v4-compatible release and verifies the fixed Met
   const parsed = parse(workflow);
   const steps = parsed.jobs['deploy-and-verify-kind'].steps;
   const build = steps.find(step => step.name === 'Build Docker Container Images');
+  const terraformValidation = steps.find(step => step.name === 'Validate Terraform IaC');
   assert.match(workflow, /version:\s*v0\.32\.0/);
+  assert.match(terraformValidation.run, /terraform init -backend=false -lockfile=readonly/,
+    'CD validation must not rewrite the tracked Terraform dependency selections on its clean-source verification path');
   assert.equal(parsed.jobs['deploy-and-verify-kind'].steps
     .find(step => step.name === 'Create Kind Kubernetes Cluster').with.node_image, 'kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256');
   assert.match(build.run, /printf -- '- Commit: `%s`\\n' "\$GITHUB_SHA"/);

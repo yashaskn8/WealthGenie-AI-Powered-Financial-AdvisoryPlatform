@@ -49,7 +49,7 @@ jobs:
         run: |
           echo "### Terraform IaC Validation" >> $GITHUB_STEP_SUMMARY
           cd terraform
-          terraform init -backend=false
+          terraform init -backend=false -lockfile=readonly
           terraform validate
           echo "Terraform configuration is syntactically valid and modularly sound." >> $GITHUB_STEP_SUMMARY
 
