@@ -255,6 +255,12 @@ test('Kind CD runs a provenance-bound, isolated Phase 15 pre-mutation doctor and
   assert.match(liveStep, /set -euo pipefail/);
   assert.doesNotMatch(liveStep, /continue-on-error:/);
   assert.match(tlsStep, /openssl verify -CAfile/);
+  assert.match(tlsStep, /sudo apt-get install --no-install-recommends -y libnss3-tools/);
+  assert.match(tlsStep, /certutil -N --empty-password -d "sql:\$NSS_DB"/);
+  assert.match(tlsStep, /certutil -A -d "sql:\$NSS_DB" -n wealthgenie-phase15-ci -t 'C,,' -i "\$CERT_DIR\/ca\.crt"/);
+  assert.match(tlsStep, /certutil -L -d "sql:\$NSS_DB" -n wealthgenie-phase15-ci/);
+  assert.match(tlsStep, /certutil -V -d "sql:\$NSS_DB" -n wealthgenie-phase15-ci -u V/);
+  assert.doesNotMatch(`${tlsStep}\n${liveStep}`, /--ignore-certificate-errors|ignoreHTTPSErrors/);
   assert.match(tlsStep, /sudo update-ca-certificates/);
   assert.match(tlsStep, /origin=https:\/\/127\.0\.0\.1:8443/);
   assert.match(bindStep, /CORS_ORIGINS=\$DEMO_BROWSER_ORIGIN/);

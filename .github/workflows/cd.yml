@@ -372,6 +372,16 @@ jobs:
             -CA "$CERT_DIR/ca.crt" -CAkey "$CERT_DIR/ca.key" -CAcreateserial \
             -out "$CERT_DIR/server.crt" -extfile "$CERT_DIR/server.ext"
           openssl verify -CAfile "$CERT_DIR/ca.crt" "$CERT_DIR/server.crt"
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libnss3-tools
+          NSS_DB="$HOME/.pki/nssdb"
+          mkdir -p "$NSS_DB"
+          if ! certutil -L -d "sql:$NSS_DB" > /dev/null 2>&1; then
+            certutil -N --empty-password -d "sql:$NSS_DB"
+          fi
+          certutil -A -d "sql:$NSS_DB" -n wealthgenie-phase15-ci -t 'C,,' -i "$CERT_DIR/ca.crt"
+          certutil -L -d "sql:$NSS_DB" -n wealthgenie-phase15-ci
+          certutil -V -d "sql:$NSS_DB" -n wealthgenie-phase15-ci -u V
           sudo install -m 0644 "$CERT_DIR/ca.crt" /usr/local/share/ca-certificates/wealthgenie-phase15-ci.crt
           sudo update-ca-certificates
           {
