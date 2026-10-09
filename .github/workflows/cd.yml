@@ -168,7 +168,7 @@ jobs:
             --from-literal=ML_SERVICE_API_KEY="$EPHEMERAL_ML_KEY" \
             --from-literal=ML_OPERATOR_KEY="$EPHEMERAL_ML_OPERATOR_KEY" \
             --from-literal=METRICS_TOKEN="$EPHEMERAL_METRICS_TOKEN" \
-            --from-literal=MONGODB_URI="mongodb://wealthgenie-mongodb.wealthgenie.svc.cluster.local:27017/wealthgenie?replicaSet=rs0" \
+            --from-literal=MONGODB_URI="mongodb://wealthgenie-mongodb.wealthgenie.svc.cluster.local:27017/wealthgenie-ci-demo?replicaSet=rs0" \
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Wait for Database and Redis to be Ready
@@ -178,6 +178,67 @@ jobs:
 
           echo "Waiting for Redis Deployment to be Ready..."
           kubectl rollout status deployment/wealthgenie-redis -n wealthgenie --timeout=240s
+
+      - name: Provision isolated Phase 15 demo database sentinel
+        id: phase15-database
+        run: |
+          set -euo pipefail
+          DEMO_DATABASE='wealthgenie-ci-demo'
+          DEMO_MONGO_HOST='wealthgenie-mongodb.wealthgenie.svc.cluster.local'
+          DEMO_MONGO_PORT='27017'
+          DEMO_ENVIRONMENT_ID=$(node -e "process.stdout.write(require('node:crypto').randomUUID())")
+          if ! [[ "$DEMO_ENVIRONMENT_ID" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$ ]]; then
+            echo "ERROR: generated environment identity is not UUIDv4"
+            exit 1
+          fi
+          MONGO_POD=$(kubectl get pods -n wealthgenie -l app=wealthgenie-mongodb -o jsonpath='{.items[0].metadata.name}')
+          if [[ -z "$MONGO_POD" ]]; then
+            echo "ERROR: isolated MongoDB pod was not found"
+            exit 1
+          fi
+
+          kubectl exec "$MONGO_POD" -n wealthgenie -- mongosh --quiet \
+            "mongodb://$DEMO_MONGO_HOST:$DEMO_MONGO_PORT/admin?replicaSet=rs0" \
+            --eval "
+              const adminDb = db.getSiblingDB('admin');
+              const hello = adminDb.runCommand({hello: 1});
+              if (hello.setName !== 'rs0' || hello.isWritablePrimary !== true || hello.me !== '$DEMO_MONGO_HOST:$DEMO_MONGO_PORT') {
+                throw new Error('Mongo replica-set identity or primary is not the expected in-cluster member');
+              }
+              const existing = adminDb.adminCommand({listDatabases: 1, nameOnly: true}).databases || [];
+              if (existing.some(item => item.name === '$DEMO_DATABASE')) {
+                throw new Error('dedicated CI demo database already exists; refusing to reuse prior data');
+              }
+              const demoDb = db.getSiblingDB('$DEMO_DATABASE');
+              if (demoDb.getCollectionNames().length !== 0) {
+                throw new Error('dedicated CI demo database is not empty; refusing to reuse prior data');
+              }
+              demoDb.demo_environment_sentinels.insertOne({
+                _id: 'wealthgenie-phase15-demo',
+                environmentId: '$DEMO_ENVIRONMENT_ID',
+                purpose: 'WEALTHGENIE_PHASE15_DEMO',
+                schemaVersion: 1
+              });
+              const sentinel = demoDb.demo_environment_sentinels.findOne({_id: 'wealthgenie-phase15-demo'});
+              if (!sentinel || Object.keys(sentinel).sort().join(',') !== '_id,environmentId,purpose,schemaVersion'
+                  || sentinel.environmentId !== '$DEMO_ENVIRONMENT_ID'
+                  || sentinel.purpose !== 'WEALTHGENIE_PHASE15_DEMO' || sentinel.schemaVersion !== 1) {
+                throw new Error('inserted sentinel does not match the application verification schema');
+              }
+              print('Verified fresh demo database, rs0 primary, exact Mongo member, and Phase 15 sentinel.');
+            "
+          {
+            echo "database=$DEMO_DATABASE"
+            echo "mongo_host=$DEMO_MONGO_HOST"
+            echo "mongo_port=$DEMO_MONGO_PORT"
+            echo "environment_id=$DEMO_ENVIRONMENT_ID"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo '### Isolated Phase 15 demo database'
+            echo '- Database: `wealthgenie-ci-demo` (fresh and empty before sentinel creation)'
+            echo '- MongoDB: in-cluster `rs0` primary; exact member and port verified'
+            echo '- Environment sentinel: schema validated before application migrations or user registration'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run the one-shot Phase 2 index migration
         run: |
@@ -278,6 +339,63 @@ jobs:
             | sed -E "s/(wealthgenie-(server|frontend|ml-service)):latest/\1:${GITHUB_SHA}/g" \
             > build/k8s-pinned.yaml
           kubectl apply -f build/k8s-pinned.yaml
+
+      - name: Create and trust ephemeral Phase 15 loopback TLS identity
+        id: phase15-tls
+        run: |
+          set -euo pipefail
+          umask 077
+          CERT_DIR="$RUNNER_TEMP/wealthgenie-phase15-tls"
+          mkdir -p "$CERT_DIR"
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$CERT_DIR/ca.key"
+          openssl req -x509 -new -sha256 -days 1 -key "$CERT_DIR/ca.key" \
+            -out "$CERT_DIR/ca.crt" -subj '/CN=WealthGenie Phase 15 CI Loopback CA' \
+            -addext 'basicConstraints=critical,CA:TRUE' \
+            -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+            -addext 'subjectKeyIdentifier=hash'
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$CERT_DIR/server.key"
+          openssl req -new -sha256 -key "$CERT_DIR/server.key" -out "$CERT_DIR/server.csr" \
+            -subj '/CN=127.0.0.1'
+          cat > "$CERT_DIR/server.ext" <<'EOF'
+          basicConstraints=critical,CA:FALSE
+          keyUsage=critical,digitalSignature,keyEncipherment
+          extendedKeyUsage=serverAuth
+          subjectAltName=IP:127.0.0.1
+          subjectKeyIdentifier=hash
+          authorityKeyIdentifier=keyid,issuer
+          EOF
+          openssl x509 -req -sha256 -days 1 -in "$CERT_DIR/server.csr" \
+            -CA "$CERT_DIR/ca.crt" -CAkey "$CERT_DIR/ca.key" -CAcreateserial \
+            -out "$CERT_DIR/server.crt" -extfile "$CERT_DIR/server.ext"
+          openssl verify -CAfile "$CERT_DIR/ca.crt" "$CERT_DIR/server.crt"
+          sudo install -m 0644 "$CERT_DIR/ca.crt" /usr/local/share/ca-certificates/wealthgenie-phase15-ci.crt
+          sudo update-ca-certificates
+          {
+            echo "cert_path=$CERT_DIR/server.crt"
+            echo "key_path=$CERT_DIR/server.key"
+            echo "ca_path=$CERT_DIR/ca.crt"
+            echo 'origin=https://127.0.0.1:8443'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Bind server to the verified Phase 15 demo database identity
+        env:
+          DEMO_DATABASE: ${{ steps.phase15-database.outputs.database }}
+          DEMO_MONGO_HOST: ${{ steps.phase15-database.outputs.mongo_host }}
+          DEMO_MONGO_PORT: ${{ steps.phase15-database.outputs.mongo_port }}
+          DEMO_ENVIRONMENT_ID: ${{ steps.phase15-database.outputs.environment_id }}
+          DEMO_BROWSER_ORIGIN: ${{ steps.phase15-tls.outputs.origin }}
+        run: |
+          set -euo pipefail
+          test "$DEMO_DATABASE" = 'wealthgenie-ci-demo'
+          test "$DEMO_MONGO_HOST" = 'wealthgenie-mongodb.wealthgenie.svc.cluster.local'
+          test "$DEMO_MONGO_PORT" = '27017'
+          test "$DEMO_BROWSER_ORIGIN" = 'https://127.0.0.1:8443'
+          kubectl set env deployment/wealthgenie-server -n wealthgenie \
+            "DEMO_EXPECTED_MONGODB_DATABASE=$DEMO_DATABASE" \
+            "DEMO_EXPECTED_MONGODB_HOST=$DEMO_MONGO_HOST" \
+            "DEMO_EXPECTED_MONGODB_PORT=$DEMO_MONGO_PORT" \
+            "DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID=$DEMO_ENVIRONMENT_ID" \
+            "CORS_ORIGINS=$DEMO_BROWSER_ORIGIN"
 
       - name: Wait for Microservices to be Ready
         run: |
@@ -457,7 +575,7 @@ jobs:
           echo "- **Liveness Probe (/health/live)**: \`$LIVE_RES\`" >> $GITHUB_STEP_SUMMARY
 
           for attempt in $(seq 1 30); do
-            if curl --fail --silent --connect-timeout 5 --max-time 10 http://127.0.0.1:8080/build-provenance/provenance.json > frontend-provenance.json; then
+            if curl --fail --silent --connect-timeout 5 --max-time 10 http://127.0.0.1:8080/build-provenance/provenance.json > build/frontend-provenance.json; then
               break
             fi
             if [ "$attempt" -eq 30 ]; then
@@ -476,7 +594,7 @@ jobs:
             --arg frontend "$EXPECTED_FRONTEND_IMAGE_ID" \
             --arg ml "$EXPECTED_ML_IMAGE_ID" \
             '.gitCommitSha == $commit and .gitTreeSha == $tree and .provenanceSha256 == $provenance and .frontendArtifactSetSha256 == $artifacts and .serverImageIdentity == $server and .frontendImageIdentity == $frontend and .mlImageIdentity == $ml' \
-            frontend-provenance.json > /dev/null; then
+            build/frontend-provenance.json > /dev/null; then
             echo "ERROR: served frontend and backend do not share the expected provenance manifest"
             exit 1
           fi
@@ -510,6 +628,62 @@ jobs:
           fi
           echo "Tax Compare Response: $TAX_RES"
           echo "- **Business Tax Endpoint (/api/tax/compare)**: \`$TAX_RES\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Install frontend verification dependencies
+        run: npm ci --prefix reactapp
+
+      - name: Install Playwright Chromium for the authenticated Phase 15 journey
+        run: reactapp/node_modules/.bin/playwright install --with-deps chromium
+
+      - name: Execute complete Phase 15 live preflight against the attested Kind deployment
+        env:
+          NODE_ENV: production
+          MARKET_DATA_PRIMARY_PROVIDER: NSE
+          DEMO_LIVE_PREFLIGHT: '1'
+          DEMO_API_BASE_URL: https://127.0.0.1:8443/api
+          DEMO_BACKEND_HEALTH_URL: http://127.0.0.1:5000
+          DEMO_FRONTEND_URL: https://127.0.0.1:8443
+          NODE_EXTRA_CA_CERTS: ${{ steps.phase15-tls.outputs.ca_path }}
+          PHASE15_TLS_CERT_PATH: ${{ steps.phase15-tls.outputs.cert_path }}
+          PHASE15_TLS_KEY_PATH: ${{ steps.phase15-tls.outputs.key_path }}
+          PHASE15_TLS_UPSTREAM_URL: http://127.0.0.1:8080
+          PHASE15_TLS_LISTEN_HOST: 127.0.0.1
+          PHASE15_TLS_LISTEN_PORT: '8443'
+          DEMO_EXPECTED_BUILD_SHA: ${{ github.sha }}
+          DEMO_EXPECTED_BUILD_TREE_SHA: ${{ steps.build.outputs.git_tree_sha }}
+          DEMO_EXPECTED_BUILD_PROVENANCE_SHA256: ${{ steps.build.outputs.provenance_sha256 }}
+          DEMO_EXPECTED_FRONTEND_ARTIFACT_SET_SHA256: ${{ steps.build.outputs.frontend_artifact_set_sha256 }}
+          DEMO_EXPECTED_MONGODB_DATABASE: ${{ steps.phase15-database.outputs.database }}
+          DEMO_EXPECTED_MONGODB_HOST: ${{ steps.phase15-database.outputs.mongo_host }}
+          DEMO_EXPECTED_MONGODB_PORT: ${{ steps.phase15-database.outputs.mongo_port }}
+          DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID: ${{ steps.phase15-database.outputs.environment_id }}
+          EXPECTED_SERVER_IMAGE_ID: ${{ steps.build.outputs.server_image_id }}
+          EXPECTED_FRONTEND_IMAGE_ID: ${{ steps.build.outputs.frontend_image_id }}
+          EXPECTED_ML_IMAGE_ID: ${{ steps.build.outputs.ml_image_id }}
+        run: |
+          set -euo pipefail
+          kubectl port-forward --address=127.0.0.1 -n wealthgenie svc/wealthgenie-server 5000:5000 > phase15-server-port-forward.log 2>&1 &
+          SERVER_PORT_FORWARD_PID=$!
+          kubectl port-forward --address=127.0.0.1 -n wealthgenie svc/wealthgenie-frontend 8080:80 > phase15-frontend-port-forward.log 2>&1 &
+          FRONTEND_PORT_FORWARD_PID=$!
+          node server/scripts/phase15LoopbackTlsProxy.js > phase15-tls-proxy.log 2>&1 &
+          TLS_PROXY_PID=$!
+          trap 'kill "$SERVER_PORT_FORWARD_PID" "$FRONTEND_PORT_FORWARD_PID" "$TLS_PROXY_PID" 2>/dev/null || true' EXIT
+
+          wait_for_loopback() {
+            local url="$1"
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent --connect-timeout 2 --max-time 5 "$url" > /dev/null; then
+                return 0
+              fi
+              sleep 2
+            done
+            echo "ERROR: scoped CI port-forward did not become ready: $url"
+            return 1
+          }
+          wait_for_loopback http://127.0.0.1:5000/health/live
+          wait_for_loopback https://127.0.0.1:8443/login
+          node server/scripts/runPhase15CiPreflight.js
 
       - name: Verify Horizontal Pod Autoscaler & Load Response (Step 3)
         run: |

@@ -1784,25 +1784,31 @@ export async function runDemoPreflight({
 
   const configuredApiBase = (environment.DEMO_API_BASE_URL || 'http://127.0.0.1:5000/api').replace(/\/$/, '');
   let apiBase = configuredApiBase;
-  let backendOrigin;
+  let backendHealthOrigin;
   try {
     const apiUrl = new URL(apiBase);
     if (!isSafeDemoUrl(apiBase, { api: true, remoteOrigins: environment.DEMO_TRUSTED_REMOTE_ORIGINS })) {
       throw new TypeError('API URL must end in /api and contain no credentials, query, or fragment.');
     }
     apiBase = `${apiUrl.origin}${apiUrl.pathname.replace(/\/+$/, '')}`;
-    backendOrigin = apiUrl.origin;
+    const configuredHealthUrl = environment.DEMO_BACKEND_HEALTH_URL || `${apiUrl.origin}/`;
+    const healthUrl = new URL(configuredHealthUrl);
+    if (!isSafeDemoUrl(configuredHealthUrl, { remoteOrigins: environment.DEMO_TRUSTED_REMOTE_ORIGINS })
+        || healthUrl.pathname !== '/' || healthUrl.origin !== configuredHealthUrl.replace(/\/$/, '')) {
+      throw new TypeError('Backend health URL must be a safe origin without a path, query, or fragment.');
+    }
+    backendHealthOrigin = healthUrl.origin;
   } catch {
-    reporter.add('Backend URL configuration', false, 'DEMO_API_BASE_URL must be a valid safe HTTP(S) URL ending in /api');
+    reporter.add('Backend URL configuration', false, 'DEMO_API_BASE_URL must be a safe /api URL and optional DEMO_BACKEND_HEALTH_URL must be a safe origin');
     return finish();
   }
-  reporter.add('Backend URL configuration', true, 'safe local URL or explicitly allowlisted HTTPS origin verified');
+  reporter.add('Backend URL configuration', true, 'safe API URL and backend health origin verified');
   const frontendUrl = environment.DEMO_FRONTEND_URL;
   const completionPayload = await loadJson(environment.DEMO_PROFILE_COMPLETION_FILE, 'Profile completion payload', reporter, financialProfileCompletionSchema);
   const taxContext = await loadJson(environment.DEMO_TAX_CONTEXT_FILE, 'Tax input payload', reporter, taxCalculationContextSchema);
 
-  const health = await readHttp(`${backendOrigin}/health/live`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null);
-  const readiness = await readHttp(`${backendOrigin}/health/ready`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null);
+  const health = await readHttp(`${backendHealthOrigin}/health/live`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null);
+  const readiness = await readHttp(`${backendHealthOrigin}/health/ready`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null);
   // Always signal that this caller requires exact DB identity. An empty/invalid
   // value is rejected by health verification before its transaction probe.
   const expectedDatabaseHeader = {
@@ -1819,7 +1825,7 @@ export async function runDemoPreflight({
   expectedDatabaseHeader['X-Demo-Expected-Mongodb-Environment-Id'] = isSafeDemoEnvironmentId(environment.DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID)
     ? environment.DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID
     : '';
-  const runtimeVerification = await readHttp(`${backendOrigin}/health/verification`, {
+  const runtimeVerification = await readHttp(`${backendHealthOrigin}/health/verification`, {
     timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS,
     headers: expectedDatabaseHeader,
   }).catch(() => null);
@@ -1875,7 +1881,7 @@ export async function runDemoPreflight({
     return finish();
   }
 
-  const deep = await readHttp(`${backendOrigin}/health/deep`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null);
+  const deep = await readHttp(`${backendHealthOrigin}/health/deep`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null);
   const services = deep?.body?.services || {};
   const redisRequired = isRedisRequired(environment);
   const backendProvider = runtimeBody?.marketProvider;

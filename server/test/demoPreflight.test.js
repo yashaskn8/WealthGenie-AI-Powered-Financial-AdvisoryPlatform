@@ -1477,6 +1477,43 @@ test('live orchestration rejects a backend process whose explicit SHA differs fr
   assert.equal(result.exitCode, 1);
 });
 
+test('preflight can use the frontend same-origin API proxy and a separate loopback backend health origin', async () => {
+  const fixture = injectedOrchestrationDependencies({ userPathPass: true, qualifiedProductTax: true });
+  fixture.environment.DEMO_API_BASE_URL = 'http://127.0.0.1:8080/api';
+  fixture.environment.DEMO_FRONTEND_URL = 'http://127.0.0.1:8080';
+  fixture.environment.DEMO_BACKEND_HEALTH_URL = 'http://127.0.0.1:5000';
+  const requestedUrls = [];
+  const originalReadHttp = fixture.dependencies.readHttp;
+  fixture.dependencies.readHttp = async (url, options) => {
+    requestedUrls.push(new URL(url));
+    return originalReadHttp(url, options);
+  };
+
+  const result = await runDemoPreflight({ ...fixture, write: () => {} });
+  assert.equal(result.checks.find(check => check.name === 'Backend URL configuration').state, 'PASS');
+  assert.equal(requestedUrls.filter(url => url.pathname.startsWith('/health/')).every(url => url.origin === 'http://127.0.0.1:5000'), true);
+  assert.equal(requestedUrls.find(url => url.pathname === '/api/regime/current')?.origin, 'http://127.0.0.1:8080');
+  assert.equal(requestedUrls.find(url => url.pathname === '/api/tax/policies')?.origin, 'http://127.0.0.1:8080');
+  assert.equal(result.checks.find(check => check.name === 'Critical browser path').state, 'PASS');
+  assert.equal(result.exitCode, 0);
+});
+
+test('preflight rejects an unsafe separate backend health origin before provider or browser work', async () => {
+  const fixture = injectedOrchestrationDependencies({ userPathPass: true });
+  fixture.environment.DEMO_BACKEND_HEALTH_URL = 'http://127.0.0.1:5000/health';
+  let readCount = 0;
+  let browserCalls = 0;
+  const readHttp = fixture.dependencies.readHttp;
+  fixture.dependencies.readHttp = async (...args) => { readCount += 1; return readHttp(...args); };
+  fixture.dependencies.verifyBrowser = async () => { browserCalls += 1; };
+
+  const result = await runDemoPreflight({ ...fixture, write: () => {} });
+  assert.equal(result.checks.find(check => check.name === 'Backend URL configuration').state, 'FAIL');
+  assert.equal(readCount, 0);
+  assert.equal(browserCalls, 0);
+  assert.equal(result.exitCode, 1);
+});
+
 test('weekend quote details identify the prior completed session without claiming a same-day close', async () => {
   const now = new Date('2026-10-03T10:30:00.000Z');
   const latestCompletedTradingDate = previousNseTradingDate('2026-10-03', ['2026-10-02']);

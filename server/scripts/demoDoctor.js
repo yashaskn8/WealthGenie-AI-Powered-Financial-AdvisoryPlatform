@@ -62,8 +62,14 @@ export async function runDemoDoctor({ environment = process.env, write = line =>
 
   const api = safeUrl(environment.DEMO_API_BASE_URL, { api: true, remoteOrigins: environment.DEMO_TRUSTED_REMOTE_ORIGINS });
   const frontend = safeUrl(environment.DEMO_FRONTEND_URL, { remoteOrigins: environment.DEMO_TRUSTED_REMOTE_ORIGINS });
+  const backendHealth = api && safeUrl(environment.DEMO_BACKEND_HEALTH_URL || `${api.origin}/`, {
+    remoteOrigins: environment.DEMO_TRUSTED_REMOTE_ORIGINS,
+  });
   add(checks, write, 'API URL syntax', Boolean(api), api ? 'valid local URL or explicitly allowlisted HTTPS /api origin' : 'configure a safe local URL or explicitly allowlisted HTTPS API origin ending in /api');
   add(checks, write, 'Frontend URL syntax', Boolean(frontend), frontend ? 'valid local URL or explicitly allowlisted HTTPS origin' : 'configure a safe local or explicitly allowlisted frontend URL');
+  add(checks, write, 'Backend health URL syntax', Boolean(backendHealth && backendHealth.pathname === '/'), backendHealth?.pathname === '/'
+    ? 'safe backend health origin verified'
+    : 'configure a safe backend origin without a path, query, or fragment');
   const expectedSha = matchesBuildSha(environment.DEMO_EXPECTED_BUILD_SHA, environment.DEMO_EXPECTED_BUILD_SHA);
   add(checks, write, 'Expected build SHA syntax', expectedSha, expectedSha ? 'valid full 40-character SHA' : 'configure a full 40-character hexadecimal SHA');
   const expectedDatabaseValid = isSafeDemoDatabaseName(environment.DEMO_EXPECTED_MONGODB_DATABASE);
@@ -93,11 +99,11 @@ export async function runDemoDoctor({ environment = process.env, write = line =>
   add(checks, write, 'Provider token presence', providerValid && tokenPresent,
     !providerValid ? 'provider selection is invalid' : provider === 'NSE' ? 'NSE does not require a provider token' : tokenPresent ? 'Upstox token PRESENT (value hidden)' : 'selected Upstox provider requires a server-side token');
 
-  if (api) {
+  if (api && backendHealth?.pathname === '/') {
     const [live, readiness, verification, deep] = await Promise.all([
-      readHttp(`${api.origin}/health/live`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null),
-      readHttp(`${api.origin}/health/ready`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null),
-      readHttp(`${api.origin}/health/verification`, {
+      readHttp(`${backendHealth.origin}/health/live`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null),
+      readHttp(`${backendHealth.origin}/health/ready`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null),
+      readHttp(`${backendHealth.origin}/health/verification`, {
         timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS,
         headers: {
           'X-Demo-Expected-Mongodb-Database': expectedDatabaseValid
@@ -114,7 +120,7 @@ export async function runDemoDoctor({ environment = process.env, write = line =>
             : '',
         },
       }).catch(() => null),
-      readHttp(`${api.origin}/health/deep`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null),
+      readHttp(`${backendHealth.origin}/health/deep`, { timeoutMs: BACKEND_HTTP_HARD_TIMEOUT_MS }).catch(() => null),
     ]);
     add(checks, write, 'Backend liveness and build identity', Boolean(live?.response.ok && live.body?.status === 'ALIVE'
       && matchesBuildSha(environment.DEMO_EXPECTED_BUILD_SHA, live.body?.buildSha)),

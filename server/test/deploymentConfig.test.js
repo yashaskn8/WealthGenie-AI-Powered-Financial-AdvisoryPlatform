@@ -320,7 +320,11 @@ test('Kind CD renders the external production overlay with Kustomize before vali
   assert.match(render.run, /kubectl kustomize deploy\/production > build\/production-template\.yaml/);
   assert.match(render.run, /node server\/scripts\/validateProductionImageManifest\.js --template < build\/production-template\.yaml/);
   assert.ok(fs.existsSync(path.join(repositoryRoot, 'k8s/kustomization.yaml')));
-  assert.equal(fs.existsSync(path.join(repositoryRoot, 'k8s/overlays/production')), false);
+  const productionOverlayPaths = spawnSync('git', [
+    'ls-files', '--cached', '--others', '--', 'k8s/overlays/production',
+  ], { cwd: repositoryRoot, encoding: 'utf8' });
+  assert.equal(productionOverlayPaths.status, 0, productionOverlayPaths.stderr);
+  assert.equal(productionOverlayPaths.stdout.trim(), '', 'production overlay source files must remain outside the deployable k8s base');
 });
 
 test('deployment validator rejects a production overlay that replaces a digest marker with a mutable tag', () => {

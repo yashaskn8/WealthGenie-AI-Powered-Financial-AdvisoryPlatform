@@ -112,6 +112,33 @@ test('read-only doctor validates runtime prerequisites without invoking mutation
     await rm(fixture.directory, { recursive: true, force: true });
   }
 });
+
+test('read-only doctor separates backend health from the frontend same-origin API proxy', async () => {
+  const fixture = await makeFixtureEnvironment();
+  fixture.environment.DEMO_API_BASE_URL = 'http://127.0.0.1:8080/api';
+  fixture.environment.DEMO_FRONTEND_URL = 'http://127.0.0.1:8080';
+  fixture.environment.DEMO_BACKEND_HEALTH_URL = 'http://127.0.0.1:5000';
+  const requested = [];
+  try {
+    const result = await runDemoDoctor({
+      environment: fixture.environment,
+      write: () => {},
+      dependencies: {
+        async readHttp(url, options) {
+          requested.push(new URL(url));
+          return verifiedResponses()(url, options);
+        },
+        async launchBrowser() { return { async close() {} }; },
+      },
+    });
+    assert.equal(result.exitCode, 0);
+    assert.equal(requested.filter(url => url.pathname.startsWith('/health/')).every(url => url.origin === 'http://127.0.0.1:5000'), true);
+    assert.equal(requested.find(url => url.pathname === '/login')?.origin, 'http://127.0.0.1:8080');
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
 test('read-only doctor fails closed when the connected database is not the configured isolated DB', async () => {
   const fixture = await makeFixtureEnvironment();
   const output = [];

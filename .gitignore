@@ -90,6 +90,7 @@ ml-service/model/saved_models/*
 ml-service/data/investment_profiles.csv
 
 # Development artifacts
+/build/
 scratch/
 brain/
 

@@ -201,9 +201,65 @@ test('Kind smoke verification owns and cleans up its server port-forward', () =>
   assert.match(smokeStep, /for attempt in \$\(seq 1 "\$attempts"\)/);
   assert.match(smokeStep, /curl[^\n]*--connect-timeout 5[^\n]*--max-time 10/);
   assert.match(smokeStep, /jq -e --arg expected "\$GITHUB_SHA" '\.buildSha == \$expected'/);
+  assert.match(smokeStep, /http:\/\/127\.0\.0\.1:8080\/build-provenance\/provenance\.json > build\/frontend-provenance\.json/);
+  assert.match(smokeStep, /build\/frontend-provenance\.json > \/dev\/null/);
   assert.match(smokeStep, /curl[^\n]*--max-time 10[^\n]*"\$TAX_URL"/);
   assert.match(smokeStep, /income=1200000&incomeSource=salary&fiscalYear=FY2026-27&age=30/);
   assert.doesNotMatch(cdWorkflow, /- name: Port-Forward Express Server for Live Request Verification/);
+});
+
+test('Kind CD runs a provenance-bound, isolated Phase 15 pre-mutation doctor and complete live preflight', () => {
+  const rootDir = fs.existsSync(path.join(process.cwd(), 'docker-compose.yml'))
+    ? process.cwd()
+    : path.resolve(process.cwd(), '..');
+  const cdWorkflow = fs.readFileSync(path.join(rootDir, '.github', 'workflows', 'cd.yml'), 'utf8');
+  const rootGitignore = fs.readFileSync(path.join(rootDir, '.gitignore'), 'utf8');
+  const databaseStep = cdWorkflow.match(
+    /- name: Provision isolated Phase 15 demo database sentinel[\s\S]*?(?=\n\s{6}- name:|$)/,
+  )?.[0];
+  const liveStep = cdWorkflow.match(
+    /- name: Execute complete Phase 15 live preflight against the attested Kind deployment[\s\S]*?(?=\n\s{6}- name:|$)/,
+  )?.[0];
+  const tlsStep = cdWorkflow.match(
+    /- name: Create and trust ephemeral Phase 15 loopback TLS identity[\s\S]*?(?=\n\s{6}- name:|$)/,
+  )?.[0];
+  const bindStep = cdWorkflow.match(
+    /- name: Bind server to the verified Phase 15 demo database identity[\s\S]*?(?=\n\s{6}- name:|$)/,
+  )?.[0];
+
+  assert.ok(databaseStep, 'isolated Phase 15 demo database sentinel provisioning is missing');
+  assert.ok(liveStep, 'complete Phase 15 live preflight step is missing');
+  assert.ok(tlsStep, 'trusted ephemeral TLS setup is missing');
+  assert.ok(bindStep, 'verified database and browser-origin binding is missing');
+  assert.match(cdWorkflow, /MONGODB_URI="mongodb:\/\/wealthgenie-mongodb[^"\s]+\/wealthgenie-ci-demo\?replicaSet=rs0"/);
+  assert.match(databaseStep, /hello\.setName !== 'rs0'/);
+  assert.match(databaseStep, /hello\.isWritablePrimary !== true/);
+  assert.match(databaseStep, /hello\.me !== '\$DEMO_MONGO_HOST:\$DEMO_MONGO_PORT'/);
+  assert.match(databaseStep, /listDatabases: 1/);
+  assert.match(databaseStep, /refusing to reuse prior data/);
+  assert.match(databaseStep, /_id: 'wealthgenie-phase15-demo'/);
+  assert.match(cdWorkflow, /DEMO_EXPECTED_MONGODB_ENVIRONMENT_ID=\$DEMO_ENVIRONMENT_ID/);
+  assert.match(liveStep, /DEMO_EXPECTED_BUILD_SHA: \$\{\{ github\.sha \}\}/);
+  assert.match(liveStep, /DEMO_EXPECTED_BUILD_TREE_SHA: \$\{\{ steps\.build\.outputs\.git_tree_sha \}\}/);
+  assert.match(liveStep, /DEMO_EXPECTED_BUILD_PROVENANCE_SHA256: \$\{\{ steps\.build\.outputs\.provenance_sha256 \}\}/);
+  assert.match(liveStep, /DEMO_EXPECTED_FRONTEND_ARTIFACT_SET_SHA256: \$\{\{ steps\.build\.outputs\.frontend_artifact_set_sha256 \}\}/);
+  assert.match(liveStep, /EXPECTED_SERVER_IMAGE_ID: \$\{\{ steps\.build\.outputs\.server_image_id \}\}/);
+  assert.match(liveStep, /EXPECTED_FRONTEND_IMAGE_ID: \$\{\{ steps\.build\.outputs\.frontend_image_id \}\}/);
+  assert.match(liveStep, /EXPECTED_ML_IMAGE_ID: \$\{\{ steps\.build\.outputs\.ml_image_id \}\}/);
+  assert.match(liveStep, /node server\/scripts\/runPhase15CiPreflight\.js/);
+  assert.match(liveStep, /DEMO_API_BASE_URL: https:\/\/127\.0\.0\.1:8443\/api/);
+  assert.match(liveStep, /DEMO_FRONTEND_URL: https:\/\/127\.0\.0\.1:8443/);
+  assert.match(liveStep, /NODE_EXTRA_CA_CERTS: \$\{\{ steps\.phase15-tls\.outputs\.ca_path \}\}/);
+  assert.match(liveStep, /node server\/scripts\/phase15LoopbackTlsProxy\.js/);
+  assert.match(liveStep, /trap 'kill "\$SERVER_PORT_FORWARD_PID" "\$FRONTEND_PORT_FORWARD_PID"/);
+  assert.match(liveStep, /set -euo pipefail/);
+  assert.doesNotMatch(liveStep, /continue-on-error:/);
+  assert.match(tlsStep, /openssl verify -CAfile/);
+  assert.match(tlsStep, /sudo update-ca-certificates/);
+  assert.match(tlsStep, /origin=https:\/\/127\.0\.0\.1:8443/);
+  assert.match(bindStep, /CORS_ORIGINS=\$DEMO_BROWSER_ORIGIN/);
+  assert.doesNotMatch(liveStep, /curl[^\n]*\s-k(?:\s|$)/);
+  assert.match(rootGitignore, /^\/build\/$/m, 'CI-generated provenance and rendered manifests must not dirty the checked-out source tree');
 });
 
 test('Kind HPA verification owns a separate port-forward and uses a valid tax contract', () => {
