@@ -25,6 +25,10 @@ export const MARKET_CONTEXT_REFRESH_LOCK_TTL_SECONDS = 5 * 60;
 
 const MARKET_REFRESH_LOCK_PREFIX = 'wealthgenie:market-refresh:';
 
+export function marketDataRefreshJobsEnabled(value = process.env.MARKET_DATA_REFRESH_ENABLED) {
+  return value !== 'false';
+}
+
 /**
  * Run one scheduled refresh under a Redis lease. Redis is required by the
  * production server, so losing it after startup must skip the external
@@ -67,6 +71,10 @@ export async function withMarketRefreshLease(
  */
 export function startMarketDataRefreshJobs() {
   stopMarketDataRefreshJobs();
+  if (!marketDataRefreshJobsEnabled()) {
+    logger.info('Market data refresh jobs disabled by configuration');
+    return () => undefined;
+  }
   const cancellations = [];
   // Daily AMFI NAV refresh at 23:30 IST (18:00 UTC)
   // AMFI publishes updated NAVs around 23:00 IST

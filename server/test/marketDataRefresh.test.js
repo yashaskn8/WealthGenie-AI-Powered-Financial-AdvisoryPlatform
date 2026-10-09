@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   getMarketContextRefreshDelay,
+  marketDataRefreshJobsEnabled,
+  startMarketDataRefreshJobs,
   MARKET_CONTEXT_CLOSED_REFRESH_MS,
   MARKET_CONTEXT_HOLIDAY_REFRESH_MS,
   MARKET_CONTEXT_OPEN_REFRESH_MS,
@@ -27,6 +29,33 @@ test('market context refresh cadence stays inside the open-session age contract'
   );
   assert.ok(MARKET_CONTEXT_OPEN_REFRESH_MS < 15 * 60 * 1000);
   assert.ok(MARKET_CONTEXT_OPEN_REFRESH_MS >= 5 * 60 * 1000);
+});
+
+test('scheduled market refresh remains on by default and can be disabled for isolated demo startup', () => {
+  assert.equal(marketDataRefreshJobsEnabled(undefined), true);
+  assert.equal(marketDataRefreshJobsEnabled('true'), true);
+  assert.equal(marketDataRefreshJobsEnabled('false'), false);
+});
+
+test('disabled market refresh startup schedules no timers or provider work', () => {
+  const previousEnvironment = process.env.MARKET_DATA_REFRESH_ENABLED;
+  const originalSetTimeout = global.setTimeout;
+  let scheduledTimers = 0;
+  global.setTimeout = (...args) => {
+    scheduledTimers += 1;
+    return originalSetTimeout(...args);
+  };
+  process.env.MARKET_DATA_REFRESH_ENABLED = 'false';
+
+  try {
+    const stop = startMarketDataRefreshJobs();
+    stop();
+    assert.equal(scheduledTimers, 0);
+  } finally {
+    global.setTimeout = originalSetTimeout;
+    if (previousEnvironment === undefined) delete process.env.MARKET_DATA_REFRESH_ENABLED;
+    else process.env.MARKET_DATA_REFRESH_ENABLED = previousEnvironment;
+  }
 });
 
 test('market context refresh cadence backs off outside an active session', () => {

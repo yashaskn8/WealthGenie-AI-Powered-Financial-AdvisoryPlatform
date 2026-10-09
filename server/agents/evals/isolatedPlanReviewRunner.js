@@ -157,10 +157,16 @@ export async function runIsolatedPlanReviewCase({ caseDefinition, provider = nul
       maxSteps: caseDefinition.maxSteps,
       maxToolCalls: caseDefinition.maxToolCalls,
       maxInputTokens: 5000,
-      maxOutputTokens: 1000,
+      // The live evaluation has a 2,500-token total budget per case. Keep the
+      // per-call ceiling low enough that the grounded explanation prompt can
+      // be reserved after the planner call without relaxing that total cap.
+      maxOutputTokens: 512,
       maxTotalTokens: 2500,
       maxModelCalls: MAX_LIVE_PROVIDER_CALLS_PER_CASE,
-      timeoutMs: liveProvider ? 25000 : 5000,
+      // Two bounded provider calls can run sequentially (the NVIDIA adapter
+      // allows 20 seconds per request); give the isolated graph enough time
+      // for both without changing its call or token budgets.
+      timeoutMs: liveProvider ? 50000 : 5000,
       toolTimeoutMs: 1000,
       researchAdaptiveEnabled: false,
       researchDeepEnabled: false,
