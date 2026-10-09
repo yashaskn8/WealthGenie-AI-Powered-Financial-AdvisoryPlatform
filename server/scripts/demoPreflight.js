@@ -357,7 +357,15 @@ async function servedFrontendBuildMatches({ page, fetcher, documentResponse, obs
 
     const inventory = manifest.frontendArtifactInventory;
     const inventoryByPath = new Map(inventory.map(entry => [entry.path, entry]));
-    const loadedAssetPaths = [...runtime.scripts, ...runtime.stylesheets]
+    // The preflight's request-origin guard intentionally blocks cross-origin
+    // stylesheets (including the app's external font stylesheet). Only
+    // same-origin files are served frontend artifacts and belong in the
+    // build inventory comparison. The exact HTML bytes are verified below.
+    const sameOriginStylesheets = runtime.stylesheets.filter(source => {
+      try { return new URL(source, origin).origin === origin; }
+      catch { return false; }
+    });
+    const loadedAssetPaths = [...runtime.scripts, ...sameOriginStylesheets]
       .map(source => frontendArtifactPathFromUrl(source, origin));
     if (loadedAssetPaths.some(assetPath => !assetPath || !inventoryByPath.has(assetPath))) return false;
 

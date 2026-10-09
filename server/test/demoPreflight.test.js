@@ -145,10 +145,12 @@ test('served frontend artifact verification stops after a failed batch and fails
 });
 
 function makeTestFrontendArtifacts(commitSha, overrides = {}) {
+  const externalFontStylesheet = 'https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Outfit:wght@300;400;500;600;700;800;900&display=swap';
   const contents = new Map([
     ['index.html', Buffer.from(
       '<!doctype html><html data-build-sha="' + commitSha + '"><head>'
-        + '<link rel="stylesheet" href="/assets/app.css"></head><body>'
+        + '<link rel="stylesheet" href="/assets/app.css">'
+        + '<link rel="stylesheet" href="' + externalFontStylesheet + '"></head><body>'
         + '<script type="module" src="/assets/app.js"></script></body></html>'
         + (overrides.indexSuffix || '')
     )],
@@ -465,8 +467,12 @@ function browserFlowFixture(scenario = {}) {
         scripts: [
           'http://127.0.0.1:5173/assets/app.js',
           ...(scenario.frontendUnlistedScript ? ['http://127.0.0.1:5173/assets/unlisted.js'] : []),
+          ...(scenario.frontendExternalScript ? ['https://untrusted.example/external.js'] : []),
         ],
-        stylesheets: ['http://127.0.0.1:5173/assets/app.css'],
+        stylesheets: [
+          'http://127.0.0.1:5173/assets/app.css',
+          'https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Outfit:wght@300;400;500;600;700;800;900&display=swap',
+        ],
       };
     },
     url: () => currentUrl,
@@ -1955,6 +1961,7 @@ test('served frontend files that retain the build marker but change bytes are re
     { browserLoadedStylesheetTampered: true },
     { frontendMissingArtifact: true },
     { frontendUnlistedScript: true },
+    { frontendExternalScript: true },
   ]) {
     const result = await runBrowserFlow(scenario);
     assert.equal(result.checks.find(check => check.name === 'Critical browser path').passed, false, JSON.stringify(scenario));
