@@ -7,6 +7,7 @@ import { runPipeline } from '../services/RecommendationPipeline.js';
 import {
   createPhase15CiFixtures,
   createPhase15CiIdentity,
+  formatSafePhase15CiError,
   runPhase15CiPreflight,
   validatePhase15CiEnvironment,
 } from '../scripts/runPhase15CiPreflight.js';
@@ -106,4 +107,79 @@ test('CI runner rejects an incomplete live preflight even if registration succee
   });
   assert.equal(result.exitCode, 1);
   assert.equal(result.preflight.passed, 22);
+});
+
+test('Phase 15 runner reports a safe pre-mutation doctor exception and never registers after it throws', async () => {
+  const output = [];
+  let registrationCalls = 0;
+  let generatedIdentity;
+  const result = await runPhase15CiPreflight({
+    environment: validEnvironment(),
+    write: line => output.push(line),
+    dependencies: {
+      async verifyBuild() { return true; },
+      maskSecret() {},
+      async runDoctor({ environment }) {
+        generatedIdentity = [environment.DEMO_EMAIL, environment.DEMO_PASSWORD];
+        const error = new Error(`connection to ${environment.DEMO_EMAIL} failed with ${environment.DEMO_PASSWORD}`);
+        error.code = 'ECONNRESET';
+        throw error;
+      },
+      async registerAccount() { registrationCalls += 1; return { passed: true }; },
+      async runPreflight() { assert.fail('preflight must not run when the read-only doctor throws'); },
+    },
+  });
+
+  const report = output.join('\n');
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.doctor.failed, 1);
+  assert.equal(result.registration, null);
+  assert.equal(registrationCalls, 0);
+  assert.match(report, /pre-mutation doctor threw/);
+  assert.match(report, /ECONNRESET/);
+  for (const value of generatedIdentity) assert.equal(report.includes(value), false);
+});
+
+test('Phase 15 runner reports a safe live-preflight exception without treating it as a pass', async () => {
+  const output = [];
+  let generatedIdentity;
+  let preflightCalls = 0;
+  const result = await runPhase15CiPreflight({
+    environment: validEnvironment(),
+    write: line => output.push(line),
+    dependencies: {
+      async verifyBuild() { return true; },
+      maskSecret() {},
+      async runDoctor() { return { exitCode: 0, passed: 1, failed: 0 }; },
+      async registerAccount(_apiBase, identity) {
+        generatedIdentity = [identity.email, identity.password];
+        return { passed: true, detail: 'synthetic account registration returned HTTP 201' };
+      },
+      async runPreflight({ environment }) {
+        preflightCalls += 1;
+        const error = new Error(`browser request failed for ${environment.DEMO_EMAIL} with ${environment.DEMO_PASSWORD}`);
+        error.code = 'ETIMEDOUT';
+        throw error;
+      },
+    },
+  });
+
+  const report = output.join('\n');
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.preflight, null);
+  assert.equal(result.registration.passed, true);
+  assert.equal(preflightCalls, 1);
+  assert.match(report, /live preflight execution threw/);
+  assert.match(report, /ETIMEDOUT/);
+  for (const value of generatedIdentity) assert.equal(report.includes(value), false);
+});
+
+test('safe Phase 15 error formatter retains classification and code while redacting environment secrets', () => {
+  const error = new TypeError('request failed with sensitive-fixture-value');
+  error.code = 'ECONNRESET';
+  const formatted = formatSafePhase15CiError(error, { NVIDIA_API_KEY: 'sensitive-fixture-value' });
+  assert.match(formatted, /TypeError/);
+  assert.match(formatted, /ECONNRESET/);
+  assert.match(formatted, /request failed/);
+  assert.equal(formatted.includes('sensitive-fixture-value'), false);
 });

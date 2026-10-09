@@ -10,6 +10,7 @@ import { taxCalculationContextSchema } from '../validation/taxSchemas.js';
 import { getCurrentFiscalYear } from '../services/taxEngine.js';
 import { verifyBuildProvenance } from '../services/buildProvenance.js';
 import { isSafeDemoEnvironmentId } from '../services/demoDatabaseIdentity.js';
+import { redactLogValue } from '../utils/logger.js';
 import { isSafeDemoUrl, readLocalBuildIdentity, runDemoPreflight } from './demoPreflight.js';
 import { runDemoDoctor } from './demoDoctor.js';
 
@@ -21,6 +22,47 @@ const CI_MONGO_PORT = '27017';
 const SHA40 = /^[a-f0-9]{40}$/;
 const SHA64 = /^[a-f0-9]{64}$/;
 const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
+const SENSITIVE_ENVIRONMENT_NAME = /(?:secret|token|password|credential|api[_-]?key|authorization|cookie|email|mobile|phone|(?:mongo(?:db)?|redis)?[_-]?(?:uri|url|dsn)|^DEMO_EMAIL$|^DEMO_PASSWORD$)/i;
+
+/** Keep actionable exception context while preventing CI secrets and demo identity values from entering logs. */
+export function formatSafePhase15CiError(error, environment = process.env) {
+  let safeError;
+  try {
+    safeError = redactLogValue(error);
+  } catch {
+    safeError = undefined;
+  }
+
+  const sensitiveValues = Object.entries(environment || {})
+    .filter(([name, value]) => SENSITIVE_ENVIRONMENT_NAME.test(name)
+      && typeof value === 'string' && value.length >= 3)
+    .map(([, value]) => value)
+    .sort((left, right) => right.length - left.length);
+  const scrub = value => {
+    let result = typeof value === 'string' ? value : '';
+    for (const secret of sensitiveValues) result = result.replaceAll(secret, '[REDACTED]');
+    return result.slice(0, 1000);
+  };
+
+  const errorName = error instanceof Error && typeof error.name === 'string'
+    ? error.name
+    : typeof safeError?.name === 'string' ? safeError.name : 'Error';
+  const name = scrub(errorName) || 'Error';
+  const code = typeof safeError?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(safeError.code)
+    ? safeError.code
+    : '';
+  const message = scrub(typeof safeError?.message === 'string'
+    ? safeError.message
+    : typeof safeError === 'string' ? safeError : '');
+  const stack = scrub(typeof safeError?.stack === 'string' ? safeError.stack : '')
+    .split('\n')
+    .slice(1, 4)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .join(' <- ');
+
+  return `${name}${code ? ` (${code})` : ''}: ${message || 'Unspecified error'}${stack ? ` [${stack}]` : ''}`;
+}
 
 function localUrl(value, { api = false } = {}) {
   if (!isSafeDemoUrl(value, { api })) return null;
@@ -169,7 +211,13 @@ export async function runPhase15CiPreflight({
     write(`FAIL Phase 15 CI safety configuration — ${configuration.errors.join('; ')}`);
     return { exitCode: 1, doctor: null, preflight: null, registration: null };
   }
-  const sourceVerified = await (dependencies.verifyBuild || verifyExactCiBuild)(environment);
+  let sourceVerified;
+  try {
+    sourceVerified = await (dependencies.verifyBuild || verifyExactCiBuild)(environment);
+  } catch (error) {
+    write(`FAIL Phase 15 CI source/provenance verification threw — ${formatSafePhase15CiError(error, environment)}`);
+    return { exitCode: 1, doctor: null, preflight: null, registration: null };
+  }
   if (!sourceVerified) {
     write('FAIL Phase 15 CI source/provenance binding — checked-out SHA, tree, manifest, image identities, or workflow run did not match the build outputs');
     return { exitCode: 1, doctor: null, preflight: null, registration: null };
@@ -212,7 +260,13 @@ export async function runPhase15CiPreflight({
       writeFile(liveEnvironment.DEMO_TAX_CONTEXT_FILE, `${JSON.stringify(fixtures.tax)}\n`, { flag: 'wx', mode: 0o600 }),
     ]);
 
-    const doctor = await (dependencies.runDoctor || runDemoDoctor)({ environment: liveEnvironment, write });
+    let doctor;
+    try {
+      doctor = await (dependencies.runDoctor || runDemoDoctor)({ environment: liveEnvironment, write });
+    } catch (error) {
+      write(`FAIL Phase 15 CI pre-mutation doctor threw — ${formatSafePhase15CiError(error, liveEnvironment)}`);
+      return { exitCode: 1, doctor: { exitCode: 1, passed: 0, failed: 1 }, preflight: null, registration: null };
+    }
     if (doctor?.exitCode !== 0) {
       write('FAIL Phase 15 CI pre-mutation doctor — registration and authenticated browser operations were not attempted');
       return { exitCode: 1, doctor, preflight: null, registration: null };
@@ -226,7 +280,13 @@ export async function runPhase15CiPreflight({
     write(`${registration.passed ? 'PASS' : 'FAIL'} Phase 15 synthetic registration — ${registration.detail}`);
     if (registration.passed !== true) return { exitCode: 1, doctor, preflight: null, registration };
 
-    const preflight = await (dependencies.runPreflight || runDemoPreflight)({ environment: liveEnvironment, write });
+    let preflight;
+    try {
+      preflight = await (dependencies.runPreflight || runDemoPreflight)({ environment: liveEnvironment, write });
+    } catch (error) {
+      write(`FAIL Phase 15 live preflight execution threw — ${formatSafePhase15CiError(error, liveEnvironment)}`);
+      return { exitCode: 1, doctor, preflight: null, registration };
+    }
     return {
       exitCode: preflight?.exitCode === 0 && preflight.passed === 23 && preflight.failed === 0 && preflight.notEvaluated === 0 ? 0 : 1,
       doctor,
@@ -239,6 +299,10 @@ export async function runPhase15CiPreflight({
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const result = await runPhase15CiPreflight();
-  process.exitCode = result.exitCode;
+  runPhase15CiPreflight()
+    .then(result => { process.exitCode = result.exitCode; })
+    .catch(error => {
+      process.stderr.write(`FAIL Phase 15 CI runner aborted before completing its gates — ${formatSafePhase15CiError(error)}\n`);
+      process.exitCode = 1;
+    });
 }
