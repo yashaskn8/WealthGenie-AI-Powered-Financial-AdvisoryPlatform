@@ -14,6 +14,7 @@ import {
   MAX_FRONTEND_ARTIFACT_SET_BYTES,
   MAX_FRONTEND_PROVENANCE_BYTES,
   verifyBuildProvenance,
+  verifyPublishedBuildProvenanceSummary,
 } from '../services/buildProvenance.js';
 import {
   NIFTYBEES_PRODUCT_TAX_EVIDENCE,
@@ -1839,13 +1840,14 @@ export async function runDemoPreflight({
     gitCommitSha: environment.DEMO_EXPECTED_BUILD_SHA?.toLowerCase(),
     gitTreeSha: environment.DEMO_EXPECTED_BUILD_TREE_SHA?.toLowerCase(),
     frontendArtifactSetSha256: expectedFrontendArtifactSetSha256?.toLowerCase(),
+    serverImageIdentity: environment.EXPECTED_SERVER_IMAGE_ID?.toLowerCase(),
+    frontendImageIdentity: environment.EXPECTED_FRONTEND_IMAGE_ID?.toLowerCase(),
+    mlImageIdentity: environment.EXPECTED_ML_IMAGE_ID?.toLowerCase(),
+    workflowRunId: environment.GITHUB_RUN_ID,
+    workflowRunAttempt: environment.GITHUB_RUN_ATTEMPT,
   };
   const verifyPublishedProvenance = value => {
-    if (value?.status !== 'VERIFIED') return false;
-    const manifest = Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'status'));
-    return ['serverImageIdentity', 'frontendImageIdentity', 'mlImageIdentity']
-      .every(field => /^sha256:[a-f0-9]{64}$/.test(manifest[field] || ''))
-      && verifyBuildProvenance(manifest, expectedProvenanceFields).valid;
+    return verifyPublishedBuildProvenanceSummary(value, expectedProvenanceFields).valid;
   };
   const buildProvenanceMatches = /^[a-f0-9]{64}$/.test(expectedProvenanceSha256 || '')
     && /^[a-f0-9]{64}$/.test(expectedFrontendArtifactSetSha256 || '')

@@ -206,6 +206,55 @@ export function verifyBuildProvenance(manifest, expected = {}) {
   return { valid: errors.length === 0, errors: [...new Set(errors)] };
 }
 
+// The health API deliberately publishes a bounded provenance summary instead
+// of the potentially large frontend artifact inventory. The backend has
+// already verified the complete manifest before assigning status=VERIFIED;
+// callers must anchor this summary to an independently verified expected
+// provenance digest and the fields needed for the live deployment binding.
+export function verifyPublishedBuildProvenanceSummary(value, expected = {}) {
+  const errors = [];
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.status !== 'VERIFIED') {
+    return { valid: false, errors: ['PUBLISHED_PROVENANCE_NOT_VERIFIED'] };
+  }
+
+  const { status: _status, ...summary } = value;
+  if (summary.schemaVersion !== BUILD_PROVENANCE_SCHEMA) errors.push('SCHEMA_MISMATCH');
+  if (!SHA40.test(summary.gitCommitSha || '')) errors.push('COMMIT_SHA_INVALID');
+  if (!SHA40.test(summary.gitTreeSha || '')) errors.push('TREE_SHA_INVALID');
+  for (const field of Object.keys(LOCK_FILES)) {
+    if (!SHA64.test(summary[field] || '')) errors.push(`${field.toUpperCase()}_INVALID`);
+  }
+  for (const field of ['frontendArtifactSetSha256', 'provenanceSha256']) {
+    if (!SHA64.test(summary[field] || '')) errors.push(`${field.toUpperCase()}_INVALID`);
+  }
+  for (const field of ['serverImageIdentity', 'frontendImageIdentity', 'mlImageIdentity']) {
+    if (!IMAGE_ID.test(summary[field] || '')) errors.push(`${field.toUpperCase()}_INVALID`);
+  }
+  for (const field of ['workflowRunId', 'workflowRunAttempt']) {
+    if (summary[field] !== null && (typeof summary[field] !== 'string' || !/^[A-Za-z0-9._-]{1,128}$/.test(summary[field]))) {
+      errors.push(`${field.toUpperCase()}_INVALID`);
+    }
+  }
+  if (summary.workflowRunAttempt !== null && !/^[1-9]\d*$/.test(summary.workflowRunAttempt || '')) {
+    errors.push('WORKFLOW_RUN_ATTEMPT_INVALID');
+  }
+  if (summary.buildTimestamp !== null && !validateBuildTimestamp(summary.buildTimestamp)) errors.push('BUILD_TIMESTAMP_INVALID');
+
+  for (const field of ['provenanceSha256', 'gitCommitSha', 'gitTreeSha', 'frontendArtifactSetSha256']) {
+    if (typeof expected[field] !== 'string' || expected[field].length === 0) {
+      errors.push(`EXPECTED_${field.toUpperCase()}_MISSING`);
+    } else if (summary[field] !== expected[field]) {
+      errors.push(`EXPECTED_${field.toUpperCase()}_MISMATCH`);
+    }
+  }
+  for (const [field, valueExpected] of Object.entries(expected)) {
+    if (valueExpected !== undefined && valueExpected !== null && summary[field] !== valueExpected) {
+      errors.push(`EXPECTED_${field.toUpperCase()}_MISMATCH`);
+    }
+  }
+  return { valid: errors.length === 0, errors: [...new Set(errors)] };
+}
+
 export function buildProvenanceMatches(left, right) {
   return verifyBuildProvenance(left).valid
     && verifyBuildProvenance(right).valid

@@ -195,7 +195,8 @@ function makeTestBuildManifest(commitSha, overrides = {}) {
   return manifest;
 }
 function publishTestBuildManifest(manifest) {
-  return { status: 'VERIFIED', ...manifest };
+  const { frontendArtifactInventory: _frontendArtifactInventory, ...publicSummary } = manifest;
+  return { status: 'VERIFIED', ...publicSummary };
 }
 
 const currentBinding = () => ({

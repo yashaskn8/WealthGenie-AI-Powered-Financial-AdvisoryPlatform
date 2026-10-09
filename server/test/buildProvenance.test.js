@@ -11,6 +11,7 @@ import {
   createBuildProvenance,
   serializeBuildProvenance,
   verifyBuildProvenance,
+  verifyPublishedBuildProvenanceSummary,
 } from '../services/buildProvenance.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -59,6 +60,42 @@ test('build provenance binds source tree, authoritative locks, frontend bytes, i
     assert.match(fixture.provenance.frontendArtifactSetSha256, /^[a-f0-9]{64}$/);
     assert.match(fixture.provenance.provenanceSha256, /^[a-f0-9]{64}$/);
     assert.equal(JSON.parse(serializeBuildProvenance(fixture.provenance)).provenanceSha256, fixture.provenance.provenanceSha256);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test('published health provenance summary binds the verified manifest without exposing its artifact inventory', async () => {
+  const fixture = await createFixture();
+  try {
+    const { frontendArtifactInventory: _inventory, ...summary } = fixture.provenance;
+    const published = { status: 'VERIFIED', ...summary };
+    const expected = {
+      provenanceSha256: fixture.provenance.provenanceSha256,
+      gitCommitSha: SOURCE_SHA,
+      gitTreeSha: TREE_SHA,
+      frontendArtifactSetSha256: fixture.provenance.frontendArtifactSetSha256,
+      serverImageIdentity: SERVER_IMAGE,
+      frontendImageIdentity: FRONTEND_IMAGE,
+      mlImageIdentity: ML_IMAGE,
+      workflowRunId: fixture.provenance.workflowRunId,
+      workflowRunAttempt: fixture.provenance.workflowRunAttempt,
+    };
+
+    const result = verifyPublishedBuildProvenanceSummary(published, expected);
+    assert.equal(result.valid, true, result.errors.join(', '));
+    assert.equal(Object.hasOwn(published, 'frontendArtifactInventory'), false);
+
+    for (const [field, wrongValue] of [
+      ['provenanceSha256', 'd'.repeat(64)],
+      ['gitTreeSha', 'c'.repeat(40)],
+      ['frontendArtifactSetSha256', 'e'.repeat(64)],
+      ['serverImageIdentity', `sha256:${'4'.repeat(64)}`],
+    ]) {
+      const changed = { ...published, [field]: wrongValue };
+      assert.equal(verifyPublishedBuildProvenanceSummary(changed, expected).valid, false, field);
+    }
+    assert.equal(verifyPublishedBuildProvenanceSummary({ ...published, status: 'UNAVAILABLE' }, expected).valid, false);
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
   }
