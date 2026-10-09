@@ -3,7 +3,7 @@
  */
 import React from 'react';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { act, render as rtlRender, screen, fireEvent, cleanup, within } from '@testing-library/react';
+import { act, render as rtlRender, screen, fireEvent, cleanup, within, waitFor } from '@testing-library/react';
 import WhereToInvestTab from '../deepdive/WhereToInvestTab';
 import * as api from '../../services/api';
 import { resetMarketContextStoreForTest } from '../../state/useMarketContext';
@@ -547,5 +547,69 @@ describe('Beginner-First Where-To-Invest UX', () => {
     expect(screen.getByLabelText(/Fiscal Year/i)).toBeVisible();
     expect(screen.getByLabelText(/Your age/i)).toHaveValue(30);
     expect(screen.getByRole('button', { name: /Apply & Calculate/i })).toBeVisible();
+  });
+
+  it('requires an explicit STT assumption and sends only user-entered tax context to the backend', async () => {
+    const product = {
+      id: 'etf:isin:INF204KB14I2',
+      canonicalProductId: 'etf:isin:INF204KB14I2',
+      name: 'Nifty 50 ETF',
+      parentInstrumentId: 'nifty_etf',
+      postTaxAnalysis: {
+        status: 'REQUIRES_TAX_INPUTS',
+        requiredTaxInputs: [
+          'annualGrossIncome', 'incomeSource', 'regime', 'fiscalYear', 'userAge',
+          'holdingPeriodMonths', 'section112AExemptionUsed', 'sttConditionAssumedSatisfied',
+        ],
+      },
+    };
+    api.rankInvestmentCandidates
+      .mockResolvedValueOnce({ financialStateBinding: CURRENT_STATE_BINDING, products: [product] })
+      .mockResolvedValueOnce({
+        financialStateBinding: CURRENT_STATE_BINDING,
+        products: [{ ...product, postTaxAnalysis: { status: 'CALCULATED', postTaxRatePct: 8.2 } }],
+      });
+
+    render(
+      <WhereToInvestTab
+        inv={{ id: 'nifty_etf', name: 'Nifty 50 ETF', riskScore: 3 }}
+        userProfile={{ profileId: CURRENT_STATE_BINDING.profileId, age: 31 }}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /Exact-product tax illustration/i }));
+    const sttAssumption = screen.getByRole('checkbox', {
+      name: /Assume the applicable STT condition is satisfied for this hypothetical transfer/i,
+    });
+    expect(sttAssumption).not.toBeChecked();
+    expect(screen.getByText(/does not verify that an actual transaction meets the condition/i)).toBeVisible();
+    fireEvent.submit(screen.getByRole('button', { name: /Apply & Calculate/i }).closest('form'));
+    expect(screen.getByText(/Confirm the explicit STT assumption/i)).toBeVisible();
+    expect(api.rankInvestmentCandidates).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(screen.getByLabelText(/Annual Gross Income/i), { target: { value: '7500000' } });
+    fireEvent.change(screen.getByLabelText(/Income source/i), { target: { value: 'salary' } });
+    fireEvent.change(screen.getByLabelText(/Tax Regime/i), { target: { value: 'new' } });
+    fireEvent.change(screen.getByLabelText(/Fiscal Year/i), { target: { value: 'FY2026-27' } });
+    fireEvent.change(screen.getByLabelText(/Your age/i), { target: { value: '31' } });
+    fireEvent.change(screen.getByLabelText(/Your holding period/i), { target: { value: '18' } });
+    fireEvent.change(screen.getByLabelText(/Annual equity long-term gains exclusion already used/i), { target: { value: '0' } });
+    fireEvent.click(sttAssumption);
+    fireEvent.click(screen.getByRole('button', { name: /Apply & Calculate/i }));
+
+    await waitFor(() => expect(api.rankInvestmentCandidates).toHaveBeenCalledTimes(2));
+    const requestContext = api.rankInvestmentCandidates.mock.calls[1][2];
+    expect(requestContext).toMatchObject({
+      illustrativePrincipal: 10000,
+      annualGrossIncome: 7500000,
+      incomeSource: 'salary',
+      regime: 'new',
+      fiscalYear: 'FY2026-27',
+      userAge: 31,
+      holdingPeriodMonths: 18,
+      section112AExemptionUsed: 0,
+      sttConditionAssumedSatisfied: true,
+    });
+    expect(requestContext).not.toHaveProperty('deductions');
   });
 });

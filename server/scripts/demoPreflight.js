@@ -411,6 +411,32 @@ const TAX_CONTEXT_BOUND_OUTPUT_FIELDS = Object.freeze([
   'assumptions', 'unavailableReasons', 'sourceReferences', 'rulesApplied', 'requiredTaxInputs',
   'metricLabel', 'disclosure', 'isHistoricalEstimate', 'historicalObservationWindowMonths', 'taxRuleMetadata',
 ]);
+const WTI_TAX_FORM_INPUTS = Object.freeze({
+  annualGrossIncome: { selector: '#wti-annual-income', kind: 'fill' },
+  incomeSource: { selector: '#wti-income-source', kind: 'select' },
+  regime: { selector: '#wti-tax-regime', kind: 'select' },
+  fiscalYear: { selector: '#wti-fiscal-year', kind: 'select' },
+  userAge: { selector: '#wti-user-age', kind: 'fill' },
+  holdingPeriodMonths: { selector: '#wti-holding-period', kind: 'fill' },
+  section112AExemptionUsed: { selector: '#wti-112a-exemption', kind: 'fill' },
+  acquisitionDate: { selector: '#wti-acquisition-date', kind: 'fill' },
+  redemptionDate: { selector: '#wti-redemption-date', kind: 'fill' },
+  sttConditionAssumedSatisfied: { selector: '#wti-stt-condition-assumed-satisfied', kind: 'check' },
+});
+const WTI_TAX_DEDUCTION_INPUTS = Object.freeze({
+  section80C: { selector: '#wti-80c-used', kind: 'fill' },
+  nps80CCD1B: { selector: '#wti-nps-80ccd1b-used', kind: 'fill' },
+  nps80CCD2: { selector: '#wti-nps80CCD2', kind: 'fill', advanced: true },
+  basicSalary: { selector: '#wti-basicSalary', kind: 'fill', advanced: true },
+  isGovtEmployee: { selector: '#wti-govt-employee', kind: 'select', advanced: true },
+  section80D_self: { selector: '#wti-section80D_self', kind: 'fill', advanced: true },
+  section80D_parents: { selector: '#wti-section80D_parents', kind: 'fill', advanced: true },
+  parents_senior: { selector: '#wti-parents-senior', kind: 'select', advanced: true },
+  hra: { selector: '#wti-hra', kind: 'fill', advanced: true },
+  homeLoanInterest: { selector: '#wti-homeLoanInterest', kind: 'fill', advanced: true },
+  section80TTA: { selector: '#wti-section80TTA', kind: 'fill', advanced: true },
+  section80TTB: { selector: '#wti-section80TTB', kind: 'fill', advanced: true },
+});
 
 const SERVER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REPO_ROOT = path.resolve(SERVER_DIR, '..');
@@ -1701,7 +1727,7 @@ export async function checkBrowserAndFinancialFlow(reporter, {
           }
           browserJourneyStage = 'frontend WTI request binding compared';
           browserJourneyStage = 'validate frontend WTI response';
-          const body = await readSafeResponseBody(wtiResponse);
+          let body = await readSafeResponseBody(wtiResponse);
           if (!requestMatchesCurrentState || !qualifiesWtiResponse(body, verifiedRecommendation, parentInstrumentId)) {
             throw Object.assign(new Error('The frontend WTI request or response did not match the current financial state.'), {
               code: 'WTI_FRONTEND_BINDING_INVALID',
@@ -1709,18 +1735,172 @@ export async function checkBrowserAndFinancialFlow(reporter, {
           }
 
           browserJourneyStage = 'render exact ETF and tax status';
-          const product = body.products[0];
-          if (product.postTaxAnalysis?.status !== 'CALCULATED'
-              || !qualifiesCalculatedNiftyEtfTax(product, taxContext, { financialBindingValid: requestMatchesCurrentState })) {
-            throw Object.assign(new Error('The exact ETF tax result is not fully source-qualified for the supplied tax scenario.'), {
-              code: 'WTI_FRONTEND_TAX_STATE_INVALID',
-            });
-          }
+          let product = body.products[0];
           const productCard = page.locator('[data-testid="wti-product-etf:isin:INF204KB14I2"]');
           await productCard.waitFor({ state: 'visible', timeout: DASHBOARD_BROWSER_TIMEOUT_MS });
           if (!await productCard.isVisible()) {
             throw Object.assign(new Error('The exact qualified ETF product card is not visible.'), {
               code: 'WTI_FRONTEND_PRODUCT_NOT_VISIBLE',
+            });
+          }
+
+          if (product.postTaxAnalysis?.status === 'CALCULATED'
+              && !isDeepStrictEqual(requestBody?.taxCalculationContext, taxContext)) {
+            throw Object.assign(new Error('The frontend calculated tax without the exact supplied tax fixture.'), {
+              code: 'WTI_FRONTEND_TAX_CONTEXT_BINDING_INVALID',
+            });
+          }
+
+          if (product.postTaxAnalysis?.status === 'REQUIRES_TAX_INPUTS') {
+            const requiredTaxInputs = product.postTaxAnalysis.requiredTaxInputs;
+            if (!taxContext || !Array.isArray(requiredTaxInputs) || requiredTaxInputs.length === 0) {
+              throw Object.assign(new Error('The frontend requires explicit tax inputs that are unavailable to the isolated demo.'), {
+                code: 'WTI_FRONTEND_TAX_INPUTS_UNAVAILABLE',
+              });
+            }
+            const unsupportedInputs = requiredTaxInputs.filter(input => !Object.hasOwn(WTI_TAX_FORM_INPUTS, input));
+            if (unsupportedInputs.length > 0
+                || (taxContext.sttConditionAssumedSatisfied !== true
+                  && requiredTaxInputs.includes('sttConditionAssumedSatisfied'))) {
+              throw Object.assign(new Error('The frontend tax form cannot represent every required synthetic tax input.'), {
+                code: 'WTI_FRONTEND_TAX_INPUT_UNSUPPORTED',
+              });
+            }
+            const principal = Number(taxContext.illustrativePrincipal);
+            if (!Number.isFinite(principal) || principal <= 0) {
+              throw Object.assign(new Error('The isolated tax fixture has no valid illustrative principal.'), {
+                code: 'WTI_FRONTEND_TAX_PRINCIPAL_INVALID',
+              });
+            }
+            const principalLabel = `₹${principal.toLocaleString('en-IN')}`;
+            const activePrincipal = await page.locator('.wti-amount-btn--active').innerText();
+            if (activePrincipal.trim() !== principalLabel) {
+              const principalButton = page.locator(`.wti-amount-btn[title="Use ${principalLabel} as the server calculation principal"]`);
+              await principalButton.waitFor({ state: 'visible', timeout: DASHBOARD_BROWSER_TIMEOUT_MS });
+              const principalResponsePromise = page.waitForResponse(response => {
+                try {
+                  const responseUrl = new URL(response.url());
+                  const request = response.request();
+                  const requestBody = request.postDataJSON();
+                  return request.method() === 'POST'
+                    && responseUrl.origin === configuredApiOrigin
+                    && responseUrl.pathname.endsWith('/api/instruments/rank-wti')
+                    && requestBody?.parentInstrumentId === parentInstrumentId
+                    && requestBody?.taxCalculationContext?.illustrativePrincipal === principal;
+                } catch {
+                  return false;
+                }
+              }, { timeout: WTI_USER_FLOW_TIMEOUT_MS });
+              await principalButton.click();
+              const principalResponse = await withVerifierDeadline(principalResponsePromise, WTI_USER_FLOW_TIMEOUT_MS);
+              if (!responseOk(principalResponse)) {
+                throw Object.assign(new Error('The frontend could not bind the selected illustrative principal.'), {
+                  code: 'WTI_FRONTEND_TAX_PRINCIPAL_REQUEST_FAILED',
+                });
+              }
+              const principalBody = await readSafeResponseBody(principalResponse);
+              if (!principalBody || !qualifiesWtiResponse(principalBody, verifiedRecommendation, parentInstrumentId)) {
+                throw Object.assign(new Error('The frontend principal update lost exact-product or current-state qualification.'), {
+                  code: 'WTI_FRONTEND_TAX_PRINCIPAL_BINDING_INVALID',
+                });
+              }
+            }
+
+            await page.locator('.wti-controls-bar .wti-tax-toggle-btn').click();
+            await page.locator('.wti-tax-drawer').waitFor({ state: 'visible', timeout: DASHBOARD_BROWSER_TIMEOUT_MS });
+            for (const inputName of requiredTaxInputs) {
+              const input = WTI_TAX_FORM_INPUTS[inputName];
+              if (!Object.hasOwn(taxContext, inputName)
+                  || (inputName === 'sttConditionAssumedSatisfied' && taxContext[inputName] !== true)) {
+                throw Object.assign(new Error('The isolated demo tax fixture lacks a required explicit tax input.'), {
+                  code: 'WTI_FRONTEND_TAX_INPUT_MISSING',
+                });
+              }
+              const control = page.locator(input.selector);
+              await control.waitFor({ state: 'visible', timeout: DASHBOARD_BROWSER_TIMEOUT_MS });
+              if (input.kind === 'check') await control.check();
+              else if (input.kind === 'select') await control.selectOption(String(taxContext[inputName]));
+              else await control.fill(String(taxContext[inputName]));
+            }
+
+            const deductions = taxContext.deductions && typeof taxContext.deductions === 'object'
+              ? taxContext.deductions
+              : {};
+            const unsupportedDeductions = Object.keys(deductions)
+              .filter(key => !Object.hasOwn(WTI_TAX_DEDUCTION_INPUTS, key));
+            if (unsupportedDeductions.length > 0) {
+              throw Object.assign(new Error('The frontend tax form cannot represent every configured synthetic deduction input.'), {
+                code: 'WTI_FRONTEND_TAX_DEDUCTION_UNSUPPORTED',
+              });
+            }
+            const advancedDeductions = Object.keys(deductions)
+              .some(key => WTI_TAX_DEDUCTION_INPUTS[key].advanced);
+            if (advancedDeductions) await page.locator('.wti-tax-drawer details summary').click();
+            for (const [key, value] of Object.entries(deductions)) {
+              const input = WTI_TAX_DEDUCTION_INPUTS[key];
+              const control = page.locator(input.selector);
+              await control.waitFor({ state: 'visible', timeout: DASHBOARD_BROWSER_TIMEOUT_MS });
+              if (input.kind === 'select') await control.selectOption(String(value));
+              else await control.fill(String(value));
+            }
+
+            const taxResponsePromise = page.waitForResponse(response => {
+              try {
+                const responseUrl = new URL(response.url());
+                const request = response.request();
+                const requestBody = request.postDataJSON();
+                return request.method() === 'POST'
+                  && responseUrl.origin === configuredApiOrigin
+                  && responseUrl.pathname.endsWith('/api/instruments/rank-wti')
+                  && requestBody?.parentInstrumentId === parentInstrumentId;
+              } catch {
+                return false;
+              }
+            }, { timeout: WTI_USER_FLOW_TIMEOUT_MS });
+            await page.locator('.wti-apply-tax-btn').click();
+            const taxResponse = await withVerifierDeadline(taxResponsePromise, WTI_USER_FLOW_TIMEOUT_MS);
+            if (!responseOk(taxResponse)) {
+              throw Object.assign(new Error('The frontend tax calculation request did not succeed.'), {
+                code: 'WTI_FRONTEND_TAX_HTTP_ERROR',
+                status: responseStatus(taxResponse),
+              });
+            }
+            const taxRequest = taxResponse.request();
+            let taxRequestBody;
+            try {
+              taxRequestBody = taxRequest.postDataJSON();
+            } catch {
+              throw Object.assign(new Error('The frontend tax request body could not be verified.'), {
+                code: 'WTI_FRONTEND_TAX_REQUEST_UNVERIFIABLE',
+              });
+            }
+            requestMatchesCurrentState = taxRequestBody?.profileId === verifiedRecommendation.profileId
+              && taxRequestBody?.profileVersion === verifiedRecommendation.profile_version
+              && taxRequestBody?.recommendationId === (verifiedRecommendation.recommendationId || verifiedRecommendation.recommendation_id)
+              && taxRequestBody?.expectedAllocationRevision === verifiedRecommendation.allocation_revision
+              && taxRequestBody?.expectedAllocationRevisionId === verifiedRecommendation.allocation_revision_id
+              && taxRequestBody?.expectedPortfolioFingerprint === verifiedRecommendation.portfolio_fingerprint
+              && taxRequestBody?.expectedRecommendationFingerprint === verifiedRecommendation.recommendation_fingerprint
+              && taxRequestBody?.parentInstrumentId === parentInstrumentId;
+            if (!requestMatchesCurrentState
+                || !isDeepStrictEqual(taxRequestBody?.taxCalculationContext, taxContext)) {
+              throw Object.assign(new Error('The frontend tax request did not preserve the verified financial binding and supplied tax fixture.'), {
+                code: 'WTI_FRONTEND_TAX_CONTEXT_BINDING_INVALID',
+              });
+            }
+            body = await readSafeResponseBody(taxResponse);
+            if (!body || !qualifiesWtiResponse(body, verifiedRecommendation, parentInstrumentId)) {
+              throw Object.assign(new Error('The frontend tax response lost exact-product or current-state qualification.'), {
+                code: 'WTI_FRONTEND_TAX_RESPONSE_BINDING_INVALID',
+              });
+            }
+            product = body.products[0];
+          }
+
+          if (product.postTaxAnalysis?.status !== 'CALCULATED'
+              || !qualifiesCalculatedNiftyEtfTax(product, taxContext, { financialBindingValid: requestMatchesCurrentState })) {
+            throw Object.assign(new Error('The exact ETF tax result is not fully source-qualified for the supplied tax scenario.'), {
+              code: 'WTI_FRONTEND_TAX_STATE_INVALID',
             });
           }
           const calculatedTax = productCard.locator('.wti-post-tax-box');

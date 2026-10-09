@@ -322,32 +322,74 @@ function browserFlowFixture(scenario = {}) {
     recommendationFingerprint: recommendation.recommendation_fingerprint,
   };
   const login = fakeHttpResponse(scenario.loginStatus ?? 200, {});
-  const uiProduct = scenario.frontendWtiTaxUnavailable
-    ? { ...qualifiedNiftyEtf(), postTaxAnalysis: { status: 'TAX_CLASSIFICATION_UNAVAILABLE' } }
-    : qualifiedNiftyTaxProductFixture();
-  if (scenario.frontendWtiWrongProduct) uiProduct.canonicalProductId = 'etf:isin:OTHER';
-  const uiWtiBody = qualifiedWtiResponse([uiProduct], recommendation);
-  if (scenario.frontendWtiBindingMismatch) uiWtiBody.financialStateBinding.allocationRevision += 1;
-  if (scenario.frontendWtiResponseMutation) scenario.frontendWtiResponseMutation(uiWtiBody);
-  let wtiUiRequested = false;
-  let resolveWtiUiResponse;
-  const createWtiUiResponse = () => ({
-    ...fakeHttpResponse(200, uiWtiBody),
-    url: () => 'http://127.0.0.1:5000/api/instruments/rank-wti',
-    request: () => ({
-      method: () => 'POST',
-      postDataJSON: () => ({
-        profileId: recommendation.profileId,
-        profileVersion: recommendation.profile_version + (scenario.frontendWtiRequestBindingMismatch ? 1 : 0),
-        recommendationId: recommendation.recommendationId,
-        expectedAllocationRevision: recommendation.allocation_revision,
-        expectedAllocationRevisionId: recommendation.allocation_revision_id,
-        expectedPortfolioFingerprint: recommendation.portfolio_fingerprint,
-        expectedRecommendationFingerprint: recommendation.recommendation_fingerprint,
-        parentInstrumentId: 'nifty_etf',
-      }),
-    }),
-  });
+  let uiPrincipal = 10000;
+  let uiTaxApplied = false;
+  const uiTaxInputs = new Map();
+  const queuedWtiResponses = [];
+  const pendingWtiResponseWaiters = [];
+  const buildSubmittedUiTaxContext = () => {
+    const context = { illustrativePrincipal: uiPrincipal };
+    const numericFields = new Set([
+      'annualGrossIncome', 'userAge', 'holdingPeriodMonths', 'section112AExemptionUsed',
+    ]);
+    const selectors = {
+      '#wti-annual-income': 'annualGrossIncome',
+      '#wti-income-source': 'incomeSource',
+      '#wti-tax-regime': 'regime',
+      '#wti-fiscal-year': 'fiscalYear',
+      '#wti-user-age': 'userAge',
+      '#wti-holding-period': 'holdingPeriodMonths',
+      '#wti-112a-exemption': 'section112AExemptionUsed',
+      '#wti-acquisition-date': 'acquisitionDate',
+      '#wti-redemption-date': 'redemptionDate',
+    };
+    for (const [selector, name] of Object.entries(selectors)) {
+      if (uiTaxInputs.has(selector)) {
+        const value = uiTaxInputs.get(selector);
+        context[name] = numericFields.has(name) ? Number(value) : value;
+      }
+    }
+    if (uiTaxInputs.get('#wti-stt-condition-assumed-satisfied') === true) {
+      context.sttConditionAssumedSatisfied = true;
+    }
+    return context;
+  };
+  const createWtiUiResponse = () => {
+    const taxCalculationContext = uiTaxApplied
+      ? buildSubmittedUiTaxContext()
+      : { illustrativePrincipal: uiPrincipal };
+    const uiProduct = scenario.frontendWtiTaxUnavailable
+      ? { ...qualifiedNiftyEtf(), postTaxAnalysis: { status: 'TAX_CLASSIFICATION_UNAVAILABLE' } }
+      : qualifiedNiftyTaxProductFixture(taxCalculationContext);
+    if (scenario.frontendWtiWrongProduct) uiProduct.canonicalProductId = 'etf:isin:OTHER';
+    const uiWtiBody = qualifiedWtiResponse([uiProduct], recommendation);
+    if (scenario.frontendWtiBindingMismatch) uiWtiBody.financialStateBinding.allocationRevision += 1;
+    if (scenario.frontendWtiResponseMutation) scenario.frontendWtiResponseMutation(uiWtiBody);
+    const requestBody = {
+      profileId: recommendation.profileId,
+      profileVersion: recommendation.profile_version + (scenario.frontendWtiRequestBindingMismatch ? 1 : 0),
+      recommendationId: recommendation.recommendationId,
+      expectedAllocationRevision: recommendation.allocation_revision,
+      expectedAllocationRevisionId: recommendation.allocation_revision_id,
+      expectedPortfolioFingerprint: recommendation.portfolio_fingerprint,
+      expectedRecommendationFingerprint: recommendation.recommendation_fingerprint,
+      parentInstrumentId: 'nifty_etf',
+      taxCalculationContext,
+    };
+    return {
+      ...fakeHttpResponse(200, uiWtiBody),
+      url: () => 'http://127.0.0.1:5000/api/instruments/rank-wti',
+      request: () => ({ method: () => 'POST', postDataJSON: () => requestBody }),
+    };
+  };
+  const publishWtiUiResponse = () => {
+    const response = createWtiUiResponse();
+    const waiterIndex = pendingWtiResponseWaiters.findIndex(waiter => {
+      try { return waiter.predicate(response); } catch { return false; }
+    });
+    if (waiterIndex >= 0) pendingWtiResponseWaiters.splice(waiterIndex, 1)[0].resolve(response);
+    else queuedWtiResponses.push(response);
+  };
   const page = {
     on(event, callback) {
       if (event === 'request') requestListener = callback;
@@ -399,15 +441,26 @@ function browserFlowFixture(scenario = {}) {
           if (selector !== '#login-form' && selector !== 'aside.sidebar' && scenario.loginControlError) throw Object.assign(new Error('secret login control detail'), { code: 'LOGIN_CONTROL_TIMEOUT' });
           if (isWtiCategory && scenario.frontendWtiMissing) throw Object.assign(new Error('category missing'), { name: 'TimeoutError' });
           if (isWtiProduct && (scenario.frontendWtiWrongProduct || scenario.frontendWtiBindingMismatch)) throw Object.assign(new Error('product unavailable'), { name: 'TimeoutError' });
+          if (selector === '.wti-tax-drawer' && scenario.frontendWtiTaxDrawerMissing) throw Object.assign(new Error('tax drawer missing'), { name: 'TimeoutError' });
           if (isCalculatedTax && scenario.frontendWtiTaxHidden) throw Object.assign(new Error('calculated tax state missing'), { name: 'TimeoutError' });
           if (isUnavailableTax && scenario.frontendWtiTaxUnavailable) throw Object.assign(new Error('unavailable tax state unexpectedly rendered'), { name: 'TimeoutError' });
         },
-        async fill() {},
+        async fill(value) { uiTaxInputs.set(selector, String(value)); },
+        async selectOption(value) { uiTaxInputs.set(selector, typeof value === 'string' ? value : value.value); },
+        async check() { uiTaxInputs.set(selector, true); },
         async click() {
           if (selector === '[data-testid="wti-category-nifty_etf"]') {
             if (scenario.frontendWtiDirectProviderRequest) requestListener?.({ url: () => 'https://portal.amfiindia.com/spages/NAVAll.txt' });
-            wtiUiRequested = true;
-            resolveWtiUiResponse?.(createWtiUiResponse());
+            publishWtiUiResponse();
+          } else if (selector.startsWith('.wti-amount-btn[title="Use ₹')) {
+            const amountText = selector.match(/Use ₹([\d,]+) as the server calculation principal/)?.[1];
+            if (amountText) {
+              uiPrincipal = Number(amountText.replaceAll(',', ''));
+              publishWtiUiResponse();
+            }
+          } else if (selector === '.wti-apply-tax-btn') {
+            uiTaxApplied = true;
+            publishWtiUiResponse();
           }
         },
         async isVisible() {
@@ -419,6 +472,7 @@ function browserFlowFixture(scenario = {}) {
           return true;
         },
         async innerText() {
+          if (selector === '.wti-amount-btn--active') return `₹${uiPrincipal.toLocaleString('en-IN')}`;
           return isCalculatedTax
             ? 'Exact-product tax illustration HISTORICAL — NOT A FORECAST.'
             : 'Exact-product tax illustration: tax classification unavailable.';
@@ -433,19 +487,12 @@ function browserFlowFixture(scenario = {}) {
         request: () => ({ method: () => 'POST' }),
       };
       if (predicate(loginResponse)) return loginResponse;
-      if (wtiUiRequested) {
-        const response = createWtiUiResponse();
-        if (predicate(response)) return response;
-      }
+      const queuedIndex = queuedWtiResponses.findIndex(response => {
+        try { return predicate(response); } catch { return false; }
+      });
+      if (queuedIndex >= 0) return queuedWtiResponses.splice(queuedIndex, 1)[0];
       return new Promise((resolve, reject) => {
-        resolveWtiUiResponse = response => {
-          try {
-            if (predicate(response)) resolve(response);
-            else reject(new Error('unexpected frontend WTI response'));
-          } catch (error) {
-            reject(error);
-          }
-        };
+        pendingWtiResponseWaiters.push({ predicate, resolve, reject });
       });
     },
     async evaluate() {
@@ -588,7 +635,7 @@ async function runBrowserFlow(scenario = {}) {
     apiBase: 'http://127.0.0.1:5000/api',
     frontendUrl: 'http://127.0.0.1:5173',
     completionPayload: { profile: 'fixture only' },
-    taxContext: scenario.taxContext ?? demoTaxContext(),
+    taxContext: scenario.taxContext ?? demoTaxContext({ illustrativePrincipal: 100000 }),
     email: 'demo@example.invalid',
     password: 'fixture-password',
     idempotencyKey: 'fixture-idempotency-key',

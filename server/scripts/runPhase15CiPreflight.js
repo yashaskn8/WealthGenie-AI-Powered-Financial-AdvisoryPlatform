@@ -144,7 +144,7 @@ export function createPhase15CiFixtures() {
       holdingPeriodMonths: 18,
       section112AExemptionUsed: 0,
       sttConditionAssumedSatisfied: true,
-      illustrativePrincipal: 1000000,
+      illustrativePrincipal: 100000,
     },
   };
 }

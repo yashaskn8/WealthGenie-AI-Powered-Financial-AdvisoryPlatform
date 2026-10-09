@@ -154,6 +154,7 @@ function getRiskTierColor(tier) {
 const WTI_SUPPORTED_TAX_CONTROLS = new Set([
   'annualGrossIncome', 'incomeSource', 'regime', 'fiscalYear', 'userAge',
   'holdingPeriodMonths', 'section112AExemptionUsed', 'acquisitionDate', 'redemptionDate',
+  'sttConditionAssumedSatisfied',
 ]);
 
 function hasCompleteWtiStateBinding(binding) {
@@ -255,6 +256,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const [taxSection80C, setTaxSection80C] = useState('');
   const [taxNps80CCD1B, setTaxNps80CCD1B] = useState('');
   const [taxAdvancedDeductions, setTaxAdvancedDeductions] = useState({});
+  const [sttConditionAssumedSatisfied, setSttConditionAssumedSatisfied] = useState(false);
   const [taxFormError, setTaxFormError] = useState('');
   const [taxPolicyMetadata, setTaxPolicyMetadata] = useState(null);
   const [taxPolicyError, setTaxPolicyError] = useState(null);
@@ -296,6 +298,7 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
     setTaxSection80C('');
     setTaxNps80CCD1B('');
     setTaxAdvancedDeductions({});
+    setSttConditionAssumedSatisfied(false);
     setTaxFormError('');
   }, [financialKey, userProfile?.age]);
 
@@ -440,6 +443,10 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
   const handleApplyTaxInputs = (e) => {
     e.preventDefault();
     setTaxFormError('');
+    if (requiredTaxInputs.includes('sttConditionAssumedSatisfied') && !sttConditionAssumedSatisfied) {
+      setTaxFormError('Confirm the explicit STT assumption for this hypothetical transfer, or leave the tax result unavailable.');
+      return;
+    }
     const incomeNum = Number(taxAnnualIncome);
     const ageNum = Number(taxUserAge);
     const requiredFieldMissing = (
@@ -483,7 +490,8 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
       section80TTA: toOptionalNumber(taxAdvancedDeductions.section80TTA),
       section80TTB: toOptionalNumber(taxAdvancedDeductions.section80TTB),
     }).filter(([, value]) => value !== undefined));
-    const nextContext = { illustrativePrincipal, deductions };
+    const nextContext = { illustrativePrincipal };
+    if (Object.keys(deductions).length > 0) nextContext.deductions = deductions;
     if (taxAnnualIncome !== '') nextContext.annualGrossIncome = incomeNum;
     if (taxRegime) nextContext.regime = taxRegime;
     if (taxFiscalYear) nextContext.fiscalYear = taxFiscalYear;
@@ -496,6 +504,9 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
       nextContext.holdingPeriodMonths = Number(holdingPeriodMonths);
     }
     if (section112AExemptionUsed !== '') nextContext.section112AExemptionUsed = Number(section112AExemptionUsed);
+    if (requiredTaxInputs.includes('sttConditionAssumedSatisfied') && sttConditionAssumedSatisfied) {
+      nextContext.sttConditionAssumedSatisfied = true;
+    }
     setActiveTaxContext(nextContext);
   };
 
@@ -1036,6 +1047,22 @@ const WhereToInvestTab = ({ inv, userProfile, recommendationMeta = null }) => {
                 required
               />
               <small>Share the amount already used across your other qualifying equity gains; it is not reset for each product.</small>
+            </div>
+          )}
+
+          {requiredTaxInputs.includes('sttConditionAssumedSatisfied') && (
+            <div className="wti-tax-input-group">
+              <label htmlFor="wti-stt-condition-assumed-satisfied">
+                <input
+                  id="wti-stt-condition-assumed-satisfied"
+                  type="checkbox"
+                  checked={sttConditionAssumedSatisfied}
+                  onChange={(e) => setSttConditionAssumedSatisfied(e.target.checked)}
+                  required
+                />{' '}
+                Assume the applicable STT condition is satisfied for this hypothetical transfer
+              </label>
+              <small>This is an explicit assumption for a historical illustration. It does not verify that an actual transaction meets the condition.</small>
             </div>
           )}
 
