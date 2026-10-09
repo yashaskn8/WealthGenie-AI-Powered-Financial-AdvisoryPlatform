@@ -6,7 +6,7 @@ import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import { TaskState } from '@a2a-js/sdk';
 import { boundedResearchBudget } from '../agents/research/researchConstants.js';
-import { createResearchBrief, validateResearchBrief } from '../agents/research/researchSchemas.js';
+import { createResearchBrief, encodeResearchBriefUuid, validateResearchBrief } from '../agents/research/researchSchemas.js';
 import { evaluateResearchNeed } from '../agents/research/researchNeedEvaluator.js';
 import { validateResearchQuery, FixtureResearchSearchProvider } from '../agents/research/researchSearchProvider.js';
 import { assertSafePublicUrl, validatePublicUrl, SafePublicDocumentFetcher, requestPinnedHttps } from '../agents/research/safePublicDocumentFetcher.js';
@@ -18,7 +18,7 @@ import { ResearchMeshClient, createResearchMeshClient } from '../agents/research
 import { invokePlanReviewGraph } from '../agents/planReview/planReviewGraph.js';
 import { classifyResearchSource } from '../agents/research/sourceTrust.js';
 import { verifyResearchArtifact } from '../agents/research/researchClaimVerifier.js';
-import { hashResearchArtifact } from '../agents/research/researchArtifact.js';
+import { canonicalStringify, hashResearchArtifact, hashResearchExecutionBinding } from '../agents/research/researchArtifact.js';
 import { normalizeResearchFacts, researchFactsMatch } from '../agents/research/researchFactNormalization.js';
 
 function nowIso() {
@@ -115,15 +115,41 @@ test('A2A REST preserves HTTP 400 for unsupported Part media without mutating th
   }), null, 'an unsupported outer HTTP Content-Type remains HTTP 415');
 });
 
-test('generated ResearchBrief IDs cannot accidentally resemble private numbers', t => {
-  let uuid = '00000000-0000-4000-8000-612345678901';
+test('generated ResearchBrief IDs cannot collide with privacy labels in UUID hex digits', t => {
+  const collisionUuid = '9a7bcdef-0123-4567-89ab-cdef01234567';
+  let uuid = collisionUuid;
   t.mock.method(crypto, 'randomUUID', () => uuid);
   const input = { topic: 'Public financial rule', question: 'Verify the current official public rule', requestedFactTypes: ['statutory_rule'] };
   const first = createResearchBrief(input);
-  assert.doesNotMatch(first.researchBriefId, /\d/);
-  uuid = '00000000-0000-4000-8000-612345678902';
+  assert.equal(first.researchBriefId, encodeResearchBriefUuid(collisionUuid));
+  assert.doesNotMatch(first.researchBriefId, /[ae0-9]/i);
+
+  const legacyCollidingId = 'brief-' + collisionUuid.replace(/\d/g, digit => 'ghijklmnop'[Number(digit)]);
+  const legacyResult = validateResearchBrief({ ...first, researchBriefId: legacyCollidingId });
+  assert.equal(legacyResult.error.details[0].type, 'RESEARCH_BRIEF_PRIVACY_VIOLATION');
+
+  uuid = '9a7bcdef-0123-4567-89ab-cdef01234566';
   const second = createResearchBrief(input);
-  assert.notEqual(first.researchBriefId, second.researchBriefId, 'encoding preserves distinct generated identities');
+  assert.notEqual(first.researchBriefId, second.researchBriefId, 'the encoding preserves distinct UUID identities');
+});
+
+test('execution-binding digests cannot collide with ResearchBrief privacy patterns', () => {
+  const binding = { runId: 'fixture-134', executionGeneration: 1, traceId: 'trace-fixed' };
+  const canonicalBinding = {
+    schemaVersion: 'plan-review-research-execution-binding/v1',
+    ...binding,
+  };
+  const legacyHexDigest = crypto.createHash('sha256').update(canonicalStringify(canonicalBinding)).digest('hex');
+  const legacyValidation = validateResearchBrief({ ...brief(), executionBindingHash: legacyHexDigest });
+  assert.equal(legacyValidation.error.details[0].type, 'RESEARCH_BRIEF_PRIVACY_VIOLATION');
+
+  const encodedDigest = hashResearchExecutionBinding(binding);
+  assert.match(encodedDigest, /^[bcdfghijklmnopqr]{64}$/);
+  assert.equal(validateResearchBrief({ ...brief(), executionBindingHash: encodedDigest }).error, undefined);
+
+  const phoneShapedLegacyHash = `${'0'.repeat(54)}9876543210`;
+  const maliciousValidation = validateResearchBrief({ ...brief(), executionBindingHash: phoneShapedLegacyHash });
+  assert.equal(maliciousValidation.error.details[0].type, 'RESEARCH_BRIEF_PRIVACY_VIOLATION');
 });
 
 test('ResearchBrief rejects private fields and credential-like values', () => {

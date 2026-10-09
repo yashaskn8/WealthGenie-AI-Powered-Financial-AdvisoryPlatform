@@ -1,6 +1,17 @@
 import crypto from 'node:crypto';
 import Joi from 'joi';
+import { EXECUTION_BINDING_HASH_PATTERN } from './researchArtifact.js';
 import { RESEARCH_SOURCE_ATTESTATION_VERSION, RESEARCH_SOURCE_FETCHER_ID } from './researchSourceAttestation.js';
+
+const SAFE_RESEARCH_BRIEF_UUID_ALPHABET = 'bcdfghijklmnopqr';
+const CANONICAL_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function encodeResearchBriefUuid(uuid) {
+  if (typeof uuid !== 'string' || !CANONICAL_UUID_PATTERN.test(uuid)) {
+    throw new TypeError('A canonical UUID is required to encode a ResearchBrief identifier.');
+  }
+  return uuid.replace(/[0-9a-f]/gi, nibble => SAFE_RESEARCH_BRIEF_UUID_ALPHABET[Number.parseInt(nibble, 16)]);
+}
 
 const id = Joi.string().trim().min(1).max(160);
 const isoDate = Joi.string().isoDate();
@@ -30,7 +41,7 @@ const sourceFetchAttestationSchema = Joi.object({
   documentHash: Joi.string().hex().length(64).required(),
   taskId: id.required(),
   researchBriefHash: Joi.string().hex().length(64).required(),
-  executionBindingHash: Joi.string().hex().length(64).required(),
+  executionBindingHash: Joi.string().pattern(EXECUTION_BINDING_HASH_PATTERN).required(),
   researchPolicyVersion: Joi.string().trim().max(120).required(),
   freshnessRequiredSourceTier: Joi.string().valid('OFFICIAL_PRIMARY', 'PRIMARY_ISSUER', 'TRUSTED_SECONDARY', 'UNVERIFIED').required(),
   freshnessMaxAgeHours: Joi.number().integer().min(1).max(8760).required(),
@@ -56,7 +67,7 @@ export const researchBriefSchema = Joi.object({
   knownEvidenceIds: Joi.array().items(id).max(40).unique().default([]),
   knownSourceDates: Joi.array().items(knownSourceDateSchema).max(40).default([]),
   freshnessRequirement: freshnessRequirementSchema,
-  executionBindingHash: Joi.string().hex().length(64).allow(null).default(null),
+  executionBindingHash: Joi.string().pattern(EXECUTION_BINDING_HASH_PATTERN).allow(null).default(null),
   maxResearchDepth: Joi.number().integer().min(0).max(3).required(),
 }).unknown(false);
 
@@ -211,10 +222,9 @@ export function validateResearchArtifact(value) {
 
 export function createResearchBrief(options = {}) {
   const result = validateResearchBrief({
-    // Generated opaque IDs must not accidentally match the private-number
-    // filters. The disjoint digit-to-letter mapping preserves UUID uniqueness;
-    // explicitly supplied IDs still pass through unchanged and are validated.
-    researchBriefId: crypto.randomUUID().replace(/\d/g, digit => 'ghijklmnop'[Number(digit)]),
+    // Encode every UUID nibble one-to-one using letters that cannot form the
+    // sensitive labels checked below. Explicit IDs still pass through unchanged.
+    researchBriefId: encodeResearchBriefUuid(crypto.randomUUID()),
     jurisdiction: 'IN',
     asOf: new Date().toISOString(),
     instrumentCategories: [],

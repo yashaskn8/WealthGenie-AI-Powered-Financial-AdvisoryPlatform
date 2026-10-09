@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { canonicalStringify } from './researchArtifact.js';
+import { canonicalStringify, EXECUTION_BINDING_HASH_PATTERN } from './researchArtifact.js';
 import { RESEARCH_POLICY_VERSION } from './researchConstants.js';
 import { isCanonicalRetrievedAt, stripUntrustedDocumentMarkup } from './documentEvidenceExtractor.js';
 
@@ -49,7 +49,7 @@ function validateSigningClaims(claims) {
   if (!requestedUrl || !canonicalUrl
       || typeof claims?.taskId !== 'string' || claims.taskId.trim().length < 1 || claims.taskId.length > 160
       || !HASH_PATTERN.test(claims?.researchBriefHash || '')
-      || !HASH_PATTERN.test(claims?.executionBindingHash || '')
+      || !EXECUTION_BINDING_HASH_PATTERN.test(claims?.executionBindingHash || '')
       || claims?.researchPolicyVersion !== RESEARCH_POLICY_VERSION
       || !SOURCE_TIERS.has(claims?.freshnessRequiredSourceTier)
       || claims?.publicationDate !== null

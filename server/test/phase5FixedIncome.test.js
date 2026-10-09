@@ -82,6 +82,35 @@ test('official India Post parser preserves rate semantics and effective interval
   );
 });
 
+test('official India Post parser accepts published parenthetical payout and maturity details', () => {
+  const sourceFormattedRows = ROWS.map(row => {
+    const interestRate = {
+      '1 Year Time Deposit': '6.9%(Annual Interest ₹708 for ₹10,000/-)',
+      '2 Year Time Deposit': '7.0%(Annual Interest ₹719 for ₹10,000/-)',
+      '3 Year Time Deposit': '7.1%(Annual Interest ₹729 for ₹10,000/-)',
+      '5 Year Time Deposit': '7.5%(Annual Interest ₹771 for ₹10,000/-)',
+      'Senior Citizen Savings Scheme': '8.2%(Quarterly Interest ₹205 for ₹10,000/-)',
+      'Monthly Income Account': '7.4%(Monthly Interest ₹62 for ₹10,000/-)',
+      'National Savings Certificate (VIII Issue)': '7.7%(Maturity Value ₹14,490 for ₹10,000/-)',
+      'Kisan Vikas Patra': '7.5%(will mature in 115 months)',
+    }[row.instrument] || row.interestRate;
+    return { ...row, interestRate };
+  });
+  const snapshot = parseIndiaPostSavingsBundle(
+    governmentBundle('01.10.2026', '31.12.2026', sourceFormattedRows),
+    { fetchedAt: '2026-10-09T04:10:00.000Z', now: new Date('2026-10-09T04:10:00.000Z') },
+  );
+
+  assert.equal(snapshot.status, 'AVAILABLE');
+  assert.equal(snapshot.availableFactCount, ROWS.length);
+  assert.equal(snapshot.facts.find(fact => fact.canonicalProductId.endsWith(':post-office-td-1y')).value, 6.9);
+  assert.equal(snapshot.facts.find(fact => fact.canonicalProductId.endsWith(':scss')).value, 8.2);
+  assert.equal(snapshot.facts.find(fact => fact.canonicalProductId.endsWith(':pomis')).value, 7.4);
+  assert.equal(snapshot.facts.find(fact => fact.canonicalProductId.endsWith(':nsc')).value, 7.7);
+  assert.equal(snapshot.facts.find(fact => fact.canonicalProductId.endsWith(':kvp')).value, 7.5);
+  assert(snapshot.facts.every(fact => fact.effectiveFrom === '2026-10-01' && fact.effectiveTo === '2026-12-31'));
+});
+
 test('official India Post parser rejects a duplicate scheme identity even when row count matches', () => {
   const duplicateNscRows = [
     ...ROWS.slice(1),
@@ -118,7 +147,7 @@ test('official India Post parser never converts negative or malformed rates into
   assert.equal(malformedPpf.value, null);
   assert.equal(malformedPpf.availabilityStatus, AVAILABILITY.UNAVAILABLE);
 
-  for (const invalidRate of ['7.1%garbage', '7.1% approx', 'NaN%', 'Infinity%', '', '0%']) {
+  for (const invalidRate of ['7.1%garbage', '7.1% approx', '7.1%(Approx ₹710)', '7.1%(Annual Interest 7.1%)', 'NaN%', 'Infinity%', '', '0%']) {
     const invalidRows = ROWS.map(row => row.instrument === 'Public Provident Fund Scheme'
       ? { ...row, interestRate: invalidRate }
       : row);

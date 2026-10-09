@@ -1,6 +1,13 @@
 import crypto from 'node:crypto';
 import { RESEARCH_MESH_VERSION, RESEARCH_POLICY_VERSION } from './researchConstants.js';
 
+const SAFE_EXECUTION_BINDING_ALPHABET = 'bcdfghijklmnopqr';
+export const EXECUTION_BINDING_HASH_PATTERN = /^(?:[a-f0-9]{64}|[bcdfghijklmnopqr]{64})$/i;
+
+function encodeExecutionBindingDigest(hexDigest) {
+  return hexDigest.replace(/[0-9a-f]/gi, nibble => SAFE_EXECUTION_BINDING_ALPHABET[Number.parseInt(nibble, 16)]);
+}
+
 function canonicalStringify(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalStringify).join(',')}]`;
@@ -25,12 +32,15 @@ export function hashResearchExecutionBinding({ runId, executionGeneration, trace
       || typeof traceId !== 'string' || traceId.trim().length < 1 || traceId.length > 160) {
     throw new TypeError('A complete PlanReview execution binding is required.');
   }
-  return crypto.createHash('sha256').update(canonicalStringify({
+  const digest = crypto.createHash('sha256').update(canonicalStringify({
     schemaVersion: 'plan-review-research-execution-binding/v1',
     runId,
     executionGeneration: Number(executionGeneration),
     traceId,
   })).digest('hex');
+  // Keep the full 256-bit digest while avoiding accidental matches with the
+  // ResearchBrief's financial-identifier privacy patterns.
+  return encodeExecutionBindingDigest(digest);
 }
 
 export function buildResearchArtifact({

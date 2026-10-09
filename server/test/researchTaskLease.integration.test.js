@@ -6,7 +6,7 @@ import ResearchTask from '../models/ResearchTask.js';
 import ResearchTaskCapacity from '../models/ResearchTaskCapacity.js';
 import { MongoResearchTaskStore } from '../services/researchTaskStore.js';
 import { migrateResearchTaskIndexes } from '../services/researchTaskPersistence.js';
-import { createResearchBrief } from '../agents/research/researchSchemas.js';
+import { createResearchBrief, encodeResearchBriefUuid } from '../agents/research/researchSchemas.js';
 import { setupTestDatabase, teardownTestDatabase } from './helpers/mongoTestHelper.js';
 
 const noMongoPartition = process.env.MONGO_TEST_PARTITION === 'NO_MONGO';
@@ -18,16 +18,15 @@ function caller() {
   return { user: { identity: { provider: 'development', authenticated: true, subject: 'phase7-lease-integration', agentType: 'PLAN_REVIEW' } } };
 }
 
-function privacySafeBriefId(id) {
-  // UUID digits can accidentally form phone/Aadhaar-shaped substrings. Encode
-  // them as distinct letters in fixture-only brief IDs; keep transport IDs intact.
-  return `brief-${id.replace(/\d/g, digit => 'ghijklmnop'[Number(digit)])}`;
+function privacySafeBriefId() {
+  // Fixture IDs share production's bijective encoding, including UUID hex letters.
+  return 'brief-' + encodeResearchBriefUuid(crypto.randomUUID());
 }
 
 function submittedTask(id, question = 'Verify the current official public financial rule') {
   const contextId = `context-${id}`;
   const brief = createResearchBrief({
-    researchBriefId: privacySafeBriefId(id),
+    researchBriefId: privacySafeBriefId(),
     topic: 'Official financial rule',
     question,
     requestedFactTypes: ['statutory_rule'],
@@ -190,7 +189,7 @@ test('Mongo semantic ResearchBrief deduplication is owner-scoped and ignores tra
     duplicate.history[0].taskId = duplicate.id;
     duplicate.history[0].parts[0].content.value = {
       ...originalBrief,
-      researchBriefId: privacySafeBriefId(`new-brief-${crypto.randomUUID()}`),
+      researchBriefId: privacySafeBriefId(),
     };
     const replay = await store.prepareAndClaim(duplicate, sameOwner);
     assert.equal(replay.semanticDuplicateTaskId, taskId);

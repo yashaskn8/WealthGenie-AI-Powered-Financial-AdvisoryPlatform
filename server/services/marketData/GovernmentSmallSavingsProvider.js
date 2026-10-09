@@ -127,7 +127,9 @@ export function parseIndiaPostSavingsBundle(bundleText, {
   for (const row of rows) {
     const identity = SCHEME_IDENTITIES[String(row?.instrument || '').trim()];
     if (!identity) continue;
-    const rateMatch = String(row?.interestRate || '').trim().match(/^([+-]?\d+(?:\.\d+)?)\s*%$/);
+    const rateMatch = String(row?.interestRate || '').trim().match(
+      /^([+-]?\d+(?:\.\d+)?)\s*%(?:\s*\((?:Annual Interest|Quarterly Interest|Monthly Interest|Maturity Value|will mature in)\s+[^()%]+\))?$/i,
+    );
     const parsedRate = rateMatch ? Number(rateMatch[1]) : null;
     const value = Number.isFinite(parsedRate) && parsedRate > 0 ? parsedRate : null;
     const canonicalProductId = `government:india-post:${identity.id}`;
