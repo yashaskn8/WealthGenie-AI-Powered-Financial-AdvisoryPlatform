@@ -47,10 +47,14 @@ jobs:
 
       - name: Validate Terraform IaC
         run: |
+          set -euo pipefail
           echo "### Terraform IaC Validation" >> $GITHUB_STEP_SUMMARY
-          cd terraform
-          terraform init -backend=false -lockfile=readonly
-          terraform validate
+          TERRAFORM_VALIDATION_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TERRAFORM_VALIDATION_DIR"' EXIT
+          cp -a terraform/. "$TERRAFORM_VALIDATION_DIR/"
+          terraform -chdir="$TERRAFORM_VALIDATION_DIR" init -backend=false
+          terraform -chdir="$TERRAFORM_VALIDATION_DIR" init -backend=false -lockfile=readonly
+          terraform -chdir="$TERRAFORM_VALIDATION_DIR" validate
           echo "Terraform configuration is syntactically valid and modularly sound." >> $GITHUB_STEP_SUMMARY
 
       - name: Create Kind Kubernetes Cluster

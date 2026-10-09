@@ -216,8 +216,15 @@ test('Kind CD uses a containerd-v4-compatible release and verifies the fixed Met
   const build = steps.find(step => step.name === 'Build Docker Container Images');
   const terraformValidation = steps.find(step => step.name === 'Validate Terraform IaC');
   assert.match(workflow, /version:\s*v0\.32\.0/);
-  assert.match(terraformValidation.run, /terraform init -backend=false -lockfile=readonly/,
-    'CD validation must not rewrite the tracked Terraform dependency selections on its clean-source verification path');
+  assert.match(terraformValidation.run, /TERRAFORM_VALIDATION_DIR="\$\(mktemp -d\)"/,
+    'Terraform dependency initialization must happen in an isolated disposable directory');
+  assert.match(terraformValidation.run, /cp -a terraform\/\. "\$TERRAFORM_VALIDATION_DIR\/"/,
+    'Terraform validation must use a copy so provider lock updates cannot dirty the attested source checkout');
+  assert.match(terraformValidation.run, /terraform -chdir="\$TERRAFORM_VALIDATION_DIR" init -backend=false\n/,
+    'Terraform must resolve and verify provider packages in the isolated copy');
+  assert.match(terraformValidation.run, /terraform -chdir="\$TERRAFORM_VALIDATION_DIR" init -backend=false -lockfile=readonly/,
+    'the resolved provider selections must be rechecked with a read-only lockfile');
+  assert.match(terraformValidation.run, /terraform -chdir="\$TERRAFORM_VALIDATION_DIR" validate/);
   assert.equal(parsed.jobs['deploy-and-verify-kind'].steps
     .find(step => step.name === 'Create Kind Kubernetes Cluster').with.node_image, 'kindest/node:v1.34.8@sha256:02722c2dedddcfc00febf5d27fbeb9b7b2c14294c82109ff4a85d89ac9ba3256');
   assert.match(build.run, /printf -- '- Commit: `%s`\\n' "\$GITHUB_SHA"/);
