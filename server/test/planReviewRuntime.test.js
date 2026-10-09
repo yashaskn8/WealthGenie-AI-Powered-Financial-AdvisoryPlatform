@@ -325,6 +325,93 @@ test('enqueue applies per-user and global queue backpressure before creating a r
   assert.equal(createCalled, false);
 });
 
+test('enqueue retries an unlabelled Mongo write conflict and observes the winning admission', async () => {
+  for (const winningAdmissionConsumesCapacity of [false, true]) {
+    let transactionAttempts = 0;
+    let endedSessions = 0;
+    let created = 0;
+    const mongo = {
+      async startSession() {
+        return {
+          async withTransaction(callback) {
+            transactionAttempts += 1;
+            if (transactionAttempts === 1) {
+              throw Object.assign(new Error('Write conflict during admission fence update'), { code: 112 });
+            }
+            return callback();
+          },
+          async endSession() { endedSessions += 1; },
+        };
+      },
+    };
+    const model = {
+      findOne() { return { lean: async () => null }; },
+      async countDocuments(filter) {
+        if (filter.status === 'QUEUED') return 0;
+        if (Array.isArray(filter.status?.$in)) return winningAdmissionConsumesCapacity ? 1 : 0;
+        return 0;
+      },
+      async create(documents) {
+        created += 1;
+        return documents;
+      },
+      async updateMany() { return { modifiedCount: 0 }; },
+    };
+    const request = enqueuePlanReviewRun({
+      userId,
+      profileId,
+      model,
+      mongo,
+      snapshotResolver,
+      admissionModel: { updateOne: async () => ({ modifiedCount: 1 }) },
+      runtimeConfig: { agentPlanReview: { maxQueuedRunsPerUser: 5, maxActiveRunsPerUser: 1, maxGlobalQueuedRuns: 20 } },
+    });
+
+    if (winningAdmissionConsumesCapacity) {
+      await assert.rejects(request, error => error.status === 429 && error.code === 'AGENT_QUEUE_SATURATED');
+      assert.equal(created, 0);
+    } else {
+      const result = await request;
+      assert.equal(result.created, true);
+      assert.equal(created, 1);
+    }
+    assert.equal(transactionAttempts, 2);
+    assert.equal(endedSessions, 2);
+  }
+});
+
+test('enqueue reports admission unavailable after bounded write-conflict retries when capacity is not full', async () => {
+  let transactionAttempts = 0;
+  let endedSessions = 0;
+  const mongo = {
+    async startSession() {
+      return {
+        async withTransaction() {
+          transactionAttempts += 1;
+          throw Object.assign(new Error('Write conflict during admission fence update'), { code: 112 });
+        },
+        async endSession() { endedSessions += 1; },
+      };
+    },
+  };
+  const model = {
+    async countDocuments() { return 0; },
+    async create() { assert.fail('A failed transaction must not create a run.'); },
+  };
+
+  await assert.rejects(enqueuePlanReviewRun({
+    userId,
+    profileId,
+    model,
+    mongo,
+    snapshotResolver,
+    admissionModel: { updateOne: async () => ({ modifiedCount: 1 }) },
+    runtimeConfig: { agentPlanReview: { maxQueuedRunsPerUser: 5, maxActiveRunsPerUser: 1, maxGlobalQueuedRuns: 20 } },
+  }), error => error.status === 503 && error.code === 'AGENT_QUEUE_ADMISSION_UNAVAILABLE');
+  assert.equal(transactionAttempts, 13);
+  assert.equal(endedSessions, 13);
+});
+
 test('WAITING_FOR_APPROVAL consumes active-user capacity in the canonical state set', async () => {
   assert.deepEqual(CAPACITY_CONSUMING_PLAN_REVIEW_STATES, ['QUEUED', 'RUNNING', 'WAITING_FOR_APPROVAL']);
   let activeFilter;

@@ -21,6 +21,7 @@ import { SafePublicDocumentFetcher } from './safePublicDocumentFetcher.js';
 import { runResearch } from './researchLoop.js';
 import { buildResearchArtifact } from './researchArtifact.js';
 import { verifyResearchArtifact } from './researchClaimVerifier.js';
+import { createResearchSourceAttestor } from './researchSourceAttestation.js';
 import { validateResearchBrief } from './researchSchemas.js';
 import { PrometheusMetrics } from '../../services/metricsCollector.js';
 import { RESEARCH_CAPABILITIES, RESEARCH_FORBIDDEN_CAPABILITIES, stableResearchId } from './researchConstants.js';
@@ -163,7 +164,7 @@ function createAgentCard({ baseUrl }) {
 }
 
 async function signAgentCard(card, { env, baseUrl }) {
-  if (env.AGENT_A2A_CARD_SIGNING_ENABLED !== 'true') return { card, jwks: null, signing: null };
+  if (env.AGENT_A2A_CARD_SIGNING_ENABLED !== 'true') return { card, jwks: null, signing: null, sourceAttestor: null };
   let privateKey;
   if (env.AGENT_A2A_CARD_SIGNING_PRIVATE_KEY) {
     privateKey = crypto.createPrivateKey(String(env.AGENT_A2A_CARD_SIGNING_PRIVATE_KEY).replace(/\\n/g, '\n'));
@@ -177,10 +178,12 @@ async function signAgentCard(card, { env, baseUrl }) {
   const jku = `${baseUrl.replace(/\/$/, '')}/.well-known/jwks.json`;
   const signer = generateAgentCardSignature(privateKey, { alg: 'RS256', kid, typ: 'JOSE', jku });
   const signedCard = await signer(card);
+  const sourceAttestor = createResearchSourceAttestor({ privateKey, keyId: kid });
   return {
     card: signedCard,
     jwks: { keys: [{ ...publicKey.export({ format: 'jwk' }), kid, alg: 'RS256', use: 'sig' }] },
     signing: { kid, jku },
+    sourceAttestor,
   };
 }
 
@@ -339,12 +342,13 @@ class ResearchAgentRequestHandler extends DefaultRequestHandler {
 }
 
 export class ResearchAgentExecutor {
-  constructor({ run, provider, documentFetcher, taskStore, budget, activeTasks = new Map(), taskContexts = new Map(), taskIdentityContexts = new Map() } = {}) {
+  constructor({ run, provider, documentFetcher, taskStore, budget, sourceAttestor = null, activeTasks = new Map(), taskContexts = new Map(), taskIdentityContexts = new Map() } = {}) {
     this.run = run;
     this.provider = provider;
     this.documentFetcher = documentFetcher;
     this.taskStore = taskStore;
     this.budget = budget;
+    this.sourceAttestor = sourceAttestor;
     this.activeTasks = activeTasks;
     this.taskContexts = taskContexts;
     this.taskIdentityContexts = taskIdentityContexts;
@@ -514,6 +518,7 @@ export class ResearchAgentExecutor {
         documentFetcher: this.documentFetcher,
         budget: this.budget,
         signal: controller.signal,
+        attestSourceFetch: this.sourceAttestor?.attest || null,
       });
       if (controller.signal.aborted || this.canceledTasks.has(taskId)) return;
       const artifact = {
@@ -695,7 +700,7 @@ export async function createResearchAgentServer({ env = process.env, port = Numb
   const verifier = dependencies.identityVerifier || createAgentIdentityVerifier({ env, dependencies });
   const provider = dependencies.provider || createResearchSearchProvider({ env, fixtureDocuments: dependencies.fixtureDocuments, fetchImpl: dependencies.fetchImpl });
   const documentFetcher = dependencies.documentFetcher || new SafePublicDocumentFetcher({ fetchImpl: dependencies.fetchImpl, dnsLookup: dependencies.dnsLookup });
-  const { card: signedCard, jwks, signing } = await signAgentCard(createAgentCard({ baseUrl }), { env, baseUrl });
+  const { card: signedCard, jwks, signing, sourceAttestor } = await signAgentCard(createAgentCard({ baseUrl }), { env, baseUrl });
   const activeTasks = new Map();
   const taskContexts = new Map();
   let taskStore = dependencies.taskStore;
@@ -709,7 +714,7 @@ export async function createResearchAgentServer({ env = process.env, port = Numb
   } else {
     taskStore ||= new InMemoryTaskStore();
   }
-  const executor = new ResearchAgentExecutor({ run: dependencies.run || runResearch, provider, documentFetcher, taskStore, budget: dependencies.budget, activeTasks, taskContexts });
+  const executor = new ResearchAgentExecutor({ run: dependencies.run || runResearch, provider, documentFetcher, taskStore, budget: dependencies.budget, sourceAttestor, activeTasks, taskContexts });
   const requestHandler = new ResearchAgentRequestHandler(signedCard, taskStore, executor);
   const app = express();
   app.disable('x-powered-by');

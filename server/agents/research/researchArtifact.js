@@ -19,6 +19,20 @@ export function hashResearchDocument(value) {
   return crypto.createHash('sha256').update(String(value || '')).digest('hex');
 }
 
+export function hashResearchExecutionBinding({ runId, executionGeneration, traceId } = {}) {
+  if (typeof runId !== 'string' || runId.trim().length < 1 || runId.length > 160
+      || !Number.isSafeInteger(Number(executionGeneration)) || Number(executionGeneration) < 1
+      || typeof traceId !== 'string' || traceId.trim().length < 1 || traceId.length > 160) {
+    throw new TypeError('A complete PlanReview execution binding is required.');
+  }
+  return crypto.createHash('sha256').update(canonicalStringify({
+    schemaVersion: 'plan-review-research-execution-binding/v1',
+    runId,
+    executionGeneration: Number(executionGeneration),
+    traceId,
+  })).digest('hex');
+}
+
 export function buildResearchArtifact({
   brief,
   taskId = null,
@@ -40,13 +54,13 @@ export function buildResearchArtifact({
 } = {}) {
   const frozenClaims = freezeTree(claims);
   const frozenEvidence = freezeTree(evidenceUnits);
-  const frozenSources = freezeTree(sources);
+  const frozenSources = freezeTree(sources.map(item => ({ ...item, fetchAttestation: item.fetchAttestation ?? null })));
   const frozenContradictions = freezeTree(contradictions);
   const frozenGaps = freezeTree(unresolvedGaps);
   const frozenBudget = freezeTree(researchBudgetUsed);
   const artifact = {
     artifactId,
-    version: '1.1.0',
+    version: '1.3.0',
     researchBriefId: brief.researchBriefId,
     researchBriefHash: hashResearchBrief(brief),
     taskId,
@@ -88,10 +102,12 @@ export function verifyArtifactContentHash(artifact) {
 
 export function researchArtifactToEvidenceEntries(artifact) {
   const evidenceById = new Map((artifact?.evidenceUnits || []).map(item => [item.evidenceId, item]));
+  const sourceById = new Map((artifact?.sources || []).map(item => [item.sourceId, item]));
   return (artifact?.claims || [])
     .filter(claim => claim.supportStatus === 'SUPPORTED')
     .map(claim => {
       const evidence = evidenceById.get(claim.supportingEvidenceIds[0]);
+      const source = evidence ? sourceById.get(evidence.sourceId) : null;
       return {
         id: `E_RESEARCH_${claim.claimId}`,
         kind: 'PUBLIC_RESEARCH_CLAIM',
@@ -105,6 +121,8 @@ export function researchArtifactToEvidenceEntries(artifact) {
           supportingEvidenceIds: claim.supportingEvidenceIds,
           artifactId: artifact.artifactId,
           contentHash: artifact.contentHash,
+          taskId: artifact.taskId,
+          researchBriefHash: artifact.researchBriefHash,
         },
         displayValue: claim.text,
         dataClass: 'VERIFIED_PUBLIC_RESEARCH',
@@ -112,6 +130,12 @@ export function researchArtifactToEvidenceEntries(artifact) {
           provider: evidence.publisher,
           url: evidence.canonicalUrl,
           publicationDate: evidence.publicationDate,
+          jurisdiction: source?.fetchAttestation?.jurisdiction || null,
+          retrievedAt: evidence.retrievedAt,
+          documentHash: evidence.documentHash,
+          sourceTrustTier: evidence.sourceTrustTier,
+          fetchAttestation: source?.fetchAttestation || null,
+          evidenceBinding: { evidenceId: evidence.evidenceId, supportingExcerptHash: evidence.supportingExcerptHash },
         } : null,
         observedAt: evidence?.retrievedAt || null,
         freshness: claim.freshnessStatus,

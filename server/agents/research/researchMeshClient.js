@@ -258,6 +258,7 @@ export class ResearchMeshClient {
     this.requireSignedCard = requireSignedCard;
     this.configuredJwk = configuredJwk;
     this.requireIndependentSourceMetadata = env.NODE_ENV === 'production';
+    this.requireSourceAttestation = env.NODE_ENV === 'production';
   }
 
   async resolve({ signal } = {}) {
@@ -299,6 +300,10 @@ export class ResearchMeshClient {
     const verification = artifact && verifyResearchArtifact(artifact, {
       brief: validation.value,
       requireIndependentSourceMetadata: this.requireIndependentSourceMetadata,
+      requireSourceAttestation: this.requireSourceAttestation,
+      requireFreshSourceFetch: this.requireSourceAttestation,
+      trustedSourceAttestationJwk: this.configuredJwk,
+      expectedTaskId: task.id,
     });
     if (!artifact || artifact.taskId !== task.id
       || artifact.researchBriefId !== validation.value.researchBriefId

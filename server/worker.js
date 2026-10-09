@@ -8,6 +8,10 @@ import { validateEnvironmentConfig } from './config/validateEnv.js';
 import { createPlanReviewWorker } from './agents/planReview/planReviewWorker.js';
 import AgentRunEvent from './models/AgentRunEvent.js';
 import ProductionAgentEvaluation from './models/ProductionAgentEvaluation.js';
+import {
+  startProductionEvaluationReconciliation,
+  stopProductionEvaluationReconciliation,
+} from './agents/evals/productionEvaluationQueue.js';
 import { createWorkerHealthServer } from './services/workerHealthServer.js';
 import { verifyPlanReviewPersistenceIndexes } from './services/planReviewPersistence.js';
 import { getPlanHealthSchedulerState, startPlanHealthScheduler, stopPlanHealthScheduler } from './services/planHealthScheduler.js';
@@ -64,6 +68,7 @@ export async function closeWorkerInfrastructure(config, overrides = {}) {
     throw error;
   }
   if (activeWorker === worker) worker = null;
+  await awaitDeadline(stopProductionEvaluationReconciliation(), 'evaluation reconciliation drain');
   await awaitDeadline(activeHealthServer?.close().catch(error => {
     logger.warn('Agent worker health server close failed', { code: error?.code || 'HEALTH_SERVER_CLOSE_FAILED' });
   }), 'health server close');
@@ -111,6 +116,12 @@ export async function startWorker({ env = process.env } = {}) {
 
   worker = createPlanReviewWorker({ runtimeConfig: config, eventModel: AgentRunEvent, productionEvaluationModel: ProductionAgentEvaluation });
   worker.start({ intervalMs: Number(env.AGENT_WORKER_POLL_MS) || 500 });
+  if (config.agenticPlanReviewEnabled) {
+    startProductionEvaluationReconciliation({
+      eventModel: AgentRunEvent,
+      evaluationModel: ProductionAgentEvaluation,
+    });
+  }
   if (config.planHealth.enabled) startPlanHealthScheduler({ config: config.planHealth });
   healthServer = createWorkerHealthServer({
     port: config.agentPlanReview.healthPort,

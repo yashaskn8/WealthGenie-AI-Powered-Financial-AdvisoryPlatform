@@ -19,6 +19,10 @@ import { verifyPlanReviewPersistenceIndexes } from './services/planReviewPersist
 import { verifyAgentRuntimePersistence } from './services/planHealthPersistence.js';
 import AgentRunEvent from './models/AgentRunEvent.js';
 import ProductionAgentEvaluation from './models/ProductionAgentEvaluation.js';
+import {
+  startProductionEvaluationReconciliation,
+  stopProductionEvaluationReconciliation,
+} from './agents/evals/productionEvaluationQueue.js';
 import { warmAuthorizationPersistence } from './services/authorizationPersistence.js';
 import { reconcileAuthorizedExecutions } from './agents/authorization/executionRecovery.js';
 import { createMcpRuntime } from './mcp/mcpRuntime.js';
@@ -54,6 +58,7 @@ function closeHttpServer(httpServer) {
 async function closeInfrastructure({ stopAgentWorker = false } = {}) {
   stopMarketDataRefreshJobs();
   if (stopAgentWorker) await stopPlanReviewWorker();
+  await stopProductionEvaluationReconciliation();
   if (authorizedRecoveryTimer) clearInterval(authorizedRecoveryTimer);
   authorizedRecoveryTimer = null;
   const closers = [];
@@ -133,6 +138,12 @@ export async function startServer({ env = process.env } = {}) {
     startMarketDataRefreshJobs();
     if (config.agentWorkerEnabled && config.agentWorkerMode === 'embedded') {
       startPlanReviewWorker({ runtimeConfig: config, eventModel: AgentRunEvent, productionEvaluationModel: ProductionAgentEvaluation });
+      if (config.agenticPlanReviewEnabled) {
+        startProductionEvaluationReconciliation({
+          eventModel: AgentRunEvent,
+          evaluationModel: ProductionAgentEvaluation,
+        });
+      }
     }
     if (config.authorization.verifiableActionsEnabled) {
       authorizedRecoveryTimer = setInterval(() => {

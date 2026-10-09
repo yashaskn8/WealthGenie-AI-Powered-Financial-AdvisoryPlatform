@@ -7,7 +7,9 @@ import { evaluateProductionAgentRun, persistProductionAgentEvaluation } from './
 import { TERMINAL_PLAN_REVIEW_STATES } from '../planReview/planReviewRuntime.js';
 
 const MAX_EVALUATIONS_PER_RECONCILIATION = 25;
+const PRODUCTION_EVALUATION_RECONCILIATION_INTERVAL_MS = 30_000;
 let reconciliationInFlight = null;
+let periodicReconciliation = null;
 
 /**
  * Rebuilds missing diagnostic evaluations from committed terminal run/event data.
@@ -104,4 +106,42 @@ export function scheduleTerminalEvaluationReconciliation(options = {}) {
     })
     .finally(() => { reconciliationInFlight = null; });
   return reconciliationInFlight;
+}
+
+/**
+ * Start a bounded recovery sweep for terminal runs whose diagnostic
+ * evaluation was not persisted. The sweep is diagnostic only: it cannot
+ * change a terminal run or the authoritative financial state.
+ */
+export function startProductionEvaluationReconciliation({
+  timerApi = { setInterval, clearInterval },
+  ...options
+} = {}) {
+  if (typeof timerApi?.setInterval !== 'function' || typeof timerApi?.clearInterval !== 'function') {
+    throw new TypeError('Production evaluation reconciliation requires interval timer functions.');
+  }
+  if (periodicReconciliation) {
+    return {
+      started: false,
+      firstRun: periodicReconciliation.firstRun,
+      stop: stopProductionEvaluationReconciliation,
+    };
+  }
+
+  const runSweep = () => scheduleTerminalEvaluationReconciliation(options);
+  const firstRun = runSweep();
+  const timer = timerApi.setInterval(runSweep, PRODUCTION_EVALUATION_RECONCILIATION_INTERVAL_MS);
+  timer?.unref?.();
+  periodicReconciliation = { timer, timerApi, firstRun };
+  return { started: true, firstRun, stop: stopProductionEvaluationReconciliation };
+}
+
+export async function stopProductionEvaluationReconciliation() {
+  const active = periodicReconciliation;
+  if (active) {
+    periodicReconciliation = null;
+    active.timerApi.clearInterval(active.timer);
+  }
+  const inFlight = reconciliationInFlight;
+  if (inFlight) await inFlight;
 }

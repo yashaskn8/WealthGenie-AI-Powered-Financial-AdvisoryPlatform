@@ -1,6 +1,7 @@
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import https from 'node:https';
+import crypto from 'node:crypto';
 
 const DEFAULT_MAX_BYTES = 2_000_000;
 const DEFAULT_TIMEOUT_MS = 8_000;
@@ -283,7 +284,8 @@ export class SafePublicDocumentFetcher {
   }
 
   async fetchDocument(rawUrl, { signal } = {}) {
-    let current = rawUrl;
+    const requestedUrl = validatePublicUrl(rawUrl).toString();
+    let current = requestedUrl;
     const deadline = Date.now() + this.timeoutMs;
     for (let redirectCount = 0; redirectCount <= this.maxRedirects; redirectCount += 1) {
       const safeUrl = validatePublicUrl(current);
@@ -352,7 +354,20 @@ export class SafePublicDocumentFetcher {
         throw Object.assign(new Error('Research document content type is not supported.'), { code: 'RESEARCH_CONTENT_TYPE_REJECTED' });
       }
       const bytes = response.bodyBytes || await readBoundedBody(response, this.maxBytes);
-      return { url: safeUrl.toString(), contentType, body: bytes.toString('utf8'), retrievedAt: new Date().toISOString() };
+      const body = bytes.toString('utf8');
+      if (!Buffer.from(body, 'utf8').equals(bytes)) {
+        throw Object.assign(new Error('Research document is not valid UTF-8.'), { code: 'RESEARCH_DOCUMENT_ENCODING_INVALID' });
+      }
+      return {
+        requestedUrl,
+        url: safeUrl.toString(),
+        contentType,
+        statusCode: response.status,
+        redirectCount,
+        rawBodySha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+        body,
+        retrievedAt: new Date().toISOString(),
+      };
     }
     throw Object.assign(new Error('Research document redirect chain is not allowed.'), { code: 'RESEARCH_REDIRECT_REJECTED' });
   }

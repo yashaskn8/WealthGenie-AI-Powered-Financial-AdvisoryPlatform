@@ -3,10 +3,14 @@ import AgentRun from '../../models/AgentRun.js';
 import { canonicalSha256 } from '../../utils/canonicalJson.js';
 import { loadBuildProvenance, verifyBuildProvenance } from '../../services/buildProvenance.js';
 import { validateTypedFinancialClaims } from '../../services/typedFinancialClaims.js';
+import { verifyResearchSourceAttestation } from '../research/researchSourceAttestation.js';
+import { hashResearchExecutionBinding } from '../research/researchArtifact.js';
+import { RESEARCH_POLICY_VERSION } from '../research/researchConstants.js';
+import { classifyResearchSource } from '../research/sourceTrust.js';
 import { PLAN_REVIEW_TOOL_CAPABILITIES, SAFE_PLAN_REVIEW_TOOLS } from '../planReview/planReviewSchemas.js';
 
-export const PRODUCTION_EVALUATOR_VERSION = 'production-agent-evaluator-1.1.0';
-export const PRODUCTION_EVALUATION_POLICY_VERSION = 'production-evaluation-policy-1.1.0';
+export const PRODUCTION_EVALUATOR_VERSION = 'production-agent-evaluator-1.2.0';
+export const PRODUCTION_EVALUATION_POLICY_VERSION = 'production-evaluation-policy-1.2.0';
 const ALLOWED_PLAN_REVIEW_ACTIONS = new Set(['NONE', 'REVIEW_PROFILE', 'RECOMPUTE_PLAN', 'REVIEW_GOALS', 'INSUFFICIENT_EVIDENCE']);
 const PRIVATE_VALUE_PATTERN = /\b[A-Z]{5}\d{4}[A-Z]\b|\b\d{4}[ -]?\d{4}[ -]?\d{4}\b|\b[\w.+-]+@[\w.-]+\.[A-Z]{2,}\b|(?<!\d)(?:\+?91[ -]?)?[6-9]\d{9}(?!\d)|\b(?:account|acct)[ _-]?(?:number|no\.?|#)?\s*[:=]?\s*\d{9,18}\b|\b[a-f0-9]{24}\b/i;
 const PRIVATE_FIELD_PATTERN = /["'](?:user|profile|account)[_-]?id["']\s*:/i;
@@ -129,8 +133,50 @@ function validateToolLedger(ledger, trajectory, run) {
   return { forbiddenRequested, authorityViolation, unauthorizedExecuted, blockedForbidden, incompleteCalls, observedCalls: calls.size };
 }
 
+function verifyResearchFetchEvidence(entries, evaluatedAt, expectedExecutionBindingHash) {
+  const researchEntries = (Array.isArray(entries) ? entries : []).filter(entry =>
+    entry?.kind === 'PUBLIC_RESEARCH_CLAIM' || entry?.dataClass === 'VERIFIED_PUBLIC_RESEARCH');
+  if (!researchEntries.length || !expectedExecutionBindingHash) return { passed: false, status: 'UNAVAILABLE', checked: researchEntries.length, hash: null };
+  let publicJwk = null;
+  try { publicJwk = process.env.AGENT_A2A_CARD_SIGNING_PUBLIC_JWK ? JSON.parse(process.env.AGENT_A2A_CARD_SIGNING_PUBLIC_JWK) : null; } catch { /* Missing or malformed trust anchor fails closed. */ }
+  const verified = researchEntries.every(entry => {
+    const source = entry?.source;
+    const attestation = source?.fetchAttestation;
+    const sourceTier = classifyResearchSource({ url: source?.url });
+    if (!source || sourceTier === 'UNVERIFIED' || source?.sourceTrustTier !== sourceTier
+        || source?.jurisdiction !== 'IN' || source?.publicationDate !== null
+        || !source?.evidenceBinding
+        || !Number.isSafeInteger(attestation?.freshnessMaxAgeHours)
+        || attestation.freshnessMaxAgeHours > 168) return false;
+    return verifyResearchSourceAttestation(attestation, {
+      publicJwk,
+      expectedSource: {
+        canonicalUrl: source.url,
+        retrievedAt: source.retrievedAt ?? entry?.observedAt,
+        documentHash: source.documentHash,
+        evidenceBinding: source.evidenceBinding,
+      },
+      expectedTaskId: entry?.value?.taskId ?? null,
+      expectedResearchBriefHash: entry?.value?.researchBriefHash ?? null,
+      expectedExecutionBindingHash,
+      expectedResearchPolicyVersion: RESEARCH_POLICY_VERSION,
+      expectedJurisdiction: 'IN',
+      now: evaluatedAt,
+      requireFreshFetch: true,
+    }).valid;
+  });
+  const attestations = researchEntries.map(entry => entry?.source?.fetchAttestation || null);
+  return {
+    passed: verified,
+    status: verified ? 'VERIFIED' : 'UNVERIFIED',
+    checked: researchEntries.length,
+    hash: verified ? canonicalSha256(attestations) : null,
+  };
+}
+
 /** Deterministic, read-only evaluator. It never calls providers, LLMs, or financial write APIs. */
 export function evaluateProductionAgentRun({ run, durableEvents = [], afterStateBinding = null, baselineVersion = null, evaluatedAt = new Date(), buildProvenance = loadBuildProvenance() } = {}) {
+  const evaluationTime = evaluatedAt instanceof Date ? evaluatedAt : new Date(evaluatedAt);
   const sourceBindingHash = run?.sourceBinding ? canonicalSha256(run.sourceBinding) : null;
   const beforeStateHash = safeDigest(run?.planReviewSnapshotHash);
   const afterStateHash = safeDigest(afterStateBinding?.planReviewSnapshotHash);
@@ -172,9 +218,20 @@ export function evaluateProductionAgentRun({ run, durableEvents = [], afterState
     evidenceEntries: run?.result?.evidence?.entries || [],
   });
   const ledgerEventsMatch = toolEventsMatchLedger(events, run?.toolExecutionLedger, run);
-  // Evidence currently carries mutable URL and freshness labels, not an
-  // authenticated provider-fetch attestation. Those labels cannot prove source
-  // identity or freshness, so production evaluation must fail this subgate closed.
+  let expectedExecutionBindingHash = null;
+  try {
+    expectedExecutionBindingHash = hashResearchExecutionBinding({
+      runId: run?.runId,
+      executionGeneration: run?.executionGeneration,
+      traceId: run?.traceId,
+    });
+  } catch { /* Incomplete persisted run identity keeps fetch evidence unverified. */ }
+  const sourceFetchAttestation = verifyResearchFetchEvidence(
+    run?.result?.evidence?.entries, evaluationTime, expectedExecutionBindingHash,
+  );
+  // Signed retrieval proves which trusted ResearchAgent fetched which bytes and
+  // when. It does not establish the document's publication date or substantive
+  // currency; that independent content-freshness gate remains fail-closed.
   const sourceEvidenceFresh = false;
   const evidenceStatus = run?.result?.evidence?.status || 'UNAVAILABLE';
   const actionAllowed = ALLOWED_PLAN_REVIEW_ACTIONS.has(run?.result?.recommendedAction);
@@ -211,6 +268,8 @@ export function evaluateProductionAgentRun({ run, durableEvents = [], afterState
     sourceBindingHash,
     trajectoryHash: canonicalSha256(Array.isArray(run?.trajectory) ? run.trajectory : []),
     toolLedgerHash: Array.isArray(run?.toolExecutionLedger) ? canonicalSha256(run.toolExecutionLedger) : null,
+    sourceFetchAttestationHash: sourceFetchAttestation.hash,
+    sourceFetchAttestationCount: sourceFetchAttestation.checked,
     durableEventsHash: canonicalSha256(events),
     beforeAuthoritativeStateHash: beforeStateHash,
     afterAuthoritativeStateHash: afterStateHash,
@@ -225,6 +284,7 @@ export function evaluateProductionAgentRun({ run, durableEvents = [], afterState
   if (!/^sha256:[a-f0-9]{64}$/i.test(evidenceManifest.runtimeImageDigest || '')) missingEvidence.push('runtimeImageDigest');
   if (!buildBoundToImage) missingEvidence.push('buildProvenanceBoundToImage');
   if (!sourceEvidenceFresh) missingEvidence.push('sourceEvidenceFreshnessAndJurisdiction');
+  if (!sourceFetchAttestation.passed) missingEvidence.push('sourceFetchAttestation');
   if (!Number.isSafeInteger(Number(evidenceManifest.executionGeneration)) || evidenceManifest.executionGeneration < 1) missingEvidence.push('positiveExecutionGeneration');
   if (sourceBindingHash !== beforeStateHash) missingEvidence.push('sourceBindingHashMismatch');
   if (!eventSequenceValid) missingEvidence.push('durableEventSequenceOrGeneration');
@@ -263,10 +323,17 @@ export function evaluateProductionAgentRun({ run, durableEvents = [], afterState
       claimCount: typedClaimValidation.claimCount,
       errors: typedClaimValidation.errors,
     },
+    sourceFetchAttestation: {
+      passed: sourceFetchAttestation.passed,
+      status: sourceFetchAttestation.status,
+      checked: sourceFetchAttestation.checked,
+    },
     sourceFreshnessAndJurisdiction: {
       passed: sourceEvidenceFresh,
       status: 'UNVERIFIED',
-      reason: 'SOURCE_FETCH_ATTESTATION_UNAVAILABLE',
+      reason: sourceFetchAttestation.passed
+        ? 'SOURCE_PUBLICATION_FRESHNESS_UNVERIFIED'
+        : 'SOURCE_FETCH_ATTESTATION_UNAVAILABLE',
     },
     actionSchema: { passed: actionAllowed },
   };
@@ -299,7 +366,7 @@ export function evaluateProductionAgentRun({ run, durableEvents = [], afterState
     hardGateResults,
     qualitySignals,
     classification,
-    evaluatedAt: evaluatedAt instanceof Date ? evaluatedAt : new Date(evaluatedAt),
+    evaluatedAt: evaluationTime,
   };
   const runtimeEvidenceHash = canonicalSha256(evidenceManifest);
   const evaluationHash = canonicalSha256({

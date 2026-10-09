@@ -25,6 +25,18 @@ import { createModelGateway } from '../modelGateway.js';
 import { createResearchMeshClient } from '../research/researchMeshClient.js';
 import { terminalizePlanReviewRun } from './planReviewTerminal.js';
 
+const MAX_ADMISSION_TRANSACTION_RETRIES = 12;
+
+function isRetryableAdmissionConflict(error) {
+  return Number(error?.code) === 112 || error?.hasErrorLabel?.('TransientTransactionError') === true;
+}
+
+function waitForAdmissionRetry(attempt) {
+  const backoffMs = Math.min(100, 5 * (2 ** attempt));
+  const jitterMs = crypto.randomInt(0, Math.max(2, Math.floor(backoffMs / 2) + 1));
+  return new Promise(resolve => setTimeout(resolve, backoffMs + jitterMs));
+}
+
 function primaryProvider() {
   if (String(process.env.LLM_DEFAULT_PROVIDER || '').trim().toLowerCase() === 'mock') return null;
   const configured = String(process.env.LLM_PRIMARY_PROVIDER || 'NVIDIA_NIM').trim().toUpperCase();
@@ -181,138 +193,176 @@ export async function enqueuePlanReviewRun({
     error.retryAfterMs = 5000;
     return error;
   };
-  let result = null;
-  let session;
-  try {
-    session = await mongo.startSession();
-    if (typeof session?.withTransaction !== 'function') {
-      const error = new Error('PlanReview queue admission requires transaction-capable MongoDB.');
-      error.status = 503;
-      error.code = 'AGENT_QUEUE_ADMISSION_UNAVAILABLE';
-      throw error;
-    }
-    await session.withTransaction(async () => {
-      // This durable row is the cross-replica admission fence. Its write makes
-      // concurrent admission transactions conflict and retry against fresh counts.
-      const gate = await admissionModel.updateOne(
-        { _id: 'plan-review' },
-        { $inc: { epoch: 1 } },
-        { session },
-      );
-      if (!Number(gate?.modifiedCount ?? gate?.nModified ?? 0)) {
-        const error = new Error('PlanReview queue admission state is missing or unavailable.');
+  const runAdmissionAttempt = async () => {
+    const session = await mongo.startSession();
+    let result = null;
+    try {
+      if (typeof session?.withTransaction !== 'function') {
+        const error = new Error('PlanReview queue admission requires transaction-capable MongoDB.');
         error.status = 503;
         error.code = 'AGENT_QUEUE_ADMISSION_UNAVAILABLE';
         throw error;
       }
-
-      // Retire stale active work atomically with admission; history and
-      // checkpoints remain intact.
-      const staleFilter = {
-        userId,
-        profileId,
-        agentType: 'PLAN_REVIEW',
-        status: { $in: CAPACITY_CONSUMING_PLAN_REVIEW_STATES },
-        planReviewSnapshotHash: { $ne: planReviewSnapshotHash },
-      };
-      if (typeof model.find === 'function') {
-        const staleQuery = model.find(staleFilter);
-        staleQuery.session?.(session);
-        const staleRuns = await (staleQuery.lean ? staleQuery.lean() : staleQuery);
-        for (const stale of staleRuns || []) {
-          await terminalizePlanReviewRun({
-            model,
-            userId,
-            runId: stale.runId,
-            expectedStatuses: [stale.status],
-            expectedPlanReviewSnapshotHash: stale.planReviewSnapshotHash,
-            status: 'SUPERSEDED',
-            reasonCode: 'PLAN_REVIEW_SOURCE_SUPERSEDED',
-            node: stale.currentNode || null,
-            now: new Date(),
-            session,
-          });
+      await session.withTransaction(async () => {
+        // The driver may rerun a transaction callback; never retain a result
+        // from an earlier uncommitted callback invocation.
+        result = null;
+        // This durable row is the cross-replica admission fence. Its write makes
+        // concurrent admission transactions conflict and retry against fresh counts.
+        const gate = await admissionModel.updateOne(
+          { _id: 'plan-review' },
+          { $inc: { epoch: 1 } },
+          { session },
+        );
+        if (!Number(gate?.modifiedCount ?? gate?.nModified ?? 0)) {
+          const error = new Error('PlanReview queue admission state is missing or unavailable.');
+          error.status = 503;
+          error.code = 'AGENT_QUEUE_ADMISSION_UNAVAILABLE';
+          throw error;
         }
-      } else {
-        await model.updateMany(staleFilter, {
-          $set: {
-            status: 'SUPERSEDED', completedAt: new Date(), leaseUntil: null,
-            failure: { code: 'PLAN_REVIEW_SOURCE_SUPERSEDED', message: 'Financial source state changed before this review completed.' },
-          },
-          $unset: { activeDedupeKey: 1 },
-        }, { session });
-      }
 
-      const activeQuery = model.findOne({
-        userId,
-        profileId,
-        agentType: 'PLAN_REVIEW',
-        status: { $in: CAPACITY_CONSUMING_PLAN_REVIEW_STATES },
-        activeDedupeKey: dedupeKey,
+        // Retire stale active work atomically with admission; history and
+        // checkpoints remain intact.
+        const staleFilter = {
+          userId,
+          profileId,
+          agentType: 'PLAN_REVIEW',
+          status: { $in: CAPACITY_CONSUMING_PLAN_REVIEW_STATES },
+          planReviewSnapshotHash: { $ne: planReviewSnapshotHash },
+        };
+        if (typeof model.find === 'function') {
+          const staleQuery = model.find(staleFilter);
+          staleQuery.session?.(session);
+          const staleRuns = await (staleQuery.lean ? staleQuery.lean() : staleQuery);
+          for (const stale of staleRuns || []) {
+            await terminalizePlanReviewRun({
+              model,
+              userId,
+              runId: stale.runId,
+              expectedStatuses: [stale.status],
+              expectedPlanReviewSnapshotHash: stale.planReviewSnapshotHash,
+              status: 'SUPERSEDED',
+              reasonCode: 'PLAN_REVIEW_SOURCE_SUPERSEDED',
+              node: stale.currentNode || null,
+              now: new Date(),
+              session,
+            });
+          }
+        } else {
+          await model.updateMany(staleFilter, {
+            $set: {
+              status: 'SUPERSEDED', completedAt: new Date(), leaseUntil: null,
+              failure: { code: 'PLAN_REVIEW_SOURCE_SUPERSEDED', message: 'Financial source state changed before this review completed.' },
+            },
+            $unset: { activeDedupeKey: 1 },
+          }, { session });
+        }
+
+        const activeQuery = model.findOne({
+          userId,
+          profileId,
+          agentType: 'PLAN_REVIEW',
+          status: { $in: CAPACITY_CONSUMING_PLAN_REVIEW_STATES },
+          activeDedupeKey: dedupeKey,
+        });
+        activeQuery.session?.(session);
+        const active = await (activeQuery.lean ? activeQuery.lean() : activeQuery);
+        if (active) {
+          result = { created: false, run: publicRun(active, { currentStateMatch: true }) };
+          return;
+        }
+
+        if (typeof model.countDocuments !== 'function') {
+          const error = new Error('PlanReview durable queue capacity cannot be verified.');
+          error.status = 503;
+          error.code = 'AGENT_QUEUE_ADMISSION_UNAVAILABLE';
+          throw error;
+        }
+        const queuedForUser = await model.countDocuments(
+          { userId, agentType: 'PLAN_REVIEW', status: 'QUEUED' }, { session },
+        );
+        const activeForUser = await model.countDocuments(
+          { userId, agentType: 'PLAN_REVIEW', status: { $in: CAPACITY_CONSUMING_PLAN_REVIEW_STATES } }, { session },
+        );
+        const globalQueued = await model.countDocuments(
+          { agentType: 'PLAN_REVIEW', status: 'QUEUED' }, { session },
+        );
+        if (queuedForUser >= runtimeConfig.agentPlanReview.maxQueuedRunsPerUser
+          || activeForUser >= runtimeConfig.agentPlanReview.maxActiveRunsPerUser
+          || globalQueued >= runtimeConfig.agentPlanReview.maxGlobalQueuedRuns) throw queueError();
+
+        const [created] = await model.create([{
+          runId: crypto.randomUUID(),
+          agentType: 'PLAN_REVIEW',
+          userId,
+          profileId,
+          status: 'QUEUED',
+          priority: 'INTERACTIVE_PLAN_REVIEW',
+          priorityRank: PLAN_REVIEW_PRIORITY_RANK.INTERACTIVE_PLAN_REVIEW,
+          recommendationId: sourceBinding.recommendationId,
+          planReviewSnapshotHash,
+          sourceBinding,
+          dedupeKey,
+          activeDedupeKey: dedupeKey,
+          correlationId,
+          agentVersion: PLAN_REVIEW_AGENT_VERSION,
+          graphVersion: PLAN_REVIEW_GRAPH_VERSION,
+          toolCatalogVersion: PLAN_REVIEW_TOOL_CATALOG_VERSION,
+          plannerVersion: PLAN_REVIEW_PLANNER_VERSION,
+          policyVersion: PLAN_REVIEW_POLICY_VERSION,
+          maxAttempts: PLAN_REVIEW_BUDGETS.maxAttempts,
+        }], { session });
+        result = { created: true, run: publicRun(created, { currentStateMatch: true }) };
       });
-      activeQuery.session?.(session);
-      const active = await (activeQuery.lean ? activeQuery.lean() : activeQuery);
-      if (active) {
-        result = { created: false, run: publicRun(active, { currentStateMatch: true }) };
-        return;
-      }
-
-      if (typeof model.countDocuments !== 'function') {
-        const error = new Error('PlanReview durable queue capacity cannot be verified.');
+      if (!result) {
+        const error = new Error('PlanReview queue admission completed without a durable result.');
         error.status = 503;
         error.code = 'AGENT_QUEUE_ADMISSION_UNAVAILABLE';
         throw error;
       }
-      const queuedForUser = await model.countDocuments(
-        { userId, agentType: 'PLAN_REVIEW', status: 'QUEUED' }, { session },
-      );
-      const activeForUser = await model.countDocuments(
-        { userId, agentType: 'PLAN_REVIEW', status: { $in: CAPACITY_CONSUMING_PLAN_REVIEW_STATES } }, { session },
-      );
-      const globalQueued = await model.countDocuments(
-        { agentType: 'PLAN_REVIEW', status: 'QUEUED' }, { session },
-      );
-      if (queuedForUser >= runtimeConfig.agentPlanReview.maxQueuedRunsPerUser
-        || activeForUser >= runtimeConfig.agentPlanReview.maxActiveRunsPerUser
-        || globalQueued >= runtimeConfig.agentPlanReview.maxGlobalQueuedRuns) throw queueError();
-
-      const [created] = await model.create([{
-        runId: crypto.randomUUID(),
-        agentType: 'PLAN_REVIEW',
-        userId,
-        profileId,
-        status: 'QUEUED',
-        priority: 'INTERACTIVE_PLAN_REVIEW',
-        priorityRank: PLAN_REVIEW_PRIORITY_RANK.INTERACTIVE_PLAN_REVIEW,
-        recommendationId: sourceBinding.recommendationId,
-        planReviewSnapshotHash,
-        sourceBinding,
-        dedupeKey,
-        activeDedupeKey: dedupeKey,
-        correlationId,
-        agentVersion: PLAN_REVIEW_AGENT_VERSION,
-        graphVersion: PLAN_REVIEW_GRAPH_VERSION,
-        toolCatalogVersion: PLAN_REVIEW_TOOL_CATALOG_VERSION,
-        plannerVersion: PLAN_REVIEW_PLANNER_VERSION,
-        policyVersion: PLAN_REVIEW_POLICY_VERSION,
-        maxAttempts: PLAN_REVIEW_BUDGETS.maxAttempts,
-      }], { session });
-      result = { created: true, run: publicRun(created, { currentStateMatch: true }) };
-    });
-    if (!result) {
-      const error = new Error('PlanReview queue admission completed without a durable result.');
-      error.status = 503;
-      error.code = 'AGENT_QUEUE_ADMISSION_UNAVAILABLE';
-      throw error;
+      return result;
+    } finally {
+      await session?.endSession();
     }
-    return result;
+  };
+
+  const queueIsCurrentlyFull = async () => {
+    try {
+      const [queuedForUser, activeForUser, globalQueued] = await Promise.all([
+        model.countDocuments({ userId, agentType: 'PLAN_REVIEW', status: 'QUEUED' }),
+        model.countDocuments({ userId, agentType: 'PLAN_REVIEW', status: { $in: CAPACITY_CONSUMING_PLAN_REVIEW_STATES } }),
+        model.countDocuments({ agentType: 'PLAN_REVIEW', status: 'QUEUED' }),
+      ]);
+      return queuedForUser >= runtimeConfig.agentPlanReview.maxQueuedRunsPerUser
+        || activeForUser >= runtimeConfig.agentPlanReview.maxActiveRunsPerUser
+        || globalQueued >= runtimeConfig.agentPlanReview.maxGlobalQueuedRuns;
+    } catch {
+      return false;
+    }
+  };
+
+  try {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await runAdmissionAttempt();
+      } catch (error) {
+        if (!isRetryableAdmissionConflict(error)) throw error;
+        if (attempt >= MAX_ADMISSION_TRANSACTION_RETRIES) {
+          if (await queueIsCurrentlyFull()) throw queueError();
+          const unavailable = new Error('PlanReview queue admission could not serialize its transaction.');
+          unavailable.status = 503;
+          unavailable.code = 'AGENT_QUEUE_ADMISSION_UNAVAILABLE';
+          unavailable.cause = error;
+          throw unavailable;
+        }
+        await waitForAdmissionRetry(attempt);
+      }
+    }
   } catch (error) {
     if (error?.code !== 11000) throw error;
     const existing = await model.findOne({ activeDedupeKey: dedupeKey, planReviewSnapshotHash }).lean();
     if (!existing) throw error;
     return { created: false, run: publicRun(existing, { currentStateMatch: true }) };
-  } finally {
-    await session?.endSession();
   }
 }
 

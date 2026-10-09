@@ -5,6 +5,7 @@ const append = () => Annotation({ reducer: (left = [], right = []) => [...left, 
 
 export const PlanReviewState = Annotation.Root({
   runId: replace(),
+  executionGeneration: replace(1),
   userId: replace(),
   profileId: replace(),
   expectedPlanReviewSnapshotHash: replace(),

@@ -1682,6 +1682,13 @@ test('NIFTY ETF tax verifier fails closed unless a calculated result has matchin
     product => { product.postTaxAnalysis.taxClass = 'BANK_DEPOSIT_INTEREST'; },
     product => { product.postTaxAnalysis.sourceReferences[0].url = 'https://mf.nipponindiaim.com/unrelated.pdf'; },
     product => { product.canonicalProductId = 'etf:isin:OTHER'; },
+    product => { product.postTaxAnalysis.grossGain += 1; },
+    product => { product.postTaxAnalysis.incrementalTax += 1; },
+    product => { product.postTaxAnalysis.netGain += 1; },
+    product => { product.postTaxAnalysis.postTaxRatePct += 0.01; },
+    product => { product.postTaxAnalysis.principal += 1; },
+    product => { product.postTaxAnalysis.illustrativePrincipal += 1; },
+    product => { product.postTaxAnalysis.taxableGain += 1; },
   ];
   for (const mutate of mutations) {
     const product = qualifiedNiftyTaxProductFixture();
@@ -1691,6 +1698,15 @@ test('NIFTY ETF tax verifier fails closed unless a calculated result has matchin
   assert.equal(qualifiesCalculatedNiftyEtfTax(validProduct, taxContext, { financialBindingValid: false }), false);
   assert.equal(qualifiesCalculatedNiftyEtfTax(validProduct, { ...taxContext, sttConditionAssumedSatisfied: false }), false);
   assert.equal(qualifiesCalculatedNiftyEtfTax(validProduct, { fiscalYear: 'FY2026-27' }), false);
+  assert.equal(qualifiesCalculatedNiftyEtfTax(validProduct, demoTaxContext({ illustrativePrincipal: 999999 })), false);
+  for (const changedTaxContext of [
+    demoTaxContext({ annualGrossIncome: 25000000 }),
+    demoTaxContext({ holdingPeriodMonths: 12 }),
+    demoTaxContext({ section112AExemptionUsed: 100000 }),
+  ]) {
+    assert.equal(qualifiesCalculatedNiftyEtfTax(validProduct, changedTaxContext), false,
+      'the calculated result must be reproduced from the supplied income, holding-period, and Section 112A exemption inputs');
+  }
 });
 
 test('WTI HTTP failures stay under WTI checks and never become browser failures', async () => {

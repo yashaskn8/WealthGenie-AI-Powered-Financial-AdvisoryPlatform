@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { trace } from '../../config/tracing.js';
 import {
   SAFE_TELEMETRY_ATTRIBUTE_NAMES,
@@ -10,7 +11,21 @@ export function sanitizeAgentAttributes(attributes = {}) {
   return sanitizeTelemetryAttributes(attributes);
 }
 
+const telemetrySuppression = new AsyncLocalStorage();
+const NOOP_AGENT_SPAN = Object.freeze({
+  setAttribute() { return this; },
+  recordException() {},
+  setStatus() {},
+  end() {},
+});
+
+export function withAgentTelemetrySuppressed(callback) {
+  if (typeof callback !== 'function') throw new TypeError('A telemetry suppression callback is required.');
+  return telemetrySuppression.run(true, callback);
+}
+
 export function startAgentSpan(name, attributes = {}, callback) {
+  if (telemetrySuppression.getStore()) return callback(NOOP_AGENT_SPAN);
   const tracer = trace.getTracer('wealthgenie.agent');
   return tracer.startActiveSpan(name, { attributes: sanitizeAgentAttributes(attributes) }, callback);
 }

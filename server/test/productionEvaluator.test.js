@@ -8,7 +8,10 @@ import {
   persistProductionAgentEvaluation,
   verifyProductionAgentEvaluationIntegrity,
 } from '../agents/evals/productionEvaluator.js';
-import { reconcileMissingTerminalEvaluations } from '../agents/evals/productionEvaluationQueue.js';
+import {
+  reconcileMissingTerminalEvaluations,
+  startProductionEvaluationReconciliation,
+} from '../agents/evals/productionEvaluationQueue.js';
 
 const now = new Date('2026-10-06T12:00:00.000Z');
 
@@ -468,6 +471,62 @@ test('terminal evaluation reconciliation contains evaluator-store outages withou
   });
   assert.deepEqual(result, { scanned: 1, persisted: 0, failed: 1 });
   assert.equal(run.status, 'FAILED');
+});
+
+test('startup and periodic evaluation reconciliation recover failed terminal diagnostics without changing the run', async () => {
+  const { run, durableEvents } = fixture({ run: { status: 'FAILED' } });
+  let saved = null;
+  let storeAvailable = false;
+  let aggregateCalls = 0;
+  let retrySweep = null;
+  let intervalCleared = false;
+  const evaluationModel = {
+    collection: { name: 'productionagentevaluations' },
+    findOne: () => ({ lean: async () => saved }),
+    create: async ([record]) => {
+      if (!storeAvailable) throw new Error('evaluation persistence unavailable');
+      saved = record;
+      return [record];
+    },
+  };
+  const timerApi = {
+    setInterval(callback, intervalMs) {
+      assert.equal(intervalMs, 30_000, 'recovery polling stays bounded');
+      retrySweep = callback;
+      return { unref() {} };
+    },
+    clearInterval() { intervalCleared = true; },
+  };
+  const recovery = startProductionEvaluationReconciliation({
+    timerApi,
+    runModel: {
+      aggregate: async () => {
+        aggregateCalls += 1;
+        return saved ? [] : [run];
+      },
+    },
+    eventModel: {
+      find: () => ({ sort() { return this; }, lean: async () => durableEvents }),
+    },
+    evaluationModel,
+    evaluatedAt: now,
+  });
+
+  try {
+    assert.equal(recovery.started, true);
+    assert.deepEqual(await recovery.firstRun, { scanned: 1, persisted: 0, failed: 1 });
+    assert.equal(run.status, 'FAILED', 'an evaluator outage cannot rewrite the terminal run');
+    assert.equal(saved, null);
+
+    storeAvailable = true;
+    assert.deepEqual(await retrySweep(), { scanned: 1, persisted: 1, failed: 0 });
+    assert.equal(aggregateCalls, 2, 'the periodic sweep retries without waiting for another terminal event');
+    assert.equal(saved.runId, run.runId);
+    assert.equal(run.status, 'FAILED');
+  } finally {
+    await recovery.stop();
+  }
+  assert.equal(intervalCleared, true, 'shutdown cancels the reconciliation timer');
 });
 
 test('production evaluation integrity binds the evidence manifest and read access to the originating run owner', async () => {

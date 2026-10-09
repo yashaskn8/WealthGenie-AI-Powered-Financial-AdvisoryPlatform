@@ -9,6 +9,8 @@ import {
 } from './researchFactNormalization.js';
 import { validateResearchArtifact } from './researchSchemas.js';
 import { classifyResearchSource, isSourceTierAtLeast } from './sourceTrust.js';
+import { normalizeSourceEvidenceBindings, verifyResearchSourceAttestation } from './researchSourceAttestation.js';
+import { RESEARCH_POLICY_VERSION } from './researchConstants.js';
 
 const UNSAFE_LANGUAGE = /\b(?:guaranteed?|risk[- ]free|certain(?:ly)?|will earn)\b/i;
 const PRESCRIPTIVE_SUBJECT = '(?:you|your|everyone|anyone|all\\s+investors?|investors?|readers?|users?|customers?|people|individuals?|savers?|borrowers?|traders?|households?|one)';
@@ -71,6 +73,10 @@ export function verifyResearchArtifact(artifact, {
   brief = null,
   now = new Date(),
   requireIndependentSourceMetadata = false,
+  requireSourceAttestation = false,
+  requireFreshSourceFetch = false,
+  trustedSourceAttestationJwk = null,
+  expectedTaskId = null,
 } = {}) {
   const errors = [];
   const audits = [];
@@ -80,6 +86,8 @@ export function verifyResearchArtifact(artifact, {
   if (artifact?.financialAuthorityDelta !== 0) errors.push('FINANCIAL_AUTHORITY_DELTA_NONZERO');
   if (brief && artifact?.researchBriefId !== brief.researchBriefId) errors.push('RESEARCH_BRIEF_BINDING_MISMATCH');
   if (brief && artifact?.researchBriefHash !== hashResearchBrief(brief)) errors.push('RESEARCH_BRIEF_HASH_MISMATCH');
+  if (expectedTaskId !== null && artifact?.taskId !== expectedTaskId) errors.push('RESEARCH_TASK_BINDING_MISMATCH');
+  if (requireSourceAttestation && !brief?.executionBindingHash) errors.push('RESEARCH_EXECUTION_BINDING_REQUIRED');
   if (brief && artifact?.taskId !== null && (typeof artifact?.taskId !== 'string' || artifact.taskId.length > 160)) errors.push('RESEARCH_TASK_BINDING_INVALID');
   const uniqueIds = (entries, key, label) => {
     const ids = entries.map(item => item?.[key]).filter(Boolean);
@@ -118,6 +126,35 @@ export function verifyResearchArtifact(artifact, {
     }
     const derivedFreshness = deriveFreshness(evidence.publicationDate, brief, now);
     if (evidence.freshnessStatus !== derivedFreshness) errors.push(`FRESHNESS_PROVENANCE_${evidence.evidenceId}`);
+  }
+
+  for (const source of artifact?.sources || []) {
+    if (requireSourceAttestation && !source.fetchAttestation) {
+      errors.push(`SOURCE_FETCH_ATTESTATION_MISSING_${source.sourceId}`);
+      continue;
+    }
+    if (!source.fetchAttestation) continue;
+    if (!trustedSourceAttestationJwk && !requireSourceAttestation) continue;
+    const attestation = verifyResearchSourceAttestation(source.fetchAttestation, {
+      publicJwk: trustedSourceAttestationJwk,
+      expectedSource: {
+        canonicalUrl: source.canonicalUrl,
+        retrievedAt: source.retrievedAt,
+        documentHash: source.documentHash,
+        evidenceBindings: normalizeSourceEvidenceBindings((artifact?.evidenceUnits || [])
+          .filter(item => item.sourceId === source.sourceId)
+          .map(item => ({ evidenceId: item.evidenceId, supportingExcerptHash: item.supportingExcerptHash }))),
+      },
+      expectedTaskId: expectedTaskId ?? artifact?.taskId ?? null,
+      expectedResearchBriefHash: artifact?.researchBriefHash ?? null,
+      expectedExecutionBindingHash: brief?.executionBindingHash ?? null,
+      expectedResearchPolicyVersion: RESEARCH_POLICY_VERSION,
+      expectedJurisdiction: brief?.jurisdiction || null,
+      expectedFreshnessMaxAgeHours: brief?.freshnessRequirement?.maxAgeHours ?? null,
+      now,
+      requireFreshFetch: requireFreshSourceFetch,
+    });
+    if (!attestation.valid) errors.push(`SOURCE_FETCH_ATTESTATION_${attestation.reason}_${source.sourceId}`);
   }
 
   for (const claim of artifact?.claims || []) {

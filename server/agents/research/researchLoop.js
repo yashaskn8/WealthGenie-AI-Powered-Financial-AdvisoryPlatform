@@ -1,9 +1,9 @@
 import { PrometheusMetrics } from '../../services/metricsCollector.js';
-import { boundedResearchBudget, emptyResearchBudgetUsage, stableResearchId } from './researchConstants.js';
+import { boundedResearchBudget, emptyResearchBudgetUsage, RESEARCH_POLICY_VERSION, stableResearchId } from './researchConstants.js';
 import { validateResearchBrief } from './researchSchemas.js';
 import { validatePublicUrl } from './safePublicDocumentFetcher.js';
 import { extractDocumentEvidence, isCanonicalRetrievedAt } from './documentEvidenceExtractor.js';
-import { buildResearchArtifact } from './researchArtifact.js';
+import { buildResearchArtifact, hashResearchBrief } from './researchArtifact.js';
 import { detectResearchContradictions, verifyResearchArtifact } from './researchClaimVerifier.js';
 
 function throwIfAborted(signal) {
@@ -64,6 +64,7 @@ function sourceFromEvidence(evidence) {
     retrievedAt: evidence.retrievedAt,
     sourceTrustTier: evidence.sourceTrustTier,
     documentHash: evidence.documentHash,
+    fetchAttestation: evidence.fetchAttestation || null,
   };
 }
 
@@ -126,6 +127,7 @@ export async function runResearch({
   signal,
   now = new Date(),
   onProgress = async () => undefined,
+  attestSourceFetch = null,
 } = {}) {
   const validation = validateResearchBrief(brief);
   if (validation.error) {
@@ -194,10 +196,11 @@ export async function runResearch({
       if (seenDocuments.has(candidateUrl)) continue;
       seenDocuments.add(candidateUrl);
       let document = candidate;
+      let fetchedDocument = null;
       const fixtureInlineContent = provider.name === 'fixture' && Boolean(candidate.content);
       if (!fixtureInlineContent) {
-        const fetched = await awaitWithAbort(documentFetcher.fetchDocument(candidateUrl, { signal: operationSignal }), operationSignal);
-        if (!isCanonicalRetrievedAt(fetched?.retrievedAt)) {
+        fetchedDocument = await awaitWithAbort(documentFetcher.fetchDocument(candidateUrl, { signal: operationSignal }), operationSignal);
+        if (!isCanonicalRetrievedAt(fetchedDocument?.retrievedAt)) {
           unresolvedGaps.push({
             gapId: stableResearchId('G', candidateUrl),
             factType: safeBrief.requestedFactTypes[0],
@@ -210,11 +213,11 @@ export async function runResearch({
         // Only fixture documents may supply these fields; live evidence uses the URL
         // actually fetched and leaves legal/publication time unknown absent a parser.
         document = {
-          url: fetched.url,
-          content: fetched.body,
-          retrievedAt: fetched.retrievedAt,
+          url: fetchedDocument.url,
+          content: fetchedDocument.body,
+          retrievedAt: fetchedDocument.retrievedAt,
           title: null,
-          publisher: publisherFromUrl(fetched.url),
+          publisher: publisherFromUrl(fetchedDocument.url),
           publicationDate: null,
         };
       }
@@ -238,11 +241,42 @@ export async function runResearch({
         continue;
       }
       if (!extracted.evidenceUnits.length) continue;
+      const units = extracted.evidenceUnits.map(unit => ({
+        ...unit,
+        freshnessStatus: isFresh(unit.publicationDate, safeBrief, now),
+      }));
+      let fetchAttestation = null;
+      if (!fixtureInlineContent && typeof attestSourceFetch === 'function') {
+        try {
+          fetchAttestation = attestSourceFetch({
+            requestedUrl: candidateUrl,
+            document: fetchedDocument,
+            documentHash: units[0].documentHash,
+            evidenceUnits: units,
+            taskId,
+            researchBriefHash: hashResearchBrief(safeBrief),
+            executionBindingHash: safeBrief.executionBindingHash,
+            researchPolicyVersion: RESEARCH_POLICY_VERSION,
+            freshnessRequiredSourceTier: safeBrief.freshnessRequirement.requiredSourceTier,
+            jurisdiction: safeBrief.jurisdiction,
+            freshnessMaxAgeHours: safeBrief.freshnessRequirement.maxAgeHours,
+          });
+        } catch {
+          unresolvedGaps.push({
+            gapId: stableResearchId('G', candidateUrl),
+            factType: safeBrief.requestedFactTypes[0],
+            status: 'UNRESOLVED',
+            reasonCode: 'RESEARCH_SOURCE_ATTESTATION_FAILED',
+          });
+          continue;
+        }
+      }
       usage.documentCount += 1;
       PrometheusMetrics.inc('research_documents_total');
-      const units = extracted.evidenceUnits.map(unit => ({ ...unit, freshnessStatus: isFresh(unit.publicationDate, safeBrief, now) }));
       evidenceUnits.push(...units);
-      sources.push(...units.filter(unit => !sources.some(source => source.sourceId === unit.sourceId)).map(sourceFromEvidence));
+      if (!sources.some(source => source.sourceId === units[0].sourceId)) {
+        sources.push(sourceFromEvidence({ ...units[0], fetchAttestation }));
+      }
       for (const unit of units) {
         const claim = claimFromEvidence(unit, safeBrief, now);
         if (seenClaims.has(claim.text.toLowerCase())) continue;

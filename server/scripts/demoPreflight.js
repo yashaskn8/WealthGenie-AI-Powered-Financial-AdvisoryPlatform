@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { matchesBuildSha } from '../../shared/buildIdentity.js';
 import {
@@ -18,6 +19,7 @@ import {
   NIFTYBEES_PRODUCT_TAX_EVIDENCE,
   PRODUCT_TAX_CLASSES,
 } from '../services/productTaxAuthority.js';
+import { calculateProductPostTaxOutcome } from '../services/productPostTaxCalculator.js';
 import { getCurrentFiscalYear, getTaxPolicyMetadata } from '../services/taxEngine.js';
 import {
   BACKEND_HTTP_HARD_TIMEOUT_MS,
@@ -393,6 +395,13 @@ const CALCULATED_TAX_FIELDS = Object.freeze([
   'principal', 'grossGain', 'taxableGain', 'exemptionApplied', 'incrementalTax',
   'cess', 'surcharge', 'netGain', 'postTaxRatePct',
 ]);
+const TAX_CONTEXT_BOUND_OUTPUT_FIELDS = Object.freeze([
+  'status', 'taxClass', 'taxClassification', 'taxClassificationMetadata',
+  'fiscalYear', 'policyVersion', 'calculationClass', 'inputBasis',
+  ...CALCULATED_TAX_FIELDS, 'illustrativePrincipal', 'holdingPeriodBasis', 'dataClass',
+  'assumptions', 'unavailableReasons', 'sourceReferences', 'rulesApplied', 'requiredTaxInputs',
+  'metricLabel', 'disclosure', 'isHistoricalEstimate', 'historicalObservationWindowMonths', 'taxRuleMetadata',
+]);
 
 const SERVER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const REPO_ROOT = path.resolve(SERVER_DIR, '..');
@@ -664,12 +673,36 @@ export function qualifiesCalculatedNiftyEtfTax(product, taxContext, { financialB
       || product.historicalReturn?.isExpectedReturn !== false
       || !Number.isFinite(product.historicalReturn?.valuePct)) return false;
 
+  const principal = Number(taxContext.illustrativePrincipal);
+  const historicalRate = Number(product.historicalReturn.valuePct);
+  if (!Number.isFinite(principal) || principal <= 0 || !Number.isFinite(historicalRate)) return false;
+  let expectedAnalysis;
+  try {
+    expectedAnalysis = calculateProductPostTaxOutcome({ product, taxCalculationContext: taxContext });
+  } catch {
+    return false;
+  }
+  if (expectedAnalysis?.status !== 'CALCULATED'
+      || !TAX_CONTEXT_BOUND_OUTPUT_FIELDS.every(field =>
+        isDeepStrictEqual(analysis[field], expectedAnalysis[field]))) return false;
+  const expectedGrossGain = Math.round(principal * (historicalRate / 100));
+  const expectedPostTaxRate = Number(((analysis.netGain / principal) * 100).toFixed(2));
   return CALCULATED_TAX_FIELDS.every(field => Number.isFinite(analysis[field]))
-    && analysis.principal > 0
+    && analysis.principal === principal
+    && analysis.illustrativePrincipal === principal
+    && analysis.grossGain === expectedGrossGain
     && analysis.incrementalTax >= 0
     && analysis.cess >= 0
     && analysis.surcharge >= 0
-    && analysis.exemptionApplied >= 0;
+    && analysis.exemptionApplied >= 0
+    && analysis.taxableGain >= 0
+    && analysis.netGain === analysis.grossGain - analysis.incrementalTax
+    && analysis.postTaxRatePct === expectedPostTaxRate
+    && (analysis.grossGain > 0
+      ? analysis.taxableGain + analysis.exemptionApplied === analysis.grossGain
+      : analysis.taxableGain === 0 && analysis.exemptionApplied === 0
+        && analysis.incrementalTax === 0 && analysis.cess === 0 && analysis.surcharge === 0
+        && analysis.netGain === analysis.grossGain);
 }
 
 function isTimestampWithin(timestamp, nowMs, maximumAgeSeconds) {

@@ -9,7 +9,7 @@ import { loadPlanReviewContext, executePlanReviewTool, getPlanReviewToolDefiniti
 import { PlanReviewState } from './planReviewState.js';
 import { createResearchBrief } from '../research/researchSchemas.js';
 import { evaluateResearchNeed } from '../research/researchNeedEvaluator.js';
-import { researchArtifactToEvidenceEntries } from '../research/researchArtifact.js';
+import { hashResearchExecutionBinding, researchArtifactToEvidenceEntries } from '../research/researchArtifact.js';
 import { verifyResearchArtifact } from '../research/researchClaimVerifier.js';
 import {
   MAX_AGENT_STEPS,
@@ -508,6 +508,11 @@ function researchBriefForPlan(state, mode) {
     topic: 'Current public financial and regulatory evidence',
     question: 'Retrieve current public evidence that can safely explain a read-only financial plan review. Do not use private user information, make recommendations, or perform financial calculations.',
     jurisdiction: 'IN',
+    executionBindingHash: hashResearchExecutionBinding({
+      runId: state.runId,
+      executionGeneration: state.executionGeneration,
+      traceId: state.traceId,
+    }),
     requestedFactTypes: ['regulatory_context', 'public_market_context'],
     instrumentCategories: [],
     maxResearchDepth: mode === 'DEEP_RESEARCH' ? 3 : 1,
@@ -622,7 +627,11 @@ async function synthesizeNode(state, dependencies) {
         span.setAttribute('agent.fallback_used', Boolean(value?.fallback));
         return value;
       });
-      provider = { provider: explanation.provider, model: explanation.model, fallback: explanation.fallback };
+      // PlanReview's persisted/public provider contract is `{ name, model,
+      // fallback }`. The grounded-explanation service calls the adapter id
+      // `provider`; translate that field before the policy schema validates
+      // the final financial review.
+      provider = { name: explanation.provider, model: explanation.model, fallback: explanation.fallback };
       modelCallCount = dependencies.modelBudget?.modelCalls ?? modelCallCount + 1;
     } catch (error) {
       if (dependencies.signal?.aborted || error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') throw error;

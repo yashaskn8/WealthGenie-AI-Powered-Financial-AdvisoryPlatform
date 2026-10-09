@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import Joi from 'joi';
+import { RESEARCH_SOURCE_ATTESTATION_VERSION, RESEARCH_SOURCE_FETCHER_ID } from './researchSourceAttestation.js';
 
 const id = Joi.string().trim().min(1).max(160);
 const isoDate = Joi.string().isoDate();
@@ -13,6 +14,31 @@ const freshnessRequirementSchema = Joi.object({
   maxAgeHours: Joi.number().integer().min(1).max(8760).default(168),
   requiredSourceTier: Joi.string().valid('OFFICIAL_PRIMARY', 'PRIMARY_ISSUER', 'TRUSTED_SECONDARY', 'UNVERIFIED').default('TRUSTED_SECONDARY'),
 }).unknown(false).default({ maxAgeHours: 168, requiredSourceTier: 'TRUSTED_SECONDARY' });
+
+const sourceFetchAttestationSchema = Joi.object({
+  schemaVersion: Joi.string().valid(RESEARCH_SOURCE_ATTESTATION_VERSION).required(),
+  algorithm: Joi.string().valid('RS256').required(),
+  keyId: Joi.string().pattern(/^[A-Za-z0-9._:-]{1,128}$/).required(),
+  fetcher: Joi.string().valid(RESEARCH_SOURCE_FETCHER_ID).required(),
+  requestedUrl: Joi.string().uri({ scheme: ['https'] }).max(2048).required(),
+  canonicalUrl: Joi.string().uri({ scheme: ['https'] }).max(2048).required(),
+  contentType: Joi.string().pattern(/^(?:text\/[a-z0-9.+-]+|application\/json)$/).max(80).required(),
+  statusCode: Joi.number().integer().valid(200).required(),
+  redirectCount: Joi.number().integer().min(0).max(3).required(),
+  retrievedAt: isoDate.required(),
+  rawBodySha256: Joi.string().hex().length(64).required(),
+  documentHash: Joi.string().hex().length(64).required(),
+  taskId: id.required(),
+  researchBriefHash: Joi.string().hex().length(64).required(),
+  executionBindingHash: Joi.string().hex().length(64).required(),
+  researchPolicyVersion: Joi.string().trim().max(120).required(),
+  freshnessRequiredSourceTier: Joi.string().valid('OFFICIAL_PRIMARY', 'PRIMARY_ISSUER', 'TRUSTED_SECONDARY', 'UNVERIFIED').required(),
+  freshnessMaxAgeHours: Joi.number().integer().min(1).max(8760).required(),
+  jurisdiction: Joi.string().pattern(/^[A-Z]{2,3}$/).required(),
+  publicationDate: Joi.valid(null).required(),
+  evidenceBindings: Joi.array().items(Joi.object({ evidenceId: id.required(), supportingExcerptHash: Joi.string().hex().length(64).required() }).unknown(false)).min(1).max(12).required(),
+  signature: Joi.string().pattern(/^[A-Za-z0-9_-]+$/).max(2048).required(),
+}).unknown(false);
 
 export const researchBriefSchema = Joi.object({
   researchBriefId: id.required(),
@@ -30,6 +56,7 @@ export const researchBriefSchema = Joi.object({
   knownEvidenceIds: Joi.array().items(id).max(40).unique().default([]),
   knownSourceDates: Joi.array().items(knownSourceDateSchema).max(40).default([]),
   freshnessRequirement: freshnessRequirementSchema,
+  executionBindingHash: Joi.string().hex().length(64).allow(null).default(null),
   maxResearchDepth: Joi.number().integer().min(0).max(3).required(),
 }).unknown(false);
 
@@ -42,6 +69,7 @@ const sourceSchema = Joi.object({
   retrievedAt: isoDate.required(),
   sourceTrustTier: Joi.string().valid('OFFICIAL_PRIMARY', 'PRIMARY_ISSUER', 'TRUSTED_SECONDARY', 'UNVERIFIED').required(),
   documentHash: Joi.string().hex().length(64).required(),
+  fetchAttestation: sourceFetchAttestationSchema.allow(null).optional(),
 }).unknown(false);
 
 const evidenceUnitSchema = Joi.object({
@@ -77,7 +105,7 @@ const claimSchema = Joi.object({
 
 export const researchArtifactSchema = Joi.object({
   artifactId: id.required(),
-  version: Joi.string().valid('1.1.0').required(),
+  version: Joi.string().valid('1.1.0', '1.2.0', '1.3.0').required(),
   researchBriefId: id.required(),
   researchBriefHash: Joi.string().hex().length(64).required(),
   taskId: id.allow(null).required(),
