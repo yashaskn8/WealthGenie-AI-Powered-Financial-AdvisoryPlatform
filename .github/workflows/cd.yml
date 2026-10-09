@@ -381,7 +381,8 @@ jobs:
           fi
           certutil -A -d "sql:$NSS_DB" -n wealthgenie-phase15-ci -t 'C,,' -i "$CERT_DIR/ca.crt"
           certutil -L -d "sql:$NSS_DB" -n wealthgenie-phase15-ci
-          certutil -V -d "sql:$NSS_DB" -n wealthgenie-phase15-ci -u V
+          certutil -A -d "sql:$NSS_DB" -n wealthgenie-phase15-ci-server -t ',,' -i "$CERT_DIR/server.crt"
+          certutil -V -d "sql:$NSS_DB" -n wealthgenie-phase15-ci-server -u V
           sudo install -m 0644 "$CERT_DIR/ca.crt" /usr/local/share/ca-certificates/wealthgenie-phase15-ci.crt
           sudo update-ca-certificates
           {
