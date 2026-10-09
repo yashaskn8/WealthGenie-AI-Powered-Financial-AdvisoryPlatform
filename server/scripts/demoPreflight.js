@@ -1007,8 +1007,19 @@ function safeStableCode(value) {
   return typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(value) ? value : null;
 }
 
+function safeBrowserNetworkErrorCode(error) {
+  for (const message of [error?.message, error?.cause?.message]) {
+    if (typeof message !== 'string') continue;
+    const match = message.slice(0, 2_000).match(/\bnet::(ERR_[A-Z0-9_]{1,55})\b/);
+    if (match) return safeStableCode(match[1]);
+  }
+  return null;
+}
+
 function safeFailureKind(error) {
-  const code = safeStableCode(error?.code) || safeStableCode(error?.cause?.code);
+  const code = safeStableCode(error?.code)
+    || safeStableCode(error?.cause?.code)
+    || safeBrowserNetworkErrorCode(error);
   const name = ['AbortError', 'AssertionError', 'Error', 'RangeError', 'SyntaxError', 'TimeoutError', 'TypeError'].includes(error?.name)
     ? error.name.toUpperCase()
     : null;
@@ -1309,17 +1320,19 @@ export async function checkBrowserAndFinancialFlow(reporter, {
   let providerRequestObserved = false;
   let providerRequestInspectionFailed = false;
   let criticalPathRecorded = false;
-  let browserJourneyStage = 'profile navigation';
+  let browserJourneyStage = 'validate frontend URL';
   const recordCriticalPath = (passed, detail) => {
     reporter.add('Critical browser path', passed, detail);
     criticalPathRecorded = true;
   };
   try {
     try {
+      browserJourneyStage = 'validate frontend URL';
       const frontend = new URL(frontendUrl);
       if (!isSafeDemoUrl(frontendUrl, { remoteOrigins: trustedRemoteOrigins })) {
         throw new Error('Unsafe frontend URL configuration.');
       }
+      browserJourneyStage = 'launch Chromium';
       if (launchBrowser) {
         browser = await launchBrowser();
       } else {
@@ -1331,10 +1344,12 @@ export async function checkBrowserAndFinancialFlow(reporter, {
         throw Object.assign(new Error('Browser launch returned an invalid browser handle.'), { code: 'BROWSER_HANDLE_INVALID' });
       }
       browserLaunched = true;
+      browserJourneyStage = 'create browser context';
       context = await browser.newContext({ serviceWorkers: 'block' });
       if (typeof context.route !== 'function') {
         throw Object.assign(new Error('Browser request-origin guard is unavailable.'), { code: 'BROWSER_ORIGIN_GUARD_UNAVAILABLE' });
       }
+      browserJourneyStage = 'install outbound-request guard';
       const withFrontendRouteSlot = createSemaphore(4);
       let frontendRouteBytes = 0;
       await context.route('**/*', async route => {
@@ -1375,6 +1390,7 @@ export async function checkBrowserAndFinancialFlow(reporter, {
           await route.abort('blockedbyclient');
         }
       });
+      browserJourneyStage = 'create browser page';
       page = await context.newPage();
       const observedBrowserResponses = new Map();
       page.on('response', response => {
@@ -1399,6 +1415,7 @@ export async function checkBrowserAndFinancialFlow(reporter, {
         }
       });
 
+      browserJourneyStage = 'navigate to login';
       const frontendResponse = await page.goto(new URL('/login', frontendUrl).toString(), { waitUntil: 'domcontentloaded' });
       if (!frontendResponse) throw Object.assign(new Error('No HTTP response.'), { code: 'NO_HTTP_RESPONSE' });
       if (!responseOk(frontendResponse)) {
@@ -1407,12 +1424,14 @@ export async function checkBrowserAndFinancialFlow(reporter, {
           status: responseStatus(frontendResponse),
         });
       }
+      browserJourneyStage = 'wait for login form';
       const loginReadyTimeoutMs = LOGIN_BROWSER_TIMEOUT_MS;
       await Promise.all([
         page.locator('#login-form'),
         page.locator('#login-email'),
         page.locator('#login-password'),
       ].map(locator => locator.waitFor({ state: 'visible', timeout: loginReadyTimeoutMs })));
+      browserJourneyStage = 'verify served frontend provenance';
       frontendBuildVerified = await servedFrontendBuildMatches({
         page,
         fetcher,
@@ -1431,7 +1450,8 @@ export async function checkBrowserAndFinancialFlow(reporter, {
     } catch (error) {
       const status = Number.isInteger(error?.status) ? ` HTTP ${error.status}` : '';
       const failure = safeFailureKind(error);
-      recordCriticalPath(false, `browser launch/navigation failed${status} (${failure.kind}${failure.code ? ` ${failure.code}` : ''})`);
+      const failureDetail = [failure.kind, failure.code, failure.name].filter(Boolean).join(' ');
+      recordCriticalPath(false, `browser launch/navigation failed${status} during ${browserJourneyStage} (${failureDetail})`);
       reporter.notEvaluated('Profile completion/auth', 'browser launch/navigation failed');
       reporter.notEvaluated('Recommendation current-state binding', 'browser launch/navigation failed');
       reporter.notEvaluated('ETF product source', 'browser launch/navigation failed');

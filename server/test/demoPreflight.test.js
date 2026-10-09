@@ -354,6 +354,7 @@ function browserFlowFixture(scenario = {}) {
     async goto(url) {
       if (url.endsWith('/login')) {
         currentUrl = url;
+        if (scenario.loginNavigationError) throw scenario.loginNavigationError;
         if (scenario.loginNavigationStatus) return fakeHttpResponse(scenario.loginNavigationStatus, {});
         const artifacts = makeTestFrontendArtifacts('c'.repeat(40), {
           indexSuffix: scenario.frontendIndexTampered || scenario.browserLoadedDocumentTampered ? '<!-- same build marker, changed document -->' : '',
@@ -1845,6 +1846,17 @@ test('browser launch, login navigation, and login-control failures cannot pass t
   const navigationFailure = await runBrowserFlow({ loginNavigationStatus: 503 });
   assert.equal(navigationFailure.checks.find(check => check.name === 'Critical browser path').passed, false);
   assert.match(navigationFailure.checks.find(check => check.name === 'Critical browser path').detail, /browser launch\/navigation failed HTTP 503/);
+
+  const tlsNavigationFailure = await runBrowserFlow({
+    loginNavigationError: Object.assign(
+      new Error('net::ERR_CERT_AUTHORITY_INVALID at https://127.0.0.1:8443/login?token=hidden'),
+      { name: 'Error' },
+    ),
+  });
+  const tlsFailureDetail = tlsNavigationFailure.checks.find(check => check.name === 'Critical browser path').detail;
+  assert.match(tlsFailureDetail, /failed during navigate to login \(network\/stage error ERR_CERT_AUTHORITY_INVALID ERROR\)/);
+  assert.equal(tlsNavigationFailure.checks.find(check => check.name === 'Profile completion/auth').state, 'NOT_EVALUATED');
+  assert.doesNotMatch(tlsNavigationFailure.lines.join('\n'), /https:\/\/127\.0\.0\.1|token=hidden/);
 
   for (const scenario of [{ loginFormError: true }, { loginControlError: true }]) {
     const result = await runBrowserFlow(scenario);
