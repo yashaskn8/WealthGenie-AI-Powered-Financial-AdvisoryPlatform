@@ -7,9 +7,109 @@ import {
 } from '../planReview/planReviewRuntime.js';
 import { PLAN_REVIEW_POLICY_VERSION } from '../planReview/planReviewSchemas.js';
 import { gradePlanReviewTrajectory } from './planReviewEvals.js';
+import { sanitizeGroundingReasonCodes } from '../../services/groundingValidator.js';
 
 const LIVE_EVAL_MAX_CASES = 3;
 const LIVE_EVAL_MAX_TOKENS = 2500;
+
+export function selectLivePlanReviewCases(dataset, requestedCaseId = null) {
+  if (!Array.isArray(dataset)) throw new TypeError('A PlanReview evaluation dataset is required.');
+  if (requestedCaseId === null || requestedCaseId === undefined || requestedCaseId === '') return dataset;
+  if (typeof requestedCaseId !== 'string') throw new TypeError('A PlanReview case identifier must be a string.');
+  const matches = dataset.filter(item => item?.id === requestedCaseId);
+  if (matches.length !== 1) {
+    const error = new Error('The requested live evaluation case is not uniquely present in the dataset.');
+    error.code = 'LIVE_EVAL_CASE_NOT_FOUND';
+    throw error;
+  }
+  return matches;
+}
+
+function sanitizedClassification(value) {
+  return typeof value === 'string' && /^[A-Z0-9_:-]{2,80}$/.test(value)
+    ? value
+    : null;
+}
+
+function sanitizedProviderAttempts(attempts) {
+  if (!Array.isArray(attempts)) return [];
+  return attempts.slice(0, 2).map(attempt => {
+    const item = attempt && typeof attempt === 'object' ? attempt : {};
+    const diagnostics = item.diagnostics && typeof item.diagnostics === 'object' ? item.diagnostics : item;
+    const safeString = (value, maxLength = 160) => typeof value === 'string' ? value.slice(0, maxLength) : null;
+    const endpointHostname = typeof diagnostics.endpointHostname === 'string'
+      && /^[A-Za-z0-9.-]{1,120}$/.test(diagnostics.endpointHostname)
+      ? diagnostics.endpointHostname
+      : null;
+    const safeInteger = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+    const safeBoolean = value => typeof value === 'boolean' ? value : null;
+    const role = item.role === 'PLANNER' || item.role === 'EXPLAINER' ? item.role : null;
+    const completionTokens = safeInteger(diagnostics.providerCompletionTokens ?? diagnostics.completionTokens);
+    const reasoningTokens = safeInteger(diagnostics.providerReasoningTokens ?? diagnostics.reasoningTokens);
+    return {
+      role,
+      outputContract: safeString(item.outputContract, 80),
+      provider: safeString(diagnostics.provider, 40),
+      model: safeString(diagnostics.configuredModel || diagnostics.model, 120),
+      returnedModel: safeString(diagnostics.returnedModel, 120),
+      endpointHostname,
+      responseFormatMode: safeString(diagnostics.responseFormatMode, 40),
+      strictSchema: safeBoolean(diagnostics.strictSchema),
+      schemaName: safeString(diagnostics.schemaName, 80),
+      schemaStructuralValidation: safeBoolean(diagnostics.schemaStructuralValidation),
+      reasoningEffort: safeString(diagnostics.reasoningEffort, 20),
+      reasoningFormat: safeString(diagnostics.reasoningFormat, 20),
+      reasoningIncluded: safeBoolean(diagnostics.reasoningIncluded),
+      httpStatus: safeInteger(diagnostics.httpStatus),
+      latencyMs: safeInteger(diagnostics.latencyMs),
+      completionReason: safeString(diagnostics.completionReason, 80),
+      outputBytes: safeInteger(diagnostics.outputBytes),
+      providerRequestId: typeof diagnostics.providerRequestId === 'string'
+        && /^[A-Za-z0-9._:-]{1,128}$/.test(diagnostics.providerRequestId)
+        ? diagnostics.providerRequestId
+        : null,
+      promptTokens: safeInteger(diagnostics.providerPromptTokens ?? diagnostics.promptTokens),
+      completionTokens,
+      reasoningTokens: reasoningTokens !== null
+        && (completionTokens === null || reasoningTokens <= completionTokens)
+        ? reasoningTokens
+        : null,
+      reportedTokens: safeInteger(diagnostics.providerReportedTokens ?? diagnostics.reportedTokens),
+      effectiveOutputTokenCeiling: safeInteger(diagnostics.effectiveOutputTokenCeiling),
+      jsonSyntaxValid: safeBoolean(diagnostics.jsonSyntaxValid),
+      jsonSchemaValid: safeBoolean(diagnostics.jsonSchemaValid),
+      financialGroundingValid: safeBoolean(diagnostics.financialGroundingValid),
+      groundingReasonCodes: sanitizeGroundingReasonCodes(diagnostics.groundingReasonCodes),
+      semanticCompletenessValid: safeBoolean(diagnostics.semanticCompletenessValid),
+      semanticReasonCodes: sanitizeGroundingReasonCodes(diagnostics.semanticReasonCodes),
+      explanationPolicyValid: safeBoolean(diagnostics.explanationPolicyValid),
+      policyReasonCodes: sanitizeGroundingReasonCodes(diagnostics.policyReasonCodes),
+      errorClassification: sanitizedClassification(item.errorClassification || diagnostics.errorClassification),
+      providerErrorCode: safeString(diagnostics.providerErrorCode, 80),
+      providerErrorField: typeof diagnostics.providerErrorField === 'string'
+        && /^[A-Za-z0-9_.\[\]-]{1,120}$/.test(diagnostics.providerErrorField)
+        ? diagnostics.providerErrorField
+        : null,
+    };
+  });
+}
+
+function failedScorecard(caseId) {
+  return {
+    caseId,
+    toolSelection: false,
+    trajectory: false,
+    grounding: false,
+    policy: false,
+    action: false,
+    robustness: false,
+    forbiddenTools: [],
+    unsupportedTools: [],
+    missingExpectedTools: [],
+    missingReasonCodes: [],
+    passed: false,
+  };
+}
 
 export async function runLivePlanReviewEvaluations({ dataset, maxCases = LIVE_EVAL_MAX_CASES, runner = null } = {}) {
   if (typeof runner !== 'function') {
@@ -54,34 +154,43 @@ export async function runLivePlanReviewEvaluations({ dataset, maxCases = LIVE_EV
   const results = [];
   for (const caseDefinition of dataset) {
     const startedAt = performance.now();
-    const actual = await runner({ caseDefinition });
+    let actual = null;
+    let runnerError = null;
+    try {
+      actual = await runner({ caseDefinition });
+    } catch (error) {
+      runnerError = error;
+    }
+    const failedEvidence = runnerError?.livePlanReviewEvidence || {};
     const latencyMs = Number.isSafeInteger(actual?.latencyMs) && actual.latencyMs >= 0
       ? actual.latencyMs
+      : Number.isSafeInteger(failedEvidence.latencyMs) && failedEvidence.latencyMs >= 0
+        ? failedEvidence.latencyMs
       : Math.round(performance.now() - startedAt);
-    if (!actual?.result || typeof actual.result !== 'object' || !Array.isArray(actual.trajectory)) {
-      const error = new Error(`The isolated PlanReview runner returned no graph result or trajectory for ${caseDefinition.id}.`);
-      error.code = 'LIVE_EVAL_RUNNER_RESULT_INVALID';
-      throw error;
-    }
-    const usage = actual.providerUsage || {};
-    if (!Number.isSafeInteger(usage.tokensUsed) || usage.tokensUsed < 0
-        || (caseDefinition.liveModelRequired === true && usage.tokenUsageAvailable !== true)) {
-      const error = new Error(`Provider token usage is unavailable for ${caseDefinition.id}.`);
-      error.code = 'LIVE_EVAL_TOKEN_USAGE_UNAVAILABLE';
-      throw error;
-    }
-    if (usage.tokensUsed > LIVE_EVAL_MAX_TOKENS) {
-      const error = new Error(`Live evaluation token budget exceeded for ${caseDefinition.id}.`);
-      error.code = 'LIVE_EVAL_TOKEN_BUDGET_EXCEEDED';
-      error.tokensUsed = usage.tokensUsed;
-      error.maxTokens = LIVE_EVAL_MAX_TOKENS;
-      throw error;
-    }
-
-    const result = actual.result;
-    const trajectory = actual.trajectory;
-    const actualAction = result.review?.recommendedAction || result.recommendedAction || null;
-    const caseScorecard = gradePlanReviewTrajectory({ caseDefinition, result, trajectory });
+    const usage = actual?.providerUsage || failedEvidence.providerUsage || {};
+    const hasGraphResult = !runnerError && actual?.result && typeof actual.result === 'object'
+      && Array.isArray(actual.trajectory);
+    const result = hasGraphResult ? actual.result : null;
+    const trajectory = hasGraphResult ? actual.trajectory : [];
+    const tokensKnown = Number.isSafeInteger(usage.tokensUsed) && usage.tokensUsed >= 0
+      && (usage.tokenUsageAvailable === true || usage.tokensUsed > 0);
+    const tokenUsageComplete = tokensKnown
+      && (caseDefinition.liveModelRequired !== true || usage.tokenUsageAvailable === true);
+    const withinTokenBudget = tokenUsageComplete && usage.tokensUsed <= LIVE_EVAL_MAX_TOKENS;
+    const providerCalls = Number.isSafeInteger(usage.providerCalls) && usage.providerCalls >= 0
+      ? usage.providerCalls
+      : null;
+    const providerCallAttempts = Number.isSafeInteger(usage.providerCallAttempts) && usage.providerCallAttempts >= 0
+      ? usage.providerCallAttempts
+      : providerCalls;
+    const providerCallBudgetCompliant = providerCalls !== null && providerCalls <= 2
+      && providerCallAttempts !== null && providerCallAttempts <= 2
+      && (caseDefinition.liveModelRequired !== true || providerCalls >= 1)
+      && (caseDefinition.liveModelRequired === true || providerCalls === 0);
+    const caseScorecard = hasGraphResult
+      ? gradePlanReviewTrajectory({ caseDefinition, result, trajectory })
+      : failedScorecard(caseDefinition.id);
+    const actualAction = result?.review?.recommendedAction || result?.recommendedAction || null;
     const forbiddenToolRequests = [
       ...trajectory
         .filter(event => event?.type === 'TOOL_SELECTED' && caseDefinition.forbiddenTools.includes(event.tool))
@@ -91,26 +200,28 @@ export async function runLivePlanReviewEvaluations({ dataset, maxCases = LIVE_EV
         .map(() => 'FORBIDDEN_TOOL_REQUEST'),
     ];
     const explanationGrounded = !caseDefinition.groundingRequired
-      || (result.review?.evidence?.status === 'AVAILABLE'
-        && result.validation?.valid === true
-        && result.evidenceVerification?.valid === true
-        && result.explanation?.validation?.status === 'PASS');
-    const unsupportedNumericalClaims = result.validation?.valid === false;
-    const policyRejected = result.policy?.allowed === false;
+      || (result?.review?.evidence?.status === 'AVAILABLE'
+        && result?.validation?.valid === true
+        && result?.evidenceVerification?.valid === true
+        && result?.explanation?.validation?.status === 'PASS');
+    const unsupportedNumericalClaims = result?.validation?.valid === false;
+    const policyRejected = result?.policy?.allowed === false;
     const fallback = Boolean(usage.plannerFallback || usage.explanationFallback);
     const providerExecutionFailed = caseDefinition.liveModelRequired === true
-      && (!Number.isSafeInteger(usage.providerCalls) || usage.providerCalls < 1
-        || usage.tokenUsageAvailable !== true || fallback);
-    const passed = caseScorecard.passed
+      && (!hasGraphResult || !providerCallBudgetCompliant || usage.tokenUsageAvailable !== true
+        || usage.plannerFallback !== false || usage.explanationFallback !== false);
+    const unexpectedProviderExecution = caseDefinition.liveModelRequired !== true && providerCalls !== 0;
+    const passed = hasGraphResult && tokenUsageComplete && withinTokenBudget && providerCallBudgetCompliant && caseScorecard.passed
       && forbiddenToolRequests.length === 0
       && explanationGrounded
       && !unsupportedNumericalClaims
       && !policyRejected
-      && !providerExecutionFailed;
+      && !providerExecutionFailed
+      && !unexpectedProviderExecution;
 
     results.push({
       caseId: caseDefinition.id,
-      toolChoices: Array.isArray(result.planner?.checks) ? result.planner.checks : [],
+      toolChoices: Array.isArray(result?.planner?.checks) ? result.planner.checks : [],
       executedTools: trajectory.filter(event => event?.type === 'TOOL_SUCCEEDED').map(event => event.tool),
       forbiddenToolRequests,
       finalAction: actualAction,
@@ -118,14 +229,40 @@ export async function runLivePlanReviewEvaluations({ dataset, maxCases = LIVE_EV
       unsupportedNumericalClaims,
       policyRejected,
       fallback,
-      providerCalls: Number.isSafeInteger(usage.providerCalls) ? usage.providerCalls : null,
+      providerCalls,
+      providerCallAttempts,
+      providerCallBudgetCompliant,
+      unexpectedProviderExecution,
       providerExecutionFailed,
       provider: usage.provider || null,
       model: usage.model || null,
+      modelsUsed: Array.isArray(usage.modelsUsed)
+        ? [...new Set(usage.modelsUsed.filter(model => typeof model === 'string'
+          && /^[A-Za-z0-9._/-]{1,120}$/.test(model)))].slice(0, 2)
+        : [],
       latencyMs,
-      tokens: usage.tokensUsed,
-      caseScorecard,
+      tokens: tokensKnown ? usage.tokensUsed : null,
+      tokenUsageAvailable: usage.tokenUsageAvailable === true,
+      tokenUsageComplete,
+      withinTokenBudget,
+      plannerSuccess: caseDefinition.liveModelRequired === true
+        ? hasGraphResult && usage.plannerFallback === false
+        : null,
+      explanationSuccess: caseDefinition.liveModelRequired === true
+        ? hasGraphResult && usage.explanationFallback === false
+          && result?.explanation?.validation?.status === 'PASS'
+        : null,
+      authorizationEvidence: actual?.authorizationEvidence || null,
+      missingReasonCodes: Array.isArray(caseScorecard.missingReasonCodes)
+        ? caseScorecard.missingReasonCodes
+        : [],
+      providerAttempts: sanitizedProviderAttempts(usage.attempts),
+      errorClassification: sanitizedClassification(runnerError?.code)
+        || (!tokenUsageComplete ? 'LIVE_EVAL_TOKEN_USAGE_UNAVAILABLE'
+          : (!withinTokenBudget ? 'LIVE_EVAL_TOKEN_BUDGET_EXCEEDED' : null)),
       passed,
+      caseScorecard,
+      failed: !passed,
     });
   }
 
@@ -156,12 +293,31 @@ export async function runLivePlanReviewEvaluations({ dataset, maxCases = LIVE_EV
     error.caseFailures = caseFailures;
     error.thresholdFailures = thresholdFailures;
     error.aggregate = aggregate;
+    error.cases = results;
+    error.caseCounts = {
+      executed: results.length,
+      passed: results.filter(item => item.passed).length,
+      failed: caseFailures.length,
+      notEvaluated: dataset.length - results.length,
+    };
+    error.totalProviderCalls = results.reduce((sum, item) => sum + (item.providerCalls || 0), 0);
+    error.totalReportedTokens = results.reduce((sum, item) => sum + (item.tokens || 0), 0);
+    error.reportedTokensComplete = results.every(item => item.tokenUsageComplete);
     throw error;
   }
 
   return {
     enabled: true,
     passed: true,
+    caseCounts: {
+      executed: results.length,
+      passed: results.filter(item => item.passed).length,
+      failed: 0,
+      notEvaluated: dataset.length - results.length,
+    },
+    totalProviderCalls: results.reduce((sum, item) => sum + (item.providerCalls || 0), 0),
+    totalReportedTokens: results.reduce((sum, item) => sum + (item.tokens || 0), 0),
+    reportedTokensComplete: results.every(item => item.tokenUsageComplete),
     agentVersion: PLAN_REVIEW_AGENT_VERSION,
     graphVersion: PLAN_REVIEW_GRAPH_VERSION,
     groundingVersion: PLAN_REVIEW_GROUNDING_VERSION,

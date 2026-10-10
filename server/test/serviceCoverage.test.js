@@ -55,6 +55,7 @@ test('geminiService uses the shared grounded provider contract', async (t) => {
     text: 'The final suitability ceiling is Moderate [E_PROFILE_RISK].',
     evidenceIdsUsed: ['E_PROFILE_RISK'],
     claims: [{ text: 'The final suitability ceiling is Moderate [E_PROFILE_RISK].', evidenceIds: ['E_PROFILE_RISK'] }],
+    financialClaims: [],
     unavailableFacts: [],
   });
   axios.post = async (url) => {

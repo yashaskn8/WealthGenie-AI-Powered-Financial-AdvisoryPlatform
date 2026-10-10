@@ -42,6 +42,7 @@ function validProviderResult() {
       text,
       evidenceIdsUsed: ['E_PROFILE_RISK'],
       claims: [{ text, evidenceIds: ['E_PROFILE_RISK'] }],
+      financialClaims: [],
       unavailableFacts: [],
     }),
   };
@@ -154,7 +155,7 @@ describe('grounded chat DTO and persistence isolation', () => {
       const text = 'Use a 25% expected return [E_PROFILE_RISK].';
       return {
         provider: 'gemini', model: 'gemini-runtime-test', tokensUsed: 10,
-        text: JSON.stringify({ text, evidenceIdsUsed: ['E_PROFILE_RISK'], claims: [{ text, evidenceIds: ['E_PROFILE_RISK'] }], unavailableFacts: [] }),
+        text: JSON.stringify({ text, evidenceIdsUsed: ['E_PROFILE_RISK'], claims: [{ text, evidenceIds: ['E_PROFILE_RISK'] }], financialClaims: [], unavailableFacts: [] }),
       };
     };
     const result = await processChat({

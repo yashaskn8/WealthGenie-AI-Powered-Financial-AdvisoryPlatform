@@ -36,6 +36,7 @@ import { resolvePromptBundle } from '../evolution/promptBundle.js';
 import { canonicalSha256 } from '../../utils/canonicalJson.js';
 import { hashGroundedEvidence } from '../../services/groundedEvidence.js';
 import { createBudgetedPlanReviewProvider, createPlanReviewTokenBudget } from './planReviewTokenBudget.js';
+import { validateProviderOutputContract } from '../../services/providerOutputContracts.js';
 
 function uuid() {
   return crypto.randomUUID();
@@ -145,6 +146,7 @@ export async function planWithProvider({ freshness, profileContext, provider, to
       recentHistory: [{ role: 'user', parts: [{ text: 'Select only the minimum safe read-only checks.' }] }],
       maxTokens: 240,
       jsonMode: true,
+      outputContract: 'PLAN_REVIEW_PLANNER_V1',
       tools: null,
       signal,
     });
@@ -152,9 +154,40 @@ export async function planWithProvider({ freshness, profileContext, provider, to
     if (value?.tokensUsed) span.setAttribute('gen_ai.usage.total_tokens', Number(value.tokensUsed));
     return value;
   });
-  if (!response?.text) return null;
-  const parsed = parseGroundedModelJson(response.text);
+  if (!response?.text) {
+    const error = new Error('Planner provider did not return a text completion.');
+    error.code = provider.lastFailureReason || 'EMPTY_COMPLETION';
+    provider.recordOutputValidation?.({ errorClassification: error.code });
+    throw error;
+  }
+  if (response.wasCompleted === false) {
+    const error = new Error('Planner provider response did not complete.');
+    error.code = response.diagnostics?.errorClassification || 'PROVIDER_INCOMPLETE_OUTPUT';
+    provider.recordOutputValidation?.({ errorClassification: error.code });
+    throw error;
+  }
+  if (!response.text.trim()) {
+    const error = new Error('Planner provider returned an empty completion.');
+    error.code = 'EMPTY_COMPLETION';
+    provider.recordOutputValidation?.({ jsonSyntaxValid: false, errorClassification: error.code });
+    throw error;
+  }
+  let parsed;
+  try {
+    parsed = parseGroundedModelJson(response.text);
+  } catch (parseError) {
+    const error = new Error('Planner provider returned malformed JSON.');
+    error.code = parseError?.message === 'EMPTY_COMPLETION' ? 'EMPTY_COMPLETION' : 'MALFORMED_PLANNER_JSON';
+    provider.recordOutputValidation?.({ jsonSyntaxValid: false, errorClassification: error.code });
+    throw error;
+  }
+  const contractValidation = validateProviderOutputContract('PLAN_REVIEW_PLANNER_V1', parsed);
   const validation = validatePlannerPlan(parsed);
+  provider.recordOutputValidation?.({
+    jsonSyntaxValid: true,
+    jsonSchemaValid: contractValidation.valid && !validation.error,
+    errorClassification: contractValidation.valid && !validation.error ? null : 'INVALID_PLANNER_SCHEMA',
+  });
   const requestedChecks = Array.isArray(parsed?.checks) ? parsed.checks : [];
   const rejectedToolRequestCount = requestedChecks
     .filter(tool => typeof tool !== 'string' || !tools.includes(tool)).length;
@@ -163,6 +196,11 @@ export async function planWithProvider({ freshness, profileContext, provider, to
     error.code = rejectedToolRequestCount > 0 ? 'FORBIDDEN_TOOL_REQUEST' : 'INVALID_PLANNER_OUTPUT';
     error.rejectedToolRequestCount = Math.min(rejectedToolRequestCount, MAX_TOOL_CALLS);
     error.details = validation.error.details.map(detail => detail.type);
+    throw error;
+  }
+  if (!contractValidation.valid) {
+    const error = new Error('Planner output did not match the declared structured-output contract.');
+    error.code = 'INVALID_PLANNER_SCHEMA';
     throw error;
   }
   // A tool can be globally safe yet outside this run's capability grant. Do
@@ -178,7 +216,14 @@ export async function planWithProvider({ freshness, profileContext, provider, to
       && Number.isSafeInteger(Number(response.tokensUsed)) && Number(response.tokensUsed) >= 0
     ? Number(response.tokensUsed)
     : null;
-  return { ...validation.value, provider: response.provider || provider.name, model: response.model || null, tokensUsed, fallback: false };
+  return {
+    ...validation.value,
+    provider: response.provider || provider.name,
+    model: response.model || null,
+    tokensUsed,
+    fallback: response.fallback === true || response.routing?.fallback === true,
+    fallbackReason: response.fallbackReason || response.routing?.fallbackReason || null,
+  };
 }
 
 async function loadContextNode(state, dependencies) {
@@ -618,6 +663,7 @@ async function synthesizeNode(state, dependencies) {
           evidencePacket: evidence,
         }, {
           providers: explanationProviders,
+          providerOutputMode: 'GROQ_JSON_OBJECT',
           signal: dependencies.signal,
           getCache: async () => null,
           setCache: async () => undefined,

@@ -318,6 +318,7 @@ describe('Chat Routes Integration & Input Validation Tests', () => {
           text,
           evidenceIdsUsed: ['E_PROFILE_RISK'],
           claims: [{ text, evidenceIds: ['E_PROFILE_RISK'] }],
+          financialClaims: [],
           unavailableFacts: [],
         }),
       };

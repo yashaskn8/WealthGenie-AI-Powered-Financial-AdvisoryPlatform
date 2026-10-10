@@ -27,6 +27,7 @@ function runHostile(packet, text) {
           text,
           evidenceIds: [text.match(/\[(E_[A-Z0-9_:-]+)\]/)?.[1] || 'E_PROFILE_RISK'],
         }],
+        financialClaims: [],
         unavailableFacts: [],
         proposedAllocation: [{ instrument: 'Bitcoin', weight: 100 }],
       }),
@@ -115,7 +116,7 @@ describe('Phase 6 financial-authority isolation', () => {
         request = args;
         const text = 'The shadow diagnostic reports STATE_0 [E_HMM_SHADOW].';
         return { provider: 'nvidia_nim', model: 'test-model', text: JSON.stringify({
-          text, evidenceIdsUsed: ['E_HMM_SHADOW'], claims: [{ text, evidenceIds: ['E_HMM_SHADOW'] }], unavailableFacts: [],
+          text, evidenceIdsUsed: ['E_HMM_SHADOW'], claims: [{ text, evidenceIds: ['E_HMM_SHADOW'] }], financialClaims: [], unavailableFacts: [],
         }) };
       },
     };

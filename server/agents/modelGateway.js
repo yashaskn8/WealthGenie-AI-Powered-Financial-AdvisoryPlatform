@@ -2,42 +2,104 @@ import { ProviderManager } from '../services/providerAbstraction.js';
 
 export const MODEL_ROLES = Object.freeze(['PLANNER', 'EXPLAINER', 'VERIFIER', 'EVOLUTION_RESEARCH']);
 
-function configuredOrder() {
+const GEMINI_FALLBACK_FAILURES = new Set([
+  'PROVIDER_TIMEOUT',
+  'PROVIDER_SERVER_ERROR',
+  'PROVIDER_NETWORK_ERROR',
+]);
+
+function configuredOrder(allowGeminiFallback) {
   // CI/local lifecycle runs use the deterministic explanation path. Treat the
   // explicit mock setting as "no external model providers", not as permission
-  // to route to the default real provider.
+  // to route to a default real provider.
   if (String(process.env.LLM_DEFAULT_PROVIDER || '').trim().toLowerCase() === 'mock') return [];
-  const primary = String(process.env.LLM_PRIMARY_PROVIDER || 'NVIDIA_NIM').trim().toUpperCase();
-  const table = { NVIDIA_NIM: ProviderManager.nvidia, GEMINI: ProviderManager.gemini, GROQ: ProviderManager.groq };
-  return [table[primary], ProviderManager.nvidia, ProviderManager.gemini, ProviderManager.groq].filter((item, index, list) => item && list.indexOf(item) === index);
+  const primary = String(process.env.LLM_PRIMARY_PROVIDER || 'GROQ').trim().toUpperCase();
+  const table = {
+    NVIDIA_NIM: ProviderManager.nvidia,
+    GEMINI: ProviderManager.gemini,
+    GROQ: ProviderManager.groq,
+  };
+  const selected = [table[primary]];
+  if (primary === 'GROQ' && allowGeminiFallback) selected.push(table.GEMINI);
+  return selected.filter(Boolean);
 }
 
-export function createModelGateway({ providers = configuredOrder(), maxOutputTokens = 1200 } = {}) {
+function canUseGeminiFallback({ primary, candidate, allowGeminiFallback, requestBudget, fallbackAttempted }) {
+  return !fallbackAttempted
+    && allowGeminiFallback === true
+    && primary?.name === 'groq'
+    && candidate?.name === 'gemini'
+    // Automatic failover requires the durable, run-scoped PlanReview budget.
+    && requestBudget?.durableReservations === true
+    && typeof requestBudget.reserve === 'function'
+    && typeof requestBudget.settle === 'function';
+}
+
+export function createModelGateway({
+  providers = null,
+  maxOutputTokens = 1200,
+  allowGeminiFallback = String(process.env.LLM_GEMINI_FALLBACK_ENABLED || '').trim().toLowerCase() === 'true',
+} = {}) {
+  const providerChain = providers || configuredOrder(allowGeminiFallback);
   return {
-    async generate({ role, systemPrompt, recentHistory = [], maxTokens = maxOutputTokens, jsonMode = false, requestBudget = null, signal } = {}) {
+    async generate({ role, systemPrompt, recentHistory = [], maxTokens = maxOutputTokens, jsonMode = false, outputContract = null, providerOutputMode = null, requestBudget = null, signal } = {}) {
       if (!MODEL_ROLES.includes(role)) throw new Error('Unknown model gateway role.');
       const startedAt = Date.now();
       const failures = [];
-      for (const provider of providers) {
+      const attempts = [];
+      let fallbackAttempted = false;
+
+      for (let index = 0; index < Math.min(providerChain.length, 2); index += 1) {
+        const provider = providerChain[index];
+        const isFallback = index > 0;
+        if (isFallback && !canUseGeminiFallback({
+          primary: providerChain[0],
+          candidate: provider,
+          allowGeminiFallback,
+          requestBudget,
+          fallbackAttempted,
+        })) break;
         if (!provider || typeof provider.generate !== 'function') continue;
-        // Do not reserve a model-call/token budget for adapters which have no
-        // credentials. A missing key is a known configuration state, not an
-        // attempted provider call. Injected providers without this method are
-        // still treated as configured for deterministic test/custom adapters.
+
+        // A missing primary credential is a configuration failure, not a
+        // transient outage. Never route around it with another provider.
         if (typeof provider.isConfigured === 'function' && !provider.isConfigured()) {
-          failures.push(`${provider.name || 'provider'}_not_configured`);
-          continue;
+          const code = `${provider.name || 'provider'}_not_configured`;
+          failures.push(code);
+          attempts.push({ provider: provider.name || 'unknown', outcome: code });
+          break;
         }
+
         let response = null;
         let reservation = null;
         try {
           const boundedMaxTokens = Math.min(Number(maxTokens) || maxOutputTokens, maxOutputTokens);
-          reservation = requestBudget ? await requestBudget.reserve({ systemPrompt, recentHistory, maxTokens: boundedMaxTokens }) : null;
+          reservation = requestBudget ? await requestBudget.reserve({
+            systemPrompt,
+            recentHistory,
+            maxTokens: boundedMaxTokens,
+            outputContract,
+            providerOutputMode: role === 'EXPLAINER'
+              && provider.name === 'groq'
+              && outputContract === 'GROUNDED_EXPLANATION_V1'
+              && providerOutputMode === 'GROQ_JSON_OBJECT'
+              ? providerOutputMode
+              : null,
+            providerName: provider.name || null,
+          }) : null;
+          if (isFallback) fallbackAttempted = true;
           response = await provider.generate({
             systemPrompt,
             recentHistory,
             maxTokens: boundedMaxTokens,
             jsonMode,
+            outputContract,
+            ...(role === 'EXPLAINER'
+              && provider.name === 'groq'
+              && outputContract === 'GROUNDED_EXPLANATION_V1'
+              && providerOutputMode === 'GROQ_JSON_OBJECT'
+              ? { providerOutputMode }
+              : {}),
             tools: null,
             signal,
           });
@@ -46,33 +108,75 @@ export function createModelGateway({ providers = configuredOrder(), maxOutputTok
           if (response && reservation) requestBudget.settle(reservation, usage);
         } catch (error) {
           if (signal?.aborted || error?.name === 'AbortError' || error?.code === 'ERR_CANCELED') throw error;
-          if (error?.code === 'AGENT_BUDGET_EXCEEDED') throw error;
-          // Providers are an untrusted availability boundary. Continue only
-          // for explicitly retryable/provider failures; programming and
-          // validation errors must surface to the caller.
-          const code = String(error?.code || '');
-          if (!code.startsWith('PROVIDER_') && !error?.retryable) throw error;
-          failures.push(code || 'PROVIDER_REQUEST_FAILED');
-          continue;
+          if (error?.code === 'AGENT_BUDGET_EXCEEDED' || error?.code === 'AGENT_BUDGET_PERSISTENCE_UNAVAILABLE') throw error;
+          const code = String(provider.lastFailureReason || error?.code || '');
+          if (!code.startsWith('PROVIDER_')) throw error;
+          failures.push(code);
+          attempts.push({ provider: provider.name || 'unknown', outcome: code });
+          const next = providerChain[index + 1];
+          if (GEMINI_FALLBACK_FAILURES.has(code)
+              && canUseGeminiFallback({
+                primary: providerChain[0],
+                candidate: next,
+                allowGeminiFallback,
+                requestBudget,
+                fallbackAttempted,
+              })) continue;
+          break;
         }
+
         if (response) {
+          attempts.push({ provider: provider.name || 'unknown', outcome: 'SUCCESS' });
+          const providerFallbackReason = failures[0] || null;
           return {
             ...response,
+            fallback: isFallback,
+            fallbackReason: providerFallbackReason,
             routing: {
               role,
               provider: response.provider || provider.name,
               model: response.model || provider.configuredModel?.() || null,
               latencyMs: Date.now() - startedAt,
               tokensUsed: Number(response.tokensUsed ?? response.usage?.totalTokens ?? response.usageMetadata?.totalTokenCount) || 0,
-              fallback: provider !== providers[0],
-              attemptedProviders: [...failures, provider.name].filter(Boolean),
-              fallbackReason: failures[0] || null,
+              fallback: isFallback,
+              attemptedProviders: attempts.map(attempt => attempt.provider),
+              providerAttempts: attempts,
+              fallbackReason: providerFallbackReason,
             },
           };
         }
-        failures.push(provider.lastFailureReason || `${provider.name || 'provider'}_unavailable`);
+
+        const code = String(provider.lastFailureReason || `${provider.name || 'provider'}_unavailable`);
+        failures.push(code);
+        attempts.push({ provider: provider.name || 'unknown', outcome: code });
+        const next = providerChain[index + 1];
+        if (GEMINI_FALLBACK_FAILURES.has(code)
+            && canUseGeminiFallback({
+              primary: providerChain[0],
+              candidate: next,
+              allowGeminiFallback,
+              requestBudget,
+              fallbackAttempted,
+            })) continue;
+        break;
       }
-      return { text: null, routing: { role, provider: null, model: null, latencyMs: Date.now() - startedAt, tokensUsed: 0, fallback: true, attemptedProviders: failures, fallbackReason: failures[0] || 'NO_PROVIDER_RESPONSE' } };
+
+      return {
+        text: null,
+        fallback: fallbackAttempted,
+        fallbackReason: failures[0] || 'NO_PROVIDER_RESPONSE',
+        routing: {
+          role,
+          provider: null,
+          model: null,
+          latencyMs: Date.now() - startedAt,
+          tokensUsed: 0,
+          fallback: fallbackAttempted,
+          attemptedProviders: attempts.map(attempt => attempt.provider),
+          providerAttempts: attempts,
+          fallbackReason: failures[0] || 'NO_PROVIDER_RESPONSE',
+        },
+      };
     },
   };
 }

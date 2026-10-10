@@ -9,6 +9,7 @@ import {
   ProviderManager,
 } from '../services/providerAbstraction.js';
 import { createModelGateway } from '../agents/modelGateway.js';
+import { createPlanReviewTokenBudget } from '../agents/planReview/planReviewTokenBudget.js';
 import { buildGroundedEvidencePacket, makeEvidenceEntry } from '../services/groundedEvidence.js';
 import { generateGroundedExplanation } from '../services/groundedExplanationService.js';
 
@@ -60,6 +61,7 @@ function groundedResponse() {
     text,
     evidenceIdsUsed: ['E_TEST_FACT'],
     claims: [{ text, evidenceIds: ['E_TEST_FACT'] }],
+    financialClaims: [],
     unavailableFacts: [],
   });
 }
@@ -83,11 +85,11 @@ test('provider failure policy separates transient health errors from request/con
     [Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }), 'PROVIDER_TIMEOUT', true, false, true],
     [Object.assign(new Error('dns'), { code: 'ENOTFOUND' }), 'PROVIDER_NETWORK_ERROR', true, false, true],
     [axiosStatus(503), 'PROVIDER_SERVER_ERROR', true, true, true],
-    [axiosStatus(429), 'PROVIDER_RATE_LIMITED', false, true, true],
-    [axiosStatus(401), 'PROVIDER_AUTHENTICATION_FAILED', false, true, true],
-    [axiosStatus(403), 'PROVIDER_AUTHENTICATION_FAILED', false, true, true],
-    [axiosStatus(422), 'PROVIDER_BAD_REQUEST', false, true, true],
-    [new Error('bug'), 'PROVIDER_INTERNAL_ERROR', false, false, true],
+    [axiosStatus(429), 'PROVIDER_RATE_LIMITED', false, true, false],
+    [axiosStatus(401), 'PROVIDER_AUTHENTICATION_FAILED', false, true, false],
+    [axiosStatus(403), 'PROVIDER_AUTHENTICATION_FAILED', false, true, false],
+    [axiosStatus(422), 'PROVIDER_BAD_REQUEST', false, true, false],
+    [new Error('bug'), 'PROVIDER_INTERNAL_ERROR', false, false, false],
   ];
   for (const [error, code, breakerRelevant, providerResponded, fallbackEligible] of cases) {
     assert.deepEqual(classifyProviderError(error), {
@@ -97,6 +99,93 @@ test('provider failure policy separates transient health errors from request/con
   const controller = new AbortController();
   controller.abort();
   assert.equal(classifyProviderError(new Error('cancelled'), { signal: controller.signal }).code, 'CALLER_ABORTED');
+});
+
+test('model gateway keeps Groq primary and never falls back without durable shared budget', async () => {
+  let geminiCalls = 0;
+  const groq = {
+    name: 'groq',
+    async generate() { this.lastFailureReason = 'PROVIDER_SERVER_ERROR'; return null; },
+  };
+  const gemini = { name: 'gemini', async generate() { geminiCalls += 1; return { text: 'must not run' }; } };
+  const gateway = createModelGateway({ providers: [groq, gemini], allowGeminiFallback: true });
+  const memoryOnlyBudget = createPlanReviewTokenBudget({ maxModelCalls: 2 });
+  const result = await gateway.generate({ role: 'PLANNER', systemPrompt: 'bounded', requestBudget: memoryOnlyBudget });
+  assert.equal(result.text, null);
+  assert.equal(result.routing.attemptedProviders.join(','), 'groq');
+  assert.equal(geminiCalls, 0);
+  assert.equal(memoryOnlyBudget.modelCalls, 1);
+});
+
+test('model gateway falls back only after a classified Groq outage and shares the durable call budget', async () => {
+  let geminiCalls = 0;
+  const groq = {
+    name: 'groq',
+    async generate() { this.lastFailureReason = 'PROVIDER_NETWORK_ERROR'; return null; },
+  };
+  const gemini = {
+    name: 'gemini',
+    configuredModel: () => 'gemini-3.6-flash',
+    async generate() { geminiCalls += 1; return { text: 'valid response', tokensUsed: 9, provider: 'gemini' }; },
+  };
+  const budget = createPlanReviewTokenBudget({
+    maxInputTokens: 4000,
+    maxOutputTokens: 1200,
+    maxTotalTokens: 5200,
+    maxModelCalls: 2,
+    onReserve: async () => undefined,
+  });
+  const gateway = createModelGateway({ providers: [groq, gemini], allowGeminiFallback: true });
+  const result = await gateway.generate({ role: 'PLANNER', systemPrompt: 'bounded', requestBudget: budget });
+  assert.equal(result.provider, 'gemini');
+  assert.equal(result.fallback, true);
+  assert.equal(result.fallbackReason, 'PROVIDER_NETWORK_ERROR');
+  assert.deepEqual(result.routing.attemptedProviders, ['groq', 'gemini']);
+  assert.equal(result.routing.providerAttempts[0].outcome, 'PROVIDER_NETWORK_ERROR');
+  assert.equal(result.routing.providerAttempts[1].outcome, 'SUCCESS');
+  assert.equal(geminiCalls, 1);
+  assert.equal(budget.modelCalls, 2);
+});
+
+test('model gateway does not route around Groq authentication, rate-limit, or request errors', async () => {
+  for (const code of ['PROVIDER_AUTHENTICATION_FAILED', 'PROVIDER_RATE_LIMITED', 'PROVIDER_BAD_REQUEST']) {
+    let geminiCalls = 0;
+    const groq = { name: 'groq', async generate() { this.lastFailureReason = code; return null; } };
+    const gemini = { name: 'gemini', async generate() { geminiCalls += 1; return { text: 'must not run' }; } };
+    const budget = createPlanReviewTokenBudget({
+      maxInputTokens: 4000,
+      maxOutputTokens: 1200,
+      maxTotalTokens: 5200,
+      maxModelCalls: 2,
+      onReserve: async () => undefined,
+    });
+    const gateway = createModelGateway({ providers: [groq, gemini], allowGeminiFallback: true });
+    const result = await gateway.generate({ role: 'EXPLAINER', systemPrompt: 'bounded', requestBudget: budget });
+    assert.equal(result.text, null, code);
+    assert.equal(geminiCalls, 0, code);
+    assert.equal(budget.modelCalls, 1, code);
+  }
+});
+
+test('Gemini fallback is not retried recursively and respects the two-call limit', async () => {
+  let geminiCalls = 0;
+  let thirdProviderCalls = 0;
+  const groq = { name: 'groq', async generate() { this.lastFailureReason = 'PROVIDER_TIMEOUT'; return null; } };
+  const gemini = { name: 'gemini', async generate() { geminiCalls += 1; this.lastFailureReason = 'PROVIDER_SERVER_ERROR'; return null; } };
+  const third = { name: 'nvidia_nim', async generate() { thirdProviderCalls += 1; return { text: 'must not run' }; } };
+  const budget = createPlanReviewTokenBudget({
+    maxInputTokens: 4000,
+    maxOutputTokens: 1200,
+    maxTotalTokens: 5200,
+    maxModelCalls: 2,
+    onReserve: async () => undefined,
+  });
+  const gateway = createModelGateway({ providers: [groq, gemini, third], allowGeminiFallback: true });
+  const result = await gateway.generate({ role: 'PLANNER', systemPrompt: 'bounded', requestBudget: budget });
+  assert.equal(result.text, null);
+  assert.equal(geminiCalls, 1);
+  assert.equal(thirdProviderCalls, 0);
+  assert.equal(budget.modelCalls, 2);
 });
 
 test('400/401/403/429 do not poison any shared provider-health breaker; 5xx does', async t => {
@@ -279,14 +368,23 @@ test('one hard provider-chain deadline aborts a hung provider and falls back wit
 
 test('provider budget denial prevents the next model call after a failed primary', async t => {
   setup(t);
+  const budget = createPlanReviewTokenBudget({
+    maxInputTokens: 4000,
+    maxOutputTokens: 1200,
+    maxTotalTokens: 5200,
+    maxModelCalls: 2,
+    onReserve: async () => undefined,
+  });
   let attempts = 0;
   let secondaryCalls = 0;
   const result = await generateGroundedExplanation({ question: 'Explain this fact.', evidencePacket: evidencePacket() }, {
     providers: [
-      { name: 'primary', lastFailureReason: 'PROVIDER_SERVER_ERROR', async generate() { attempts += 1; return null; } },
-      { name: 'secondary', async generate() { secondaryCalls += 1; return null; } },
+      { name: 'groq', lastFailureReason: 'PROVIDER_SERVER_ERROR', async generate() { attempts += 1; return null; } },
+      { name: 'gemini', async generate() { secondaryCalls += 1; return null; } },
     ],
-    async beforeProviderAttempt() { return attempts === 0; },
+    allowGeminiFallback: true,
+    requestBudget: budget,
+    async beforeProviderAttempt({ providerAttemptCount }) { return providerAttemptCount === 0; },
     getCache: async () => null,
     setCache: async () => false,
   });
@@ -294,23 +392,35 @@ test('provider budget denial prevents the next model call after a failed primary
   assert.equal(secondaryCalls, 0);
   assert.ok(result.validation.reasonCodes.includes('PROVIDER_BUDGET_EXHAUSTED'));
   assert.equal(result.providerAttemptFailureCount, 1);
+  assert.equal(budget.modelCalls, 1);
 });
 
-test('a successful secondary provider follows a quick transient primary failure', async t => {
+test('a bounded durable request may route Groq transport failure to Gemini', async t => {
   setup(t);
+  const budget = createPlanReviewTokenBudget({
+    maxInputTokens: 4000,
+    maxOutputTokens: 1200,
+    maxTotalTokens: 5200,
+    maxModelCalls: 2,
+    onReserve: async () => undefined,
+  });
   const providers = [
-    { name: 'primary', lastFailureReason: null, async generate() { this.lastFailureReason = 'PROVIDER_SERVER_ERROR'; return null; } },
-    { name: 'secondary', configuredModel: () => 'test-model', async generate() {
-      return { provider: 'secondary', model: 'test-model', text: groundedResponse(), tokensUsed: 5 };
+    { name: 'groq', lastFailureReason: null, async generate() { this.lastFailureReason = 'PROVIDER_SERVER_ERROR'; return null; } },
+    { name: 'gemini', configuredModel: () => 'gemini-3.6-flash', async generate() {
+      return { provider: 'gemini', model: 'gemini-3.6-flash', text: groundedResponse(), tokensUsed: 5 };
     } },
   ];
   const result = await generateGroundedExplanation({ question: 'Explain this fact.', evidencePacket: evidencePacket() }, {
     providers,
+    allowGeminiFallback: true,
+    requestBudget: budget,
     getCache: async () => null,
     setCache: async () => false,
   });
-  assert.equal(result.provider, 'SECONDARY');
+  assert.equal(result.provider, 'GEMINI');
   assert.equal(result.providerAttemptCount, 2);
   assert.equal(result.providerAttemptFailureCount, 1);
-  assert.equal(result.fallback, false);
+  assert.equal(result.fallback, true);
+  assert.ok(result.validation.reasonCodes.includes('PROVIDER_SERVER_ERROR'));
+  assert.equal(budget.modelCalls, 2);
 });

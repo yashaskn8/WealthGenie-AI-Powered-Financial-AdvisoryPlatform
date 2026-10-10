@@ -44,7 +44,10 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
   let originalUserFindById;
   let originalConvFindOne;
   let originalNvidiaKey;
+  let originalGeminiKey;
+  let originalGroqKey;
   let originalPrimaryProvider;
+  let originalFallbackSetting;
   let restoreChatStore;
   let savedMessages = [];
 
@@ -57,13 +60,17 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
     originalUserFindById = User.findById;
     originalConvFindOne = ConversationHistory.findOne;
     originalNvidiaKey = process.env.NVIDIA_API_KEY;
+    originalGeminiKey = process.env.GEMINI_API_KEY;
+    originalGroqKey = process.env.GROQ_API_KEY;
     originalPrimaryProvider = process.env.LLM_PRIMARY_PROVIDER;
+    originalFallbackSetting = process.env.LLM_GEMINI_FALLBACK_ENABLED;
     savedMessages = [];
 
     process.env.GEMINI_API_KEY = 'mock-gemini-key';
     process.env.GROQ_API_KEY = 'mock-groq-key';
     process.env.NVIDIA_API_KEY = '';
-    process.env.LLM_PRIMARY_PROVIDER = 'GEMINI';
+    process.env.LLM_PRIMARY_PROVIDER = 'GROQ';
+    process.env.LLM_GEMINI_FALLBACK_ENABLED = 'false';
 
     ProviderManager.gemini.reset();
     ProviderManager.groq.reset();
@@ -113,7 +120,10 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
     ConversationHistory.findOne = originalConvFindOne;
     restoreChatStore?.();
     if (originalNvidiaKey === undefined) delete process.env.NVIDIA_API_KEY; else process.env.NVIDIA_API_KEY = originalNvidiaKey;
+    if (originalGeminiKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = originalGeminiKey;
+    if (originalGroqKey === undefined) delete process.env.GROQ_API_KEY; else process.env.GROQ_API_KEY = originalGroqKey;
     if (originalPrimaryProvider === undefined) delete process.env.LLM_PRIMARY_PROVIDER; else process.env.LLM_PRIMARY_PROVIDER = originalPrimaryProvider;
+    if (originalFallbackSetting === undefined) delete process.env.LLM_GEMINI_FALLBACK_ENABLED; else process.env.LLM_GEMINI_FALLBACK_ENABLED = originalFallbackSetting;
   });
 
   // ── Groq Adapter Unit Tests ──
@@ -257,6 +267,153 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
     ProviderManager.groq.reset();
   });
 
+  it('Groq diagnostics retain sanitized parsed-response usage and request ID', async () => {
+    const responseText = JSON.stringify({
+      text: 'A synthetic fact is supported [E_SYNTHETIC].',
+      evidenceIdsUsed: ['E_SYNTHETIC'],
+      claims: [{ text: 'A synthetic fact is supported [E_SYNTHETIC].', evidenceIds: ['E_SYNTHETIC'] }],
+      financialClaims: [],
+      unavailableFacts: [],
+    });
+    let requestBody;
+    axios.post = async (_url, body) => {
+      requestBody = body;
+      return ({
+      status: 200,
+      headers: { 'x-request-id': 'req_test-123' },
+      data: {
+        model: 'openai/gpt-oss-120b',
+        choices: [{ message: { content: responseText }, finish_reason: 'stop' }],
+        usage: {
+          prompt_tokens: 111,
+          completion_tokens: 45,
+          total_tokens: 156,
+          completion_tokens_details: { reasoning_tokens: 12 },
+        },
+      },
+      });
+    };
+
+    const result = await ProviderManager.groq.generate({
+      systemPrompt: 'Use the supplied synthetic evidence only.',
+      recentHistory: [{ role: 'user', parts: [{ text: 'Explain the synthetic evidence.' }] }],
+      maxTokens: 512,
+      jsonMode: true,
+      outputContract: 'GROUNDED_EXPLANATION_V1',
+    });
+
+    assert.equal(result.provider, 'groq');
+    assert.equal(result.diagnostics.httpStatus, 200);
+    assert.equal(result.diagnostics.providerRequestId, 'req_test-123');
+    assert.equal(result.diagnostics.providerPromptTokens, 111);
+    assert.equal(result.diagnostics.providerCompletionTokens, 45);
+    assert.equal(result.diagnostics.providerReasoningTokens, 12);
+    assert.equal(result.diagnostics.providerReportedTokens, 156);
+    assert.equal(result.diagnostics.completionReason, 'stop');
+    assert.equal(requestBody.reasoning_effort, 'low');
+    assert.equal(requestBody.include_reasoning, false);
+    assert.equal(Object.hasOwn(requestBody, 'reasoning_format'), false);
+    assert.equal(result.diagnostics.reasoningEffort, 'low');
+    assert.equal(result.diagnostics.reasoningIncluded, false);
+    assert.equal(result.diagnostics.reasoningFormat, null);
+  });
+
+  it('Groq JSON Object Mode rejects a length-finished response and reports reasoning usage only as diagnostics', async () => {
+    const responseText = JSON.stringify({
+      text: 'A synthetic fact is supported [E_SYNTHETIC].',
+      evidenceIdsUsed: ['E_SYNTHETIC'],
+      claims: [{ text: 'A synthetic fact is supported [E_SYNTHETIC].', evidenceIds: ['E_SYNTHETIC'] }],
+      financialClaims: [],
+      unavailableFacts: [],
+    });
+    axios.post = async () => ({
+      status: 200,
+      data: {
+        model: 'openai/gpt-oss-120b',
+        choices: [{ message: { content: responseText }, finish_reason: 'length' }],
+        usage: {
+          prompt_tokens: 307,
+          completion_tokens: 512,
+          total_tokens: 819,
+          completion_tokens_details: { reasoning_tokens: 176 },
+        },
+      },
+    });
+
+    const result = await ProviderManager.groq.generate({
+      systemPrompt: 'Use only synthetic evidence.',
+      recentHistory: [{ role: 'user', parts: [{ text: 'Explain the synthetic fact.' }] }],
+      maxTokens: 512,
+      jsonMode: true,
+      outputContract: 'GROUNDED_EXPLANATION_V1',
+      providerOutputMode: 'GROQ_JSON_OBJECT',
+    });
+
+    assert.equal(result.wasCompleted, false);
+    assert.equal(result.diagnostics.completionReason, 'length');
+    assert.equal(result.diagnostics.providerReasoningTokens, 176);
+    assert.equal(result.diagnostics.providerCompletionTokens, 512);
+    assert.equal(result.tokensUsed, 819, 'the reasoning subtotal is not added a second time to provider-reported total usage');
+    assert.equal(ProviderManager.groq.lastFailureReason, 'PROVIDER_INCOMPLETE_OUTPUT');
+  });
+
+  it('Groq error diagnostics keep response identity without retaining provider error text', async () => {
+    axios.post = async () => {
+      throw Object.assign(new Error('sensitive provider response text'), {
+        response: {
+          status: 400,
+          headers: { 'x-request-id': 'req_bad-schema-456' },
+          data: { error: { code: 'JSON_VALIDATE_FAILED', message: 'sensitive body detail' } },
+        },
+      });
+    };
+
+    const result = await ProviderManager.groq.generate({
+      systemPrompt: 'Synthetic test request.',
+      recentHistory: [],
+      maxTokens: 512,
+      jsonMode: true,
+      outputContract: 'GROUNDED_EXPLANATION_V1',
+    });
+    const diagnostics = ProviderManager.groq.lastResponseDiagnostics;
+
+    assert.equal(result, null);
+    assert.equal(diagnostics.httpStatus, 400);
+    assert.equal(diagnostics.errorClassification, 'PROVIDER_BAD_REQUEST');
+    assert.equal(diagnostics.providerErrorCode, 'JSON_VALIDATE_FAILED');
+    assert.equal(diagnostics.providerRequestId, 'req_bad-schema-456');
+    assert.equal(diagnostics.providerPromptTokens, null);
+    assert.equal(diagnostics.providerCompletionTokens, null);
+    assert.equal(diagnostics.providerReportedTokens, null);
+    assert.doesNotMatch(JSON.stringify(diagnostics), /sensitive|mock-groq-key/i);
+  });
+
+  it('Groq error diagnostics tolerate malformed provider detail shapes without exposing them', async () => {
+    axios.post = async () => {
+      throw Object.assign(new Error('sensitive provider response text'), {
+        response: {
+          status: 400,
+          data: { error: { code: 'INVALID_REQUEST', details: 'sensitive malformed detail payload' } },
+        },
+      });
+    };
+
+    const result = await ProviderManager.groq.generate({
+      systemPrompt: 'Synthetic test request.',
+      recentHistory: [],
+      maxTokens: 32,
+      jsonMode: true,
+      outputContract: 'GROUNDED_EXPLANATION_V1',
+    });
+    const diagnostics = ProviderManager.groq.lastResponseDiagnostics;
+
+    assert.equal(result, null);
+    assert.equal(diagnostics.errorClassification, 'PROVIDER_BAD_REQUEST');
+    assert.equal(diagnostics.providerErrorCode, 'INVALID_REQUEST');
+    assert.equal(diagnostics.providerErrorField, null);
+    assert.doesNotMatch(JSON.stringify(diagnostics), /sensitive malformed detail payload|sensitive provider response text/i);
+  });
+
   it('GroqProviderAdapter records failure and opens circuit after 3 consecutive HTTP errors', async () => {
     ProviderManager.groq.reset(); // reset
 
@@ -280,7 +437,7 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
 
   // ── Groq grounded explanation integration via processChat ──
 
-  it('Groq fallback receives one read-only grounded request with no tool surface', async () => {
+  it('Groq primary receives one read-only grounded request with no tool surface', async () => {
     let groqCallCount = 0;
     let requestBody;
 
@@ -297,7 +454,7 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
         return { data: {
           model: 'openai/gpt-oss-120b',
           choices: [{ message: { content: JSON.stringify({
-            text, evidenceIdsUsed: ['E_PROFILE_AGE'], claims: [{ text, evidenceIds: ['E_PROFILE_AGE'] }], unavailableFacts: [],
+            text, evidenceIdsUsed: ['E_PROFILE_AGE'], claims: [{ text, evidenceIds: ['E_PROFILE_AGE'] }], financialClaims: [], unavailableFacts: [],
           }) }, finish_reason: 'stop' }],
           usage: { total_tokens: 80 },
         } };
@@ -314,7 +471,10 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
 
     assert.equal(groqCallCount, 1);
     assert.equal(requestBody.tools, undefined);
-    assert.deepEqual(requestBody.response_format, { type: 'json_object' });
+    assert.equal(requestBody.response_format.type, 'json_schema');
+    assert.equal(requestBody.response_format.json_schema.name, 'grounded_explanation_v1');
+    assert.equal(requestBody.response_format.json_schema.strict, true);
+    assert.equal(requestBody.max_completion_tokens, 1200);
     assert.equal(result.provider, 'GROQ');
     assert.equal(result.model, 'openai/gpt-oss-120b');
     const lastSavedModelMsg = savedMessages.filter(m => m.role === 'model').slice(-1)[0];
@@ -373,7 +533,7 @@ describe('Groq Provider Native Tool-Calling Integration Tests', () => {
         return { data: {
           model: 'openai/gpt-oss-120b',
           choices: [{ message: { content: JSON.stringify({
-            text, evidenceIdsUsed: ['E_PROFILE_AGE'], claims: [{ text, evidenceIds: ['E_PROFILE_AGE'] }], unavailableFacts: [],
+            text, evidenceIdsUsed: ['E_PROFILE_AGE'], claims: [{ text, evidenceIds: ['E_PROFILE_AGE'] }], financialClaims: [], unavailableFacts: [],
           }) }, finish_reason: 'stop' }],
           usage: { total_tokens: 60 },
         } };

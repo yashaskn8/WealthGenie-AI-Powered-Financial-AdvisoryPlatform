@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildGroundedEvidencePacket } from '../services/groundedEvidence.js';
 import { generateGroundedExplanation } from '../services/groundedExplanationService.js';
+import { createPlanReviewTokenBudget } from '../agents/planReview/planReviewTokenBudget.js';
 
 function packet() {
   return buildGroundedEvidencePacket({
@@ -24,6 +25,7 @@ function output(value = 'Moderate') {
     text,
     evidenceIdsUsed: ['E_PROFILE_RISK'],
     claims: [{ text, evidenceIds: ['E_PROFILE_RISK'] }],
+    financialClaims: [],
     unavailableFacts: [],
   });
 }
@@ -53,32 +55,46 @@ describe('Phase 6 bounded grounded generation', () => {
     assert.equal(result.toolCalls, undefined);
   });
 
-  it('uses the identical evidence contract when moving to the next provider', async () => {
+  it('uses the identical evidence contract for explicitly budgeted Groq-to-Gemini transport fallback', async () => {
     const requests = [];
     const first = {
-      name: 'nvidia_nim', configuredModel: () => 'nim-test',
+      name: 'groq', configuredModel: () => 'openai/gpt-oss-120b',
       generate: async args => {
         requests.push(args);
-        return { provider: 'nvidia_nim', model: 'nim-test', text: output('Aggressive') };
+        first.lastFailureReason = 'PROVIDER_SERVER_ERROR';
+        return null;
       },
     };
     const second = {
       name: 'gemini', configuredModel: () => 'gemini-test',
       generate: async args => {
         requests.push(args);
-        return { provider: 'gemini', model: 'gemini-test', text: output() };
+        return { provider: 'gemini', model: 'gemini-test', text: output(), tokensUsed: 5 };
       },
     };
+    const requestBudget = createPlanReviewTokenBudget({
+      maxInputTokens: 4000,
+      maxOutputTokens: 1200,
+      maxTotalTokens: 5200,
+      maxModelCalls: 2,
+      onReserve: async () => undefined,
+    });
     const result = await generateGroundedExplanation({ question: 'Explain suitability.', evidencePacket: packet() }, {
-      providers: [first, second], ...noCache,
+      providers: [first, second],
+      allowGeminiFallback: true,
+      requestBudget,
+      ...noCache,
     });
     assert.equal(requests.length, 2);
     assert.equal(requests[0].recentHistory[0].parts[0].text, requests[1].recentHistory[0].parts[0].text);
     assert.equal(result.provider, 'GEMINI');
     assert.equal(result.model, 'gemini-test');
+    assert.equal(result.fallback, true);
+    assert.ok(result.validation.reasonCodes.includes('PROVIDER_SERVER_ERROR'));
+    assert.equal(requestBudget.modelCalls, 2);
   });
 
-  it('bounds failures to one call per configured provider and then fails closed', async () => {
+  it('malformed structured output is not retried against another provider', async () => {
     let calls = 0;
     const providers = Array.from({ length: 3 }, (_, index) => ({
       name: `provider_${index}`,
@@ -91,7 +107,7 @@ describe('Phase 6 bounded grounded generation', () => {
     const result = await generateGroundedExplanation({ question: 'Explain suitability.', evidencePacket: packet() }, {
       providers, ...noCache,
     });
-    assert.equal(calls, 3);
+    assert.equal(calls, 1);
     assert.equal(result.provider, 'DETERMINISTIC_TEMPLATE');
     assert.equal(result.fallback, true);
     assert.ok(result.validation.reasonCodes.includes('MALFORMED_GROUNDED_JSON'));

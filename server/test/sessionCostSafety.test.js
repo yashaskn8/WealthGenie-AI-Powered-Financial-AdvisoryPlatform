@@ -69,7 +69,7 @@ describe('grounded chat session-cost safety', () => {
       const text = 'The final suitability ceiling is Moderate [E_PROFILE_RISK].';
       return {
         provider: 'gemini', model: 'gemini-cost-test', tokensUsed: 250,
-        text: JSON.stringify({ text, evidenceIdsUsed: ['E_PROFILE_RISK'], claims: [{ text, evidenceIds: ['E_PROFILE_RISK'] }], unavailableFacts: [] }),
+        text: JSON.stringify({ text, evidenceIdsUsed: ['E_PROFILE_RISK'], claims: [{ text, evidenceIds: ['E_PROFILE_RISK'] }], financialClaims: [], unavailableFacts: [] }),
       };
     };
   });
@@ -119,7 +119,7 @@ describe('grounded chat session-cost safety', () => {
       const text = 'The final suitability ceiling is Moderate [E_PROFILE_RISK].';
       return {
         provider: 'gemini', model: 'gemini-cost-test', tokensUsed: 13000,
-        text: JSON.stringify({ text, evidenceIdsUsed: ['E_PROFILE_RISK'], claims: [{ text, evidenceIds: ['E_PROFILE_RISK'] }], unavailableFacts: [] }),
+        text: JSON.stringify({ text, evidenceIdsUsed: ['E_PROFILE_RISK'], claims: [{ text, evidenceIds: ['E_PROFILE_RISK'] }], financialClaims: [], unavailableFacts: [] }),
       };
     };
     await processChat({ userId, user: {}, message: 'Explain suitability.', sessionId: 'cost-safety' });

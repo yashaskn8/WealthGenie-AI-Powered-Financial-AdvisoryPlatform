@@ -311,6 +311,8 @@ test('correct-looking values fail on wrong value, unit, source, evidence, period
     rateClaim({ statement: 'The current rate is 7.25% [E_RATE].' }),
   ];
   for (const claim of invalidClaims) assert.equal(verify(claim).passed, false, JSON.stringify(claim));
+  assert.ok(verify(rateClaim({ source: 'attacker-controlled' })).errors.includes('CLAIM_AUTHORITY_MISMATCH'),
+    'a complete-looking typed claim with an incorrect source is rejected against evidence provenance');
 });
 
 test('numeric text requires an exact typed claim and every numeric mention must be covered', () => {

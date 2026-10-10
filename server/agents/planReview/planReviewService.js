@@ -39,12 +39,13 @@ function waitForAdmissionRetry(attempt) {
 
 function primaryProvider() {
   if (String(process.env.LLM_DEFAULT_PROVIDER || '').trim().toLowerCase() === 'mock') return null;
-  const configured = String(process.env.LLM_PRIMARY_PROVIDER || 'NVIDIA_NIM').trim().toUpperCase();
-  return {
+  const configured = String(process.env.LLM_PRIMARY_PROVIDER || 'GROQ').trim().toUpperCase();
+  const providers = {
     NVIDIA_NIM: ProviderManager.nvidia,
     GEMINI: ProviderManager.gemini,
     GROQ: ProviderManager.groq,
-  }[configured] || ProviderManager.nvidia;
+  };
+  return Object.hasOwn(providers, configured) ? providers[configured] : null;
 }
 
 function publicReview(review) {
@@ -130,7 +131,9 @@ export async function runPlanReview({ userId, profileId, runId = null, execution
       maxOutputTokens: runtimeConfig.agentPlanReview.maxOutputTokens,
       maxTotalTokens: runtimeConfig.agentPlanReview.maxTotalTokens,
       toolTimeoutMs: Math.min(5000, runtimeConfig.agentPlanReview.timeoutMs),
-      plannerProvider: process.env.AGENT_USE_MODEL_PLANNER === 'true' ? primaryProvider() : null,
+      // Route planner and synthesis calls through the same durable, run-wide
+      // model budget so approved provider failover cannot bypass accounting.
+      plannerProvider: null,
       modelPlannerEnabled: process.env.AGENT_USE_MODEL_PLANNER === 'true' && primaryProvider() !== null,
       modelGateway: createModelGateway({ maxOutputTokens: runtimeConfig.agentPlanReview.maxOutputTokens }),
       persistAgentRun: payload => persistPlanReviewRun(payload),

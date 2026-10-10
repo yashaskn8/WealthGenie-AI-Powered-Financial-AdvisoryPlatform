@@ -47,6 +47,7 @@ function groundedGeminiPayload(text = 'The final suitability ceiling is Moderate
           text,
           evidenceIdsUsed: ['E_PROFILE_RISK'],
           claims: [{ text, evidenceIds: ['E_PROFILE_RISK'] }],
+          financialClaims: [],
           unavailableFacts: [],
         }) }] },
         finishReason: 'STOP',
@@ -277,7 +278,9 @@ describe('GenieChat V3 Enterprise Architecture Tests', () => {
 
     assert.equal(callCount, 1);
     assert.equal(requestBody.tools, undefined);
-    assert.equal(requestBody.generationConfig.responseMimeType, 'application/json');
+    assert.equal(requestBody.generationConfig.responseFormat.text.mimeType, 'APPLICATION_JSON');
+    assert.ok(requestBody.generationConfig.responseFormat.text.schema.required.includes('financialClaims'));
+    assert.equal(Object.hasOwn(requestBody.generationConfig, 'temperature'), false);
     const lastSavedModelMsg = savedMessages.filter(m => m.role === 'model').slice(-1)[0];
     assert.equal(lastSavedModelMsg.metadata.tool_outputs, undefined);
     assert.equal(result.tool_results, undefined);

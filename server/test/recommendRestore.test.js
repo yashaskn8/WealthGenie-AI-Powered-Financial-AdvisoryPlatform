@@ -1187,6 +1187,7 @@ test('persisted deferred advisory is reconciled against a rebalance before its r
         text,
         evidenceIdsUsed: [evidenceId],
         claims: [{ text, evidenceIds: [evidenceId] }],
+        financialClaims: [],
         unavailableFacts: [],
       }),
       provider: 'nvidia_nim',

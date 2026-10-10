@@ -15,6 +15,55 @@ const CONTROLLED_AUTHORITY_LABELS = Object.freeze([
   'state_0', 'state_1', 'bull', 'bear', 'crash', 'recession',
 ]);
 const UNSUPPORTED_ABSOLUTE_FINANCIAL_CLAIMS = /\b(?:risk[- ]free|zero[- ]risk|no risk|completely safe|100% safe|guaranteed returns?|assured returns?|can never lose(?: money)?|never lose(?: money)?|fully guaranteed)\b/i;
+const UNSUPPORTED_REGULATORY_ENDORSEMENT = /\b(?:SEBI|Securities and Exchange Board of India|RBI|Reserve Bank of India)\b[^.!?]{0,80}\b(?:approv\w*|endorse\w*|recommend\w*|guarantee\w*|certif\w*|authori[sz]\w*|licen[cs]\w*|prescrib\w*)\b|\b(?:approv\w*|endorse\w*|recommend\w*|guarantee\w*|certif\w*|authori[sz]\w*|licen[cs]\w*|prescrib\w*)\b[^.!?]{0,80}\b(?:by|from)\s+(?:SEBI|Securities and Exchange Board of India|RBI|Reserve Bank of India)\b/i;
+
+// Only these fixed validator codes may cross into live-evaluation diagnostics.
+// Keep this list independent of candidate content and exception messages.
+const GROUNDING_DIAGNOSTIC_CODES = new Set([
+  'GROUNDING_OUTPUT_NOT_OBJECT',
+  'GROUNDING_TEXT_REQUIRED',
+  'EVIDENCE_IDS_REQUIRED',
+  'CLAIMS_REQUIRED',
+  'UNAVAILABLE_FACTS_REQUIRED',
+  'UNCLAIMED_NARRATIVE_CONTENT',
+  'UNKNOWN_EVIDENCE_ID',
+  'FABRICATED_TEXT_EVIDENCE_ID',
+  'USED_EVIDENCE_NOT_CITED_IN_TEXT',
+  'UNDECLARED_TEXT_EVIDENCE_ID',
+  'UNSUPPORTED_UNAVAILABLE_FACT',
+  'CLAIM_CITATION_REQUIRED',
+  'CLAIM_UNKNOWN_EVIDENCE_ID',
+  'CLAIM_EVIDENCE_NOT_DECLARED',
+  'CLAIM_INLINE_CITATION_REQUIRED',
+  'CLAIM_INLINE_CITATION_UNDECLARED',
+  'UNSUPPORTED_FINANCIAL_NUMBER',
+  'UNSUPPORTED_DATE',
+  'UNSUPPORTED_SOURCE_URL',
+  'UNSUPPORTED_FINANCIAL_ENTITY',
+  'UNSUPPORTED_AUTHORITY_LABEL',
+  'UNSUPPORTED_REGULATORY_ENDORSEMENT',
+  'UNSUPPORTED_ABSOLUTE_FINANCIAL_CLAIM',
+  'CLAIMS_ARRAY_INVALID',
+  'EVIDENCE_ID_INVALID_OR_DUPLICATE',
+  'TYPED_CLAIM_REQUIRED',
+  'CLAIM_SCHEMA_INVALID',
+  'CLAIM_TYPE_UNSUPPORTED',
+  'CLAIM_DUPLICATE',
+  'CLAIM_AUTHORITY_MISMATCH',
+  'CLAIM_SEMANTIC_TYPE_MISMATCH',
+  'CLAIM_EVIDENCE_CITATION_REQUIRED',
+  'CLAIM_STATEMENT_NOT_IN_NARRATIVE',
+  'CLAIM_VALUE_OR_UNIT_MISMATCH',
+  'UNBOUND_FINANCIAL_NUMBER',
+  'SEMANTIC_CONTENT_MISSING',
+  'CLAIM_EVIDENCE_RELEVANCE_INSUFFICIENT',
+  'UNAUTHORIZED_FINANCIAL_DIRECTIVE',
+]);
+
+export function sanitizeGroundingReasonCodes(codes) {
+  if (!Array.isArray(codes)) return [];
+  return [...new Set(codes.filter(code => typeof code === 'string' && GROUNDING_DIAGNOSTIC_CODES.has(code)))];
+}
 
 function normalizedNumber(value) {
   const number = Number(String(value).replace(/,/g, ''));
@@ -148,6 +197,16 @@ export function validateGroundedExplanation(candidate, packet) {
   if (!Array.isArray(candidate.claims) || candidate.claims.length === 0) errors.push('CLAIMS_REQUIRED');
   if (!Array.isArray(candidate.unavailableFacts)) errors.push('UNAVAILABLE_FACTS_REQUIRED');
 
+  // Every user-visible narrative statement must be represented by a separately
+  // cited claim below. Otherwise an uncited sentence can be appended to `text`
+  // while the claim list validates only an unrelated, evidence-backed sentence.
+  if (typeof candidate.text === 'string' && Array.isArray(candidate.claims)
+      && candidate.claims.every(claim => typeof claim?.text === 'string')) {
+    const narrative = candidate.text.replace(/\s+/g, ' ').trim();
+    const claimedNarrative = candidate.claims.map(claim => claim.text.replace(/\s+/g, ' ').trim()).join(' ').trim();
+    if (narrative !== claimedNarrative) errors.push('UNCLAIMED_NARRATIVE_CONTENT');
+  }
+
   const used = Array.isArray(candidate.evidenceIdsUsed) ? candidate.evidenceIdsUsed : [];
   if (used.some(id => !evidenceIds.has(id))) errors.push('UNKNOWN_EVIDENCE_ID');
   const textCitations = citationsIn(candidate.text);
@@ -168,6 +227,7 @@ export function validateGroundedExplanation(candidate, packet) {
     if (claim.evidenceIds.some(id => !used.includes(id))) errors.push('CLAIM_EVIDENCE_NOT_DECLARED');
     const claimCitations = citationsIn(claim.text);
     if (claim.evidenceIds.some(id => !claimCitations.includes(id))) errors.push('CLAIM_INLINE_CITATION_REQUIRED');
+    if (claimCitations.some(id => !claim.evidenceIds.includes(id))) errors.push('CLAIM_INLINE_CITATION_UNDECLARED');
     const scopedEntries = claim.evidenceIds.map(id => evidenceById.get(id)).filter(Boolean);
     const scoped = unsupportedFactsInText(claim.text, scopedEntries);
     if (scoped.unsupportedNumbers.length) errors.push('UNSUPPORTED_FINANCIAL_NUMBER');
@@ -176,6 +236,7 @@ export function validateGroundedExplanation(candidate, packet) {
     const controlled = unsupportedControlledTerms(claim.text, scopedEntries);
     if (controlled.financialEntities.length) errors.push('UNSUPPORTED_FINANCIAL_ENTITY');
     if (controlled.authorityLabels.length) errors.push('UNSUPPORTED_AUTHORITY_LABEL');
+    if (UNSUPPORTED_REGULATORY_ENDORSEMENT.test(claim.text)) errors.push('UNSUPPORTED_REGULATORY_ENDORSEMENT');
   }
 
   const { numberKinds, dates, urls } = collectAllowedFacts(packet);
