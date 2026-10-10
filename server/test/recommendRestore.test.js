@@ -1180,8 +1180,10 @@ test('persisted deferred advisory is reconciled against a rebalance before its r
     providerCalls += 1;
     const prompt = recentHistory?.[0]?.parts?.[0]?.text;
     const evidencePacket = JSON.parse(prompt).EVIDENCE_PACKET;
-    const evidenceId = evidencePacket.entries[0].id;
-    const text = `This recommendation is grounded in the verified evidence [${evidenceId}].`;
+    const profileRiskEvidence = evidencePacket.entries.find(entry => entry.id === 'E_PROFILE_RISK');
+    assert.ok(profileRiskEvidence, 'the grounded explanation packet includes profile-risk evidence');
+    const evidenceId = profileRiskEvidence.id;
+    const text = `The current profile records ${profileRiskEvidence.displayValue} [${evidenceId}].`;
     return {
       text: JSON.stringify({
         text,

@@ -468,6 +468,44 @@ test('Gemini provider fallback must pass the same substantive and advice-policy 
   assert.deepEqual(diagnostics.policyReasonCodes, ['UNAUTHORIZED_FINANCIAL_DIRECTIVE']);
 });
 
+test('profile-risk claims anchored to the cited evidence pass substantive explanation validation', async () => {
+  const packet = evidencePacket();
+  const profileRiskEvidence = packet.entries.find(entry => entry.id === 'E_PROFILE_RISK');
+  assert.ok(profileRiskEvidence);
+  const text = `The current profile records ${profileRiskEvidence.displayValue} [${profileRiskEvidence.id}].`;
+  const provider = {
+    name: 'nvidia_nim',
+    configuredModel: () => 'grounded-risk-test-model',
+    async generate() {
+      return {
+        provider: 'nvidia_nim',
+        model: 'grounded-risk-test-model',
+        tokensUsed: 0,
+        text: JSON.stringify({
+          text,
+          evidenceIdsUsed: [profileRiskEvidence.id],
+          claims: [{ text, evidenceIds: [profileRiskEvidence.id] }],
+          financialClaims: [],
+          unavailableFacts: [],
+        }),
+      };
+    },
+  };
+
+  const result = await generateGroundedExplanation({
+    question: 'Explain the profile suitability context.',
+    evidencePacket: packet,
+  }, {
+    providers: [provider],
+    getCache: async () => null,
+    setCache: async () => false,
+  });
+
+  assert.equal(result.status, 'GROUNDED_EXPLANATION_AVAILABLE');
+  assert.equal(result.provider, 'NVIDIA_NIM');
+  assert.equal(result.fallback, false);
+});
+
 test('grounding rejects user-visible narrative that is absent from cited claim text', () => {
   const packet = evidencePacket();
   const hiddenNarrative = {
