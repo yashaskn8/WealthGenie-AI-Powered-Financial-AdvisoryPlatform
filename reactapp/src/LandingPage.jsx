@@ -1,181 +1,208 @@
-import React from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Brain, TrendingUp, ShieldCheck, ArrowRight, Sparkles } from 'lucide-react';
-import { motion, useMotionValue, useTransform } from 'framer-motion';
+import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
+import {
+  ArrowRight,
+  BarChart3,
+  ShieldCheck,
+  Target,
+} from 'lucide-react';
+import genieLampAsset from './assets/logo.png';
 import './LandingPage.css';
 
-const TiltCard = ({ icon: Icon, title, desc, delay }) => {
-  const x = useMotionValue(0);
-  const y = useMotionValue(0);
+const HERO_VIDEO = '/media/wealthgenie-hero.mp4';
+const HERO_POSTER = '/media/wealthgenie-hero-poster.jpg';
 
-  const rotateX = useTransform(y, [-100, 100], [15, -15]);
-  const rotateY = useTransform(x, [-100, 100], [-15, 15]);
+const FEATURE_ITEMS = [
+  { icon: BarChart3, label: 'Personalized Advice' },
+  { icon: ShieldCheck, label: 'Tax Analysis Tools' },
+  { icon: Target, label: 'Long-Term Goals' },
+];
 
-  const handleMouseMove = (event) => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    const centerX = rect.left + rect.width / 2;
-    const centerY = rect.top + rect.height / 2;
-    x.set(event.clientX - centerX);
-    y.set(event.clientY - centerY);
-  };
+function getMediaPreferences() {
+  const reducedMotion =
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const saveData = typeof navigator !== 'undefined' && navigator.connection?.saveData === true;
 
-  const handleMouseLeave = () => {
-    x.set(0);
-    y.set(0);
-  };
+  return { reducedMotion, saveData };
+}
 
+function GenieMark() {
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 50, rotateX: 20 }}
-      animate={{ opacity: 1, y: 0, rotateX: 0 }}
-      transition={{ duration: 0.8, delay, type: "spring" }}
-      className="feature-card-wrapper"
-      style={{ perspective: 1000 }}
-    >
-      <motion.div
-        className="feature-card"
-        onMouseMove={handleMouseMove}
-        onMouseLeave={handleMouseLeave}
-        style={{
-          rotateX,
-          rotateY,
-          transformStyle: "preserve-3d"
-        }}
-      >
-        <div className="feature-icon-wrapper" style={{ transform: "translateZ(40px)" }}>
-          <Icon size={32} />
-        </div>
-        <h3 style={{ transform: "translateZ(30px)" }}>{title}</h3>
-        <p style={{ transform: "translateZ(20px)" }}>{desc}</p>
-      </motion.div>
-    </motion.div>
+    <img
+      className="wg-landing__logo-lamp"
+      src={genieLampAsset}
+      alt="WealthGenie golden genie lamp emblem"
+      width="507"
+      height="288"
+      decoding="async"
+    />
   );
-};
+}
 
-const LandingPage = () => {
-  const navigate = useNavigate();
+function LandingPage() {
+  const heroRef = useRef(null);
+  const [preferences, setPreferences] = useState(getMediaPreferences);
+  const [videoUnavailable, setVideoUnavailable] = useState(false);
+  const showVideo = !preferences.reducedMotion && !preferences.saveData && !videoUnavailable;
 
-  // Container variants for staggered entrance
-  const containerVariants = {
-    hidden: { opacity: 0 },
-    visible: {
-      opacity: 1,
-      transition: {
-        staggerChildren: 0.15,
-        delayChildren: 0.2
-      }
-    }
-  };
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
 
-  const itemVariants = {
-    hidden: { opacity: 0, y: 30, rotateX: 10 },
-    visible: {
-      opacity: 1,
-      y: 0,
-      rotateX: 0,
-      transition: { type: "spring", stiffness: 100, damping: 15 }
-    }
+    const motionQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    const connection = typeof navigator !== 'undefined' ? navigator.connection : undefined;
+    const updateMotion = () => {
+      const reducedMotion = motionQuery?.matches === true;
+      setPreferences((current) => ({ ...current, reducedMotion }));
+    };
+    const updateData = () => {
+      const saveData = connection?.saveData === true;
+      setPreferences((current) => ({ ...current, saveData }));
+    };
+
+    if (motionQuery?.addEventListener) motionQuery.addEventListener('change', updateMotion);
+    else motionQuery?.addListener?.(updateMotion);
+    connection?.addEventListener?.('change', updateData);
+
+    return () => {
+      if (motionQuery?.removeEventListener) motionQuery.removeEventListener('change', updateMotion);
+      else motionQuery?.removeListener?.(updateMotion);
+      connection?.removeEventListener?.('change', updateData);
+    };
+  }, []);
+
+  useEffect(() => {
+    const hero = heroRef.current;
+    if (!hero || preferences.reducedMotion || preferences.saveData) return undefined;
+
+    const finePointer = window.matchMedia?.('(pointer: fine)');
+    if (finePointer && !finePointer.matches) return undefined;
+
+    let frame = 0;
+    const resetDepth = () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        hero.style.setProperty('--scene-tilt-x', '0deg');
+        hero.style.setProperty('--scene-tilt-y', '0deg');
+        hero.style.setProperty('--scene-light-x', '50%');
+        hero.style.setProperty('--scene-light-y', '42%');
+      });
+    };
+    const updateDepth = (event) => {
+      const bounds = hero.getBoundingClientRect();
+      if (!bounds.width || !bounds.height) return;
+      const x = Math.max(-1, Math.min(1, ((event.clientX - bounds.left) / bounds.width) * 2 - 1));
+      const y = Math.max(-1, Math.min(1, ((event.clientY - bounds.top) / bounds.height) * 2 - 1));
+      const lightX = ((event.clientX - bounds.left) / bounds.width) * 100;
+      const lightY = ((event.clientY - bounds.top) / bounds.height) * 100;
+
+      if (frame) window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        hero.style.setProperty('--scene-tilt-x', (x * 0.34).toFixed(2) + 'deg');
+        hero.style.setProperty('--scene-tilt-y', (y * -0.24).toFixed(2) + 'deg');
+        hero.style.setProperty('--scene-light-x', lightX.toFixed(1) + '%');
+        hero.style.setProperty('--scene-light-y', lightY.toFixed(1) + '%');
+      });
+    };
+
+    hero.addEventListener('pointermove', updateDepth, { passive: true });
+    hero.addEventListener('pointerleave', resetDepth);
+
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      hero.removeEventListener('pointermove', updateDepth);
+      hero.removeEventListener('pointerleave', resetDepth);
+      hero.style.setProperty('--scene-tilt-x', '0deg');
+      hero.style.setProperty('--scene-tilt-y', '0deg');
+    };
+  }, [preferences.reducedMotion, preferences.saveData]);
+
+  const handleVideoError = () => {
+    setVideoUnavailable(true);
   };
 
   return (
-    <div className="landing-page">
-      {/* Premium Glass Header Navbar */}
-      <header className="landing-navbar">
-        <div className="navbar-container">
-          <div className="navbar-logo" onClick={() => navigate('/')}>
-            <Sparkles size={20} className="logo-glow-icon" />
-            <span className="logo-text">Wealth<span className="accent-text">Genie</span></span>
-          </div>
-          <nav className="navbar-links">
-            <a href="#features" className="nav-link">Features</a>
-            <a href="#about" className="nav-link">Platform</a>
-            <a href="#security" className="nav-link">Security</a>
-            <a href="#advisory" className="nav-link">AI Advisory</a>
-          </nav>
-          <button className="navbar-cta-btn" onClick={() => navigate('/login')}>
-            Launch App
-          </button>
+    <div className="wg-landing">
+      <a className="wg-landing__skip-link" href="#wg-landing-main">
+        Skip to main content
+      </a>
+
+      <section className="wg-landing__hero" ref={heroRef} aria-label="WealthGenie introduction" data-motion={preferences.reducedMotion ? 'reduced' : 'full'}>
+        <div className="wg-landing__media" aria-hidden="true">
+          <img className="wg-landing__poster" src={HERO_POSTER} alt="" />
+          {showVideo && (
+            <video
+              className="wg-landing__video"
+              autoPlay
+              muted
+              loop
+              playsInline
+              poster={HERO_POSTER}
+              preload="metadata"
+              tabIndex={-1}
+              onError={handleVideoError}
+            >
+              <source src={HERO_VIDEO} type="video/mp4" />
+            </video>
+          )}
+          <div className="wg-landing__scrim" />
+          <div className="wg-landing__lightfield" />
         </div>
-      </header>
 
-      {/* Decorative Grid & Floating Particles */}
-      <div className="landing-grid-dots" />
-      <div className="decorative-glow-line" />
+        <header className="wg-landing__header">
+          <div className="wg-landing__header-inner">
+            <Link className="wg-landing__brand" to="/" aria-label="WealthGenie home">
+              <GenieMark />
+              <span className="wg-landing__brand-copy">
+                <span className="wg-landing__wordmark">
+                  WEALTH<span>GENIE</span>
+                </span>
+                <span className="wg-landing__tagline">PLAN SMARTER. LIVE BRIGHTER.</span>
+              </span>
+            </Link>
 
-      {/* 3D Background Orbs */}
-      <motion.div 
-        className="bg-orb orb-1"
-        animate={{ 
-          y: [0, -50, 20, 0], 
-          x: [0, 40, -30, 0],
-          scale: [1, 1.15, 0.9, 1]
-        }}
-        transition={{ duration: 18, repeat: Infinity, ease: "easeInOut" }}
-      />
-      <motion.div 
-        className="bg-orb orb-2"
-        animate={{ 
-          y: [0, 60, -40, 0], 
-          x: [0, -50, 30, 0],
-          scale: [1, 0.9, 1.1, 1]
-        }}
-        transition={{ duration: 22, repeat: Infinity, ease: "easeInOut" }}
-      />
-
-      {/* Hero & Staggered Reveal Content */}
-      <motion.div 
-        className="landing-content-wrapper"
-        variants={containerVariants}
-        initial="hidden"
-        animate="visible"
-      >
-        <motion.div className="landing-hero" style={{ perspective: 1000 }} variants={itemVariants}>
-          <div className="badge-3d">
-            <Sparkles size={14} /> Welcome to Premium Financial Advising
+            <div className="wg-landing__header-actions">
+              <Link className="wg-landing__login" to="/login">Log In</Link>
+            </div>
           </div>
-          <h1 className="landing-title">
-            Wealth<span className="title-3d">Genie</span>
-          </h1>
-          <p className="landing-subtitle">
-            Experience spatial personal finance. AI-powered wealth optimization, intelligent tax planning, and personalized portfolio tracking in a fully interactive spatial interface.
-          </p>
-        </motion.div>
+        </header>
 
-        <motion.div className="landing-features" id="features" variants={itemVariants}>
-          <TiltCard 
-            icon={Brain} 
-            title="Genie AI Chat" 
-            desc="Get instant, context-aware financial advice and personalized portfolio adjustments from our advanced conversational AI."
-            delay={0.1}
-          />
-          <TiltCard 
-            icon={TrendingUp} 
-            title="Smart Allocation" 
-            desc="Optimize your returns with dynamic asset allocation algorithms that adapt to your specific risk profile and financial goals."
-            delay={0.25}
-          />
-          <TiltCard 
-            icon={ShieldCheck} 
-            title="Tax Optimization" 
-            desc="Maximize your take-home wealth with automated tax-saving strategies across Old and New regimes under Indian tax laws."
-            delay={0.4}
-          />
-        </motion.div>
+        <main className="wg-landing__main" id="wg-landing-main" tabIndex={-1}>
+          <div className="wg-landing__copy">
+            <p className="wg-landing__badge">
+              <span aria-hidden="true">✦</span>
+              AI-ASSISTED FINANCIAL GUIDANCE
+            </p>
+            <h1 className="wg-landing__title">
+              <span>Smarter Investments,</span>
+              <span className="wg-landing__title-accent">A Brighter Tomorrow</span>
+            </h1>
+            <p className="wg-landing__subtitle">
+              Get personalized investment recommendations for your goals, plus tax analysis where the available inputs support it.
+            </p>
+            <div className="wg-landing__cta-row">
+              <Link className="wg-landing__summon" to="/login">
+                <span className="wg-landing__cta-arrow" aria-hidden="true"><ArrowRight size={22} strokeWidth={1.9} /></span>
+                <span>Summon Genie</span>
+              </Link>
+            </div>
+          </div>
+        </main>
 
-        <motion.div className="landing-cta-container" variants={itemVariants}>
-          <motion.button 
-            className="cta-button-3d" 
-            onClick={() => navigate('/login')}
-            whileHover={{ scale: 1.03, translateZ: 15 }}
-            whileTap={{ scale: 0.98 }}
-          >
-            <span>Summon Genie</span>
-            <ArrowRight size={20} />
-          </motion.button>
-        </motion.div>
-      </motion.div>
+        <section className="wg-landing__feature-strip" id="features" aria-label="WealthGenie features">
+          {FEATURE_ITEMS.map(({ icon: Icon, label }, index) => (
+            <div className="wg-landing__feature" key={label}>
+              {index > 0 && <span className="wg-landing__feature-divider" aria-hidden="true" />}
+              <Icon className="wg-landing__feature-icon" size={27} strokeWidth={1.8} aria-hidden="true" />
+              <span>{label}</span>
+            </div>
+          ))}
+        </section>
+      </section>
+
     </div>
   );
-};
+}
 
 export default LandingPage;
